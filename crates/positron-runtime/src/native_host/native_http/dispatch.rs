@@ -767,18 +767,24 @@ pub(super) fn route<S: Read + Write>(
             let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
                 Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
             })?);
-            health
+            let status = health
                 .authorized_configuration_status(&bearer)
                 .map_err(|failure| match failure {
                     crate::health::ConfigurationStatusFailure::AuthenticationRejected => {
                         Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
                     },
                     crate::health::ConfigurationStatusFailure::Unavailable => Response::empty(503),
-                })?
-                .map_or_else(
-                    || Ok(Response::empty(503)),
-                    |status| Ok(configuration_status_response(health.phase(), &status)),
-                )
+                })?;
+            status.configuration.as_ref().map_or_else(
+                || Ok(Response::empty(503)),
+                |configuration| {
+                    Ok(configuration_status_response(
+                        health.phase(),
+                        configuration,
+                        status.maintenance,
+                    ))
+                },
+            )
         },
         (ListenerRole::Api, "POST", "/v1/capabilities:negotiate") => {
             let services = services.ok_or_else(|| Response::empty(503))?;

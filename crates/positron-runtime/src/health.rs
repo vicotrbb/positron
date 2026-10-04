@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
+use positron_kernel::{LifecycleClockState, MaintenanceTaskPhase, WorkClass};
 
 use crate::{
     ConfigurationObservation, ConfigurationRuntimeFailure, InitializedInstance, ListenerRole,
@@ -39,6 +40,80 @@ pub enum Liveness {
 pub(crate) enum ConfigurationStatusFailure {
     AuthenticationRejected,
     Unavailable,
+}
+
+/// Bounded, aggregate maintenance facts derived from the coordinator and the
+/// Resource Governor for authenticated Operations inspection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MaintenanceHealth {
+    queued: u32,
+    running: u32,
+    deferred: u32,
+    terminal: u32,
+    failed: u32,
+    clock_uncertain: bool,
+    oldest_queued_age_seconds: Option<u64>,
+    completed_inputs: u32,
+    input_objects: u32,
+    outstanding_reservations: u32,
+    maximum_outstanding_reservations: u32,
+    outstanding_maintenance_reservations: u32,
+}
+
+impl MaintenanceHealth {
+    #[must_use]
+    pub(crate) const fn queued(self) -> u32 {
+        self.queued
+    }
+    #[must_use]
+    pub(crate) const fn running(self) -> u32 {
+        self.running
+    }
+    #[must_use]
+    pub(crate) const fn deferred(self) -> u32 {
+        self.deferred
+    }
+    #[must_use]
+    pub(crate) const fn terminal(self) -> u32 {
+        self.terminal
+    }
+    #[must_use]
+    pub(crate) const fn failed(self) -> u32 {
+        self.failed
+    }
+    #[must_use]
+    pub(crate) const fn clock_uncertain(self) -> bool {
+        self.clock_uncertain
+    }
+    #[must_use]
+    pub(crate) const fn oldest_queued_age_seconds(self) -> Option<u64> {
+        self.oldest_queued_age_seconds
+    }
+    #[must_use]
+    pub(crate) const fn completed_inputs(self) -> u32 {
+        self.completed_inputs
+    }
+    #[must_use]
+    pub(crate) const fn input_objects(self) -> u32 {
+        self.input_objects
+    }
+    #[must_use]
+    pub(crate) const fn outstanding_reservations(self) -> u32 {
+        self.outstanding_reservations
+    }
+    #[must_use]
+    pub(crate) const fn maximum_outstanding_reservations(self) -> u32 {
+        self.maximum_outstanding_reservations
+    }
+    #[must_use]
+    pub(crate) const fn outstanding_maintenance_reservations(self) -> u32 {
+        self.outstanding_maintenance_reservations
+    }
+}
+
+pub(crate) struct OperationsStatus {
+    pub(crate) configuration: Option<ConfigurationObservation>,
+    pub(crate) maintenance: MaintenanceHealth,
 }
 
 /// A bounded operator-visible security condition that does not affect readiness.
@@ -166,7 +241,7 @@ impl HealthState {
     pub(crate) fn authorized_configuration_status(
         &self,
         bearer: &str,
-    ) -> Result<Option<ConfigurationObservation>, ConfigurationStatusFailure> {
+    ) -> Result<OperationsStatus, ConfigurationStatusFailure> {
         let catalog_operation = self
             .catalog_operation
             .get()
@@ -177,8 +252,112 @@ impl HealthState {
             .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
         self.authorize_configuration_status(bearer)
             .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?;
-        self.configuration_status()
-            .map_err(|_| ConfigurationStatusFailure::Unavailable)
+        let authority = self
+            .inspection_authority
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(ConfigurationStatusFailure::Unavailable)?;
+        let clock_uncertain =
+            authority.retention_time.status().state() == LifecycleClockState::ClockUncertain;
+        let now = if clock_uncertain {
+            None
+        } else {
+            Some(
+                authority
+                    .retention_time
+                    .governance_now_seconds()
+                    .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
+            )
+        };
+        let statuses = authority
+            .maintenance_coordinator()
+            .statuses_with_clock_uncertainty(clock_uncertain)
+            .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
+        let mut maintenance = MaintenanceHealth {
+            queued: 0,
+            running: 0,
+            deferred: 0,
+            terminal: 0,
+            failed: 0,
+            clock_uncertain,
+            oldest_queued_age_seconds: None,
+            completed_inputs: 0,
+            input_objects: 0,
+            outstanding_reservations: 0,
+            maximum_outstanding_reservations: 0,
+            outstanding_maintenance_reservations: 0,
+        };
+        for status in statuses {
+            match status.phase() {
+                MaintenanceTaskPhase::Queued => {
+                    maintenance.queued = maintenance
+                        .queued
+                        .checked_add(1)
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                    if let Some(now) = now {
+                        let age = now.saturating_sub(status.submitted_at());
+                        maintenance.oldest_queued_age_seconds = Some(
+                            maintenance
+                                .oldest_queued_age_seconds
+                                .map_or(age, |oldest| oldest.max(age)),
+                        );
+                    }
+                },
+                MaintenanceTaskPhase::Running => {
+                    maintenance.running = maintenance
+                        .running
+                        .checked_add(1)
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?
+                },
+                MaintenanceTaskPhase::Deferred => {
+                    maintenance.deferred = maintenance
+                        .deferred
+                        .checked_add(1)
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?
+                },
+                MaintenanceTaskPhase::Cancelled
+                | MaintenanceTaskPhase::Succeeded
+                | MaintenanceTaskPhase::Failed => {
+                    maintenance.terminal = maintenance
+                        .terminal
+                        .checked_add(1)
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                    if status.phase() == MaintenanceTaskPhase::Failed {
+                        maintenance.failed = maintenance
+                            .failed
+                            .checked_add(1)
+                            .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                    }
+                },
+            }
+            maintenance.input_objects = maintenance
+                .input_objects
+                .checked_add(
+                    u32::try_from(status.task().inputs().len())
+                        .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
+                )
+                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+            if let Some(checkpoint) = status.checkpoint() {
+                maintenance.completed_inputs = maintenance
+                    .completed_inputs
+                    .checked_add(checkpoint.completed_inputs())
+                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+            }
+        }
+        let resources = authority
+            .resource_governor()
+            .inspect()
+            .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
+        maintenance.outstanding_reservations = resources.outstanding_reservations();
+        maintenance.maximum_outstanding_reservations = resources.maximum_outstanding_reservations();
+        maintenance.outstanding_maintenance_reservations =
+            resources.outstanding_for(WorkClass::OrdinaryMaintenanceBackup);
+        Ok(OperationsStatus {
+            configuration: self
+                .configuration_status()
+                .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
+            maintenance,
+        })
     }
 }
 

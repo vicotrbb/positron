@@ -87,6 +87,10 @@ fn operations_status_exposes_a_fenced_configuration_drift() -> Result<(), Box<dy
     assert!(reloaded_status.contains("\"phase\":\"serving\""));
     assert!(reloaded_status.contains("\"drift_disposition\":\"none\""));
     assert!(reloaded_status.contains("\"pending_restart\":false"));
+    assert!(
+        reloaded_status.contains("\"maintenance\":{"),
+        "missing bounded maintenance health view: {reloaded_status}"
+    );
     assert_eq!(
         quoted_status_value(&reloaded_status, "effective_digest")?,
         quoted_status_value(&reloaded_status, "desired_digest")?
