@@ -205,33 +205,41 @@ impl MaintenanceRunAuditEntry {
 /// Builds the audit intent atomically paired with the initial immutable task
 /// descriptor. The request identity and server-derived task facts are all
 /// bound before Catalog publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaintenanceRunAuditRequest {
+    pub actor: PrincipalId,
+    pub idempotency_key: AdministrativeIdempotencyKey,
+    pub task: MaintenanceTaskId,
+    pub tenant: TenantId,
+    pub signal: SignalKind,
+    pub shard: u32,
+    pub resource_generation: u64,
+    pub submitted_at_unix_seconds: u64,
+}
+
 pub fn maintenance_run_audit_intent(
-    actor: PrincipalId,
-    idempotency_key: AdministrativeIdempotencyKey,
-    task: MaintenanceTaskId,
-    tenant: TenantId,
-    signal: SignalKind,
-    shard: u32,
-    resource_generation: u64,
-    submitted_at_unix_seconds: u64,
+    request: MaintenanceRunAuditRequest,
 ) -> Result<AuditIntent, GovernanceIntentFailure> {
-    if shard == 0 || resource_generation == 0 || submitted_at_unix_seconds == 0 {
+    if request.shard == 0
+        || request.resource_generation == 0
+        || request.submitted_at_unix_seconds == 0
+    {
         return Err(GovernanceIntentFailure);
     }
-    let signal = match signal {
+    let signal = match request.signal {
         SignalKind::Logs => 1,
         SignalKind::Traces => 2,
     };
     let mut encoded = Vec::with_capacity(93);
     encoded.extend_from_slice(&MAINTENANCE_RUN_AUDIT_MAGIC);
-    encoded.extend_from_slice(&actor.to_bytes());
-    encoded.extend_from_slice(&idempotency_key.to_bytes());
-    encoded.extend_from_slice(&task.to_bytes());
-    encoded.extend_from_slice(&tenant.to_bytes());
+    encoded.extend_from_slice(&request.actor.to_bytes());
+    encoded.extend_from_slice(&request.idempotency_key.to_bytes());
+    encoded.extend_from_slice(&request.task.to_bytes());
+    encoded.extend_from_slice(&request.tenant.to_bytes());
     encoded.push(signal);
-    encoded.extend_from_slice(&shard.to_be_bytes());
-    encoded.extend_from_slice(&resource_generation.to_be_bytes());
-    encoded.extend_from_slice(&submitted_at_unix_seconds.to_be_bytes());
+    encoded.extend_from_slice(&request.shard.to_be_bytes());
+    encoded.extend_from_slice(&request.resource_generation.to_be_bytes());
+    encoded.extend_from_slice(&request.submitted_at_unix_seconds.to_be_bytes());
     AuditIntent::new(encoded).map_err(|_| GovernanceIntentFailure)
 }
 

@@ -116,7 +116,7 @@ fn print_acknowledgement(task: &MaintenanceTaskAcknowledgement) {
 
 fn print_task(task: &MaintenanceTaskStatus) {
     println!(
-        "identity={} class={} scope={} phase={} submitted_at_unix_seconds={} checkpoint_sequence={} pause_until_unix_seconds={} cancellation_requested={}",
+        "identity={} class={} scope={} phase={} submitted_at_unix_seconds={} checkpoint_sequence={} pause_until_unix_seconds={} automatic_resume_at_unix_seconds={} capacity_risk={} retention_impact={} recovery_impact={} cancellation_requested={}",
         task.identity,
         task.class,
         task.scope,
@@ -126,6 +126,11 @@ fn print_task(task: &MaintenanceTaskStatus) {
             .map_or_else(|| "none".to_owned(), |value| value.to_string()),
         task.pause_until_unix_seconds
             .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        task.automatic_resume_at_unix_seconds
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        task.capacity_risk.as_deref().unwrap_or("unknown"),
+        task.retention_impact.as_deref().unwrap_or("unknown"),
+        task.recovery_impact.as_deref().unwrap_or("unknown"),
         task.cancellation_requested,
     );
 }

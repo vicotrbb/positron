@@ -104,7 +104,7 @@ fn maintenance_status_client_uses_the_canonical_bounded_system_administration_ro
                 .to_ascii_lowercase()
                 .contains("authorization: bearer system-administrator\r\n")
         );
-        let body = r#"{"tasks":[{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","phase":"deferred","submitted_at_unix_seconds":1,"checkpoint_sequence":2,"pause_until_unix_seconds":61,"cancellation_requested":false,"resource_generation":1,"reservations":{"memory_bytes":0,"queue_slots":0,"task_slots":1,"buffer_cache_bytes":0,"batch_items":0,"lease_slots":0,"retry_slots":0,"io_permits":0,"cpu_work_units":0,"file_descriptors":0,"disk_headroom_bytes":0},"expected_foreground_impact":{"memory_bytes":0,"queue_slots":0,"task_slots":1,"buffer_cache_bytes":0,"batch_items":0,"lease_slots":0,"retry_slots":0,"io_permits":0,"cpu_work_units":0,"file_descriptors":0,"disk_headroom_bytes":0},"blocked_precondition":"maintenance_pause_active","safe_actions":["resume"],"backlog_age_seconds":3,"checkpoint_completed_inputs":0,"input_object_count":1,"output_object_count":0}],"returned":1,"total":1,"queued":0,"running":0,"deferred":1,"terminal":0}"#;
+        let body = r#"{"tasks":[{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","phase":"deferred","submitted_at_unix_seconds":1,"checkpoint_sequence":2,"automatic_resume_at_unix_seconds":61,"capacity_risk":"foreground_reservation","retention_impact":"unaffected","recovery_impact":"unaffected","pause_until_unix_seconds":61,"cancellation_requested":false,"resource_generation":1,"reservations":{"memory_bytes":0,"queue_slots":0,"task_slots":1,"buffer_cache_bytes":0,"batch_items":0,"lease_slots":0,"retry_slots":0,"io_permits":0,"cpu_work_units":0,"file_descriptors":0,"disk_headroom_bytes":0},"expected_foreground_impact":{"memory_bytes":0,"queue_slots":0,"task_slots":1,"buffer_cache_bytes":0,"batch_items":0,"lease_slots":0,"retry_slots":0,"io_permits":0,"cpu_work_units":0,"file_descriptors":0,"disk_headroom_bytes":0},"blocked_precondition":"maintenance_pause_active","safe_actions":["resume"],"backlog_age_seconds":3,"checkpoint_completed_inputs":0,"input_object_count":1,"output_object_count":0}],"returned":1,"total":1,"queued":0,"running":0,"deferred":1,"terminal":0}"#;
         stream.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -148,6 +148,13 @@ fn maintenance_status_client_uses_the_canonical_bounded_system_administration_ro
     assert_eq!(task.input_object_count, 1);
     assert_eq!(task.output_object_count, 0);
     assert_eq!(task.estimated_output_object_amplification_milli, None);
+    assert_eq!(
+        task.capacity_risk.as_deref(),
+        Some("foreground_reservation")
+    );
+    assert_eq!(task.retention_impact.as_deref(), Some("unaffected"));
+    assert_eq!(task.recovery_impact.as_deref(), Some("unaffected"));
+    assert_eq!(task.automatic_resume_at_unix_seconds, Some(61));
     assert_eq!(task.terminal_outcome, None);
     server.join().map_err(|_| "server panicked")??;
     Ok(())
@@ -166,6 +173,10 @@ fn full_valid_maintenance_registry_page_fits_the_bounded_response() {
             last_progress_at_unix_seconds: Some(u64::MAX),
             no_durable_progress_slo_breached: Some(true),
             no_durable_progress_slo_seconds: Some(u64::MAX),
+            capacity_risk: Some("foreground_reservation".to_owned()),
+            retention_impact: Some("unaffected".to_owned()),
+            recovery_impact: Some("unaffected".to_owned()),
+            automatic_resume_at_unix_seconds: Some(u64::MAX),
             pause_until_unix_seconds: None,
             cancellation_requested: false,
             resource_generation: Some(u64::MAX),

@@ -13,15 +13,15 @@ use positron_domain::{
 };
 use positron_governance::{
     AdministrativeIdempotencyKey, AuthorizedContext, CompatibilityHints, GovernanceAuditEntry,
-    Identity, MaintenanceControlAuditEntry, MaintenanceRunAuditEntry, PresentedCredential,
-    RequestedIntent, maintenance_control_audit_intent, maintenance_run_audit_intent,
-    maintenance_window_audit_intent,
+    Identity, MaintenanceControlAuditEntry, MaintenanceRunAuditEntry, MaintenanceRunAuditRequest,
+    PresentedCredential, RequestedIntent, maintenance_control_audit_intent,
+    maintenance_run_audit_intent, maintenance_window_audit_intent,
 };
 use positron_kernel::{
     ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, LifecycleClockState,
-    MaintenanceCoordinator, MaintenanceFailure, MaintenanceScope, MaintenanceTaskClass,
-    MaintenanceTaskId, MaintenanceTaskPhase, NO_DURABLE_PROGRESS_SLO_SECONDS, ResourceDimension,
-    SegmentScope,
+    MaintenanceCoordinator, MaintenanceFailure, MaintenanceReservationAuthority, MaintenanceScope,
+    MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase, NO_DURABLE_PROGRESS_SLO_SECONDS,
+    ResourceDimension, SegmentScope,
 };
 
 use crate::ServiceHandle;
@@ -206,16 +206,16 @@ impl ServiceHandle {
         let task = ledger
             .prepare_compaction_task(bucket, task_identity)
             .map_err(|_| (503, "administration_unavailable"))?;
-        let audit = maintenance_run_audit_intent(
-            actor.principal_id(),
-            administrative_key(idempotency)?,
-            task_identity,
+        let audit = maintenance_run_audit_intent(MaintenanceRunAuditRequest {
+            actor: actor.principal_id(),
+            idempotency_key: administrative_key(idempotency)?,
+            task: task_identity,
             tenant,
             signal,
-            shard.value(),
-            task.task().preconditions().resource_generation(),
-            now,
-        )
+            shard: shard.value(),
+            resource_generation: task.task().preconditions().resource_generation(),
+            submitted_at_unix_seconds: now,
+        })
         .map_err(|_| (503, "administration_unavailable"))?;
         let submitted = task
             .submit_and_persist_audited(coordinator, &catalog, now, audit)
@@ -740,17 +740,21 @@ fn task_status_for_coordinator(
     status: positron_kernel::MaintenanceTaskStatus,
     now: Option<u64>,
 ) -> Result<MaintenanceTaskStatus, MaintenanceFailure> {
-    let window_until = now
-        .map(|current| coordinator.window_blocking_until(status.task().identity(), current))
+    let active_window_until = now
+        .map(|current| coordinator.active_window_until(status.task().identity(), current))
         .transpose()?
         .flatten();
-    Ok(task_status(status, now, window_until))
+    let window_until = (status.phase() == MaintenanceTaskPhase::Queued)
+        .then_some(active_window_until)
+        .flatten();
+    Ok(task_status(status, now, window_until, active_window_until))
 }
 
 fn task_status(
     status: positron_kernel::MaintenanceTaskStatus,
     now: Option<u64>,
     window_until: Option<u64>,
+    active_window_until: Option<u64>,
 ) -> MaintenanceTaskStatus {
     let task = status.task();
     let phase = status.phase();
@@ -795,6 +799,13 @@ fn task_status(
         file_descriptors: reservations.get(ResourceDimension::FileDescriptors),
         disk_headroom_bytes: reservations.get(ResourceDimension::DiskHeadroomBytes),
     };
+    let deferral_active = paused || active_window_until.is_some();
+    let automatic_resume_at_unix_seconds = match (status.pause_until(), active_window_until) {
+        (Some(pause_until), Some(window_until)) => Some(pause_until.max(window_until)),
+        (Some(pause_until), None) => Some(pause_until),
+        (None, Some(window_until)) => Some(window_until),
+        (None, None) => None,
+    };
     MaintenanceTaskStatus {
         identity: hex(task.identity().to_bytes()),
         class: class_name(task.class()).to_owned(),
@@ -806,16 +817,35 @@ fn task_status(
         no_durable_progress_slo_breached: status.no_durable_progress_slo_breached(),
         no_durable_progress_slo_seconds: (phase == MaintenanceTaskPhase::Running)
             .then_some(NO_DURABLE_PROGRESS_SLO_SECONDS),
+        capacity_risk: (!matches!(
+            phase,
+            MaintenanceTaskPhase::Cancelled
+                | MaintenanceTaskPhase::Succeeded
+                | MaintenanceTaskPhase::Failed
+        ))
+        .then(|| match task.reservation_authority() {
+            MaintenanceReservationAuthority::Foreground => "foreground_reservation".to_owned(),
+            MaintenanceReservationAuthority::RecoveryReserve => "recovery_reserve".to_owned(),
+        }),
+        retention_impact: if status.clock_uncertain_blocked() {
+            Some("eligibility_unknown".to_owned())
+        } else if deferral_active {
+            Some("unaffected".to_owned())
+        } else {
+            None
+        },
+        recovery_impact: deferral_active.then_some("unaffected".to_owned()),
+        automatic_resume_at_unix_seconds,
         pause_until_unix_seconds: status.pause_until(),
         cancellation_requested: status.cancellation_requested(),
         resource_generation: Some(task.preconditions().resource_generation()),
         reservations: Some(reservation_view.clone()),
         expected_foreground_impact: Some(reservation_view),
         blocked_precondition,
-        maintenance_window_until_unix_seconds: window_until,
+        maintenance_window_until_unix_seconds: active_window_until,
         safe_actions: if paused {
             vec!["resume".to_owned()]
-        } else if phase == MaintenanceTaskPhase::Queued && task.class().is_deferrable() {
+        } else if phase == MaintenanceTaskPhase::Queued && task.is_pause_deferrable() {
             vec!["pause".to_owned()]
         } else {
             Vec::new()
@@ -950,10 +980,11 @@ mod tests {
     };
     use positron_domain::{routing::SignalKind, time::UnixNanoseconds};
     use positron_kernel::{
-        ActiveSegmentLedger, LifecycleClockFailure, LifecycleClockPolicy, LifecycleClockSource,
-        MaintenancePreconditions, MaintenanceScope, MaintenanceTask, MaintenanceTaskClass,
-        MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger, ResourceAmounts,
-        RetentionTimeAuthority, SegmentScope,
+        ActiveSegmentLedger, CatalogPublicationFault, LifecycleClockFailure, LifecycleClockPolicy,
+        LifecycleClockSource, MaintenancePreconditions, MaintenanceScope, MaintenanceTask,
+        MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger,
+        ResourceAmounts, RetentionTimeAuthority, SegmentScope,
+        with_catalog_publication_fault_after,
     };
     use prost::Message;
 
@@ -1278,6 +1309,11 @@ mod tests {
             observed.backlog_age_seconds, None,
             "inspection must not invent an age from an uncertain lifecycle clock"
         );
+        assert_eq!(
+            observed.retention_impact.as_deref(),
+            Some("eligibility_unknown")
+        );
+        assert_eq!(observed.automatic_resume_at_unix_seconds, None);
         let explain = services
             .explain_maintenance_task(
                 &administrator,
@@ -1344,6 +1380,16 @@ mod tests {
             observed.maintenance_window_until_unix_seconds,
             Some(window.until_unix_seconds)
         );
+        assert_eq!(
+            observed.capacity_risk.as_deref(),
+            Some("foreground_reservation")
+        );
+        assert_eq!(observed.retention_impact.as_deref(), Some("unaffected"));
+        assert_eq!(observed.recovery_impact.as_deref(), Some("unaffected"));
+        assert_eq!(
+            observed.automatic_resume_at_unix_seconds,
+            Some(window.until_unix_seconds)
+        );
 
         let explain = services
             .explain_maintenance_task(
@@ -1359,6 +1405,16 @@ mod tests {
             explain.task.maintenance_window_until_unix_seconds,
             Some(window.until_unix_seconds)
         );
+        assert_eq!(
+            explain.task.automatic_resume_at_unix_seconds,
+            Some(window.until_unix_seconds)
+        );
+        assert_eq!(
+            explain.task.capacity_risk.as_deref(),
+            Some("foreground_reservation")
+        );
+        assert_eq!(explain.task.retention_impact.as_deref(), Some("unaffected"));
+        assert_eq!(explain.task.recovery_impact.as_deref(), Some("unaffected"));
         Ok(())
     }
 
@@ -1529,6 +1585,160 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_run_keeps_audit_and_task_publication_atomic_across_faults()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        services.ingest_otlp_logs(&ingest, request("run-fault-sealed-source").encode_to_vec())?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        drop(catalog);
+        let request = MaintenanceRunRequest::new(
+            "compaction".to_owned(),
+            initialized.default_tenant_id().to_canonical_text(),
+            "logs".to_owned(),
+            scope.shard_id().value(),
+            "00000000-0000-0000-0000-000000000031".to_owned(),
+        );
+        let body = request.encode()?;
+        let rejected = with_catalog_publication_fault_after(
+            CatalogPublicationFault::SynchronizeCommit,
+            0,
+            || services.run_maintenance(&administrator, &body),
+        );
+        assert_eq!(rejected, Err((503, "administration_unavailable")));
+        assert!(
+            initialized
+                .maintenance_coordinator()
+                .statuses()
+                .map_err(|failure| format!("coordinator status: {failure:?}"))?
+                .is_empty(),
+            "the in-memory coordinator cannot expose a descriptor whose catalog publication failed"
+        );
+        assert!(
+            open_catalog(&initialized)?
+                .governance_audit_records()?
+                .into_iter()
+                .map(|record| positron_governance::GovernanceAuditEntry::decode(&record))
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .all(|entry| entry.action() != "maintenance.run"),
+            "a failed pre-publication commit leaves neither a Run receipt nor a task descriptor"
+        );
+        let first = services
+            .run_maintenance(&administrator, &body)
+            .map_err(|failure| format!("retry after rejected publication: {failure:?}"))?;
+        assert_eq!(
+            initialized
+                .maintenance_coordinator()
+                .durable_records()
+                .map_err(|failure| format!("coordinator records: {failure:?}"))?
+                .len(),
+            1,
+            "the retry publishes one descriptor only after the rejected transaction left no durable state"
+        );
+        assert_eq!(
+            services
+                .run_maintenance(&administrator, &body)
+                .map_err(|failure| format!("retry acknowledgement: {failure:?}"))?,
+            first
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_run_reconciles_a_lost_publication_acknowledgement_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        services.ingest_otlp_logs(&ingest, request("run-lost-ack-source").encode_to_vec())?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        drop(catalog);
+        let body = MaintenanceRunRequest::new(
+            "compaction".to_owned(),
+            initialized.default_tenant_id().to_canonical_text(),
+            "logs".to_owned(),
+            scope.shard_id().value(),
+            "00000000-0000-0000-0000-000000000032".to_owned(),
+        )
+        .encode()?;
+        let acknowledged = with_catalog_publication_fault_after(
+            CatalogPublicationFault::SynchronizeGenerationDirectory,
+            0,
+            || services.run_maintenance(&administrator, &body),
+        )
+        .map_err(|failure| format!("reconcile lost acknowledgement: {failure:?}"))?;
+        let replay = services
+            .run_maintenance(&administrator, &body)
+            .map_err(|failure| format!("replay reconciled acknowledgement: {failure:?}"))?;
+        assert_eq!(
+            replay, acknowledged,
+            "a post-marker fault reconciles the same immutable acknowledgement before responding"
+        );
+        assert_eq!(
+            services
+                .run_maintenance(&administrator, &body)
+                .map_err(|failure| format!("repeat reconciled acknowledgement: {failure:?}"))?,
+            replay,
+            "identical retries expose one immutable acknowledgement"
+        );
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("reconciled status: {failure:?}"))?;
+        assert_eq!(status.total, 1);
+        assert_eq!(status.tasks.len(), 1);
+        assert_eq!(status.tasks[0].identity, replay.task.identity);
+        let runs = open_catalog(&initialized)?
+            .governance_audit_records()?
+            .into_iter()
+            .map(|record| positron_governance::GovernanceAuditEntry::decode(&record))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|entry| entry.action() == "maintenance.run")
+            .count();
+        assert_eq!(runs, 1, "the lost acknowledgement retains one audit intent");
+        assert_eq!(
+            initialized
+                .maintenance_coordinator()
+                .durable_records()
+                .map_err(|failure| format!("reconciled records: {failure:?}"))?
+                .len(),
+            1,
+            "the audit receipt and coordinator registry retain one task identity"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn maintenance_run_rejects_unauthenticated_requests_before_decoding()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
@@ -1682,6 +1892,17 @@ mod tests {
             1,
             "the declared task reservation is the exact foreground-impact estimate"
         );
+        assert_eq!(
+            observed.capacity_risk.as_deref(),
+            Some("foreground_reservation"),
+            "the current reservation truthfully identifies foreground capacity contention"
+        );
+        assert_eq!(observed.retention_impact.as_deref(), Some("unaffected"));
+        assert_eq!(observed.recovery_impact.as_deref(), Some("unaffected"));
+        assert_eq!(
+            observed.automatic_resume_at_unix_seconds, observed.pause_until_unix_seconds,
+            "a finite pause exposes its authoritative automatic-resume time"
+        );
         assert_eq!(observed.safe_actions, ["resume"]);
         assert!(observed.backlog_age_seconds.is_some());
         assert_eq!(observed.conflict_owner, None);
@@ -1690,6 +1911,39 @@ mod tests {
         assert_eq!(observed.output_object_count, 0);
         assert_eq!(observed.estimated_output_object_amplification_milli, None);
         assert_eq!(observed.terminal_outcome, None);
+        let expected_window_generation = open_catalog(&initialized)?.pin()?.number();
+        let window_request = MaintenanceWindowRequest::new(
+            vec!["compaction".to_owned()],
+            expected_window_generation,
+            120,
+            "00000000-0000-0000-0000-000000000014".to_owned(),
+        );
+        let window = services
+            .set_maintenance_window(&administrator, &window_request.encode()?)
+            .map_err(|failure| format!("overlapping window: {failure:?}"))?;
+        let overlapping_status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("overlapping status: {failure:?}"))?;
+        let overlapping = overlapping_status
+            .tasks
+            .iter()
+            .find(|candidate| candidate.identity == task.identity)
+            .ok_or("overlapping task status")?;
+        assert_eq!(
+            overlapping.blocked_precondition.as_deref(),
+            Some("maintenance_pause_active"),
+            "the task-specific pause remains the immediate scheduler blocker"
+        );
+        assert_eq!(
+            overlapping.maintenance_window_until_unix_seconds,
+            Some(window.until_unix_seconds),
+            "status retains the concurrent global window rather than hiding it behind the pause"
+        );
+        assert_eq!(
+            overlapping.automatic_resume_at_unix_seconds,
+            Some(window.until_unix_seconds),
+            "automatic resume means the earliest execution time after every finite deferral"
+        );
         assert_eq!(
             services
                 .pause_maintenance(&administrator, &pause.encode()?)
@@ -1749,6 +2003,91 @@ mod tests {
                 .map_err(|failure| format!("pause replay after successor: {failure:?}"))?,
             paused,
             "a later resume cannot change the acknowledged pause receipt"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_status_reports_protected_recovery_reserve_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        let task = MaintenanceTask::new(
+            MaintenanceTaskId::new([0x82; 16]).map_err(|_| "task identity")?,
+            MaintenanceTaskClass::CatalogReclamation,
+        );
+        let identity = task.identity();
+        let catalog = open_catalog(&initialized)?;
+        initialized
+            .maintenance_coordinator()
+            .submit_and_persist(&catalog, task, 1)
+            .map_err(|failure| format!("submit recovery task: {failure:?}"))?;
+        drop(catalog);
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("status recovery task: {failure:?}"))?;
+        let observed = status
+            .tasks
+            .iter()
+            .find(|candidate| candidate.identity == super::hex(identity.to_bytes()))
+            .ok_or("recovery task status")?;
+        assert_eq!(
+            observed.capacity_risk.as_deref(),
+            Some("recovery_reserve"),
+            "catalog reclamation is admitted through the protected Recovery Reserve"
+        );
+        assert_eq!(observed.retention_impact, None);
+        assert_eq!(observed.recovery_impact, None);
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_pause_rejects_emergency_compaction_without_audit_or_transition()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        let task = MaintenanceTask::new(
+            MaintenanceTaskId::new([0x83; 16]).map_err(|_| "task identity")?,
+            MaintenanceTaskClass::Compaction,
+        )
+        .emergency_compaction_for_test()
+        .map_err(|_| "emergency compaction")?;
+        let identity = task.identity();
+        let audit_count = open_catalog(&initialized)?
+            .governance_audit_records()?
+            .len();
+        initialized
+            .maintenance_coordinator()
+            .submit(task)
+            .map_err(|failure| format!("submit emergency task: {failure:?}"))?;
+        let pause = MaintenancePauseRequest::new(
+            super::hex(identity.to_bytes()),
+            1,
+            60,
+            "00000000-0000-0000-0000-000000000083".to_owned(),
+        );
+        assert_eq!(
+            services.pause_maintenance(&administrator, &pause.encode()?),
+            Err((409, "precondition_failed")),
+            "ADR-0071 forbids an authenticated expiring pause from deferring emergency work"
+        );
+        assert_eq!(
+            initialized
+                .maintenance_coordinator()
+                .status(identity)
+                .map_err(|failure| format!("emergency task status: {failure:?}"))?
+                .phase(),
+            MaintenanceTaskPhase::Queued,
+            "rejected pause must not change the durable scheduler phase"
+        );
+        assert_eq!(
+            open_catalog(&initialized)?
+                .governance_audit_records()?
+                .len(),
+            audit_count,
+            "rejected pause must not publish an immutable control receipt"
         );
         Ok(())
     }

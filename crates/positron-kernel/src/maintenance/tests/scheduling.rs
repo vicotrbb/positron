@@ -301,6 +301,37 @@ fn finite_window_expires_and_never_defers_trusted_emergency_compaction() {
 }
 
 #[test]
+fn finite_pause_never_defers_trusted_emergency_compaction() {
+    let (authority, _) = authority();
+    let coordinator = MaintenanceCoordinator::new();
+    assert_eq!(
+        authority
+            .observe_disk_for_test(DiskObservation::new(20))
+            .expect("hard pressure observed"),
+        DiskPressureState::HardPressure
+    );
+    let emergency = MaintenanceTask::with_contract(
+        MaintenanceTaskId::new([0x82; 16]).expect("identity"),
+        MaintenanceTaskClass::Compaction,
+        MaintenanceScope::system(),
+        MaintenanceTrigger::Event,
+        MaintenancePreconditions::new(1, 1).expect("preconditions"),
+        Vec::new(),
+        Vec::new(),
+        ResourceAmounts::new([1; 11]),
+    )
+    .expect("compaction");
+    let emergency = coordinator
+        .submit_emergency_compaction(&authority, emergency)
+        .expect("pressure-proven emergency accepted");
+    assert_eq!(
+        coordinator.pause(emergency.identity(), 1, 20, 10),
+        Err(MaintenanceFailure::PreconditionFailed),
+        "the same optional-work predicate governs finite pauses and windows"
+    );
+}
+
+#[test]
 fn durability_outranks_an_aged_lower_class_without_promoting_untrusted_recovery_work() {
     let coordinator = MaintenanceCoordinator::new();
     let ordinary = task(

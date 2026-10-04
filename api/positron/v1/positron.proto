@@ -399,6 +399,15 @@ message MaintenanceTaskStatus {
   optional uint64 last_progress_at_unix_seconds = 23;
   optional bool no_durable_progress_slo_breached = 24;
   optional uint64 no_durable_progress_slo_seconds = 25;
+  // Current coordinator-owned authority for this task's declared reservation:
+  // foreground_reservation or recovery_reserve.
+  optional string capacity_risk = 26;
+  // Current lifecycle safety consequence. Omitted when no such fact applies.
+  optional string retention_impact = 27;
+  optional string recovery_impact = 28;
+  // Server-owned earliest time at which every active finite deferral permits
+  // execution. This is the later expiry when a pause and window overlap.
+  optional uint64 automatic_resume_at_unix_seconds = 29;
 }
 
 // A task's coordinator-derived peak Resource Governor reservation. This is

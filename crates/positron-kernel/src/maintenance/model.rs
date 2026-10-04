@@ -341,6 +341,18 @@ impl MaintenanceTask {
         )
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn emergency_compaction_for_test(mut self) -> Result<Self, MaintenanceFailure> {
+        if self.class != MaintenanceTaskClass::Compaction
+            || self.trigger != MaintenanceTrigger::Event
+        {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
+        self.emergency_compaction = true;
+        Ok(self)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_contract_not_before(
         identity: MaintenanceTaskId,
@@ -401,6 +413,14 @@ impl MaintenanceTask {
     #[must_use]
     pub const fn class(&self) -> MaintenanceTaskClass {
         self.class
+    }
+
+    /// Whether the task is optional work that an audited finite pause may
+    /// defer. Emergency compaction remains eligible despite the ordinary
+    /// Compaction class because it is protected Recovery Reserve work.
+    #[must_use]
+    pub const fn is_pause_deferrable(&self) -> bool {
+        self.class.is_window_deferrable(self.emergency_compaction)
     }
 
     #[must_use]

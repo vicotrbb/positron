@@ -422,6 +422,25 @@ pub enum MaintenanceReservation<'authority> {
     Recovery(ResourceReservation<'authority>),
 }
 
+/// The sole authority from which a task's declared reservation is admitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaintenanceReservationAuthority {
+    Foreground,
+    RecoveryReserve,
+}
+
+impl MaintenanceTask {
+    /// Returns the coordinator's source of capacity for this task class.
+    #[must_use]
+    pub fn reservation_authority(&self) -> MaintenanceReservationAuthority {
+        if scheduling::recovery_kind(self).is_some() {
+            MaintenanceReservationAuthority::RecoveryReserve
+        } else {
+            MaintenanceReservationAuthority::Foreground
+        }
+    }
+}
+
 impl MaintenanceReservation<'_> {
     #[must_use]
     pub fn granted(&self) -> ResourceAmounts {
@@ -856,7 +875,7 @@ impl MaintenanceCoordinator {
             .tasks
             .get_mut(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        if !task.task.class.deferrable()
+        if !task.task.is_pause_deferrable()
             || task.task.preconditions.resource_generation != resource_generation
         {
             return Err(MaintenanceFailure::PreconditionFailed);
@@ -1223,6 +1242,38 @@ impl MaintenanceCoordinator {
         };
         Ok((task.phase == MaintenanceTaskPhase::Queued
             && window.until > now
+            && window.deferred.contains(&task.task.class)
+            && task
+                .task
+                .class
+                .is_window_deferrable(task.task.emergency_compaction))
+        .then_some(window.until))
+    }
+
+    /// Returns the finite window currently applicable to a nonterminal task,
+    /// even when a task-specific pause is its immediate scheduler blocker.
+    /// This permits an authenticated status to report the later execution
+    /// boundary when both deferrals overlap.
+    pub fn active_window_until(
+        &self,
+        identity: MaintenanceTaskId,
+        now: u64,
+    ) -> Result<Option<u64>, MaintenanceFailure> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        let task = state
+            .tasks
+            .get(&identity)
+            .ok_or(MaintenanceFailure::UnknownTask)?;
+        let Some(window) = state.window.as_ref() else {
+            return Ok(None);
+        };
+        Ok((matches!(
+            task.phase,
+            MaintenanceTaskPhase::Queued | MaintenanceTaskPhase::Deferred
+        ) && window.until > now
             && window.deferred.contains(&task.task.class)
             && task
                 .task

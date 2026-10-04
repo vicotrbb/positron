@@ -373,7 +373,7 @@ impl MaintenanceCoordinator {
             .tasks
             .get_mut(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        if !task.task.class.deferrable()
+        if !task.task.is_pause_deferrable()
             || task.task.preconditions.resource_generation != resource_generation
         {
             return Err(MaintenanceFailure::PreconditionFailed);
@@ -414,7 +414,7 @@ impl MaintenanceCoordinator {
             .tasks
             .get_mut(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        if !task.task.class.deferrable()
+        if !task.task.is_pause_deferrable()
             || task.task.preconditions.resource_generation != resource_generation
         {
             return Err(MaintenanceFailure::PreconditionFailed);

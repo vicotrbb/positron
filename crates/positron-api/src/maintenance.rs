@@ -445,6 +445,18 @@ pub struct MaintenanceTaskStatus {
     pub no_durable_progress_slo_breached: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_durable_progress_slo_seconds: Option<u64>,
+    /// Exact coordinator admission authority for a nonterminal task's declared
+    /// reservation: ordinary foreground capacity or the protected Recovery
+    /// Reserve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_risk: Option<String>,
+    /// Exact lifecycle implication of the currently visible scheduler state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_impact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_impact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_resume_at_unix_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_until_unix_seconds: Option<u64>,
     pub cancellation_requested: bool,
@@ -458,8 +470,9 @@ pub struct MaintenanceTaskStatus {
     pub expected_foreground_impact: Option<MaintenanceResourceReservations>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_precondition: Option<String>,
-    /// Server-derived expiry of the finite whole-coordinator window that is
-    /// currently deferring this queued task.
+    /// Server-derived expiry of an active whole-coordinator window applicable
+    /// to this nonterminal task, including while a task-specific pause is its
+    /// immediate scheduler blocker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance_window_until_unix_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -692,6 +705,28 @@ impl MaintenanceStatusResponse {
                         && (task.phase != "running" || task.last_progress_at_unix_seconds.is_none())
                     || task.no_durable_progress_slo_seconds == Some(0)
                     || task.no_durable_progress_slo_seconds.is_some() && task.phase != "running"
+                    || task.capacity_risk.as_deref().is_some_and(|value| {
+                        !matches!(value, "foreground_reservation" | "recovery_reserve")
+                    })
+                    || task
+                        .retention_impact
+                        .as_deref()
+                        .is_some_and(|value| !matches!(value, "unaffected" | "eligibility_unknown"))
+                    || task
+                        .recovery_impact
+                        .as_deref()
+                        .is_some_and(|value| value != "unaffected")
+                    || task.automatic_resume_at_unix_seconds == Some(0)
+                    || task.automatic_resume_at_unix_seconds.is_some()
+                        && task.pause_until_unix_seconds.is_none()
+                        && task.maintenance_window_until_unix_seconds.is_none()
+                    || task.automatic_resume_at_unix_seconds.is_some_and(|resume| {
+                        task.pause_until_unix_seconds
+                            .is_some_and(|pause| resume < pause)
+                            || task
+                                .maintenance_window_until_unix_seconds
+                                .is_some_and(|window| resume < window)
+                    })
                     || task.pause_until_unix_seconds == Some(0)
                     || task.resource_generation == Some(0)
                     || task
@@ -700,7 +735,10 @@ impl MaintenanceStatusResponse {
                         .is_some_and(|value| value.is_empty() || value.len() > 64)
                     || task.maintenance_window_until_unix_seconds == Some(0)
                     || task.maintenance_window_until_unix_seconds.is_some()
-                        && task.blocked_precondition.as_deref() != Some("maintenance_window_active")
+                        && !matches!(
+                            task.blocked_precondition.as_deref(),
+                            Some("maintenance_window_active" | "maintenance_pause_active")
+                        )
                     || task.blocked_precondition.as_deref() == Some("maintenance_window_active")
                         && task.maintenance_window_until_unix_seconds.is_none()
                     || task.safe_actions.len() > 1
