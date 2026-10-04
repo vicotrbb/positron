@@ -678,7 +678,6 @@ impl MaintenanceStatusResponse {
         if self.tasks.len() > MAX_STATUS_PAGE_TASKS
             || self.returned as usize != self.tasks.len()
             || self.total as usize > MAX_TASKS
-            || self.queued + self.running + self.deferred + self.terminal != self.total
             || self
                 .next_cursor
                 .as_deref()
@@ -763,7 +762,10 @@ impl MaintenanceStatusResponse {
                         .as_deref()
                         .is_some_and(|failure| {
                             task.phase != "failed"
-                                || !matches!(failure, "identity_mismatch" | "unclassified")
+                                || !matches!(
+                                    failure,
+                                    "identity_mismatch" | "stale_generation" | "unclassified"
+                                )
                         })
                     || task.phase == "failed" && task.terminal_failure_class.is_none()
             })

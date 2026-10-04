@@ -70,6 +70,7 @@ pub(crate) struct MaintenanceHealth {
     interactive_query_tail_reservations: u32,
     ordinary_maintenance_backup_reservations: u32,
     failed_identity_mismatch: u32,
+    failed_stale_generation: u32,
     failed_unclassified: u32,
 }
 
@@ -157,6 +158,10 @@ impl MaintenanceHealth {
     #[must_use]
     pub(crate) const fn failed_identity_mismatch(self) -> u32 {
         self.failed_identity_mismatch
+    }
+    #[must_use]
+    pub(crate) const fn failed_stale_generation(self) -> u32 {
+        self.failed_stale_generation
     }
     #[must_use]
     pub(crate) const fn failed_unclassified(self) -> u32 {
@@ -348,6 +353,7 @@ impl HealthState {
             interactive_query_tail_reservations: 0,
             ordinary_maintenance_backup_reservations: 0,
             failed_identity_mismatch: 0,
+            failed_stale_generation: 0,
             failed_unclassified: 0,
         };
         for status in statuses {
@@ -415,6 +421,12 @@ impl HealthState {
                             Some(MaintenanceTerminalFailure::IdentityMismatch) => {
                                 maintenance.failed_identity_mismatch = maintenance
                                     .failed_identity_mismatch
+                                    .checked_add(1)
+                                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                            },
+                            Some(MaintenanceTerminalFailure::StaleGeneration) => {
+                                maintenance.failed_stale_generation = maintenance
+                                    .failed_stale_generation
                                     .checked_add(1)
                                     .ok_or(ConfigurationStatusFailure::Unavailable)?;
                             },

@@ -1335,7 +1335,7 @@
           "output_object_count": {"type": "integer", "minimum": 0, "maximum": 16},
           "estimated_output_object_amplification_milli": {"type": "integer", "minimum": 1},
           "terminal_outcome": {"type": "string", "enum": ["cancelled", "succeeded", "failed"]},
-          "terminal_failure_class": {"type": "string", "enum": ["identity_mismatch", "unclassified"]}
+          "terminal_failure_class": {"type": "string", "enum": ["identity_mismatch", "stale_generation", "unclassified"]}
         }
       },
       "MaintenanceTaskAcknowledgement": {

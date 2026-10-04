@@ -104,6 +104,7 @@ pub(super) fn outcome(
     identity: Identity,
     audit: Vec<GovernanceAuditEntry>,
     authority: StorageKernelResourceAuthority,
+    maintenance: positron_kernel::MaintenanceCoordinator,
     retention_time: RetentionTimeAuthority,
     generation: u64,
     audit_frontier: u64,
@@ -124,7 +125,7 @@ pub(super) fn outcome(
         #[cfg(any(test, fuzzing))]
         audit,
         _authority: authority,
-        maintenance: positron_kernel::MaintenanceCoordinator::new(),
+        maintenance,
         governance_audit_checkpoint_gate: std::sync::Mutex::new(()),
         retention_time,
         instance: record.instance,

@@ -359,6 +359,7 @@ fn terminal_failure_code(
         None => Ok(0),
         Some(MaintenanceTerminalFailure::Unclassified) => Ok(1),
         Some(MaintenanceTerminalFailure::IdentityMismatch) => Ok(2),
+        Some(MaintenanceTerminalFailure::StaleGeneration) => Ok(3),
     }
 }
 
@@ -369,6 +370,7 @@ fn terminal_failure_from_code(
         0 => Ok(None),
         1 => Ok(Some(MaintenanceTerminalFailure::Unclassified)),
         2 => Ok(Some(MaintenanceTerminalFailure::IdentityMismatch)),
+        3 => Ok(Some(MaintenanceTerminalFailure::StaleGeneration)),
         _ => Err(MaintenanceFailure::InvalidInput),
     }
 }
@@ -609,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_failed_task_decodes_with_an_unclassified_terminal_cause() {
+    fn stale_generation_round_trips_and_v3_failed_task_remains_unclassified() {
         let state = TaskState {
             task: MaintenanceTask::with_contract_not_before(
                 MaintenanceTaskId::new([8; 16]).expect("identity"),
@@ -624,7 +626,7 @@ mod tests {
             )
             .expect("task"),
             phase: MaintenanceTaskPhase::Failed,
-            terminal_failure: Some(MaintenanceTerminalFailure::IdentityMismatch),
+            terminal_failure: Some(MaintenanceTerminalFailure::StaleGeneration),
             submitted_at: 7,
             checkpoint: None,
             last_progress_at: None,
@@ -634,7 +636,14 @@ mod tests {
             terminal_order: None,
             active_dispatch: None,
         };
-        let mut legacy = encode_record(&state).expect("v5 encoding").0;
+        let current = encode_record(&state).expect("v5 encoding").0;
+        assert_eq!(
+            decode_record(&current)
+                .expect("current decoding")
+                .terminal_failure,
+            Some(MaintenanceTerminalFailure::StaleGeneration)
+        );
+        let mut legacy = current;
         legacy.drain(171..180);
         legacy[..RECORD_MAGIC.len()].copy_from_slice(LEGACY_RECORD_MAGIC);
         // PMTC0003 used the same layout as PMTC0004 except it had no byte

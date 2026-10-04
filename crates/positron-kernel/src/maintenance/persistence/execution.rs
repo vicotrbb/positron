@@ -254,6 +254,24 @@ impl MaintenanceExecution<'_> {
         coordinator.complete_and_persist_dispatch(catalog, self.dispatch, true)
     }
 
+    /// Records an authenticated Compaction binding rejected before it can
+    /// mutate output. This is deliberately unavailable to other task classes:
+    /// Compaction publication has separate post-mutation reconciliation.
+    pub fn fail_rejected_compaction_and_persist(
+        &self,
+        coordinator: &MaintenanceCoordinator,
+        catalog: &Catalog<'_>,
+    ) -> Result<(), MaintenanceFailure> {
+        if self.task.class != MaintenanceTaskClass::Compaction {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
+        coordinator.fail_and_persist_dispatch(
+            catalog,
+            self.dispatch,
+            MaintenanceTerminalFailure::StaleGeneration,
+        )
+    }
+
     /// Returns an audit-checkpoint execution to its durable queue while its
     /// existing reservation is still live. This is used only after its signed
     /// artifact has committed but the terminal task record remains unavailable.

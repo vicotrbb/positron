@@ -211,6 +211,22 @@ fn maintenance_status_and_explain_preserve_an_epoch_progress_instant() {
 }
 
 #[test]
+fn maintenance_status_decoder_rejects_overflowing_phase_counts() {
+    let overflowing = br#"{"tasks":[],"returned":0,"total":0,"queued":4294967295,"running":1,"deferred":0,"terminal":0}"#;
+    assert_eq!(
+        MaintenanceStatusResponse::decode(overflowing),
+        Err(positron_api::maintenance::MaintenanceWireFailure),
+        "a peer-provided count sum that overflows u32 is malformed wire data"
+    );
+
+    let bounded_total = br#"{"tasks":[],"returned":0,"total":128,"queued":128,"running":0,"deferred":0,"terminal":0}"#;
+    assert!(
+        MaintenanceStatusResponse::decode(bounded_total).is_ok(),
+        "the configured bounded registry maximum remains a valid exact count"
+    );
+}
+
+#[test]
 fn full_valid_maintenance_registry_page_fits_the_bounded_response() {
     let tasks = (0..positron_api::maintenance::MAX_STATUS_PAGE_TASKS)
         .map(|index| MaintenanceTaskStatus {

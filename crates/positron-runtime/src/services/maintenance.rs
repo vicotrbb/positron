@@ -318,20 +318,36 @@ fn complete_installed_maintenance(
             positron_domain::routing::SignalKind::Logs => {
                 let policy = LogRetentionPolicy::from_catalog(&snapshot)
                     .map_err(map_log_compaction_failure)?;
-                LogStore::new()
+                match LogStore::new()
                     .compact_with_maintenance(&ledger, scope.tenant_id(), policy, &maintenance)
                     .map(|_| ())
-                    .map_err(map_log_compaction_failure)
+                {
+                    Ok(()) => {},
+                    Err(failure) if failure.code() == LogStoreFailureCode::StaleGeneration => {
+                        execution
+                            .fail_rejected_compaction_and_persist(coordinator, &catalog)
+                            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+                    },
+                    Err(failure) => return Err(map_log_compaction_failure(failure)),
+                }
             },
             positron_domain::routing::SignalKind::Traces => {
                 let policy = TraceRetentionPolicy::from_catalog(&snapshot)
                     .map_err(map_trace_compaction_failure)?;
-                TraceStore::new()
+                match TraceStore::new()
                     .compact_with_maintenance(&ledger, scope.tenant_id(), policy, &maintenance)
                     .map(|_| ())
-                    .map_err(map_trace_compaction_failure)
+                {
+                    Ok(()) => {},
+                    Err(failure) if failure.code() == TraceStoreFailureCode::StaleGeneration => {
+                        execution
+                            .fail_rejected_compaction_and_persist(coordinator, &catalog)
+                            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+                    },
+                    Err(failure) => return Err(map_trace_compaction_failure(failure)),
+                }
             },
-        }?;
+        }
         return Ok(true);
     }
     let completed = match execution {

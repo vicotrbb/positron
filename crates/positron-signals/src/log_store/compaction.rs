@@ -208,6 +208,17 @@ fn compact_inner<'kernel, 'catalog>(
     }
     check_scan_cancellation(cancellation)?;
     if inputs.is_empty() {
+        if let Some((coordinator, execution)) = maintenance {
+            ledger
+                .compact_sealed_with_maintenance(
+                    Vec::new(),
+                    preparation,
+                    coordinator,
+                    execution,
+                    || cancellation.is_cancelled(),
+                )
+                .map_err(LogStoreFailure::kernel)?;
+        }
         return Ok(LogCompactionOutcome {
             bucket,
             input_segments: 0,
@@ -225,6 +236,17 @@ fn compact_inner<'kernel, 'catalog>(
         }
     }
     if input_segments.len() < 2 {
+        if let Some((coordinator, execution)) = maintenance {
+            ledger
+                .compact_sealed_with_maintenance(
+                    inputs,
+                    preparation,
+                    coordinator,
+                    execution,
+                    || cancellation.is_cancelled(),
+                )
+                .map_err(LogStoreFailure::kernel)?;
+        }
         return Ok(LogCompactionOutcome {
             bucket,
             input_segments: 0,

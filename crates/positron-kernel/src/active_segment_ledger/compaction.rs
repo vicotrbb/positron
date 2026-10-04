@@ -903,6 +903,33 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             }
         }
 
+        let mut terminal = terminal;
+        if selected_segments.len() < 2
+            && let Some((identity, record)) = terminal.take()
+        {
+            if is_cancelled() {
+                return Err(LedgerFailure::new(LedgerFailureCode::Cancelled));
+            }
+            let volume = self
+                .authority
+                .primary_data_volume()
+                .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::StorageUnavailable))?;
+            let output_storage = LedgerStorage::open(volume)?;
+            publish_exact_scope_segments_with_task_replacement(
+                self.catalog,
+                &basis,
+                &output_storage,
+                self.scope,
+                &current_metadata,
+                identity,
+                record,
+            )?;
+            return Ok(CompactionPublication {
+                input_segments: 0,
+                output_segments: 0,
+            });
+        }
+
         let runs = contiguous_runs(&blocks)?;
         let run_count = runs.len();
         let mut proposal = current_metadata;

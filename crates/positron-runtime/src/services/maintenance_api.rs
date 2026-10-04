@@ -875,6 +875,9 @@ fn terminal_failure_class(failure: positron_kernel::MaintenanceTerminalFailure) 
         positron_kernel::MaintenanceTerminalFailure::IdentityMismatch => {
             "identity_mismatch".to_owned()
         },
+        positron_kernel::MaintenanceTerminalFailure::StaleGeneration => {
+            "stale_generation".to_owned()
+        },
         positron_kernel::MaintenanceTerminalFailure::Unclassified => "unclassified".to_owned(),
     }
 }
@@ -1580,6 +1583,59 @@ mod tests {
                 Err(positron_kernel::MaintenanceFailure::UnknownTask)
             ),
             "terminal retention reclamation removes the mutable task record while the audit receipt remains replayable after reopen"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_run_terminalizes_a_one_segment_log_compaction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        services.ingest_otlp_logs(&ingest, request("run-api-one-segment").encode_to_vec())?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        drop(catalog);
+
+        let body = MaintenanceRunRequest::new(
+            "compaction".to_owned(),
+            initialized.default_tenant_id().to_canonical_text(),
+            "logs".to_owned(),
+            scope.shard_id().value(),
+            "00000000-0000-0000-0000-000000000021".to_owned(),
+        )
+        .encode()?;
+        let response = services
+            .run_maintenance(&administrator, &body)
+            .map_err(|failure| format!("one-segment run: {failure:?}"))?;
+        let identity = super::task_identity(&response.task.identity).ok_or("task identity")?;
+
+        assert!(
+            services.wake_maintenance_worker()?,
+            "the public Run task dispatches through the bounded worker"
+        );
+        assert_eq!(
+            initialized
+                .maintenance_coordinator()
+                .status(identity)
+                .map_err(|failure| format!("one-segment status: {failure:?}"))?
+                .phase(),
+            MaintenanceTaskPhase::Succeeded,
+            "a selected sealed source with one segment has no compaction work but still terminalizes"
         );
         Ok(())
     }

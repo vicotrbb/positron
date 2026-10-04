@@ -186,6 +186,17 @@ fn compact_inner<'kernel, 'catalog>(
         }
     }
     if input_segments.len() < 2 {
+        if let Some((coordinator, execution)) = maintenance {
+            ledger
+                .compact_sealed_with_maintenance(
+                    inputs,
+                    preparation,
+                    coordinator,
+                    execution,
+                    || cancellation.is_cancelled(),
+                )
+                .map_err(TraceStoreFailure::kernel)?;
+        }
         return Ok(TraceCompactionOutcome {
             bucket,
             input_segments: 0,

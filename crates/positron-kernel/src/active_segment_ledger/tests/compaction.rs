@@ -2003,7 +2003,8 @@ fn typed_compaction_recovers_the_exact_output_and_terminal_pair_after_lost_ack()
     let tenant = TenantId::from_bytes([0x64; 16])?;
     super::retention_frontier::install_governance_policy(&catalog, instance, tenant, 60, 0xec)?;
     let scope = SegmentScope::new(tenant, SignalKind::Logs, VirtualShardId::new(62)?);
-    let retention_time = RetentionTimeAuthority::establish()?;
+    let (retention_time, _elapsed) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
     let key = || SegmentProtectionKey::from_owned(Box::new([0xed; 32]));
     for (identity, payload) in [
         ([0xee; 16], b"lost-ack-first".as_slice()),
@@ -2143,7 +2144,8 @@ fn typed_compaction_reconciles_a_two_fault_lost_ack_with_the_original_execution(
     let tenant = TenantId::from_bytes([0x64; 16])?;
     super::retention_frontier::install_governance_policy(&catalog, instance, tenant, 60, 0xf4)?;
     let scope = SegmentScope::new(tenant, SignalKind::Logs, VirtualShardId::new(63)?);
-    let retention_time = RetentionTimeAuthority::establish()?;
+    let (retention_time, _elapsed) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
     let key = || SegmentProtectionKey::from_owned(Box::new([0xf5; 32]));
     for (identity, payload) in [
         ([0xf6; 16], b"two-fault-first".as_slice()),
