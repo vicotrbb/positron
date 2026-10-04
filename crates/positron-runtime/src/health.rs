@@ -531,6 +531,18 @@ fn plaintext_role_bit(role: ListenerRole) -> Option<u8> {
     }
 }
 
+fn decode_phase(value: u8) -> ProcessPhase {
+    match value {
+        0 => ProcessPhase::Starting,
+        1 => ProcessPhase::Recovering,
+        2 => ProcessPhase::Serving,
+        3 => ProcessPhase::Draining,
+        4 => ProcessPhase::Fenced,
+        5 => ProcessPhase::Stopping,
+        _ => ProcessPhase::Stopped,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use positron_kernel::{
@@ -565,17 +577,5 @@ mod tests {
                 .expect("urgent status"),
             70,
         ));
-    }
-}
-
-fn decode_phase(value: u8) -> ProcessPhase {
-    match value {
-        0 => ProcessPhase::Starting,
-        1 => ProcessPhase::Recovering,
-        2 => ProcessPhase::Serving,
-        3 => ProcessPhase::Draining,
-        4 => ProcessPhase::Fenced,
-        5 => ProcessPhase::Stopping,
-        _ => ProcessPhase::Stopped,
     }
 }
