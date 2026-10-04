@@ -6,7 +6,8 @@ use positron_api::maintenance::{
     MaintenanceControlResponse, MaintenanceExplainRequest, MaintenanceExplainResponse,
     MaintenancePauseRequest, MaintenanceResourceReservations, MaintenanceResumeRequest,
     MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceStatusRequest,
-    MaintenanceStatusResponse, MaintenanceTaskStatus,
+    MaintenanceStatusResponse, MaintenanceTaskStatus, MaintenanceWindowRequest,
+    MaintenanceWindowResponse,
 };
 use positron_domain::{
     identity::{PrincipalId, TenantId},
@@ -15,6 +16,7 @@ use positron_domain::{
 use positron_governance::{
     AdministrativeIdempotencyKey, AuthorizedContext, CompatibilityHints, GovernanceAuditEntry,
     Identity, PresentedCredential, RequestedIntent, maintenance_control_audit_intent,
+    maintenance_window_audit_intent,
 };
 use positron_kernel::{
     ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, LifecycleClockState,
@@ -336,6 +338,75 @@ impl ServiceHandle {
         })
     }
 
+    /// Authenticates before decoding a bounded whole-coordinator Maintenance
+    /// Window. The durable Catalog generation precondition prevents a stale
+    /// operator request from replacing a later window.
+    pub(crate) fn set_maintenance_window(
+        &self,
+        bearer: &str,
+        body: &[u8],
+    ) -> Result<MaintenanceWindowResponse, (u16, &'static str)> {
+        let _catalog_operation = self
+            .catalog_operation()
+            .map_err(|_| (503, "administration_unavailable"))?;
+        let actor = self.authorize_system_administration(bearer)?;
+        let request =
+            MaintenanceWindowRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
+        let deferred = request
+            .deferred_classes()
+            .iter()
+            .map(|class| window_class(class).ok_or((400, "invalid_request")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
+            .map_err(|_| (400, "invalid_request"))?;
+        let catalog = self.open_maintenance_catalog()?;
+        if let Some(response) = maintenance_window_replay(
+            &catalog,
+            actor.principal_id(),
+            idempotency,
+            request.expected_catalog_generation(),
+            &deferred,
+            request.duration_seconds(),
+        )? {
+            return Ok(response);
+        }
+        let now = self.maintenance_status_now()?;
+        let until = now
+            .checked_add(request.duration_seconds())
+            .ok_or((400, "invalid_request"))?;
+        let audit = maintenance_window_audit_intent(
+            actor.principal_id(),
+            administrative_key(idempotency)?,
+            request.expected_catalog_generation(),
+            &deferred,
+            request.duration_seconds(),
+            until,
+        )
+        .map_err(|_| (503, "administration_unavailable"))?;
+        let catalog_generation = self
+            .instance
+            .maintenance_coordinator()
+            .set_window_and_persist_audited(
+                &catalog,
+                deferred,
+                request.expected_catalog_generation(),
+                until,
+                now,
+                audit,
+            )
+            .map_err(control_failure)?;
+        let audit_position = latest_control_audit_position(&catalog)?;
+        drop(catalog);
+        drop(_catalog_operation);
+        self.notify_maintenance_worker();
+        Ok(MaintenanceWindowResponse {
+            deferred_classes: request.deferred_classes().to_vec(),
+            until_unix_seconds: until,
+            catalog_generation,
+            audit_position,
+        })
+    }
+
     fn open_maintenance_catalog(&self) -> Result<Catalog<'_>, (u16, &'static str)> {
         let instance = &self.instance;
         Catalog::open(
@@ -453,6 +524,74 @@ fn maintenance_control_replay(
         return Ok(Some(candidate.position()));
     }
     Ok(None)
+}
+
+fn maintenance_window_replay(
+    catalog: &Catalog<'_>,
+    actor: PrincipalId,
+    idempotency: PrincipalId,
+    expected_catalog_generation: u64,
+    deferred: &[MaintenanceTaskClass],
+    duration_seconds: u64,
+) -> Result<Option<MaintenanceWindowResponse>, (u16, &'static str)> {
+    let records = catalog
+        .governance_audit_records()
+        .map_err(|_| (503, "administration_unavailable"))?;
+    for record in records {
+        let entry = GovernanceAuditEntry::decode(&record)
+            .map_err(|_| (503, "administration_unavailable"))?;
+        let GovernanceAuditEntry::MaintenanceWindow(candidate) = entry else {
+            continue;
+        };
+        if candidate.idempotency_key().to_bytes() != idempotency.to_bytes()
+            || candidate.actor() != actor
+        {
+            continue;
+        }
+        if candidate.expected_catalog_generation() != expected_catalog_generation
+            || candidate.deferred() != deferred
+            || candidate.duration_seconds() != duration_seconds
+        {
+            return Err((409, "idempotency_conflict"));
+        }
+        return Ok(Some(MaintenanceWindowResponse {
+            deferred_classes: deferred
+                .iter()
+                .map(window_class_name)
+                .map(str::to_owned)
+                .collect(),
+            until_unix_seconds: candidate.until_unix_seconds(),
+            catalog_generation: expected_catalog_generation
+                .checked_add(1)
+                .ok_or((503, "administration_unavailable"))?,
+            audit_position: candidate.position(),
+        }));
+    }
+    Ok(None)
+}
+
+fn window_class(value: &str) -> Option<MaintenanceTaskClass> {
+    match value {
+        "compaction" => Some(MaintenanceTaskClass::Compaction),
+        "schema_promotion" => Some(MaintenanceTaskClass::SchemaPromotion),
+        "schema_demotion" => Some(MaintenanceTaskClass::SchemaDemotion),
+        "repository_verification" => Some(MaintenanceTaskClass::RepositoryVerification),
+        "backup_snapshot" => Some(MaintenanceTaskClass::BackupSnapshot),
+        "durable_export" => Some(MaintenanceTaskClass::DurableExport),
+        _ => None,
+    }
+}
+
+const fn window_class_name(class: &MaintenanceTaskClass) -> &'static str {
+    match class {
+        MaintenanceTaskClass::Compaction => "compaction",
+        MaintenanceTaskClass::SchemaPromotion => "schema_promotion",
+        MaintenanceTaskClass::SchemaDemotion => "schema_demotion",
+        MaintenanceTaskClass::RepositoryVerification => "repository_verification",
+        MaintenanceTaskClass::BackupSnapshot => "backup_snapshot",
+        MaintenanceTaskClass::DurableExport => "durable_export",
+        _ => "",
+    }
 }
 
 fn latest_control_audit_position(catalog: &Catalog<'_>) -> Result<u64, (u16, &'static str)> {
@@ -647,7 +786,7 @@ mod tests {
 
     use positron_api::maintenance::{
         MaintenanceExplainRequest, MaintenancePauseRequest, MaintenanceResumeRequest,
-        MaintenanceRunRequest, MaintenanceStatusRequest,
+        MaintenanceRunRequest, MaintenanceStatusRequest, MaintenanceWindowRequest,
     };
     use positron_domain::{routing::SignalKind, time::UnixNanoseconds};
     use positron_kernel::{
@@ -893,6 +1032,61 @@ mod tests {
             services.run_maintenance("not-a-credential", br#"{\"unknown\":true}"#),
             Err((401, "authentication_rejected")),
             "authentication precedes decoding"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_window_authenticates_before_decode_and_replays_its_atomic_publication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        assert_eq!(
+            services.set_maintenance_window("not-a-credential", br#"{\"unexpected\":true}"#),
+            Err((401, "authentication_rejected")),
+            "authentication must precede untrusted window decoding"
+        );
+        let expected = open_catalog(&initialized)?.pin()?.number();
+        let request = MaintenanceWindowRequest::new(
+            vec!["compaction".to_owned(), "durable_export".to_owned()],
+            expected,
+            60,
+            "00000000-0000-0000-0000-000000000021".to_owned(),
+        );
+        let first = services
+            .set_maintenance_window(&administrator, &request.encode()?)
+            .map_err(|failure| format!("window publication: {failure:?}"))?;
+        assert_eq!(first.catalog_generation, expected + 1);
+        assert!(first.until_unix_seconds >= 60);
+        assert_ne!(first.audit_position, 0);
+        assert_eq!(
+            services
+                .set_maintenance_window(&administrator, &request.encode()?)
+                .map_err(|failure| format!("window replay: {failure:?}"))?,
+            first,
+            "exact retries return the same acknowledged publication"
+        );
+        let conflict = MaintenanceWindowRequest::new(
+            vec!["compaction".to_owned()],
+            expected,
+            60,
+            "00000000-0000-0000-0000-000000000021".to_owned(),
+        );
+        assert_eq!(
+            services.set_maintenance_window(&administrator, &conflict.encode()?),
+            Err((409, "idempotency_conflict"))
+        );
+        let stale = MaintenanceWindowRequest::new(
+            vec!["compaction".to_owned()],
+            expected,
+            60,
+            "00000000-0000-0000-0000-000000000022".to_owned(),
+        );
+        assert_eq!(
+            services.set_maintenance_window(&administrator, &stale.encode()?),
+            Err((409, "precondition_failed")),
+            "the actual committed Catalog generation fences the global window"
         );
         Ok(())
     }

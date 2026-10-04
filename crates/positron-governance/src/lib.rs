@@ -39,10 +39,11 @@ pub use audit::{
     GovernanceAuditEntry, IngestPolicyActivationAuditEntry, InitialAuditMetadata,
     InitializationAuditEntry, ListenerTransportAuditEntry, ListenerTransportAuditRequest,
     ListenerTransportConfigurationProvenance, ListenerTransportRole, MaintenanceControlAuditEntry,
-    SchemaCheckpointAuditEntry, SystemAuditRetentionUpdateAuditEntry,
+    MaintenanceWindowAuditEntry, SchemaCheckpointAuditEntry, SystemAuditRetentionUpdateAuditEntry,
     TenantDisplayNameUpdateAuditEntry, TenantQuotaUpdateAuditEntry, TlsMaterialReloadAuditEntry,
     TlsMaterialReloadAuditRequest, TlsMaterialReloadListenerSet, TlsMaterialReloadOutcome,
-    maintenance_control_audit_intent, schema_checkpoint_audit_intent,
+    maintenance_control_audit_intent, maintenance_window_audit_intent,
+    schema_checkpoint_audit_intent,
 };
 #[cfg(fuzzing)]
 pub use durable_operation_administration::fuzz_durable_operation_record;

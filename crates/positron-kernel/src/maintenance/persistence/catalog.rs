@@ -274,6 +274,66 @@ pub(super) fn persist_window(
     Ok(())
 }
 
+/// Replaces the one durable window and appends its caller-attributed audit
+/// intent in one Catalog generation. The supplied generation is checked
+/// against the snapshot actually committed, never an in-memory estimate.
+pub(super) fn persist_window_audited(
+    catalog: &Catalog<'_>,
+    window: &MaintenanceWindow,
+    expected_catalog_generation: u64,
+    audit: AuditIntent,
+) -> Result<u64, MaintenanceFailure> {
+    let encoded = record::encode_window(window)?;
+    let snapshot = catalog.pin().map_err(map_catalog_failure)?;
+    if snapshot.number() != expected_catalog_generation {
+        return Err(MaintenanceFailure::PreconditionFailed);
+    }
+    let mut objects = Vec::new();
+    objects
+        .try_reserve_exact(snapshot.object_count())
+        .map_err(|_| MaintenanceFailure::CapacityExceeded)?;
+    let mut identities = BTreeSet::new();
+    let mut saw_window = false;
+    for bytes in snapshot.plaintext_objects() {
+        if let Some(identity) =
+            record::record_identity(bytes).map_err(|_| MaintenanceFailure::CatalogUnavailable)?
+        {
+            if !identities.insert(identity) {
+                return Err(MaintenanceFailure::CatalogUnavailable);
+            }
+            objects.push(CatalogObject::new(bytes.to_vec()).map_err(map_catalog_failure)?);
+            continue;
+        }
+        if record::window_record(bytes)
+            .map_err(|_| MaintenanceFailure::CatalogUnavailable)?
+            .is_some()
+        {
+            if saw_window {
+                return Err(MaintenanceFailure::CatalogUnavailable);
+            }
+            saw_window = true;
+            continue;
+        }
+        objects.push(CatalogObject::new(bytes.to_vec()).map_err(map_catalog_failure)?);
+    }
+    let object = CatalogObject::new(encoded).map_err(map_catalog_failure)?;
+    let transaction =
+        record_transaction(snapshot.identity().to_bytes(), object.identity().to_bytes())?;
+    objects.push(object);
+    let epoch = snapshot
+        .format_epoch()
+        .ok_or(MaintenanceFailure::CatalogUnavailable)?;
+    let proposal =
+        CatalogProposal::new(transaction, epoch, objects).map_err(map_catalog_failure)?;
+    catalog
+        .commit(snapshot.identity(), proposal, Some(audit))
+        .map_err(map_catalog_failure)?;
+    catalog
+        .pin()
+        .map(|current| current.number())
+        .map_err(map_catalog_failure)
+}
+
 pub(super) fn record_transaction(
     predecessor: [u8; 32],
     identity: [u8; 32],

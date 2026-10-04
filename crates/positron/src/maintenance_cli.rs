@@ -7,7 +7,7 @@ use positron_api::maintenance::{
     MaintenanceControlResponse, MaintenanceExplainRequest, MaintenancePauseRequest,
     MaintenanceResumeRequest, MaintenanceRunRequest, MaintenanceServiceClient,
     MaintenanceServiceClientFailure, MaintenanceStatusRequest, MaintenanceTaskStatus,
-    MaintenanceTransport,
+    MaintenanceTransport, MaintenanceWindowRequest,
 };
 use zeroize::Zeroizing;
 
@@ -77,6 +77,16 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
             let response = client.resume(bearer, &request).map_err(client_failure)?;
             print_control(&response);
         },
+        Command::Window(request) => {
+            let response = client.window(bearer, &request).map_err(client_failure)?;
+            println!(
+                "deferred_classes={} until_unix_seconds={} catalog_generation={} audit_position={}",
+                response.deferred_classes.join(","),
+                response.until_unix_seconds,
+                response.catalog_generation,
+                response.audit_position,
+            );
+        },
     }
     Ok(())
 }
@@ -131,6 +141,7 @@ enum Command {
     Run(MaintenanceRunRequest),
     Pause(MaintenancePauseRequest),
     Resume(MaintenanceResumeRequest),
+    Window(MaintenanceWindowRequest),
 }
 
 fn parse(
@@ -139,7 +150,7 @@ fn parse(
     let operation = arguments.next().ok_or(USAGE)?;
     if !matches!(
         operation.as_str(),
-        "status" | "explain" | "run" | "pause" | "resume"
+        "status" | "explain" | "run" | "pause" | "resume" | "window"
     ) {
         return Err(USAGE);
     }
@@ -170,6 +181,8 @@ fn parse(
                 | "--shard"
                 | "--resource-generation"
                 | "--duration-seconds"
+                | "--expected-catalog-generation"
+                | "--deferred-classes"
                 | "--idempotency-key"
         ) {
             return Err("unknown maintenance option");
@@ -221,6 +234,19 @@ fn parse(
             take(&mut options, "--task-id")?,
             take(&mut options, "--idempotency-key")?,
         )),
+        "window" => Command::Window(MaintenanceWindowRequest::new(
+            take(&mut options, "--deferred-classes")?
+                .split(',')
+                .map(ToOwned::to_owned)
+                .collect(),
+            take(&mut options, "--expected-catalog-generation")?
+                .parse()
+                .map_err(|_| "invalid catalog generation")?,
+            take(&mut options, "--duration-seconds")?
+                .parse()
+                .map_err(|_| "invalid maintenance window duration")?,
+            take(&mut options, "--idempotency-key")?,
+        )),
         _ => return Err(USAGE),
     };
     if !options.is_empty() {
@@ -237,6 +263,9 @@ fn parse(
         Command::Resume(request) => request
             .validate()
             .map_err(|_| "invalid maintenance resume request")?,
+        Command::Window(request) => request
+            .validate()
+            .map_err(|_| "invalid maintenance window request")?,
     }
     Ok((MaintenanceTransport::PlaintextOptOut { endpoint }, command))
 }
@@ -247,4 +276,4 @@ fn take(options: &mut BTreeMap<String, String>, name: &str) -> Result<String, &'
         .ok_or("required maintenance option absent")
 }
 
-const USAGE: &str = "usage: positron maintenance status|explain|run|pause|resume --endpoint IP:PORT --credential-stdin [operation options] --allow-plaintext";
+const USAGE: &str = "usage: positron maintenance status|explain|run|pause|resume|window --endpoint IP:PORT --credential-stdin [operation options] --allow-plaintext";

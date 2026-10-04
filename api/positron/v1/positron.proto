@@ -52,6 +52,7 @@ service MaintenanceService {
   rpc Run(MaintenanceRunRequest) returns (MaintenanceRunResponse);
   rpc Pause(MaintenancePauseRequest) returns (MaintenanceControlResponse);
   rpc Resume(MaintenanceResumeRequest) returns (MaintenanceControlResponse);
+  rpc Window(MaintenanceWindowRequest) returns (MaintenanceWindowResponse);
 }
 
 // Authenticated system administration for explicit tenant registry entries.
@@ -465,6 +466,23 @@ message MaintenanceResumeRequest {
 message MaintenanceControlResponse {
   MaintenanceTaskStatus task = 1;
   uint64 audit_position = 2;
+}
+
+// Defers a closed set of optional maintenance classes until a duration derived
+// from the server Lifecycle Clock. The expected Catalog generation fences the
+// one global window against concurrent operator changes.
+message MaintenanceWindowRequest {
+  repeated string deferred_classes = 1;
+  uint64 expected_catalog_generation = 2;
+  uint64 duration_seconds = 3;
+  string idempotency_key = 4;
+}
+
+message MaintenanceWindowResponse {
+  repeated string deferred_classes = 1;
+  uint64 until_unix_seconds = 2;
+  uint64 catalog_generation = 3;
+  uint64 audit_position = 4;
 }
 
 message CapabilityResponse {

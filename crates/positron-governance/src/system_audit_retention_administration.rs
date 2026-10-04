@@ -401,6 +401,7 @@ fn receipt_for_pruned_entry(
         | GovernanceAuditEntry::SchemaCheckpoint(_)
         | GovernanceAuditEntry::DurableOperation(_)
         | GovernanceAuditEntry::MaintenanceControl(_)
+        | GovernanceAuditEntry::MaintenanceWindow(_)
         | GovernanceAuditEntry::Configuration(_)
         | GovernanceAuditEntry::TlsMaterialReload(_) => return Ok(None),
         GovernanceAuditEntry::LifecycleClockAcceptance(entry) => (

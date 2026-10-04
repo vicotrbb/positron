@@ -33,6 +33,61 @@ fn maintenance_control_audit_is_closed_bounded_and_backward_safe() {
     malformed[8] = 2;
     assert!(GovernanceAuditEntry::decode_fields(9, [4; 16], &malformed).is_err());
 }
+
+#[test]
+fn maintenance_window_audit_is_typed_bounded_and_rejects_nonoptional_classes() {
+    use positron_kernel::MaintenanceTaskClass;
+
+    let actor = PrincipalId::from_bytes([1; 16]).expect("actor");
+    let key = crate::AdministrativeIdempotencyKey::new([2; 16]).expect("key");
+    let intent = crate::maintenance_window_audit_intent(
+        actor,
+        key,
+        7,
+        &[
+            MaintenanceTaskClass::Compaction,
+            MaintenanceTaskClass::DurableExport,
+        ],
+        60,
+        120,
+    )
+    .expect("valid window audit intent");
+    assert!(format!("{intent:?}").contains("encoded_bytes"));
+    let mut encoded = super::MAINTENANCE_WINDOW_AUDIT_MAGIC.to_vec();
+    encoded.extend_from_slice(&actor.to_bytes());
+    encoded.extend_from_slice(&key.to_bytes());
+    encoded.extend_from_slice(&7_u64.to_be_bytes());
+    encoded.extend_from_slice(&[2, 1, 6]);
+    encoded.extend_from_slice(&60_u64.to_be_bytes());
+    encoded.extend_from_slice(&120_u64.to_be_bytes());
+    let entry =
+        GovernanceAuditEntry::decode_fields(9, [4; 16], &encoded).expect("typed window audit");
+    let GovernanceAuditEntry::MaintenanceWindow(window) = entry else {
+        panic!("maintenance window audit entry");
+    };
+    assert_eq!(window.actor(), actor);
+    assert_eq!(window.expected_catalog_generation(), 7);
+    assert_eq!(
+        window.deferred(),
+        [
+            MaintenanceTaskClass::Compaction,
+            MaintenanceTaskClass::DurableExport
+        ]
+    );
+    assert_eq!(window.duration_seconds(), 60);
+    assert_eq!(window.until_unix_seconds(), 120);
+    assert!(
+        crate::maintenance_window_audit_intent(
+            actor,
+            key,
+            7,
+            &[MaintenanceTaskClass::TenantPurge],
+            60,
+            120,
+        )
+        .is_err()
+    );
+}
 use crate::{
     AdministrativeIdempotencyKey, ApiKeyLifecycleAction, ConfigurationAuditContext,
     ConfigurationAuditOutcome, ConfigurationAuditRequest, ConfigurationWithPlaintextAuditRequest,

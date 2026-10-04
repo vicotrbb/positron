@@ -3,7 +3,85 @@ use positron_api::maintenance::{
     MaintenanceResourceReservations, MaintenanceResumeRequest, MaintenanceRunRequest,
     MaintenanceRunResponse, MaintenanceServiceClient, MaintenanceStatusRequest,
     MaintenanceStatusResponse, MaintenanceTaskStatus, MaintenanceTransport,
+    MaintenanceWindowRequest, MaintenanceWindowResponse,
 };
+
+#[test]
+fn maintenance_window_contract_accepts_only_optional_classes_and_server_derived_expiry() {
+    let request = MaintenanceWindowRequest::new(
+        vec!["compaction".to_owned(), "durable_export".to_owned()],
+        1,
+        60,
+        "00000000-0000-0000-0000-000000000001".to_owned(),
+    );
+    assert!(request.encode().is_ok());
+    assert!(
+        MaintenanceWindowRequest::new(
+            vec!["tenant_purge".to_owned()],
+            1,
+            60,
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+        )
+        .encode()
+        .is_err()
+    );
+    assert!(
+        MaintenanceWindowRequest::new(
+            vec!["compaction".to_owned()],
+            0,
+            60,
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+        )
+        .encode()
+        .is_err()
+    );
+}
+
+#[test]
+fn maintenance_window_client_uses_the_canonical_generation_fenced_route()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = listener.local_addr()?;
+    let server = std::thread::spawn(move || -> Result<(), std::io::Error> {
+        let (mut stream, _) = listener.accept()?;
+        let mut bytes = [0_u8; 4096];
+        let read = stream.read(&mut bytes)?;
+        let request = String::from_utf8_lossy(&bytes[..read]);
+        assert!(request.starts_with("POST /v1/maintenance:window HTTP/1.1\r\n"));
+        assert!(request.contains(r#""expected_catalog_generation":7"#));
+        assert!(request.contains(r#""deferred_classes":["compaction","durable_export"]"#));
+        let body = r#"{"deferred_classes":["compaction","durable_export"],"until_unix_seconds":60,"catalog_generation":8,"audit_position":9}"#;
+        stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )?;
+        Ok(())
+    });
+    let client = MaintenanceServiceClient::new(MaintenanceTransport::PlaintextOptOut { endpoint })?;
+    let request = MaintenanceWindowRequest::new(
+        vec!["compaction".to_owned(), "durable_export".to_owned()],
+        7,
+        60,
+        "00000000-0000-0000-0000-000000000001".to_owned(),
+    );
+    assert_eq!(
+        client.window("system-administrator", &request)?,
+        MaintenanceWindowResponse {
+            deferred_classes: vec!["compaction".to_owned(), "durable_export".to_owned()],
+            until_unix_seconds: 60,
+            catalog_generation: 8,
+            audit_position: 9,
+        }
+    );
+    server.join().map_err(|_| "server panicked")??;
+    Ok(())
+}
 
 #[test]
 fn maintenance_status_client_uses_the_canonical_bounded_system_administration_route()

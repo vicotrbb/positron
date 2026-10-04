@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "8f8bd53eb7b7857a20a80c01409903a37bc1170fff4d7cb63cbd95e43e52cae6"
+    "x-positron-schema-digest": "45a5a775df66c2c3180b5b579cb7df1dd9eff4ffafb4a6ec1d04cf4addc2112e"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -491,6 +491,22 @@
           "401": {"description": "System-administration authentication failed before request decoding."},
           "404": {"description": "The task is unavailable."},
           "409": {"description": "The task transition precondition failed, or the idempotency binding conflicts."},
+          "503": {"description": "Maintenance administration is unavailable."}
+        }
+      }
+    },
+    "/v1/maintenance:window": {
+      "post": {
+        "operationId": "SetMaintenanceWindow",
+        "security": [{"apiKeyBearer": []}],
+        "x-positron-availability": "available",
+        "x-positron-max-request-bytes": 192,
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceWindowRequest"}}}},
+        "responses": {
+          "200": {"description": "Durable acknowledgement of one finite optional-class Maintenance Window.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceWindowResponse"}}}},
+          "400": {"description": "Invalid bounded Maintenance Window request."},
+          "401": {"description": "System-administration authentication failed before request decoding."},
+          "409": {"description": "The Catalog generation precondition failed, or the idempotency binding conflicts."},
           "503": {"description": "Maintenance administration is unavailable."}
         }
       }
@@ -1393,6 +1409,26 @@
         "required": ["task", "audit_position"],
         "properties": {
           "task": {"$ref": "#/components/schemas/MaintenanceTaskStatus"},
+          "audit_position": {"type": "integer", "minimum": 1}
+        }
+      },
+      "MaintenanceWindowRequest": {
+        "type": "object", "additionalProperties": false,
+        "required": ["deferred_classes", "expected_catalog_generation", "duration_seconds", "idempotency_key"],
+        "properties": {
+          "deferred_classes": {"type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": {"type": "string", "enum": ["compaction", "schema_promotion", "schema_demotion", "repository_verification", "backup_snapshot", "durable_export"]}},
+          "expected_catalog_generation": {"type": "integer", "minimum": 1},
+          "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+          "idempotency_key": {"type": "string", "format": "uuid"}
+        }
+      },
+      "MaintenanceWindowResponse": {
+        "type": "object", "additionalProperties": false,
+        "required": ["deferred_classes", "until_unix_seconds", "catalog_generation", "audit_position"],
+        "properties": {
+          "deferred_classes": {"type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": {"type": "string", "enum": ["compaction", "schema_promotion", "schema_demotion", "repository_verification", "backup_snapshot", "durable_export"]}},
+          "until_unix_seconds": {"type": "integer", "minimum": 1},
+          "catalog_generation": {"type": "integer", "minimum": 1},
           "audit_position": {"type": "integer", "minimum": 1}
         }
       },

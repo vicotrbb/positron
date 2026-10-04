@@ -651,4 +651,44 @@ impl MaintenanceCoordinator {
         state.window = Some(window);
         Ok(())
     }
+
+    /// Publishes one operator-attributed finite window and its audit intent in
+    /// the same Catalog generation. The Catalog generation precondition is
+    /// evaluated by the commit path while the coordinator lock prevents the
+    /// in-memory scheduler view from preceding durable publication.
+    pub fn set_window_and_persist_audited(
+        &self,
+        catalog: &Catalog<'_>,
+        deferred: impl IntoIterator<Item = MaintenanceTaskClass>,
+        expected_catalog_generation: u64,
+        until: u64,
+        now: u64,
+        audit: crate::AuditIntent,
+    ) -> Result<u64, MaintenanceFailure> {
+        if until <= now || expected_catalog_generation == 0 {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
+        let mut classes = BTreeSet::new();
+        for class in deferred {
+            if !class.deferrable() {
+                return Err(MaintenanceFailure::InvalidInput);
+            }
+            classes.insert(class);
+        }
+        if classes.is_empty() {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
+        let window = MaintenanceWindow {
+            deferred: classes,
+            until,
+        };
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        let generation =
+            persist_window_audited(catalog, &window, expected_catalog_generation, audit)?;
+        state.window = Some(window);
+        Ok(generation)
+    }
 }

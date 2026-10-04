@@ -14,6 +14,7 @@ pub const EXPLAIN_HTTP_PATH: &str = "/v1/maintenance:explain";
 pub const RUN_HTTP_PATH: &str = "/v1/maintenance:run";
 pub const PAUSE_HTTP_PATH: &str = "/v1/maintenance:pause";
 pub const RESUME_HTTP_PATH: &str = "/v1/maintenance:resume";
+pub const WINDOW_HTTP_PATH: &str = "/v1/maintenance:window";
 pub const MAX_REQUEST_BYTES: usize = 128;
 pub const MAX_RUN_REQUEST_BYTES: usize = 256;
 pub const MAX_CONTROL_REQUEST_BYTES: usize = 192;
@@ -117,6 +118,131 @@ pub struct MaintenancePauseRequest {
 pub struct MaintenanceResumeRequest {
     identity: String,
     idempotency_key: String,
+}
+
+/// An authenticated finite window for named optional maintenance classes. The
+/// server validates every class and derives the expiry from its lifecycle
+/// clock; the caller cannot submit an absolute deadline.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceWindowRequest {
+    deferred_classes: Vec<String>,
+    expected_catalog_generation: u64,
+    duration_seconds: u64,
+    idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceWindowResponse {
+    pub deferred_classes: Vec<String>,
+    pub until_unix_seconds: u64,
+    pub catalog_generation: u64,
+    pub audit_position: u64,
+}
+
+impl MaintenanceWindowRequest {
+    #[must_use]
+    pub fn new(
+        deferred_classes: Vec<String>,
+        expected_catalog_generation: u64,
+        duration_seconds: u64,
+        idempotency_key: String,
+    ) -> Self {
+        Self {
+            deferred_classes,
+            expected_catalog_generation,
+            duration_seconds,
+            idempotency_key,
+        }
+    }
+
+    pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
+        if body.len() > MAX_CONTROL_REQUEST_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        let request: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
+        self.validate()?;
+        serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)
+    }
+
+    #[must_use]
+    pub fn deferred_classes(&self) -> &[String] {
+        &self.deferred_classes
+    }
+    #[must_use]
+    pub const fn expected_catalog_generation(&self) -> u64 {
+        self.expected_catalog_generation
+    }
+    #[must_use]
+    pub const fn duration_seconds(&self) -> u64 {
+        self.duration_seconds
+    }
+    #[must_use]
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        let mut classes = self.deferred_classes.clone();
+        classes.sort_unstable();
+        (self.expected_catalog_generation != 0
+            && (1..=MAX_PAUSE_DURATION_SECONDS).contains(&self.duration_seconds)
+            && !classes.is_empty()
+            && classes.len() <= 6
+            && classes == self.deferred_classes
+            && classes.windows(2).all(|pair| pair[0] != pair[1])
+            && classes.iter().all(|class| {
+                matches!(
+                    class.as_str(),
+                    "compaction"
+                        | "schema_promotion"
+                        | "schema_demotion"
+                        | "repository_verification"
+                        | "backup_snapshot"
+                        | "durable_export"
+                )
+            })
+            && identifier(&self.idempotency_key))
+        .then_some(())
+        .ok_or(MaintenanceWireFailure)
+    }
+}
+
+impl MaintenanceWindowResponse {
+    pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        let response: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
+        response.validate()?;
+        Ok(response)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
+        self.validate()?;
+        serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)
+    }
+
+    pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        MaintenanceWindowRequest::new(
+            self.deferred_classes.clone(),
+            self.catalog_generation,
+            1,
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+        )
+        .validate()
+        .and_then(|()| {
+            (self.until_unix_seconds != 0 && self.audit_position != 0)
+                .then_some(())
+                .ok_or(MaintenanceWireFailure)
+        })
+    }
 }
 
 impl MaintenancePauseRequest {

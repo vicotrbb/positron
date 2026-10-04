@@ -293,6 +293,7 @@ fn maintenance_controls_authenticate_before_decoding_their_bodies()
     for path in [
         positron_api::maintenance::PAUSE_HTTP_PATH,
         positron_api::maintenance::RESUME_HTTP_PATH,
+        positron_api::maintenance::WINDOW_HTTP_PATH,
     ] {
         assert_status(
             http(
