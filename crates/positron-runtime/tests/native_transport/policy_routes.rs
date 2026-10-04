@@ -681,7 +681,7 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
     assert_eq!(preview.tenant, tenant.to_canonical_text());
     let digest = preview.confirmation_digest;
     let evaluation = preview.confirmation_evaluated_at_unix_nanos;
-    let reduction = positron_api::tenant_retention::TenantRetentionUpdateRequest::new(
+    let stale_reduction = positron_api::tenant_retention::TenantRetentionUpdateRequest::new(
         tenant.to_canonical_text(),
         86_400,
         preview.retention_generation,
@@ -689,6 +689,43 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
         "ebebebeb-ebeb-ebeb-ebeb-ebebebebebeb".to_owned(),
     )
     .with_confirmation_evaluated_at_unix_nanos(evaluation);
+    let renamed = tls_http(
+        api,
+        &certificate,
+        "POST",
+        positron_api::tenant_service::UPDATE_DISPLAY_NAME_HTTP_PATH,
+        &[
+            ("Authorization", &format!("Bearer {}", claim.secret())),
+            ("Content-Type", "application/json"),
+        ],
+        format!(
+            r#"{{"tenant":"{}","expected_display_generation":1,"display_name":"TLS retention tenant renamed","idempotency_key":"e0e0e0e0-e0e0-e0e0-e0e0-e0e0e0e0e0e0"}}"#,
+            tenant.to_canonical_text()
+        )
+        .as_bytes(),
+    )?;
+    assert_status(renamed, 200);
+    assert_eq!(
+        client.update(&administrator_secret, &stale_reduction),
+        Err(positron_api::tenant_retention::TenantRetentionServiceClientFailure::InvalidConfirmation)
+    );
+    let refreshed_preview = client.preview(
+        &administrator_secret,
+        &positron_api::tenant_retention::TenantRetentionPreviewRequest::new(
+            tenant.to_canonical_text(),
+            86_400,
+        ),
+    )?;
+    let reduction = positron_api::tenant_retention::TenantRetentionUpdateRequest::new(
+        tenant.to_canonical_text(),
+        86_400,
+        refreshed_preview.retention_generation,
+        Some(refreshed_preview.confirmation_digest),
+        "e1e1e1e1-e1e1-e1e1-e1e1-e1e1e1e1e1e1".to_owned(),
+    )
+    .with_confirmation_evaluated_at_unix_nanos(
+        refreshed_preview.confirmation_evaluated_at_unix_nanos,
+    );
     let updated = client.update(&administrator_secret, &reduction)?;
     assert_eq!(updated.retention_generation, 2);
     assert_eq!(client.update(&administrator_secret, &reduction)?, updated);
