@@ -20,10 +20,15 @@ use positron_ingest::load_schema_checkpoint;
 use positron_kernel::{
     ActiveSegmentLedger, AuditIntent, Catalog, CatalogObject, CatalogProposal,
     CatalogPublicationFault, FormatEpoch, MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId,
-    MaintenanceTaskPhase, MountQualification, RetentionTimeAuthority, SegmentScope, TransactionId,
-    WorkClass, with_catalog_publication_fault_after,
+    MaintenanceTaskPhase, MountQualification, ResourceAmounts, ResourceDimension,
+    RetentionTimeAuthority, SegmentScope, StoreBlockIdentity, TransactionId, WorkClaim, WorkClass,
+    WorkKind, with_catalog_publication_fault_after,
+};
+use positron_policy::{
+    IngestPolicy, LogMetadata, NativeLogCandidate, PolicyEvaluation, PolicyReceiver,
 };
 use positron_query::QueryBudget;
+use positron_signals::{LogRecord as StoredLogRecord, LogStore};
 use prost::Message;
 
 use super::super::{ServiceFailure, ServiceHandle, schema_maintenance};
@@ -883,8 +888,6 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
 -> Result<(), Box<dyn Error>> {
     let _test_guard = live_native_maintenance_test_guard();
     let fixture = Fixture::new()?;
-    let (initialized, _, _) = fixture.initialized()?;
-    drop(initialized);
 
     let [operations, api, otlp_grpc, otlp_http, loki_push] = reserve_native_addresses()?;
     static NEXT_POSTSTART_NATIVE_CONTROL: std::sync::atomic::AtomicU64 =
@@ -908,7 +911,7 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
         MountQualification::LocalHost,
     )?;
     let process = ApplicationRuntime::start(
-        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        ServeConfiguration::new(paths, InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
     )?;
     let services = process.services().ok_or("serving services")?;
@@ -921,6 +924,42 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
     let catalog = open_catalog(&services.instance)?;
     let identity = positron_governance::Identity::open(&catalog.pin()?)?;
     let protection = super::super::tenant_segment_key(&services.instance, &identity, scope)?;
+    let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &services.instance._authority,
+        &services.instance.retention_time,
+        &catalog,
+        scope,
+        protection,
+    )?;
+    let PolicyEvaluation::Accepted(evaluated) = IngestPolicy::preserving(1)?.evaluate(
+        NativeLogCandidate::new(None, None, None, Vec::new(), LogMetadata::empty()),
+        PolicyReceiver::OtlpGrpc,
+    )?
+    else {
+        return Err("preserving policy rejected periodic-worker fixture".into());
+    };
+    let capacity = services
+        .instance
+        ._authority
+        .governor()
+        .reserve(WorkClaim::tenant(
+            services.instance.tenant,
+            WorkKind::Ingest,
+            ResourceAmounts::only(ResourceDimension::MemoryBytes, 1_048_576)?,
+        )?)?;
+    ledger.append(
+        LogStore::new()
+            .prepare(
+                ledger.begin_store_block(capacity, StoreBlockIdentity::new([0x94; 16])?)?,
+                vec![StoredLogRecord::checked_evaluated(
+                    positron_domain::value::ValueLimitProfile::release_1_system_maximum(),
+                    *evaluated,
+                )?],
+            )?
+            .into_store_block(),
+    )?;
+    drop(ledger);
+    let protection = super::super::tenant_segment_key(&services.instance, &identity, scope)?;
     let ledger = ActiveSegmentLedger::open_with_retention_time(
         &services.instance._authority,
         &services.instance.retention_time,
@@ -928,11 +967,11 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
         scope,
         protection,
     )?;
-    let now = services.instance.retention_time.governance_now_seconds()?;
+    let created_at = services.instance.retention_time.governance_now_seconds()?;
     let coordinator = services.instance.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
         coordinator,
-        now,
+        created_at,
         std::num::NonZeroU64::new(1).ok_or("nonzero ttl")?,
         catalog.pin()?.identity(),
     )?;
@@ -957,10 +996,25 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
             let clock = services.instance.retention_time.status().state();
             let now = services.instance.retention_time.governance_now_seconds();
             let not_before = status.task().not_before();
+            let active_window = now.ok().and_then(|now| {
+                services
+                    .instance
+                    .maintenance_coordinator()
+                    .active_window_until(task, now)
+                    .ok()
+            });
+            let catalog_gate = match services.try_catalog_operation() {
+                Ok(Some(gate)) => {
+                    drop(gate);
+                    "available"
+                },
+                Ok(None) => "busy",
+                Err(_) => "poisoned",
+            };
             drop(services);
             let outcome = process.shutdown(ShutdownTrigger::FirstSignal);
             return Err(format!(
-                "native maintenance role did not complete poststart future expiry work (phase: {phase:?}, not_before: {not_before}, now: {now:?}, clock: {clock:?}, shutdown: {outcome:?})"
+                "native maintenance role did not complete poststart future expiry work (created_at: {created_at}, phase: {phase:?}, not_before: {not_before}, now: {now:?}, clock: {clock:?}, active_window: {active_window:?}, catalog_gate: {catalog_gate}, shutdown: {outcome:?})"
             )
             .into());
         }
