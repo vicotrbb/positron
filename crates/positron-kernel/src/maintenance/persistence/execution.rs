@@ -199,6 +199,28 @@ impl MaintenanceExecution<'_> {
         }
     }
 
+    /// Publishes a permanent, typed terminal failure before releasing the
+    /// execution and its governor reservation. Availability failures remain
+    /// on the running descriptor for retry and must not use this transition.
+    pub fn fail_and_persist(
+        &self,
+        coordinator: &MaintenanceCoordinator,
+        catalog: &Catalog<'_>,
+        failure: MaintenanceTerminalFailure,
+    ) -> Result<(), MaintenanceFailure> {
+        if matches!(
+            self.task.class,
+            MaintenanceTaskClass::Compaction | MaintenanceTaskClass::CatalogReclamation
+        ) {
+            return Err(MaintenanceFailure::InvalidTransition);
+        }
+        if self.task.class == MaintenanceTaskClass::GovernanceAuditCheckpoint {
+            coordinator.fail_and_persist_admitted_dispatch(catalog, self.dispatch, failure, self)
+        } else {
+            coordinator.fail_and_persist_dispatch(catalog, self.dispatch, failure)
+        }
+    }
+
     /// Terminalizes a dispatched Compaction whose authenticated selected bucket
     /// contains no blocks. This commits only its exact PMTC successor; it must
     /// not invent a replacement segment or manifest publication.

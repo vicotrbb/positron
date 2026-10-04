@@ -91,6 +91,20 @@ fn operations_status_exposes_a_fenced_configuration_drift() -> Result<(), Box<dy
         reloaded_status.contains("\"maintenance\":{"),
         "missing bounded maintenance health view: {reloaded_status}"
     );
+    for field in [
+        "lower_class_queue_delay_breaches",
+        "failure_classes",
+        "durability_recovery",
+        "security_lifecycle",
+        "ingest",
+        "interactive_query_tail",
+        "ordinary_maintenance_backup",
+    ] {
+        assert!(
+            reloaded_status.contains(&format!("\"{field}\":")),
+            "missing bounded maintenance health field {field}: {reloaded_status}"
+        );
+    }
     assert_eq!(
         quoted_status_value(&reloaded_status, "effective_digest")?,
         quoted_status_value(&reloaded_status, "desired_digest")?

@@ -270,7 +270,7 @@ pub(in crate::native_host) fn configuration_status_response(
     Response::json(
         200,
         format!(
-            "{{\"phase\":\"{}\",\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{}}}}}",
+            "{{\"phase\":\"{}\",\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"unclassified\":{}}}}}}}",
             process_phase_name(phase),
             status.generation(),
             hexadecimal_digest(crate::configuration_catalog::configuration_digest(
@@ -290,11 +290,19 @@ pub(in crate::native_host) fn configuration_status_response(
             maintenance
                 .oldest_queued_age_seconds()
                 .map_or_else(|| "null".to_owned(), |age| age.to_string()),
+            maintenance.lower_class_queue_delay_breaches(),
             maintenance.completed_inputs(),
             maintenance.input_objects(),
             maintenance.outstanding_reservations(),
             maintenance.maximum_outstanding_reservations(),
             maintenance.outstanding_maintenance_reservations(),
+            maintenance.durability_recovery_reservations(),
+            maintenance.security_lifecycle_reservations(),
+            maintenance.ingest_reservations(),
+            maintenance.interactive_query_tail_reservations(),
+            maintenance.ordinary_maintenance_backup_reservations(),
+            maintenance.failed_identity_mismatch(),
+            maintenance.failed_unclassified(),
         ),
     )
 }

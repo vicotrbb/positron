@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "45a5a775df66c2c3180b5b579cb7df1dd9eff4ffafb4a6ec1d04cf4addc2112e"
+    "x-positron-schema-digest": "1c28e525fda176f7a375bb6323d9e851c8e96c0c59ff9690ab801e15dc53241d"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1318,7 +1318,8 @@
           "resource_generation": {"type": "integer", "minimum": 1},
           "reservations": {"$ref": "#/components/schemas/MaintenanceResourceReservations"},
           "expected_foreground_impact": {"$ref": "#/components/schemas/MaintenanceResourceReservations"},
-          "blocked_precondition": {"type": "string", "enum": ["maintenance_pause_active", "conflict_owner_active", "scheduled_start_time", "clock_uncertain_destructive_schedule"]},
+          "blocked_precondition": {"type": "string", "enum": ["maintenance_pause_active", "maintenance_window_active", "conflict_owner_active", "scheduled_start_time", "clock_uncertain_destructive_schedule"]},
+          "maintenance_window_until_unix_seconds": {"type": "integer", "minimum": 1},
           "safe_actions": {"type": "array", "maxItems": 1, "items": {"type": "string", "enum": ["pause", "resume"]}},
           "backlog_age_seconds": {"type": "integer", "minimum": 0},
           "conflict_owner": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
@@ -1326,7 +1327,8 @@
           "input_object_count": {"type": "integer", "minimum": 0, "maximum": 16},
           "output_object_count": {"type": "integer", "minimum": 0, "maximum": 16},
           "estimated_output_object_amplification_milli": {"type": "integer", "minimum": 1},
-          "terminal_outcome": {"type": "string", "enum": ["cancelled", "succeeded", "failed"]}
+          "terminal_outcome": {"type": "string", "enum": ["cancelled", "succeeded", "failed"]},
+          "terminal_failure_class": {"type": "string", "enum": ["identity_mismatch", "unclassified"]}
         }
       },
       "MaintenanceResourceReservations": {

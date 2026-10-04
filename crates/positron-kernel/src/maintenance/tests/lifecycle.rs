@@ -187,6 +187,7 @@ fn scheduler_order_has_no_priority_fairness_cycle() {
         )
         .expect("task"),
         phase: MaintenanceTaskPhase::Queued,
+        terminal_failure: None,
         submitted_at: 0,
         checkpoint: None,
         pause_until: None,

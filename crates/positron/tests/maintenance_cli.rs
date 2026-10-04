@@ -23,7 +23,7 @@ fn maintenance_status_cli_forwards_a_piped_system_bearer() -> Result<(), Box<dyn
                 .to_ascii_lowercase()
                 .contains("authorization: bearer system-administrator\r\n")
         );
-        let body = r#"{"tasks":[],"queued":0,"running":0,"deferred":0,"terminal":0}"#;
+        let body = r#"{"tasks":[],"returned":0,"total":0,"queued":0,"running":0,"deferred":0,"terminal":0}"#;
         stream.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

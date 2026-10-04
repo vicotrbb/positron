@@ -391,6 +391,20 @@ fn catalog_pause_and_finite_window_survive_reopen_without_deferring_past_expiry(
         restored.status(identity).expect("restored status").phase(),
         MaintenanceTaskPhase::Queued
     );
+    assert_eq!(
+        restored
+            .window_blocking_until(identity, 19)
+            .expect("persisted window inspection"),
+        Some(20),
+        "inspection and scheduling share the restored finite-window predicate"
+    );
+    assert_eq!(
+        restored
+            .window_blocking_until(identity, 20)
+            .expect("expired window inspection"),
+        None,
+        "the same predicate releases work at the server-derived expiry"
+    );
     assert!(
         restored
             .start_next_with_reservation_and_persist(&reopened, &authority, 19, false)
@@ -520,6 +534,90 @@ fn catalog_post_publication_completion_ambiguity_retries_without_losing_executio
             .expect("terminal state")
             .phase(),
         MaintenanceTaskPhase::Succeeded
+    );
+    Ok(())
+}
+
+#[test]
+fn catalog_failed_terminal_cause_is_atomic_and_survives_reopen()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = CatalogRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority(volume)?;
+    let instance = InstanceId::new(nonzero_id(47))?;
+    let catalog = Catalog::open(
+        &authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([0x93; 32]), Box::new([0x94; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(48))?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(
+                b"maintenance terminal cause basis".to_vec(),
+            )?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let task = catalog_task(49);
+    let identity = task.identity();
+    coordinator
+        .submit_and_persist(&catalog, task, 7)
+        .map_err(|failure| format!("submit task: {failure:?}"))?;
+    let execution = coordinator
+        .start_next_with_reservation_and_persist(&catalog, &authority, 8, false)
+        .map_err(|failure| format!("dispatch task: {failure:?}"))?
+        .ok_or("task must dispatch")?;
+
+    let failure =
+        crate::catalog::with_catalog_fault(crate::catalog::CatalogFileEvent::WriteMarker, || {
+            execution.fail_and_persist(
+                &coordinator,
+                &catalog,
+                MaintenanceTerminalFailure::IdentityMismatch,
+            )
+        });
+    assert_eq!(failure, Err(MaintenanceFailure::CatalogUnavailable));
+    let running = coordinator
+        .status(identity)
+        .map_err(|failure| format!("running task: {failure:?}"))?;
+    assert_eq!(running.phase(), MaintenanceTaskPhase::Running);
+    assert_eq!(running.terminal_failure(), None);
+
+    execution
+        .fail_and_persist(
+            &coordinator,
+            &catalog,
+            MaintenanceTerminalFailure::IdentityMismatch,
+        )
+        .map_err(|failure| format!("publish failed terminal cause: {failure:?}"))?;
+    let failed = coordinator
+        .status(identity)
+        .map_err(|failure| format!("failed task: {failure:?}"))?;
+    assert_eq!(failed.phase(), MaintenanceTaskPhase::Failed);
+    assert_eq!(
+        failed.terminal_failure(),
+        Some(MaintenanceTerminalFailure::IdentityMismatch)
+    );
+    drop(execution);
+    drop(catalog);
+
+    let reopened = Catalog::open(
+        &authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([0x93; 32]), Box::new([0x94; 32])),
+    )?;
+    let restored = MaintenanceCoordinator::restore_from_catalog(&reopened)
+        .map_err(|failure| format!("restore task: {failure:?}"))?;
+    assert_eq!(
+        restored
+            .status(identity)
+            .map_err(|failure| format!("restored task: {failure:?}"))?
+            .terminal_failure(),
+        Some(MaintenanceTerminalFailure::IdentityMismatch)
     );
     Ok(())
 }

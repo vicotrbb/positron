@@ -133,7 +133,9 @@ fn scheduling_priority(task: &TaskState, now: u64) -> MaintenancePriority {
     match task.task.priority() {
         MaintenancePriority::Durability => MaintenancePriority::Durability,
         MaintenancePriority::Urgent => MaintenancePriority::Urgent,
-        _priority if now.saturating_sub(task.submitted_at) >= MAX_LOWER_CLASS_QUEUE_DELAY => {
+        _priority
+            if now.saturating_sub(task.submitted_at) >= MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS =>
+        {
             MaintenancePriority::Urgent
         },
         priority => priority,

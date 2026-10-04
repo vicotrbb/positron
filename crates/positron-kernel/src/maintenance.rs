@@ -192,7 +192,9 @@ impl GovernanceAuditCheckpointBinding {
         Self::new(position, record_hash, integrity_key_fingerprint)
     }
 }
-const MAX_LOWER_CLASS_QUEUE_DELAY: u64 = 60;
+/// The bounded queue delay after which ordinary and required maintenance is
+/// promoted to Urgent scheduling priority.
+pub const MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS: u64 = 60;
 static NEXT_COORDINATOR_ID: AtomicU64 = AtomicU64::new(1);
 
 mod model;
@@ -211,6 +213,20 @@ pub enum MaintenanceFailure {
     Paused,
     ResourceAdmissionRefused,
     CatalogUnavailable,
+}
+
+/// Closed, durable cause for a task that has reached the Failed phase.
+///
+/// Retryable execution failures never enter this enum: their handler keeps
+/// the same running descriptor for the worker's bounded retry policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaintenanceTerminalFailure {
+    /// A legacy record or compatibility boolean failure did not retain a more
+    /// specific cause.
+    Unclassified,
+    /// A Governance Audit checkpoint binding no longer matches durable
+    /// identity material and cannot safely execute.
+    IdentityMismatch,
 }
 
 /// The only scheduler for background Storage Kernel work.
@@ -252,6 +268,7 @@ struct MaintenanceWindow {
 struct TaskState {
     task: MaintenanceTask,
     phase: MaintenanceTaskPhase,
+    terminal_failure: Option<MaintenanceTerminalFailure>,
     submitted_at: u64,
     checkpoint: Option<MaintenanceCheckpoint>,
     pause_until: Option<u64>,
@@ -383,6 +400,7 @@ impl<'record> SnapshotLeaseExpiryBinding<'record> {
 pub struct MaintenanceTaskStatus {
     task: MaintenanceTask,
     phase: MaintenanceTaskPhase,
+    terminal_failure: Option<MaintenanceTerminalFailure>,
     submitted_at: u64,
     checkpoint: Option<MaintenanceCheckpoint>,
     pause_until: Option<u64>,
@@ -521,13 +539,18 @@ impl MaintenanceExecution<'_> {
             {
                 return Err(MaintenanceFailure::InvalidTransition);
             }
-            task.phase = if task.cancellation_requested {
-                MaintenanceTaskPhase::Cancelled
+            let (phase, terminal_failure) = if task.cancellation_requested {
+                (MaintenanceTaskPhase::Cancelled, None)
             } else if succeeded {
-                MaintenanceTaskPhase::Succeeded
+                (MaintenanceTaskPhase::Succeeded, None)
             } else {
-                MaintenanceTaskPhase::Failed
+                (
+                    MaintenanceTaskPhase::Failed,
+                    Some(MaintenanceTerminalFailure::Unclassified),
+                )
             };
+            task.phase = phase;
+            task.terminal_failure = terminal_failure;
             task.active_dispatch = None;
         }
         assign_terminal_order(&mut state, self.dispatch.identity)
@@ -573,6 +596,12 @@ impl MaintenanceTaskStatus {
     #[must_use]
     pub const fn phase(&self) -> MaintenanceTaskPhase {
         self.phase
+    }
+    /// The bounded durable reason for a failed task. Nonterminal and
+    /// successful tasks have no failure cause.
+    #[must_use]
+    pub const fn terminal_failure(&self) -> Option<MaintenanceTerminalFailure> {
+        self.terminal_failure
     }
     #[must_use]
     pub const fn submitted_at(&self) -> u64 {
@@ -626,6 +655,7 @@ fn maintenance_task_status(
     MaintenanceTaskStatus {
         task: task.task.clone(),
         phase: task.phase,
+        terminal_failure: task.terminal_failure,
         submitted_at: task.submitted_at,
         checkpoint: task.checkpoint.clone(),
         pause_until: task.pause_until,
@@ -721,6 +751,7 @@ impl MaintenanceCoordinator {
             TaskState {
                 task: task.clone(),
                 phase: MaintenanceTaskPhase::Queued,
+                terminal_failure: None,
                 submitted_at: now,
                 checkpoint: None,
                 pause_until: None,
@@ -978,13 +1009,18 @@ impl MaintenanceCoordinator {
             if task.phase != MaintenanceTaskPhase::Running {
                 return Err(MaintenanceFailure::InvalidTransition);
             }
-            task.phase = if task.cancellation_requested {
-                MaintenanceTaskPhase::Cancelled
+            let (phase, terminal_failure) = if task.cancellation_requested {
+                (MaintenanceTaskPhase::Cancelled, None)
             } else if succeeded {
-                MaintenanceTaskPhase::Succeeded
+                (MaintenanceTaskPhase::Succeeded, None)
             } else {
-                MaintenanceTaskPhase::Failed
+                (
+                    MaintenanceTaskPhase::Failed,
+                    Some(MaintenanceTerminalFailure::Unclassified),
+                )
             };
+            task.phase = phase;
+            task.terminal_failure = terminal_failure;
         }
         assign_terminal_order(&mut state, identity)?;
         Ok(())
@@ -1057,6 +1093,35 @@ impl MaintenanceCoordinator {
             task,
             clock_uncertain,
         ))
+    }
+
+    /// Returns the server-derived expiry of the finite durable window that is
+    /// currently deferring one queued task. The coordinator remains the sole
+    /// authority for both this inspection result and scheduling eligibility.
+    pub fn window_blocking_until(
+        &self,
+        identity: MaintenanceTaskId,
+        now: u64,
+    ) -> Result<Option<u64>, MaintenanceFailure> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        let task = state
+            .tasks
+            .get(&identity)
+            .ok_or(MaintenanceFailure::UnknownTask)?;
+        let Some(window) = state.window.as_ref() else {
+            return Ok(None);
+        };
+        Ok((task.phase == MaintenanceTaskPhase::Queued
+            && window.until > now
+            && window.deferred.contains(&task.task.class)
+            && task
+                .task
+                .class
+                .is_window_deferrable(task.task.emergency_compaction))
+        .then_some(window.until))
     }
 
     /// Returns the complete bounded task view for authenticated administration

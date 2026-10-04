@@ -313,6 +313,7 @@ impl MaintenanceCoordinator {
         let reclamation = TaskState {
             task: binding.reclamation,
             phase: MaintenanceTaskPhase::Queued,
+            terminal_failure: None,
             submitted_at: before.submitted_at,
             checkpoint: None,
             pause_until: None,
@@ -674,6 +675,7 @@ impl MaintenanceCoordinator {
         let state = TaskState {
             task,
             phase: MaintenanceTaskPhase::Queued,
+            terminal_failure: None,
             submitted_at: not_before,
             checkpoint: None,
             pause_until: None,
@@ -788,6 +790,7 @@ impl MaintenanceCoordinator {
         let state = TaskState {
             task,
             phase: MaintenanceTaskPhase::Queued,
+            terminal_failure: None,
             submitted_at,
             checkpoint: None,
             pause_until: None,

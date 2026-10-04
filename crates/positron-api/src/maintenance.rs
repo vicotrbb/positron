@@ -450,6 +450,10 @@ pub struct MaintenanceTaskStatus {
     pub expected_foreground_impact: Option<MaintenanceResourceReservations>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_precondition: Option<String>,
+    /// Server-derived expiry of the finite whole-coordinator window that is
+    /// currently deferring this queued task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_window_until_unix_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub safe_actions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,6 +470,10 @@ pub struct MaintenanceTaskStatus {
     pub estimated_output_object_amplification_milli: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_outcome: Option<String>,
+    /// Closed durable cause for a terminal failed task. It is omitted for all
+    /// non-failed phases and never contains handler error text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_failure_class: Option<String>,
 }
 
 /// Bounded Resource Governor amounts requested by one maintenance task.
@@ -641,6 +649,11 @@ impl MaintenanceStatusResponse {
                         .blocked_precondition
                         .as_deref()
                         .is_some_and(|value| value.is_empty() || value.len() > 64)
+                    || task.maintenance_window_until_unix_seconds == Some(0)
+                    || task.maintenance_window_until_unix_seconds.is_some()
+                        && task.blocked_precondition.as_deref() != Some("maintenance_window_active")
+                    || task.blocked_precondition.as_deref() == Some("maintenance_window_active")
+                        && task.maintenance_window_until_unix_seconds.is_none()
                     || task.safe_actions.len() > 1
                     || task
                         .safe_actions
@@ -659,6 +672,14 @@ impl MaintenanceStatusResponse {
                     || task.terminal_outcome.as_deref().is_some_and(|outcome| {
                         !matches!(outcome, "cancelled" | "succeeded" | "failed")
                     })
+                    || task
+                        .terminal_failure_class
+                        .as_deref()
+                        .is_some_and(|failure| {
+                            task.phase != "failed"
+                                || !matches!(failure, "identity_mismatch" | "unclassified")
+                        })
+                    || task.phase == "failed" && task.terminal_failure_class.is_none()
             })
         {
             return Err(MaintenanceWireFailure);

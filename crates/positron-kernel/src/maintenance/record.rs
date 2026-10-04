@@ -1,12 +1,16 @@
 use super::*;
 
-const RECORD_MAGIC: &[u8; 8] = b"PMTC0003";
-const PREVIOUS_RECORD_MAGIC: &[u8; 8] = b"PMTC0002";
+const RECORD_MAGIC: &[u8; 8] = b"PMTC0004";
+const PREVIOUS_RECORD_MAGIC: &[u8; 8] = b"PMTC0003";
+const LEGACY_RECORD_MAGIC: &[u8; 8] = b"PMTC0002";
 
 pub(super) fn encode_record(
     state: &TaskState,
 ) -> Result<MaintenanceTaskRecord, MaintenanceFailure> {
     let task = &state.task;
+    if (state.phase == MaintenanceTaskPhase::Failed) != state.terminal_failure.is_some() {
+        return Err(MaintenanceFailure::InvalidInput);
+    }
     let checkpoint_bytes = state
         .checkpoint
         .as_ref()
@@ -39,6 +43,7 @@ pub(super) fn encode_record(
         push_u64(&mut bytes, task.reservations.get(dimension));
     }
     bytes.push(phase_code(state.phase));
+    bytes.push(terminal_failure_code(state.terminal_failure)?);
     push_u64(&mut bytes, state.submitted_at);
     bytes.push(u8::from(state.pause_until.is_some()));
     push_u64(&mut bytes, state.pause_until.unwrap_or(0));
@@ -71,7 +76,7 @@ pub(super) fn encoded_record_capacity(
         .checked_add(16 + 3 + 16 + 6 + 16 + 1 + 1 + 1 + 8 + 8 + 1 + 8)
         .and_then(|size| size.checked_add(objects.checked_mul(32)?))
         .and_then(|size| {
-            size.checked_add(11 * 8 + 1 + 8 + 1 + 1 + 8 + 1 + 8 + 4 + 4 + checkpoint_bytes)
+            size.checked_add(11 * 8 + 1 + 1 + 8 + 1 + 1 + 8 + 1 + 8 + 4 + 4 + checkpoint_bytes)
         })
         .ok_or(MaintenanceFailure::CapacityExceeded)
 }
@@ -79,10 +84,12 @@ pub(super) fn encoded_record_capacity(
 pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailure> {
     let mut cursor = RecordCursor::new(bytes);
     let magic = cursor.take_exact(RECORD_MAGIC.len())?;
-    let includes_not_before = if magic == RECORD_MAGIC {
-        true
+    let (includes_not_before, includes_terminal_failure) = if magic == RECORD_MAGIC {
+        (true, true)
     } else if magic == PREVIOUS_RECORD_MAGIC {
-        false
+        (true, false)
+    } else if magic == LEGACY_RECORD_MAGIC {
+        (false, false)
     } else {
         return Err(MaintenanceFailure::InvalidInput);
     };
@@ -126,6 +133,16 @@ pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailur
         return Err(MaintenanceFailure::InvalidInput);
     }
     let phase = phase_from_code(cursor.byte()?)?;
+    let terminal_failure = if includes_terminal_failure {
+        terminal_failure_from_code(cursor.byte()?)?
+    } else if phase == MaintenanceTaskPhase::Failed {
+        Some(MaintenanceTerminalFailure::Unclassified)
+    } else {
+        None
+    };
+    if (phase == MaintenanceTaskPhase::Failed) != terminal_failure.is_some() {
+        return Err(MaintenanceFailure::InvalidInput);
+    }
     let submitted_at = cursor.u64()?;
     let pause_until = match cursor.byte()? {
         0 => {
@@ -159,6 +176,7 @@ pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailur
     Ok(TaskState {
         task,
         phase,
+        terminal_failure,
         submitted_at,
         checkpoint,
         pause_until,
@@ -307,6 +325,27 @@ fn priority_from_code(code: u8) -> Result<MaintenancePriority, MaintenanceFailur
         _ => Err(MaintenanceFailure::InvalidInput),
     }
 }
+fn terminal_failure_code(
+    failure: Option<MaintenanceTerminalFailure>,
+) -> Result<u8, MaintenanceFailure> {
+    match failure {
+        None => Ok(0),
+        Some(MaintenanceTerminalFailure::Unclassified) => Ok(1),
+        Some(MaintenanceTerminalFailure::IdentityMismatch) => Ok(2),
+    }
+}
+
+fn terminal_failure_from_code(
+    code: u8,
+) -> Result<Option<MaintenanceTerminalFailure>, MaintenanceFailure> {
+    match code {
+        0 => Ok(None),
+        1 => Ok(Some(MaintenanceTerminalFailure::Unclassified)),
+        2 => Ok(Some(MaintenanceTerminalFailure::IdentityMismatch)),
+        _ => Err(MaintenanceFailure::InvalidInput),
+    }
+}
+
 fn phase_code(phase: MaintenanceTaskPhase) -> u8 {
     match phase {
         MaintenanceTaskPhase::Queued => 0,
@@ -394,7 +433,10 @@ impl<'a> RecordCursor<'a> {
 pub(super) fn record_identity(
     bytes: &[u8],
 ) -> Result<Option<MaintenanceTaskId>, MaintenanceFailure> {
-    if !bytes.starts_with(RECORD_MAGIC) && !bytes.starts_with(PREVIOUS_RECORD_MAGIC) {
+    if !bytes.starts_with(RECORD_MAGIC)
+        && !bytes.starts_with(PREVIOUS_RECORD_MAGIC)
+        && !bytes.starts_with(LEGACY_RECORD_MAGIC)
+    {
         return Ok(None);
     }
     decode_record(bytes).map(|state| Some(state.task.identity))
@@ -472,6 +514,7 @@ mod tests {
             )
             .expect("task"),
             phase: MaintenanceTaskPhase::Queued,
+            terminal_failure: None,
             submitted_at: 7,
             checkpoint: None,
             pause_until: None,
@@ -481,13 +524,54 @@ mod tests {
             active_dispatch: None,
         };
         let mut legacy = encode_record(&state).expect("v3 encoding").0;
-        legacy[..RECORD_MAGIC.len()].copy_from_slice(PREVIOUS_RECORD_MAGIC);
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(LEGACY_RECORD_MAGIC);
         // Magic, identity, class, system scope, trigger, emergency, priority,
         // then the two precondition generations precede the v3 due-time field.
         legacy.drain(45..53);
+        // PMTC0002 also predates PMTC0004's terminal-cause field. Its phase
+        // moves left with the removed due-time field.
+        legacy.drain(136..137);
         let decoded = decode_record(&legacy).expect("v2 decoding");
         assert_eq!(decoded.task.not_before(), 0);
         assert_eq!(decoded.task.class(), MaintenanceTaskClass::SchemaPromotion);
+    }
+
+    #[test]
+    fn v3_failed_task_decodes_with_an_unclassified_terminal_cause() {
+        let state = TaskState {
+            task: MaintenanceTask::with_contract_not_before(
+                MaintenanceTaskId::new([8; 16]).expect("identity"),
+                MaintenanceTaskClass::SchemaPromotion,
+                MaintenanceScope::system(),
+                MaintenanceTrigger::Scheduled,
+                MaintenancePreconditions::new(3, 1).expect("preconditions"),
+                Vec::new(),
+                Vec::new(),
+                ResourceAmounts::new([1; 11]),
+                99,
+            )
+            .expect("task"),
+            phase: MaintenanceTaskPhase::Failed,
+            terminal_failure: Some(MaintenanceTerminalFailure::IdentityMismatch),
+            submitted_at: 7,
+            checkpoint: None,
+            pause_until: None,
+            cancellation_requested: false,
+            dispatches: 0,
+            terminal_order: None,
+            active_dispatch: None,
+        };
+        let mut legacy = encode_record(&state).expect("v4 encoding").0;
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(PREVIOUS_RECORD_MAGIC);
+        // PMTC0003 used the same layout as PMTC0004 except it had no byte
+        // after the phase for the terminal cause.
+        legacy.drain(144..145);
+        let decoded = decode_record(&legacy).expect("v3 decoding");
+        assert_eq!(decoded.phase, MaintenanceTaskPhase::Failed);
+        assert_eq!(
+            decoded.terminal_failure,
+            Some(MaintenanceTerminalFailure::Unclassified)
+        );
     }
 
     #[test]

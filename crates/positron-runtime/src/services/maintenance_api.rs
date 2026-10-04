@@ -20,8 +20,8 @@ use positron_governance::{
 };
 use positron_kernel::{
     ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, LifecycleClockState,
-    MaintenanceFailure, MaintenanceScope, MaintenanceTaskClass, MaintenanceTaskId,
-    MaintenanceTaskPhase, ResourceDimension, SegmentScope,
+    MaintenanceCoordinator, MaintenanceFailure, MaintenanceScope, MaintenanceTaskClass,
+    MaintenanceTaskId, MaintenanceTaskPhase, ResourceDimension, SegmentScope,
 };
 
 use crate::ServiceHandle;
@@ -78,13 +78,13 @@ impl ServiceHandle {
         let remaining = statuses.len().saturating_sub(page_start);
         let page_len = remaining.min(request.page_limit());
         let has_more = remaining > page_len;
-        response.tasks.extend(
-            statuses
-                .into_iter()
-                .skip(page_start)
-                .take(page_len)
-                .map(|status| task_status(status, now)),
-        );
+        let coordinator = self.instance.maintenance_coordinator();
+        for status in statuses.into_iter().skip(page_start).take(page_len) {
+            response.tasks.push(
+                task_status_for_coordinator(coordinator, status, now)
+                    .map_err(|_| (503, "administration_unavailable"))?,
+            );
+        }
         response.returned =
             u32::try_from(response.tasks.len()).map_err(|_| (503, "administration_unavailable"))?;
         if has_more {
@@ -115,7 +115,8 @@ impl ServiceHandle {
             .status_with_clock_uncertainty(identity, clock_uncertain)
             .map_err(|_| (404, "task_unavailable"))?;
         Ok(MaintenanceExplainResponse {
-            task: task_status(status, now),
+            task: task_status_for_coordinator(self.instance.maintenance_coordinator(), status, now)
+                .map_err(|_| (503, "administration_unavailable"))?,
         })
     }
 
@@ -172,7 +173,12 @@ impl ServiceHandle {
                     && status.task().scope() == expected_scope =>
             {
                 return Ok(MaintenanceRunResponse {
-                    task: task_status(status, Some(now)),
+                    task: task_status_for_coordinator(
+                        self.instance.maintenance_coordinator(),
+                        status,
+                        Some(now),
+                    )
+                    .map_err(|_| (503, "administration_unavailable"))?,
                 });
             },
             Ok(_) => return Err((409, "idempotency_conflict")),
@@ -204,7 +210,12 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceRunResponse {
-            task: task_status(status, Some(now)),
+            task: task_status_for_coordinator(
+                self.instance.maintenance_coordinator(),
+                status,
+                Some(now),
+            )
+            .map_err(|_| (503, "administration_unavailable"))?,
         })
     }
 
@@ -239,7 +250,12 @@ impl ServiceHandle {
                 .status(identity)
                 .map_err(control_failure)?;
             return Ok(MaintenanceControlResponse {
-                task: task_status(status, Some(now)),
+                task: task_status_for_coordinator(
+                    self.instance.maintenance_coordinator(),
+                    status,
+                    Some(now),
+                )
+                .map_err(|_| (503, "administration_unavailable"))?,
                 audit_position,
             });
         }
@@ -273,7 +289,12 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceControlResponse {
-            task: task_status(status, Some(now)),
+            task: task_status_for_coordinator(
+                self.instance.maintenance_coordinator(),
+                status,
+                Some(now),
+            )
+            .map_err(|_| (503, "administration_unavailable"))?,
             audit_position,
         })
     }
@@ -309,7 +330,12 @@ impl ServiceHandle {
                 .status(identity)
                 .map_err(control_failure)?;
             return Ok(MaintenanceControlResponse {
-                task: task_status(status, Some(now)),
+                task: task_status_for_coordinator(
+                    self.instance.maintenance_coordinator(),
+                    status,
+                    Some(now),
+                )
+                .map_err(|_| (503, "administration_unavailable"))?,
                 audit_position,
             });
         }
@@ -333,7 +359,12 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceControlResponse {
-            task: task_status(status, Some(now)),
+            task: task_status_for_coordinator(
+                self.instance.maintenance_coordinator(),
+                status,
+                Some(now),
+            )
+            .map_err(|_| (503, "administration_unavailable"))?,
             audit_position,
         })
     }
@@ -613,9 +644,22 @@ fn control_failure(failure: MaintenanceFailure) -> (u16, &'static str) {
     }
 }
 
+fn task_status_for_coordinator(
+    coordinator: &MaintenanceCoordinator,
+    status: positron_kernel::MaintenanceTaskStatus,
+    now: Option<u64>,
+) -> Result<MaintenanceTaskStatus, MaintenanceFailure> {
+    let window_until = now
+        .map(|current| coordinator.window_blocking_until(status.task().identity(), current))
+        .transpose()?
+        .flatten();
+    Ok(task_status(status, now, window_until))
+}
+
 fn task_status(
     status: positron_kernel::MaintenanceTaskStatus,
     now: Option<u64>,
+    window_until: Option<u64>,
 ) -> MaintenanceTaskStatus {
     let task = status.task();
     let phase = status.phase();
@@ -636,6 +680,8 @@ fn task_status(
         Some("clock_uncertain_destructive_schedule".to_owned())
     } else if paused {
         Some("maintenance_pause_active".to_owned())
+    } else if window_until.is_some() {
+        Some("maintenance_window_active".to_owned())
     } else if conflict_owner.is_some() {
         Some("conflict_owner_active".to_owned())
     } else if phase == MaintenanceTaskPhase::Queued
@@ -671,6 +717,7 @@ fn task_status(
         reservations: Some(reservation_view.clone()),
         expected_foreground_impact: Some(reservation_view),
         blocked_precondition,
+        maintenance_window_until_unix_seconds: window_until,
         safe_actions: if paused {
             vec!["resume".to_owned()]
         } else if phase == MaintenanceTaskPhase::Queued && task.class().is_deferrable() {
@@ -694,6 +741,16 @@ fn task_status(
             | MaintenanceTaskPhase::Running
             | MaintenanceTaskPhase::Deferred => None,
         },
+        terminal_failure_class: status.terminal_failure().map(terminal_failure_class),
+    }
+}
+
+fn terminal_failure_class(failure: positron_kernel::MaintenanceTerminalFailure) -> String {
+    match failure {
+        positron_kernel::MaintenanceTerminalFailure::IdentityMismatch => {
+            "identity_mismatch".to_owned()
+        },
+        positron_kernel::MaintenanceTerminalFailure::Unclassified => "unclassified".to_owned(),
     }
 }
 
@@ -848,6 +905,51 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_status_and_explain_report_a_durable_terminal_failure_class()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let mut initialized = Arc::try_unwrap(initialized)
+            .map_err(|_| "maintenance fixture retains the initialized instance")?;
+        let task = initialized.queue_governance_audit_checkpoint_for_test()?;
+        initialized.rotate_governance_audit_fingerprint_for_test([0xa5; 32])?;
+        let failure = initialized
+            .complete_queued_governance_audit_checkpoint_for_test(task)
+            .expect_err("retired identity binding must terminalize");
+        assert_eq!(
+            failure.code(),
+            crate::BootstrapFailureCode::IdentityMismatch
+        );
+        let initialized = Arc::new(initialized);
+        let services = ServiceHandle::new(initialized)?;
+        let identity = super::hex(task.to_bytes());
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("status: {failure:?}"))?;
+        let observed = status
+            .tasks
+            .into_iter()
+            .find(|candidate| candidate.identity == identity)
+            .ok_or("failed task missing from status")?;
+        assert_eq!(observed.phase, "failed");
+        assert_eq!(
+            observed.terminal_failure_class.as_deref(),
+            Some("identity_mismatch")
+        );
+        let explained = services
+            .explain_maintenance_task(
+                &administrator,
+                &serde_json::to_vec(&MaintenanceExplainRequest { identity })?,
+            )
+            .map_err(|failure| format!("explain: {failure:?}"))?;
+        assert_eq!(
+            explained.task.terminal_failure_class.as_deref(),
+            Some("identity_mismatch")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn authenticated_status_and_explain_report_clock_uncertain_destructive_blocking()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
@@ -913,6 +1015,74 @@ mod tests {
             Some("clock_uncertain_destructive_schedule")
         );
         assert_eq!(explain.task.backlog_age_seconds, None);
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_status_and_explain_report_an_active_maintenance_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        let task = MaintenanceTask::new(
+            MaintenanceTaskId::new([0x51; 16])
+                .map_err(|failure| format!("window identity: {failure:?}"))?,
+            MaintenanceTaskClass::Compaction,
+        );
+        let identity = super::hex(task.identity().to_bytes());
+        let now = services
+            .maintenance_status_now()
+            .map_err(|failure| format!("window clock: {failure:?}"))?;
+        initialized
+            .maintenance_coordinator()
+            .submit_at(task, now)
+            .map_err(|failure| format!("queue window task: {failure:?}"))?;
+        let expected_catalog_generation = open_catalog(&initialized)?.pin()?.number();
+        let window = services
+            .set_maintenance_window(
+                &administrator,
+                &MaintenanceWindowRequest::new(
+                    vec!["compaction".to_owned()],
+                    expected_catalog_generation,
+                    60,
+                    "00000000-0000-0000-0000-000000000031".to_owned(),
+                )
+                .encode()?,
+            )
+            .map_err(|failure| format!("set window: {failure:?}"))?;
+        assert!(window.until_unix_seconds >= now);
+
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("window status: {failure:?}"))?;
+        let observed = status
+            .tasks
+            .into_iter()
+            .find(|candidate| candidate.identity == identity)
+            .ok_or("window task missing from status")?;
+        assert_eq!(
+            observed.blocked_precondition.as_deref(),
+            Some("maintenance_window_active")
+        );
+        assert_eq!(
+            observed.maintenance_window_until_unix_seconds,
+            Some(window.until_unix_seconds)
+        );
+
+        let explain = services
+            .explain_maintenance_task(
+                &administrator,
+                &serde_json::to_vec(&MaintenanceExplainRequest { identity })?,
+            )
+            .map_err(|failure| format!("window explain: {failure:?}"))?;
+        assert_eq!(
+            explain.task.blocked_precondition.as_deref(),
+            Some("maintenance_window_active")
+        );
+        assert_eq!(
+            explain.task.maintenance_window_until_unix_seconds,
+            Some(window.until_unix_seconds)
+        );
         Ok(())
     }
 

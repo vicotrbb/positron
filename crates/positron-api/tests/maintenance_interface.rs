@@ -192,7 +192,8 @@ fn full_valid_maintenance_registry_page_fits_the_bounded_response() {
                 file_descriptors: u64::MAX,
                 disk_headroom_bytes: u64::MAX,
             }),
-            blocked_precondition: Some("conflict_owner_active".to_owned()),
+            blocked_precondition: Some("maintenance_window_active".to_owned()),
+            maintenance_window_until_unix_seconds: Some(u64::MAX),
             safe_actions: vec!["pause".to_owned()],
             backlog_age_seconds: Some(u64::MAX),
             conflict_owner: Some(format!("{:032x}", (index + 1) % MAX_TASKS)),
@@ -201,6 +202,7 @@ fn full_valid_maintenance_registry_page_fits_the_bounded_response() {
             output_object_count: 16,
             estimated_output_object_amplification_milli: Some(1_000),
             terminal_outcome: None,
+            terminal_failure_class: None,
         })
         .collect();
     assert!(
@@ -369,6 +371,7 @@ fn maintenance_run_client_uses_the_canonical_explicit_scope_route()
                 reservations: None,
                 expected_foreground_impact: None,
                 blocked_precondition: None,
+                maintenance_window_until_unix_seconds: None,
                 safe_actions: Vec::new(),
                 backlog_age_seconds: None,
                 conflict_owner: None,
@@ -377,6 +380,7 @@ fn maintenance_run_client_uses_the_canonical_explicit_scope_route()
                 output_object_count: 0,
                 estimated_output_object_amplification_milli: None,
                 terminal_outcome: None,
+                terminal_failure_class: None,
             },
         }
     );

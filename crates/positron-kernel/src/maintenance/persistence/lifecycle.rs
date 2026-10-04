@@ -54,7 +54,16 @@ impl MaintenanceCoordinator {
         dispatch: MaintenanceDispatch,
         succeeded: bool,
     ) -> Result<(), MaintenanceFailure> {
-        self.complete_and_persist_dispatch_inner(catalog, dispatch, succeeded, None)
+        self.complete_and_persist_dispatch_inner(catalog, dispatch, succeeded, None, None)
+    }
+
+    pub(in super::super) fn fail_and_persist_dispatch(
+        &self,
+        catalog: &Catalog<'_>,
+        dispatch: MaintenanceDispatch,
+        failure: MaintenanceTerminalFailure,
+    ) -> Result<(), MaintenanceFailure> {
+        self.complete_and_persist_dispatch_inner(catalog, dispatch, false, Some(failure), None)
     }
 
     fn complete_and_persist_dispatch_inner(
@@ -62,6 +71,7 @@ impl MaintenanceCoordinator {
         catalog: &Catalog<'_>,
         dispatch: MaintenanceDispatch,
         succeeded: bool,
+        failure: Option<MaintenanceTerminalFailure>,
         execution: Option<&MaintenanceExecution<'_>>,
     ) -> Result<(), MaintenanceFailure> {
         if dispatch.coordinator_id != self.coordinator_id {
@@ -91,13 +101,18 @@ impl MaintenanceCoordinator {
             {
                 return Err(MaintenanceFailure::InvalidTransition);
             }
-            task.phase = if task.cancellation_requested {
-                MaintenanceTaskPhase::Cancelled
+            let (phase, terminal_failure) = if task.cancellation_requested {
+                (MaintenanceTaskPhase::Cancelled, None)
             } else if succeeded {
-                MaintenanceTaskPhase::Succeeded
+                (MaintenanceTaskPhase::Succeeded, None)
             } else {
-                MaintenanceTaskPhase::Failed
+                (
+                    MaintenanceTaskPhase::Failed,
+                    Some(failure.unwrap_or(MaintenanceTerminalFailure::Unclassified)),
+                )
             };
+            task.phase = phase;
+            task.terminal_failure = terminal_failure;
             task.active_dispatch = None;
         }
         assign_terminal_order(&mut next, dispatch.identity)?;
@@ -120,7 +135,29 @@ impl MaintenanceCoordinator {
         succeeded: bool,
         execution: &MaintenanceExecution<'_>,
     ) -> Result<(), MaintenanceFailure> {
-        self.complete_and_persist_dispatch_inner(catalog, dispatch, succeeded, Some(execution))
+        self.complete_and_persist_dispatch_inner(
+            catalog,
+            dispatch,
+            succeeded,
+            None,
+            Some(execution),
+        )
+    }
+
+    pub(in super::super) fn fail_and_persist_admitted_dispatch(
+        &self,
+        catalog: &Catalog<'_>,
+        dispatch: MaintenanceDispatch,
+        failure: MaintenanceTerminalFailure,
+        execution: &MaintenanceExecution<'_>,
+    ) -> Result<(), MaintenanceFailure> {
+        self.complete_and_persist_dispatch_inner(
+            catalog,
+            dispatch,
+            false,
+            Some(failure),
+            Some(execution),
+        )
     }
 
     pub(in super::super) fn complete_catalog_reclamation_and_persist_dispatch(

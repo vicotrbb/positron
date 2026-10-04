@@ -394,6 +394,8 @@ message MaintenanceTaskStatus {
   optional uint32 estimated_output_object_amplification_milli = 18;
   optional string terminal_outcome = 19;
   optional MaintenanceResourceReservations expected_foreground_impact = 20;
+  optional string terminal_failure_class = 21;
+  optional uint64 maintenance_window_until_unix_seconds = 22;
 }
 
 // A task's coordinator-derived peak Resource Governor reservation. This is

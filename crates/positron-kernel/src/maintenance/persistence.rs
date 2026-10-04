@@ -302,6 +302,7 @@ impl MaintenanceCoordinator {
         let task_state = TaskState {
             task: task.clone(),
             phase: MaintenanceTaskPhase::Queued,
+            terminal_failure: None,
             submitted_at: now,
             checkpoint,
             pause_until: None,

@@ -2,7 +2,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
-use positron_kernel::{LifecycleClockState, MaintenanceTaskPhase, WorkClass};
+use positron_kernel::{
+    LifecycleClockState, MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS, MaintenanceTaskPhase,
+    MaintenanceTerminalFailure, WorkClass,
+};
 
 use crate::{
     ConfigurationObservation, ConfigurationRuntimeFailure, InitializedInstance, ListenerRole,
@@ -53,11 +56,19 @@ pub(crate) struct MaintenanceHealth {
     failed: u32,
     clock_uncertain: bool,
     oldest_queued_age_seconds: Option<u64>,
+    lower_class_queue_delay_breaches: u32,
     completed_inputs: u32,
     input_objects: u32,
     outstanding_reservations: u32,
     maximum_outstanding_reservations: u32,
     outstanding_maintenance_reservations: u32,
+    durability_recovery_reservations: u32,
+    security_lifecycle_reservations: u32,
+    ingest_reservations: u32,
+    interactive_query_tail_reservations: u32,
+    ordinary_maintenance_backup_reservations: u32,
+    failed_identity_mismatch: u32,
+    failed_unclassified: u32,
 }
 
 impl MaintenanceHealth {
@@ -90,6 +101,10 @@ impl MaintenanceHealth {
         self.oldest_queued_age_seconds
     }
     #[must_use]
+    pub(crate) const fn lower_class_queue_delay_breaches(self) -> u32 {
+        self.lower_class_queue_delay_breaches
+    }
+    #[must_use]
     pub(crate) const fn completed_inputs(self) -> u32 {
         self.completed_inputs
     }
@@ -108,6 +123,34 @@ impl MaintenanceHealth {
     #[must_use]
     pub(crate) const fn outstanding_maintenance_reservations(self) -> u32 {
         self.outstanding_maintenance_reservations
+    }
+    #[must_use]
+    pub(crate) const fn durability_recovery_reservations(self) -> u32 {
+        self.durability_recovery_reservations
+    }
+    #[must_use]
+    pub(crate) const fn security_lifecycle_reservations(self) -> u32 {
+        self.security_lifecycle_reservations
+    }
+    #[must_use]
+    pub(crate) const fn ingest_reservations(self) -> u32 {
+        self.ingest_reservations
+    }
+    #[must_use]
+    pub(crate) const fn interactive_query_tail_reservations(self) -> u32 {
+        self.interactive_query_tail_reservations
+    }
+    #[must_use]
+    pub(crate) const fn ordinary_maintenance_backup_reservations(self) -> u32 {
+        self.ordinary_maintenance_backup_reservations
+    }
+    #[must_use]
+    pub(crate) const fn failed_identity_mismatch(self) -> u32 {
+        self.failed_identity_mismatch
+    }
+    #[must_use]
+    pub(crate) const fn failed_unclassified(self) -> u32 {
+        self.failed_unclassified
     }
 }
 
@@ -281,11 +324,19 @@ impl HealthState {
             failed: 0,
             clock_uncertain,
             oldest_queued_age_seconds: None,
+            lower_class_queue_delay_breaches: 0,
             completed_inputs: 0,
             input_objects: 0,
             outstanding_reservations: 0,
             maximum_outstanding_reservations: 0,
             outstanding_maintenance_reservations: 0,
+            durability_recovery_reservations: 0,
+            security_lifecycle_reservations: 0,
+            ingest_reservations: 0,
+            interactive_query_tail_reservations: 0,
+            ordinary_maintenance_backup_reservations: 0,
+            failed_identity_mismatch: 0,
+            failed_unclassified: 0,
         };
         for status in statuses {
             match status.phase() {
@@ -301,6 +352,12 @@ impl HealthState {
                                 .oldest_queued_age_seconds
                                 .map_or(age, |oldest| oldest.max(age)),
                         );
+                        if age >= MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS {
+                            maintenance.lower_class_queue_delay_breaches = maintenance
+                                .lower_class_queue_delay_breaches
+                                .checked_add(1)
+                                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                        }
                     }
                 },
                 MaintenanceTaskPhase::Running => {
@@ -327,6 +384,21 @@ impl HealthState {
                             .failed
                             .checked_add(1)
                             .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                        match status.terminal_failure() {
+                            Some(MaintenanceTerminalFailure::IdentityMismatch) => {
+                                maintenance.failed_identity_mismatch = maintenance
+                                    .failed_identity_mismatch
+                                    .checked_add(1)
+                                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                            },
+                            Some(MaintenanceTerminalFailure::Unclassified) => {
+                                maintenance.failed_unclassified = maintenance
+                                    .failed_unclassified
+                                    .checked_add(1)
+                                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                            },
+                            None => return Err(ConfigurationStatusFailure::Unavailable),
+                        }
                     }
                 },
             }
@@ -351,6 +423,15 @@ impl HealthState {
         maintenance.outstanding_reservations = resources.outstanding_reservations();
         maintenance.maximum_outstanding_reservations = resources.maximum_outstanding_reservations();
         maintenance.outstanding_maintenance_reservations =
+            resources.outstanding_for(WorkClass::OrdinaryMaintenanceBackup);
+        maintenance.durability_recovery_reservations =
+            resources.outstanding_for(WorkClass::DurabilityRecovery);
+        maintenance.security_lifecycle_reservations =
+            resources.outstanding_for(WorkClass::SecurityLifecycle);
+        maintenance.ingest_reservations = resources.outstanding_for(WorkClass::Ingest);
+        maintenance.interactive_query_tail_reservations =
+            resources.outstanding_for(WorkClass::InteractiveQueryTail);
+        maintenance.ordinary_maintenance_backup_reservations =
             resources.outstanding_for(WorkClass::OrdinaryMaintenanceBackup);
         Ok(OperationsStatus {
             configuration: self

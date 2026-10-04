@@ -83,6 +83,7 @@ fn restore_requires_the_typed_retention_publication_checkpoint() {
         let record = encode_record(&TaskState {
             task: task.clone(),
             phase: MaintenanceTaskPhase::Queued,
+            terminal_failure: None,
             submitted_at: 1,
             checkpoint,
             pause_until: None,
@@ -101,6 +102,7 @@ fn restore_requires_the_typed_retention_publication_checkpoint() {
     let record = encode_record(&TaskState {
         task: task.clone(),
         phase: MaintenanceTaskPhase::Queued,
+        terminal_failure: None,
         submitted_at: 1,
         checkpoint: Some(
             MaintenanceCheckpoint::new(1, 0, retention_publication_checkpoint_bytes(12))
@@ -151,6 +153,7 @@ fn queued_reclamation_state(task: MaintenanceTask) -> TaskState {
     TaskState {
         task,
         phase: MaintenanceTaskPhase::Queued,
+        terminal_failure: None,
         submitted_at: 1,
         checkpoint: None,
         pause_until: None,
@@ -358,6 +361,7 @@ fn generic_completion_cannot_terminalize_a_retention_reclamation()
     let running = TaskState {
         task: task.clone(),
         phase: MaintenanceTaskPhase::Running,
+        terminal_failure: None,
         submitted_at: 1,
         checkpoint: None,
         pause_until: None,
@@ -430,6 +434,7 @@ fn generic_checkpoint_cannot_mutate_a_retention_reclamation()
     let queued = TaskState {
         task,
         phase: MaintenanceTaskPhase::Queued,
+        terminal_failure: None,
         submitted_at: 1,
         checkpoint: None,
         pause_until: None,
@@ -514,6 +519,7 @@ fn generic_completion_cannot_terminalize_a_retention_publication()
     let running = TaskState {
         task: task.clone(),
         phase: MaintenanceTaskPhase::Running,
+        terminal_failure: None,
         submitted_at: 1,
         checkpoint: Some(
             MaintenanceCheckpoint::new(1, 0, retention_publication_checkpoint_bytes(12))
@@ -607,6 +613,7 @@ fn retention_publication_completion_refuses_a_full_registry_without_corrupting_r
     let publication_state = TaskState {
         task: publication.clone(),
         phase: MaintenanceTaskPhase::Running,
+        terminal_failure: None,
         submitted_at: 1,
         checkpoint: Some(
             MaintenanceCheckpoint::new(1, 0, retention_publication_checkpoint_bytes(12))
@@ -627,6 +634,7 @@ fn retention_publication_completion_refuses_a_full_registry_without_corrupting_r
                 TaskState {
                     task,
                     phase: MaintenanceTaskPhase::Cancelled,
+                    terminal_failure: None,
                     submitted_at: u64::from(raw),
                     checkpoint: None,
                     pause_until: None,
@@ -727,6 +735,7 @@ fn retention_publication_refuses_a_successor_with_nonpublication_bindings() {
     let running = TaskState {
         task: publication.clone(),
         phase: MaintenanceTaskPhase::Running,
+        terminal_failure: None,
         submitted_at: 1,
         checkpoint: Some(
             MaintenanceCheckpoint::new(1, 0, retention_publication_checkpoint_bytes(12))

@@ -294,7 +294,11 @@ impl InitializedInstance {
         failure: BootstrapFailureCode,
     ) -> Result<positron_kernel::GovernanceAuditCheckpoint, BootstrapFailure> {
         execution
-            .complete_and_persist(coordinator, catalog, false)
+            .fail_and_persist(
+                coordinator,
+                catalog,
+                positron_kernel::MaintenanceTerminalFailure::IdentityMismatch,
+            )
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         Err(BootstrapFailure::new(failure))
     }

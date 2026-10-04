@@ -285,6 +285,7 @@ fn ordinary_submissions_never_evict_a_terminal_reserved_for_lease_publication()
                 TaskState {
                     task,
                     phase: MaintenanceTaskPhase::Cancelled,
+                    terminal_failure: None,
                     submitted_at: u64::from(raw),
                     checkpoint: None,
                     pause_until: None,
