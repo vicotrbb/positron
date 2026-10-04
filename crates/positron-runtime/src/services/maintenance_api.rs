@@ -1206,7 +1206,14 @@ mod tests {
         drop(initialized);
 
         let reopened = fixture.reopen()?;
-        let _restored_services = ServiceHandle::new(Arc::clone(&reopened))?;
+        let restored_services = ServiceHandle::new(Arc::clone(&reopened))?;
+        assert_eq!(
+            restored_services
+                .run_maintenance(&administrator, &body)
+                .map_err(|failure| format!("reopened terminal replay: {failure:?}"))?,
+            first,
+            "a reopened terminal successor cannot change the durable run acknowledgement"
+        );
         assert_eq!(
             reopened
                 .maintenance_coordinator()
