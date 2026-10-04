@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "9e4789a5e93fdbe4d331c59fb669f8de85cc06ba064db8b8d7bb54015980e161"
+    "x-positron-schema-digest": "47e817235f3c64cfdd154a0e5b9f36d82659e5dbf66dd8f5155ed8c8580209e2"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1313,7 +1313,7 @@
           "phase": {"type": "string", "enum": ["queued", "running", "deferred", "cancelled", "succeeded", "failed"]},
           "submitted_at_unix_seconds": {"type": "integer", "minimum": 0},
           "checkpoint_sequence": {"type": "integer", "minimum": 1},
-          "last_progress_at_unix_seconds": {"type": "integer", "minimum": 1},
+          "last_progress_at_unix_seconds": {"type": "integer", "minimum": 0},
           "no_durable_progress_slo_breached": {"type": "boolean"},
           "no_durable_progress_slo_seconds": {"type": "integer", "minimum": 1},
           "capacity_risk": {"type": "string", "enum": ["foreground_reservation", "recovery_reserve"]},

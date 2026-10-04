@@ -429,6 +429,7 @@ fn valid_task_identity(identity: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceTaskStatus {
     pub identity: String,
     pub class: String,

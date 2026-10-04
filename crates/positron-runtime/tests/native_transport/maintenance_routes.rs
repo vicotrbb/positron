@@ -312,3 +312,121 @@ fn maintenance_controls_authenticate_before_decoding_their_bodies()
     );
     Ok(())
 }
+
+#[test]
+fn maintenance_routes_accept_their_canonical_bounded_bodies_before_authentication()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = live_test_guard();
+    let roots = TestRoots::new("maintenance-route-body-limits")?;
+    let paths = roots.paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        positron_runtime::InitializationPlan::non_interactive(),
+    )?);
+    let host = NativeHost::new(bindings(&roots, "maintenance-route-body-limits")?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let address = address(
+        &process.bound_endpoints(),
+        positron_runtime::ListenerRole::Api,
+    )?;
+
+    for (path, limit) in [
+        (
+            positron_api::maintenance::STATUS_HTTP_PATH,
+            positron_api::maintenance::MAX_REQUEST_BYTES,
+        ),
+        (
+            positron_api::maintenance::EXPLAIN_HTTP_PATH,
+            positron_api::maintenance::MAX_REQUEST_BYTES,
+        ),
+        (
+            positron_api::maintenance::RUN_HTTP_PATH,
+            positron_api::maintenance::MAX_RUN_REQUEST_BYTES,
+        ),
+        (
+            positron_api::maintenance::PAUSE_HTTP_PATH,
+            positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES,
+        ),
+        (
+            positron_api::maintenance::RESUME_HTTP_PATH,
+            positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES,
+        ),
+        (
+            positron_api::maintenance::WINDOW_HTTP_PATH,
+            positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES,
+        ),
+    ] {
+        let body = vec![b' '; limit];
+        assert!(body.len() > 64, "test route must exceed the default limit");
+        assert_status(
+            http(
+                address,
+                "POST",
+                path,
+                &[("Content-Type", "application/json")],
+                &body,
+            )?,
+            401,
+        );
+    }
+
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+#[test]
+fn valid_maintenance_window_larger_than_the_default_body_limit_reaches_generation_fencing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = live_test_guard();
+    let roots = TestRoots::new("maintenance-window-body-limit")?;
+    let paths = roots.paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        positron_runtime::InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let initialized = InstanceBootstrap::reopen(&paths)?;
+    let expected_catalog_generation = initialized.catalog_generation();
+    drop(initialized);
+    let host = NativeHost::new(bindings(&roots, "maintenance-window-body-limit")?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let body = format!(
+        r#"{{"deferred_classes":["compaction"],"expected_catalog_generation":{expected_catalog_generation},"duration_seconds":60,"idempotency_key":"00000000-0000-0000-0000-000000000001"}}"#
+    );
+    assert!(body.len() > 64);
+    assert!(body.len() <= positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES);
+
+    let response = http(
+        address(
+            &process.bound_endpoints(),
+            positron_runtime::ListenerRole::Api,
+        )?,
+        "POST",
+        positron_api::maintenance::WINDOW_HTTP_PATH,
+        &[
+            ("Authorization", &format!("Bearer {}", claim.secret())),
+            ("Content-Type", "application/json"),
+        ],
+        body.as_bytes(),
+    )?;
+    assert_status(response.clone(), 409);
+    assert!(
+        response.contains("\"code\":\"precondition_failed\""),
+        "a current Catalog publication may advance after fixture inspection, but the valid request must reach its typed generation fence"
+    );
+
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}

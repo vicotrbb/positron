@@ -211,6 +211,24 @@ fn maintenance_status_and_explain_preserve_an_epoch_progress_instant() {
 }
 
 #[test]
+fn maintenance_status_and_explain_reject_unknown_nested_task_fields() {
+    let task = r#"{"identity":"00000000000000000000000000000001","class":"compaction","scope":"system","phase":"running","submitted_at_unix_seconds":1,"cancellation_requested":false,"input_object_count":0,"output_object_count":0,"unexpected":true}"#;
+    let status = format!(
+        r#"{{"tasks":[{task}],"returned":1,"total":1,"queued":0,"running":1,"deferred":0,"terminal":0}}"#
+    );
+    let explain = format!(r#"{{"task":{task}}}"#);
+
+    assert!(
+        MaintenanceStatusResponse::decode(status.as_bytes()).is_err(),
+        "status must reject fields the canonical task schema does not publish"
+    );
+    assert!(
+        MaintenanceExplainResponse::decode(explain.as_bytes()).is_err(),
+        "explain must reject fields the canonical task schema does not publish"
+    );
+}
+
+#[test]
 fn maintenance_status_decoder_rejects_overflowing_phase_counts() {
     let overflowing = br#"{"tasks":[],"returned":0,"total":0,"queued":4294967295,"running":1,"deferred":0,"terminal":0}"#;
     assert_eq!(
@@ -397,6 +415,16 @@ fn maintenance_status_contract_is_canonical_and_bounded() {
     assert_eq!(run["authentication"], "Bearer SystemAdministration");
     assert_eq!(run["max_request_bytes"], 256);
     assert_eq!(run["max_response_bytes"], 2048);
+
+    let openapi: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/openapi.json"))
+            .expect("canonical OpenAPI document");
+    let task = &openapi["components"]["schemas"]["MaintenanceTaskStatus"];
+    assert_eq!(task["additionalProperties"], false);
+    assert_eq!(
+        task["properties"]["last_progress_at_unix_seconds"]["minimum"], 0,
+        "the Unix epoch is a valid trusted durable-progress instant"
+    );
 }
 
 #[test]

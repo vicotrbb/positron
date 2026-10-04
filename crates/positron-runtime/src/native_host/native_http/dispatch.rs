@@ -41,7 +41,8 @@ pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
             positron_api::maintenance::MAX_RUN_REQUEST_BYTES
         },
         positron_api::maintenance::PAUSE_HTTP_PATH
-        | positron_api::maintenance::RESUME_HTTP_PATH => {
+        | positron_api::maintenance::RESUME_HTTP_PATH
+        | positron_api::maintenance::WINDOW_HTTP_PATH => {
             positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES
         },
         positron_api::tenant_aliases::HTTP_PATH => positron_api::tenant_aliases::MAX_REQUEST_BYTES,
@@ -80,6 +81,7 @@ fn api_path_is_known(path: &str) -> bool {
             | positron_api::maintenance::RUN_HTTP_PATH
             | positron_api::maintenance::PAUSE_HTTP_PATH
             | positron_api::maintenance::RESUME_HTTP_PATH
+            | positron_api::maintenance::WINDOW_HTTP_PATH
             | positron_api::tenant_aliases::HTTP_PATH
             | positron_api::tenant_service::CREATE_HTTP_PATH
             | positron_api::tenant_service::INSPECT_HTTP_PATH
