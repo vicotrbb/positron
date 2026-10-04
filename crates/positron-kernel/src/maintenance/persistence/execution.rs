@@ -165,7 +165,26 @@ impl MaintenanceExecution<'_> {
         ) {
             return Err(MaintenanceFailure::InvalidTransition);
         }
-        coordinator.checkpoint_and_persist_dispatch(catalog, self.dispatch, checkpoint)
+        coordinator.checkpoint_and_persist_dispatch(catalog, self.dispatch, checkpoint, None)
+    }
+
+    /// Commits a checkpoint with the server lifecycle instant at which it was
+    /// observed. Only a successful Catalog publication of semantic progress
+    /// resets the running no-progress deadline.
+    pub fn checkpoint_and_persist_at(
+        &self,
+        coordinator: &MaintenanceCoordinator,
+        catalog: &Catalog<'_>,
+        checkpoint: MaintenanceCheckpoint,
+        now: u64,
+    ) -> Result<(), MaintenanceFailure> {
+        if matches!(
+            self.task.class,
+            MaintenanceTaskClass::Compaction | MaintenanceTaskClass::CatalogReclamation
+        ) {
+            return Err(MaintenanceFailure::InvalidTransition);
+        }
+        coordinator.checkpoint_and_persist_dispatch(catalog, self.dispatch, checkpoint, Some(now))
     }
 
     /// Durably publishes the terminal coordinator outcome before releasing the

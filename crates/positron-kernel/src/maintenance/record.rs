@@ -1,8 +1,9 @@
 use super::*;
 
-const RECORD_MAGIC: &[u8; 8] = b"PMTC0004";
-const PREVIOUS_RECORD_MAGIC: &[u8; 8] = b"PMTC0003";
-const LEGACY_RECORD_MAGIC: &[u8; 8] = b"PMTC0002";
+const RECORD_MAGIC: &[u8; 8] = b"PMTC0005";
+const PREVIOUS_RECORD_MAGIC: &[u8; 8] = b"PMTC0004";
+const LEGACY_RECORD_MAGIC: &[u8; 8] = b"PMTC0003";
+const OLDEST_RECORD_MAGIC: &[u8; 8] = b"PMTC0002";
 
 pub(super) fn encode_record(
     state: &TaskState,
@@ -49,6 +50,8 @@ pub(super) fn encode_record(
     push_u64(&mut bytes, state.pause_until.unwrap_or(0));
     bytes.push(u8::from(state.cancellation_requested));
     push_u64(&mut bytes, state.dispatches);
+    bytes.push(u8::from(state.last_progress_at.is_some()));
+    push_u64(&mut bytes, state.last_progress_at.unwrap_or(0));
     bytes.push(u8::from(state.checkpoint.is_some()));
     if let Some(checkpoint) = &state.checkpoint {
         push_u64(&mut bytes, checkpoint.sequence);
@@ -76,7 +79,9 @@ pub(super) fn encoded_record_capacity(
         .checked_add(16 + 3 + 16 + 6 + 16 + 1 + 1 + 1 + 8 + 8 + 1 + 8)
         .and_then(|size| size.checked_add(objects.checked_mul(32)?))
         .and_then(|size| {
-            size.checked_add(11 * 8 + 1 + 1 + 8 + 1 + 1 + 8 + 1 + 8 + 4 + 4 + checkpoint_bytes)
+            size.checked_add(
+                11 * 8 + 1 + 1 + 8 + 1 + 1 + 8 + 1 + 8 + 1 + 8 + 1 + 8 + 4 + 4 + checkpoint_bytes,
+            )
         })
         .ok_or(MaintenanceFailure::CapacityExceeded)
 }
@@ -84,15 +89,18 @@ pub(super) fn encoded_record_capacity(
 pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailure> {
     let mut cursor = RecordCursor::new(bytes);
     let magic = cursor.take_exact(RECORD_MAGIC.len())?;
-    let (includes_not_before, includes_terminal_failure) = if magic == RECORD_MAGIC {
-        (true, true)
-    } else if magic == PREVIOUS_RECORD_MAGIC {
-        (true, false)
-    } else if magic == LEGACY_RECORD_MAGIC {
-        (false, false)
-    } else {
-        return Err(MaintenanceFailure::InvalidInput);
-    };
+    let (includes_not_before, includes_terminal_failure, includes_progress_timestamp) =
+        if magic == RECORD_MAGIC {
+            (true, true, true)
+        } else if magic == PREVIOUS_RECORD_MAGIC {
+            (true, true, false)
+        } else if magic == LEGACY_RECORD_MAGIC {
+            (true, false, false)
+        } else if magic == OLDEST_RECORD_MAGIC {
+            (false, false, false)
+        } else {
+            return Err(MaintenanceFailure::InvalidInput);
+        };
     let identity = MaintenanceTaskId::new(cursor.array_16()?)?;
     let class = class_from_code(cursor.byte()?)?;
     let scope = decode_scope(&mut cursor)?;
@@ -158,6 +166,24 @@ pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailur
         _ => return Err(MaintenanceFailure::InvalidInput),
     };
     let dispatches = cursor.u64()?;
+    let last_progress_at = if includes_progress_timestamp {
+        match cursor.byte()? {
+            0 => {
+                let _ = cursor.u64()?;
+                None
+            },
+            1 => {
+                let timestamp = cursor.u64()?;
+                (timestamp != 0)
+                    .then_some(timestamp)
+                    .ok_or(MaintenanceFailure::InvalidInput)?
+                    .into()
+            },
+            _ => return Err(MaintenanceFailure::InvalidInput),
+        }
+    } else {
+        None
+    };
     let checkpoint = match cursor.byte()? {
         0 => None,
         1 => {
@@ -179,6 +205,7 @@ pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailur
         terminal_failure,
         submitted_at,
         checkpoint,
+        last_progress_at,
         pause_until,
         cancellation_requested,
         dispatches,
@@ -436,6 +463,7 @@ pub(super) fn record_identity(
     if !bytes.starts_with(RECORD_MAGIC)
         && !bytes.starts_with(PREVIOUS_RECORD_MAGIC)
         && !bytes.starts_with(LEGACY_RECORD_MAGIC)
+        && !bytes.starts_with(OLDEST_RECORD_MAGIC)
     {
         return Ok(None);
     }
@@ -517,14 +545,16 @@ mod tests {
             terminal_failure: None,
             submitted_at: 7,
             checkpoint: None,
+            last_progress_at: None,
             pause_until: None,
             cancellation_requested: false,
             dispatches: 0,
             terminal_order: None,
             active_dispatch: None,
         };
-        let mut legacy = encode_record(&state).expect("v3 encoding").0;
-        legacy[..RECORD_MAGIC.len()].copy_from_slice(LEGACY_RECORD_MAGIC);
+        let mut legacy = encode_record(&state).expect("v5 encoding").0;
+        legacy.drain(171..180);
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(OLDEST_RECORD_MAGIC);
         // Magic, identity, class, system scope, trigger, emergency, priority,
         // then the two precondition generations precede the v3 due-time field.
         legacy.drain(45..53);
@@ -555,14 +585,16 @@ mod tests {
             terminal_failure: Some(MaintenanceTerminalFailure::IdentityMismatch),
             submitted_at: 7,
             checkpoint: None,
+            last_progress_at: None,
             pause_until: None,
             cancellation_requested: false,
             dispatches: 0,
             terminal_order: None,
             active_dispatch: None,
         };
-        let mut legacy = encode_record(&state).expect("v4 encoding").0;
-        legacy[..RECORD_MAGIC.len()].copy_from_slice(PREVIOUS_RECORD_MAGIC);
+        let mut legacy = encode_record(&state).expect("v5 encoding").0;
+        legacy.drain(171..180);
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(LEGACY_RECORD_MAGIC);
         // PMTC0003 used the same layout as PMTC0004 except it had no byte
         // after the phase for the terminal cause.
         legacy.drain(144..145);

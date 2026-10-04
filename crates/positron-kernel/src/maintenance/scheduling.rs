@@ -123,6 +123,7 @@ pub(super) fn dispatch_task(
         .get_mut(&identity)
         .ok_or(MaintenanceFailure::UnknownTask)?;
     task.phase = MaintenanceTaskPhase::Running;
+    task.last_progress_at = Some(now);
     task.dispatches = dispatch.attempt;
     task.active_dispatch = Some(dispatch);
     state.fairness.insert(fairness_key, next_fairness);

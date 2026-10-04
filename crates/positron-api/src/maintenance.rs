@@ -438,6 +438,14 @@ pub struct MaintenanceTaskStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_at_unix_seconds: Option<u64>,
+    /// Server-owned no-durable-progress deadline fact. Omitted when the
+    /// lifecycle clock cannot truthfully establish an age.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_durable_progress_slo_breached: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_durable_progress_slo_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_until_unix_seconds: Option<u64>,
     pub cancellation_requested: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -679,6 +687,11 @@ impl MaintenanceStatusResponse {
                         "queued" | "running" | "deferred" | "cancelled" | "succeeded" | "failed"
                     )
                     || task.checkpoint_sequence == Some(0)
+                    || task.last_progress_at_unix_seconds == Some(0)
+                    || task.no_durable_progress_slo_breached.is_some()
+                        && (task.phase != "running" || task.last_progress_at_unix_seconds.is_none())
+                    || task.no_durable_progress_slo_seconds == Some(0)
+                    || task.no_durable_progress_slo_seconds.is_some() && task.phase != "running"
                     || task.pause_until_unix_seconds == Some(0)
                     || task.resource_generation == Some(0)
                     || task

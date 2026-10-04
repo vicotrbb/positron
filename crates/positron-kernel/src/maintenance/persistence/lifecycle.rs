@@ -9,6 +9,7 @@ impl MaintenanceCoordinator {
         catalog: &Catalog<'_>,
         dispatch: MaintenanceDispatch,
         checkpoint: MaintenanceCheckpoint,
+        progress_at: Option<u64>,
     ) -> Result<(), MaintenanceFailure> {
         if dispatch.coordinator_id != self.coordinator_id {
             return Err(MaintenanceFailure::InvalidTransition);
@@ -38,6 +39,9 @@ impl MaintenanceCoordinator {
             return Err(MaintenanceFailure::InvalidTransition);
         }
         let mut next = task.clone();
+        if checkpoint_advances(next.checkpoint.as_ref(), &checkpoint) {
+            next.last_progress_at = progress_at;
+        }
         next.checkpoint = Some(checkpoint);
         persist_task_state(catalog, &next, None)?;
         let task = state

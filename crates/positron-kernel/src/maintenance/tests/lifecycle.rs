@@ -190,6 +190,7 @@ fn scheduler_order_has_no_priority_fairness_cycle() {
         terminal_failure: None,
         submitted_at: 0,
         checkpoint: None,
+        last_progress_at: None,
         pause_until: None,
         cancellation_requested: false,
         dispatches: 0,

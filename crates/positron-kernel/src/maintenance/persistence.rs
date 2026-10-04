@@ -305,6 +305,7 @@ impl MaintenanceCoordinator {
             terminal_failure: None,
             submitted_at: now,
             checkpoint,
+            last_progress_at: None,
             pause_until: None,
             cancellation_requested: false,
             dispatches: 0,

@@ -288,6 +288,7 @@ fn ordinary_submissions_never_evict_a_terminal_reserved_for_lease_publication()
                     terminal_failure: None,
                     submitted_at: u64::from(raw),
                     checkpoint: None,
+                    last_progress_at: None,
                     pause_until: None,
                     cancellation_requested: false,
                     dispatches: 0,

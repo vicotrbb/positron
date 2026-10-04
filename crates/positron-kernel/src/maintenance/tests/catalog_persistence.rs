@@ -68,6 +68,34 @@ fn catalog_checkpoint_reopen_restores_one_queued_task_with_its_progress()
         .start_next_with_reservation_and_persist(&catalog, &authority, 8, false)
         .expect("dispatch admission")
         .expect("persisted task must dispatch");
+    assert_eq!(
+        coordinator
+            .status_with_progress_slo(identity, Some(67), false)
+            .expect("running status")
+            .no_durable_progress_slo_breached(),
+        Some(false)
+    );
+    let failed_checkpoint =
+        crate::catalog::with_catalog_fault(crate::catalog::CatalogFileEvent::WriteMarker, || {
+            execution.checkpoint_and_persist_at(
+                &coordinator,
+                &catalog,
+                MaintenanceCheckpoint::new(1, 0, vec![4, 2]).expect("checkpoint"),
+                20,
+            )
+        });
+    assert_eq!(
+        failed_checkpoint.expect_err("checkpoint publication must fail"),
+        MaintenanceFailure::CatalogUnavailable
+    );
+    assert_eq!(
+        coordinator
+            .status_with_progress_slo(identity, Some(68), false)
+            .expect("running status")
+            .no_durable_progress_slo_breached(),
+        Some(true),
+        "an unpublished checkpoint cannot reset the durable-progress deadline"
+    );
     execution
         .checkpoint_and_persist(
             &coordinator,

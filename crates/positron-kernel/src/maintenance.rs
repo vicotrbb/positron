@@ -195,6 +195,9 @@ impl GovernanceAuditCheckpointBinding {
 /// The bounded queue delay after which ordinary and required maintenance is
 /// promoted to Urgent scheduling priority.
 pub const MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS: u64 = 60;
+/// The initial server-owned deadline for a running task to durably advance
+/// its checkpoint. This is independent from queued-work priority escalation.
+pub const NO_DURABLE_PROGRESS_SLO_SECONDS: u64 = 60;
 static NEXT_COORDINATOR_ID: AtomicU64 = AtomicU64::new(1);
 
 mod model;
@@ -271,6 +274,7 @@ struct TaskState {
     terminal_failure: Option<MaintenanceTerminalFailure>,
     submitted_at: u64,
     checkpoint: Option<MaintenanceCheckpoint>,
+    last_progress_at: Option<u64>,
     pause_until: Option<u64>,
     cancellation_requested: bool,
     dispatches: u64,
@@ -403,6 +407,8 @@ pub struct MaintenanceTaskStatus {
     terminal_failure: Option<MaintenanceTerminalFailure>,
     submitted_at: u64,
     checkpoint: Option<MaintenanceCheckpoint>,
+    last_progress_at: Option<u64>,
+    no_durable_progress_slo_breached: Option<bool>,
     pause_until: Option<u64>,
     cancellation_requested: bool,
     conflict_owner: Option<MaintenanceTaskId>,
@@ -551,6 +557,7 @@ impl MaintenanceExecution<'_> {
             };
             task.phase = phase;
             task.terminal_failure = terminal_failure;
+            task.last_progress_at = None;
             task.active_dispatch = None;
         }
         assign_terminal_order(&mut state, self.dispatch.identity)
@@ -611,6 +618,18 @@ impl MaintenanceTaskStatus {
     pub fn checkpoint(&self) -> Option<&MaintenanceCheckpoint> {
         self.checkpoint.as_ref()
     }
+    /// The server lifecycle instant of the durable Running transition or the
+    /// most recent checkpoint that advanced actual task progress.
+    #[must_use]
+    pub const fn last_progress_at(&self) -> Option<u64> {
+        self.last_progress_at
+    }
+    /// `Some` only when a running task has a trusted lifecycle-clock age.
+    /// `None` deliberately represents an unknown deadline evaluation.
+    #[must_use]
+    pub const fn no_durable_progress_slo_breached(&self) -> Option<bool> {
+        self.no_durable_progress_slo_breached
+    }
     #[must_use]
     pub const fn pause_until(&self) -> Option<u64> {
         self.pause_until
@@ -638,6 +657,7 @@ fn maintenance_task_status(
     identity: MaintenanceTaskId,
     task: &TaskState,
     clock_uncertain: bool,
+    now: Option<u64>,
 ) -> MaintenanceTaskStatus {
     let conflict_owner = (task.phase == MaintenanceTaskPhase::Queued)
         .then(|| {
@@ -658,6 +678,8 @@ fn maintenance_task_status(
         terminal_failure: task.terminal_failure,
         submitted_at: task.submitted_at,
         checkpoint: task.checkpoint.clone(),
+        last_progress_at: task.last_progress_at,
+        no_durable_progress_slo_breached: progress_slo_breached(task, now, clock_uncertain),
         pause_until: task.pause_until,
         cancellation_requested: task.cancellation_requested,
         conflict_owner,
@@ -668,6 +690,25 @@ fn maintenance_task_status(
             clock_uncertain,
         ),
     }
+}
+
+fn progress_slo_breached(
+    task: &TaskState,
+    now: Option<u64>,
+    clock_uncertain: bool,
+) -> Option<bool> {
+    if task.phase != MaintenanceTaskPhase::Running || clock_uncertain {
+        return None;
+    }
+    let age = now?.checked_sub(task.last_progress_at?)?;
+    Some(age >= NO_DURABLE_PROGRESS_SLO_SECONDS)
+}
+
+fn checkpoint_advances(
+    previous: Option<&MaintenanceCheckpoint>,
+    candidate: &MaintenanceCheckpoint,
+) -> bool {
+    previous.is_some_and(|current| candidate.completed_inputs > current.completed_inputs)
 }
 
 impl MaintenanceCoordinator {
@@ -754,6 +795,7 @@ impl MaintenanceCoordinator {
                 terminal_failure: None,
                 submitted_at: now,
                 checkpoint: None,
+                last_progress_at: None,
                 pause_until: None,
                 cancellation_requested: false,
                 dispatches: 0,
@@ -964,6 +1006,28 @@ impl MaintenanceCoordinator {
         identity: MaintenanceTaskId,
         checkpoint: MaintenanceCheckpoint,
     ) -> Result<(), MaintenanceFailure> {
+        self.checkpoint_at_inner(identity, checkpoint, None)
+    }
+
+    /// Test and fuzz seam for the same server-time checkpoint transition that
+    /// production commits through the Catalog writer.
+    #[cfg(any(test, fuzzing))]
+    pub fn checkpoint_at(
+        &self,
+        identity: MaintenanceTaskId,
+        checkpoint: MaintenanceCheckpoint,
+        now: u64,
+    ) -> Result<(), MaintenanceFailure> {
+        self.checkpoint_at_inner(identity, checkpoint, Some(now))
+    }
+
+    #[cfg(any(test, fuzzing))]
+    fn checkpoint_at_inner(
+        &self,
+        identity: MaintenanceTaskId,
+        checkpoint: MaintenanceCheckpoint,
+        progress_at: Option<u64>,
+    ) -> Result<(), MaintenanceFailure> {
         let mut state = self
             .state
             .lock()
@@ -985,6 +1049,9 @@ impl MaintenanceCoordinator {
             .is_some_and(|previous| previous.sequence >= checkpoint.sequence)
         {
             return Err(MaintenanceFailure::PreconditionFailed);
+        }
+        if checkpoint_advances(task.checkpoint.as_ref(), &checkpoint) {
+            task.last_progress_at = progress_at;
         }
         task.checkpoint = Some(checkpoint);
         Ok(())
@@ -1038,6 +1105,7 @@ impl MaintenanceCoordinator {
         for (identity, task) in &mut state.tasks {
             if task.phase == MaintenanceTaskPhase::Running {
                 task.active_dispatch = None;
+                task.last_progress_at = None;
                 task.phase = if task.cancellation_requested {
                     MaintenanceTaskPhase::Cancelled
                 } else {
@@ -1069,7 +1137,7 @@ impl MaintenanceCoordinator {
             .tasks
             .get(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        Ok(maintenance_task_status(&state, identity, task, false))
+        Ok(maintenance_task_status(&state, identity, task, false, None))
     }
 
     /// Returns one status with the same ClockUncertain scheduling predicate
@@ -1092,6 +1160,33 @@ impl MaintenanceCoordinator {
             identity,
             task,
             clock_uncertain,
+            None,
+        ))
+    }
+
+    /// Returns one task's deadline fact using server-authenticated lifecycle
+    /// time. A `ClockUncertain` server must report an unknown fact rather than
+    /// inventing an age or a healthy result.
+    pub fn status_with_progress_slo(
+        &self,
+        identity: MaintenanceTaskId,
+        now: Option<u64>,
+        clock_uncertain: bool,
+    ) -> Result<MaintenanceTaskStatus, MaintenanceFailure> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        let task = state
+            .tasks
+            .get(&identity)
+            .ok_or(MaintenanceFailure::UnknownTask)?;
+        Ok(maintenance_task_status(
+            &state,
+            identity,
+            task,
+            clock_uncertain,
+            now,
         ))
     }
 
@@ -1134,7 +1229,7 @@ impl MaintenanceCoordinator {
         Ok(state
             .tasks
             .iter()
-            .map(|(identity, task)| maintenance_task_status(&state, *identity, task, false))
+            .map(|(identity, task)| maintenance_task_status(&state, *identity, task, false, None))
             .collect())
     }
 
@@ -1152,7 +1247,27 @@ impl MaintenanceCoordinator {
             .tasks
             .iter()
             .map(|(identity, task)| {
-                maintenance_task_status(&state, *identity, task, clock_uncertain)
+                maintenance_task_status(&state, *identity, task, clock_uncertain, None)
+            })
+            .collect())
+    }
+
+    /// Bounded coordinator inspection with one server lifecycle instant for
+    /// every running no-progress deadline fact.
+    pub fn statuses_with_progress_slo(
+        &self,
+        now: Option<u64>,
+        clock_uncertain: bool,
+    ) -> Result<Vec<MaintenanceTaskStatus>, MaintenanceFailure> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        Ok(state
+            .tasks
+            .iter()
+            .map(|(identity, task)| {
+                maintenance_task_status(&state, *identity, task, clock_uncertain, now)
             })
             .collect())
     }

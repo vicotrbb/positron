@@ -21,7 +21,8 @@ use positron_governance::{
 use positron_kernel::{
     ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, LifecycleClockState,
     MaintenanceCoordinator, MaintenanceFailure, MaintenanceScope, MaintenanceTaskClass,
-    MaintenanceTaskId, MaintenanceTaskPhase, ResourceDimension, SegmentScope,
+    MaintenanceTaskId, MaintenanceTaskPhase, NO_DURABLE_PROGRESS_SLO_SECONDS, ResourceDimension,
+    SegmentScope,
 };
 
 use crate::ServiceHandle;
@@ -49,7 +50,7 @@ impl ServiceHandle {
         let statuses = self
             .instance
             .maintenance_coordinator()
-            .statuses_with_clock_uncertainty(clock_uncertain)
+            .statuses_with_progress_slo(now, clock_uncertain)
             .map_err(|_| (503, "administration_unavailable"))?;
         let mut response = MaintenanceStatusResponse {
             tasks: Vec::with_capacity(request.page_limit()),
@@ -112,7 +113,7 @@ impl ServiceHandle {
         let status = self
             .instance
             .maintenance_coordinator()
-            .status_with_clock_uncertainty(identity, clock_uncertain)
+            .status_with_progress_slo(identity, now, clock_uncertain)
             .map_err(|_| (404, "task_unavailable"))?;
         Ok(MaintenanceExplainResponse {
             task: task_status_for_coordinator(self.instance.maintenance_coordinator(), status, now)
@@ -725,6 +726,10 @@ fn task_status(
         phase: phase_name(phase).to_owned(),
         submitted_at_unix_seconds: status.submitted_at(),
         checkpoint_sequence: status.checkpoint().map(|checkpoint| checkpoint.sequence()),
+        last_progress_at_unix_seconds: status.last_progress_at(),
+        no_durable_progress_slo_breached: status.no_durable_progress_slo_breached(),
+        no_durable_progress_slo_seconds: (phase == MaintenanceTaskPhase::Running)
+            .then_some(NO_DURABLE_PROGRESS_SLO_SECONDS),
         pause_until_unix_seconds: status.pause_until(),
         cancellation_requested: status.cancellation_requested(),
         resource_generation: Some(task.preconditions().resource_generation()),

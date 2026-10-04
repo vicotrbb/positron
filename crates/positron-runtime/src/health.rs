@@ -57,6 +57,8 @@ pub(crate) struct MaintenanceHealth {
     clock_uncertain: bool,
     oldest_queued_age_seconds: Option<u64>,
     lower_class_queue_delay_breaches: u32,
+    running_no_durable_progress_slo_breaches: u32,
+    running_no_durable_progress_slo_unknown: u32,
     completed_inputs: u32,
     input_objects: u32,
     outstanding_reservations: u32,
@@ -103,6 +105,14 @@ impl MaintenanceHealth {
     #[must_use]
     pub(crate) const fn lower_class_queue_delay_breaches(self) -> u32 {
         self.lower_class_queue_delay_breaches
+    }
+    #[must_use]
+    pub(crate) const fn running_no_durable_progress_slo_breaches(self) -> u32 {
+        self.running_no_durable_progress_slo_breaches
+    }
+    #[must_use]
+    pub(crate) const fn running_no_durable_progress_slo_unknown(self) -> u32 {
+        self.running_no_durable_progress_slo_unknown
     }
     #[must_use]
     pub(crate) const fn completed_inputs(self) -> u32 {
@@ -314,7 +324,7 @@ impl HealthState {
         };
         let statuses = authority
             .maintenance_coordinator()
-            .statuses_with_clock_uncertainty(clock_uncertain)
+            .statuses_with_progress_slo(now, clock_uncertain)
             .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
         let mut maintenance = MaintenanceHealth {
             queued: 0,
@@ -325,6 +335,8 @@ impl HealthState {
             clock_uncertain,
             oldest_queued_age_seconds: None,
             lower_class_queue_delay_breaches: 0,
+            running_no_durable_progress_slo_breaches: 0,
+            running_no_durable_progress_slo_unknown: 0,
             completed_inputs: 0,
             input_objects: 0,
             outstanding_reservations: 0,
@@ -364,7 +376,22 @@ impl HealthState {
                     maintenance.running = maintenance
                         .running
                         .checked_add(1)
-                        .ok_or(ConfigurationStatusFailure::Unavailable)?
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                    match status.no_durable_progress_slo_breached() {
+                        Some(true) => {
+                            maintenance.running_no_durable_progress_slo_breaches = maintenance
+                                .running_no_durable_progress_slo_breaches
+                                .checked_add(1)
+                                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                        },
+                        Some(false) => {},
+                        None => {
+                            maintenance.running_no_durable_progress_slo_unknown = maintenance
+                                .running_no_durable_progress_slo_unknown
+                                .checked_add(1)
+                                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                        },
+                    }
                 },
                 MaintenanceTaskPhase::Deferred => {
                     maintenance.deferred = maintenance

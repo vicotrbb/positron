@@ -55,3 +55,94 @@ fn generic_submission_cannot_persist_a_compaction_without_its_typed_binding()
     );
     Ok(())
 }
+
+#[test]
+fn running_work_reports_the_server_owned_no_progress_deadline_at_its_boundary() {
+    let coordinator = MaintenanceCoordinator::new();
+    let task = MaintenanceTask::new(
+        MaintenanceTaskId::new([0x81; 16]).expect("non-zero stable identity"),
+        MaintenanceTaskClass::SchemaStatistics,
+    );
+    let identity = task.identity();
+    coordinator.submit(task).expect("task is accepted");
+    coordinator.start_next(1, false).expect("scheduler runs");
+
+    assert_eq!(
+        coordinator
+            .status_with_progress_slo(identity, Some(60), false)
+            .expect("running status")
+            .no_durable_progress_slo_breached(),
+        Some(false),
+        "59 seconds without durable progress remains inside the initial SLO"
+    );
+    assert_eq!(
+        coordinator
+            .status_with_progress_slo(identity, Some(61), false)
+            .expect("running status")
+            .no_durable_progress_slo_breached(),
+        Some(true),
+        "60 seconds without durable progress is a server-reported breach"
+    );
+    assert_eq!(
+        coordinator
+            .status_with_progress_slo(identity, Some(61), true)
+            .expect("running status")
+            .no_durable_progress_slo_breached(),
+        None,
+        "an uncertain lifecycle clock cannot invent a healthy or stale deadline fact"
+    );
+}
+
+#[test]
+fn only_an_advancing_durable_checkpoint_resets_the_running_progress_deadline() {
+    let coordinator = MaintenanceCoordinator::new();
+    let task = task(
+        0x82,
+        MaintenanceTaskClass::SchemaStatistics,
+        MaintenanceTrigger::Event,
+        MaintenancePriority::Required,
+        vec![
+            MaintenanceObjectId::new([0x82; 32]).expect("first input"),
+            MaintenanceObjectId::new([0x83; 32]).expect("second input"),
+        ],
+    );
+    let identity = task.identity();
+    coordinator.submit(task).expect("task is accepted");
+    coordinator.start_next(1, false).expect("scheduler runs");
+    coordinator
+        .checkpoint_at(
+            identity,
+            MaintenanceCheckpoint::new(1, 1, vec![1]).expect("checkpoint"),
+            10,
+        )
+        .expect("completed input advances durable progress");
+    coordinator
+        .checkpoint_at(
+            identity,
+            MaintenanceCheckpoint::new(2, 1, vec![2]).expect("rewritten cursor"),
+            30,
+        )
+        .expect("a non-advancing checkpoint remains durable state");
+    assert_eq!(
+        coordinator
+            .status_with_progress_slo(identity, Some(70), false)
+            .expect("running status")
+            .no_durable_progress_slo_breached(),
+        Some(true),
+        "changing only checkpoint metadata or cursor bytes cannot hide a stall"
+    );
+    coordinator
+        .checkpoint_at(
+            identity,
+            MaintenanceCheckpoint::new(3, 2, vec![3]).expect("checkpoint"),
+            71,
+        )
+        .expect("a further completed input advances durable progress");
+    assert_eq!(
+        coordinator
+            .status_with_progress_slo(identity, Some(130), false)
+            .expect("running status")
+            .no_durable_progress_slo_breached(),
+        Some(false)
+    );
+}
