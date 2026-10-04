@@ -1,5 +1,3 @@
-use std::fmt::Write;
-
 use sha2::{Digest, Sha256};
 
 use positron_api::maintenance::{
@@ -15,8 +13,9 @@ use positron_domain::{
 };
 use positron_governance::{
     AdministrativeIdempotencyKey, AuthorizedContext, CompatibilityHints, GovernanceAuditEntry,
-    Identity, MaintenanceControlAuditEntry, PresentedCredential, RequestedIntent,
-    maintenance_control_audit_intent, maintenance_window_audit_intent,
+    Identity, MaintenanceControlAuditEntry, MaintenanceRunAuditEntry, PresentedCredential,
+    RequestedIntent, maintenance_control_audit_intent, maintenance_run_audit_intent,
+    maintenance_window_audit_intent,
 };
 use positron_kernel::{
     ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, LifecycleClockState,
@@ -152,6 +151,17 @@ impl ServiceHandle {
                 .map_err(|_| (503, "administration_unavailable"))?,
         )
         .map_err(|_| (503, "administration_unavailable"))?;
+        if let Some(response) = maintenance_run_replay(
+            &catalog,
+            actor.principal_id(),
+            idempotency,
+            task_identity,
+            tenant,
+            signal,
+            shard,
+        )? {
+            return Ok(response);
+        }
         let snapshot = catalog
             .pin()
             .map_err(|_| (503, "administration_unavailable"))?;
@@ -196,8 +206,19 @@ impl ServiceHandle {
         let task = ledger
             .prepare_compaction_task(bucket, task_identity)
             .map_err(|_| (503, "administration_unavailable"))?;
+        let audit = maintenance_run_audit_intent(
+            actor.principal_id(),
+            administrative_key(idempotency)?,
+            task_identity,
+            tenant,
+            signal,
+            shard.value(),
+            task.task().preconditions().resource_generation(),
+            now,
+        )
+        .map_err(|_| (503, "administration_unavailable"))?;
         let submitted = task
-            .submit_and_persist(coordinator, &catalog, now)
+            .submit_and_persist_audited(coordinator, &catalog, now, audit)
             .map_err(|_| (503, "administration_unavailable"))?;
         let status = coordinator
             .status(submitted.identity())
@@ -537,6 +558,61 @@ fn maintenance_control_replay(
     Ok(None)
 }
 
+fn maintenance_run_replay(
+    catalog: &Catalog<'_>,
+    actor: PrincipalId,
+    idempotency: PrincipalId,
+    task: MaintenanceTaskId,
+    tenant: TenantId,
+    signal: SignalKind,
+    shard: VirtualShardId,
+) -> Result<Option<MaintenanceRunResponse>, (u16, &'static str)> {
+    for record in catalog
+        .governance_audit_records()
+        .map_err(|_| (503, "administration_unavailable"))?
+    {
+        let entry = GovernanceAuditEntry::decode(&record)
+            .map_err(|_| (503, "administration_unavailable"))?;
+        let GovernanceAuditEntry::MaintenanceRun(candidate) = entry else {
+            continue;
+        };
+        if candidate.actor() != actor
+            || candidate.idempotency_key().to_bytes() != idempotency.to_bytes()
+        {
+            continue;
+        }
+        if candidate.task() != task
+            || candidate.tenant() != tenant
+            || candidate.signal() != signal
+            || candidate.shard() != shard.value()
+        {
+            return Err((409, "idempotency_conflict"));
+        }
+        return Ok(Some(run_acknowledgement(&candidate)?));
+    }
+    Ok(None)
+}
+
+fn run_acknowledgement(
+    audit: &MaintenanceRunAuditEntry,
+) -> Result<MaintenanceRunResponse, (u16, &'static str)> {
+    let shard =
+        VirtualShardId::new(audit.shard()).map_err(|_| (503, "administration_unavailable"))?;
+    Ok(MaintenanceRunResponse {
+        resource_generation: audit.resource_generation(),
+        task: MaintenanceTaskAcknowledgement {
+            identity: hex(audit.task().to_bytes()),
+            class: "compaction".to_owned(),
+            scope: scope_name(MaintenanceScope::segment(
+                audit.tenant(),
+                audit.signal(),
+                shard,
+            )),
+            submitted_at_unix_seconds: audit.submitted_at_unix_seconds(),
+        },
+    })
+}
+
 fn maintenance_window_replay(
     catalog: &Catalog<'_>,
     actor: PrincipalId,
@@ -795,9 +871,17 @@ const fn hex_value(value: u8) -> Option<u8> {
 fn hex(bytes: [u8; 16]) -> String {
     let mut rendered = String::with_capacity(32);
     for byte in bytes {
-        let _ = write!(rendered, "{byte:02x}");
+        rendered.push(hex_digit(byte >> 4));
+        rendered.push(hex_digit(byte & 0x0f));
     }
     rendered
+}
+
+const fn hex_digit(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        _ => (b'a' + (value - 10)) as char,
+    }
 }
 
 fn scope_name(scope: MaintenanceScope) -> String {
@@ -1362,6 +1446,16 @@ mod tests {
             .map_err(|failure| format!("first run: {failure:?}"))?;
         assert_eq!(first.task.class, "compaction");
         assert_eq!(first.resource_generation, 1);
+        assert!(
+            open_catalog(&initialized)?
+                .governance_audit_records()?
+                .into_iter()
+                .map(|record| positron_governance::GovernanceAuditEntry::decode(&record))
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|entry| entry.action() == "maintenance.run"),
+            "the first durable task submission must atomically leave immutable governance evidence"
+        );
         let replay = services
             .run_maintenance(&administrator, &body)
             .map_err(|failure| format!("replayed run: {failure:?}"))?;

@@ -216,7 +216,7 @@ impl MaintenanceCoordinator {
         ) {
             return Err(MaintenanceFailure::InvalidInput);
         }
-        self.submit_task_and_persist(catalog, task, None, now)
+        self.submit_task_and_persist(catalog, task, None, now, None)
     }
 
     pub(crate) fn submit_retention_publication_and_persist(
@@ -230,7 +230,7 @@ impl MaintenanceCoordinator {
             return Err(MaintenanceFailure::InvalidInput);
         }
         super::retention_publication_frontier(Some(&checkpoint))?;
-        self.submit_task_and_persist(catalog, task, Some(checkpoint), now)
+        self.submit_task_and_persist(catalog, task, Some(checkpoint), now, None)
     }
 
     /// Persists Compaction only with its immutable source and policy proof.
@@ -250,7 +250,28 @@ impl MaintenanceCoordinator {
         {
             return Err(MaintenanceFailure::InvalidInput);
         }
-        self.submit_task_and_persist(catalog, task, Some(binding.checkpoint()?), now)
+        self.submit_task_and_persist(catalog, task, Some(binding.checkpoint()?), now, None)
+    }
+
+    /// Persists a Compaction descriptor jointly with its immutable Run audit
+    /// receipt. A failed Catalog publication leaves neither visible.
+    pub fn submit_compaction_and_persist_audited(
+        &self,
+        catalog: &Catalog<'_>,
+        task: MaintenanceTask,
+        binding: crate::CompactionBinding,
+        now: u64,
+        audit: crate::AuditIntent,
+    ) -> Result<MaintenanceTask, MaintenanceFailure> {
+        if task.class != MaintenanceTaskClass::Compaction
+            || task.scope != binding.scope()
+            || task.inputs.is_empty()
+            || !task.outputs.is_empty()
+            || task.preconditions.resource_generation != 1
+        {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
+        self.submit_task_and_persist(catalog, task, Some(binding.checkpoint()?), now, Some(audit))
     }
 
     /// Persists the immutable binding for one system-scoped Governance Audit
@@ -271,7 +292,7 @@ impl MaintenanceCoordinator {
         {
             return Err(MaintenanceFailure::InvalidInput);
         }
-        self.submit_task_and_persist(catalog, task, Some(binding.checkpoint()?), now)
+        self.submit_task_and_persist(catalog, task, Some(binding.checkpoint()?), now, None)
     }
 
     fn submit_task_and_persist(
@@ -280,6 +301,7 @@ impl MaintenanceCoordinator {
         task: MaintenanceTask,
         checkpoint: Option<MaintenanceCheckpoint>,
         now: u64,
+        audit: Option<crate::AuditIntent>,
     ) -> Result<MaintenanceTask, MaintenanceFailure> {
         let mut state = self
             .state
@@ -318,7 +340,11 @@ impl MaintenanceCoordinator {
             terminal_order: None,
             active_dispatch: None,
         };
-        persist_task_state(catalog, &task_state, removed)?;
+        if let Some(audit) = audit {
+            persist_task_state_audited(catalog, &task_state, removed, audit)?;
+        } else {
+            persist_task_state(catalog, &task_state, removed)?;
+        }
         if let Some(identity) = removed {
             remove_task_and_clear_empty_scope(&mut state, identity)?;
         }
@@ -401,7 +427,7 @@ impl MaintenanceCoordinator {
         }
         task.phase = MaintenanceTaskPhase::Deferred;
         task.pause_until = Some(until);
-        persist_task_state_audited(catalog, task, audit)?;
+        persist_task_state_audited(catalog, task, None, audit)?;
         *state = next;
         Ok(())
     }
@@ -452,7 +478,7 @@ impl MaintenanceCoordinator {
         }
         task.phase = MaintenanceTaskPhase::Queued;
         task.pause_until = None;
-        persist_task_state_audited(catalog, task, audit)?;
+        persist_task_state_audited(catalog, task, None, audit)?;
         *state = next;
         Ok(())
     }

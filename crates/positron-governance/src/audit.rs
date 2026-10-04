@@ -5,9 +5,12 @@ mod schema_checkpoint;
 use std::fmt::{Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use positron_domain::identity::{ExternalTenantAlias, PrincipalId, Scope, TenantId, TenantSlug};
 use positron_domain::lifecycle::TenantLifecycleState;
 use positron_domain::time::UnixNanoseconds;
+use positron_domain::{
+    identity::{ExternalTenantAlias, PrincipalId, Scope, TenantId, TenantSlug},
+    routing::SignalKind,
+};
 use positron_kernel::{
     AuditIntent, GovernanceAuditRecord, MaintenanceTaskClass, MaintenanceTaskId,
 };
@@ -47,6 +50,7 @@ const TENANT_RETENTION_MAGIC: [u8; 8] = *b"POSTRT01";
 const SYSTEM_AUDIT_RETENTION_MAGIC: [u8; 8] = *b"POSAR001";
 const LIFECYCLE_CLOCK_ACCEPTANCE_MAGIC: [u8; 8] = *b"POSLCA01";
 const MAINTENANCE_CONTROL_AUDIT_MAGIC: [u8; 8] = *b"POSMTC01";
+const MAINTENANCE_RUN_AUDIT_MAGIC: [u8; 8] = *b"POSMTR01";
 const MAINTENANCE_WINDOW_AUDIT_MAGIC: [u8; 8] = *b"POSMTW01";
 const DURABLE_OPERATION_AUDIT_MAGIC: [u8; 8] = *b"POSOPA02";
 const DURABLE_OPERATION_AUDIT_MAGIC_V3: [u8; 8] = *b"POSOPA03";
@@ -138,10 +142,97 @@ pub enum GovernanceAuditEntry {
     SystemAuditRetentionUpdate(SystemAuditRetentionUpdateAuditEntry),
     LifecycleClockAcceptance(LifecycleClockAcceptanceAuditEntry),
     MaintenanceControl(MaintenanceControlAuditEntry),
+    MaintenanceRun(MaintenanceRunAuditEntry),
     MaintenanceWindow(MaintenanceWindowAuditEntry),
     DurableOperation(DurableOperationAuditEntry),
     Configuration(ConfigurationAuditEntry),
     TlsMaterialReload(TlsMaterialReloadAuditEntry),
+}
+
+/// Redacted immutable receipt for one server-derived maintenance Run request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaintenanceRunAuditEntry {
+    position: u64,
+    actor: PrincipalId,
+    idempotency_key: AdministrativeIdempotencyKey,
+    task: MaintenanceTaskId,
+    tenant: TenantId,
+    signal: SignalKind,
+    shard: u32,
+    resource_generation: u64,
+    submitted_at_unix_seconds: u64,
+}
+
+impl MaintenanceRunAuditEntry {
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
+    #[must_use]
+    pub const fn actor(&self) -> PrincipalId {
+        self.actor
+    }
+    #[must_use]
+    pub const fn idempotency_key(&self) -> AdministrativeIdempotencyKey {
+        self.idempotency_key
+    }
+    #[must_use]
+    pub const fn task(&self) -> MaintenanceTaskId {
+        self.task
+    }
+    #[must_use]
+    pub const fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+    #[must_use]
+    pub const fn signal(&self) -> SignalKind {
+        self.signal
+    }
+    #[must_use]
+    pub const fn shard(&self) -> u32 {
+        self.shard
+    }
+    #[must_use]
+    pub const fn resource_generation(&self) -> u64 {
+        self.resource_generation
+    }
+    #[must_use]
+    pub const fn submitted_at_unix_seconds(&self) -> u64 {
+        self.submitted_at_unix_seconds
+    }
+}
+
+/// Builds the audit intent atomically paired with the initial immutable task
+/// descriptor. The request identity and server-derived task facts are all
+/// bound before Catalog publication.
+pub fn maintenance_run_audit_intent(
+    actor: PrincipalId,
+    idempotency_key: AdministrativeIdempotencyKey,
+    task: MaintenanceTaskId,
+    tenant: TenantId,
+    signal: SignalKind,
+    shard: u32,
+    resource_generation: u64,
+    submitted_at_unix_seconds: u64,
+) -> Result<AuditIntent, GovernanceIntentFailure> {
+    if shard == 0 || resource_generation == 0 || submitted_at_unix_seconds == 0 {
+        return Err(GovernanceIntentFailure);
+    }
+    let signal = match signal {
+        SignalKind::Logs => 1,
+        SignalKind::Traces => 2,
+    };
+    let mut encoded = Vec::with_capacity(93);
+    encoded.extend_from_slice(&MAINTENANCE_RUN_AUDIT_MAGIC);
+    encoded.extend_from_slice(&actor.to_bytes());
+    encoded.extend_from_slice(&idempotency_key.to_bytes());
+    encoded.extend_from_slice(&task.to_bytes());
+    encoded.extend_from_slice(&tenant.to_bytes());
+    encoded.push(signal);
+    encoded.extend_from_slice(&shard.to_be_bytes());
+    encoded.extend_from_slice(&resource_generation.to_be_bytes());
+    encoded.extend_from_slice(&submitted_at_unix_seconds.to_be_bytes());
+    AuditIntent::new(encoded).map_err(|_| GovernanceIntentFailure)
 }
 
 /// Redacted operator evidence for one atomic Maintenance Window publication.
@@ -1984,6 +2075,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(entry) => entry.position(),
             Self::TlsMaterialReload(entry) => entry.position(),
             Self::MaintenanceControl(entry) => entry.position(),
+            Self::MaintenanceRun(entry) => entry.position(),
             Self::MaintenanceWindow(entry) => entry.position(),
         }
     }
@@ -2010,6 +2102,7 @@ impl GovernanceAuditEntry {
             Self::SystemAuditRetentionUpdate(_) | Self::LifecycleClockAcceptance(_) => None,
             Self::DurableOperation(entry) => entry.applicable_tenant(),
             Self::Configuration(entry) => entry.applicable_tenant(),
+            Self::MaintenanceRun(entry) => Some(entry.tenant()),
             Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceWindow(_) => None,
@@ -2049,6 +2142,7 @@ impl GovernanceAuditEntry {
                 }
             },
             Self::MaintenanceWindow(_) => "maintenance.window",
+            Self::MaintenanceRun(_) => "maintenance.run",
         }
     }
 
@@ -2084,7 +2178,9 @@ impl GovernanceAuditEntry {
                 | ConfigurationAuditOutcome::PendingRestart => "succeeded",
             },
             Self::TlsMaterialReload(entry) => entry.outcome_label(),
-            Self::MaintenanceControl(_) | Self::MaintenanceWindow(_) => "succeeded",
+            Self::MaintenanceControl(_) | Self::MaintenanceRun(_) | Self::MaintenanceWindow(_) => {
+                "succeeded"
+            },
         }
     }
 
@@ -2110,6 +2206,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2136,6 +2233,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2162,6 +2260,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2188,6 +2287,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2214,6 +2314,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2240,6 +2341,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2266,6 +2368,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2294,6 +2397,7 @@ impl GovernanceAuditEntry {
             Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2320,6 +2424,7 @@ impl GovernanceAuditEntry {
             | Self::Configuration(_)
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }

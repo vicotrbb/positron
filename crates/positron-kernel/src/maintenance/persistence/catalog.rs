@@ -152,9 +152,10 @@ pub(super) fn persist_task_state(
 pub(super) fn persist_task_state_audited(
     catalog: &Catalog<'_>,
     task: &TaskState,
+    removed: Option<MaintenanceTaskId>,
     audit: AuditIntent,
 ) -> Result<(), MaintenanceFailure> {
-    persist_task_state_inner(catalog, task, None, None, Some(audit))
+    persist_task_state_inner(catalog, task, removed, None, Some(audit))
 }
 
 pub(super) fn persist_task_state_admitted(

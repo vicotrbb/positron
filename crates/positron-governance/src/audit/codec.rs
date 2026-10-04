@@ -87,6 +87,44 @@ impl GovernanceAuditEntry {
                 pause_until_unix_seconds,
             }));
         }
+        if intent.starts_with(&MAINTENANCE_RUN_AUDIT_MAGIC) {
+            let mut cursor = Cursor::new(intent);
+            if cursor.take_array::<8>()? != MAINTENANCE_RUN_AUDIT_MAGIC {
+                return Err(IdentityFailure);
+            }
+            let actor =
+                PrincipalId::from_bytes(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let idempotency_key = AdministrativeIdempotencyKey::new(cursor.take_array()?)
+                .map_err(|_| IdentityFailure)?;
+            let task = MaintenanceTaskId::new(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let tenant = TenantId::from_bytes(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let signal = match cursor.take_u8()? {
+                1 => SignalKind::Logs,
+                2 => SignalKind::Traces,
+                _ => return Err(IdentityFailure),
+            };
+            let shard = u32::from_be_bytes(cursor.take_array()?);
+            let resource_generation = cursor.take_u64()?;
+            let submitted_at_unix_seconds = cursor.take_u64()?;
+            if shard == 0
+                || resource_generation == 0
+                || submitted_at_unix_seconds == 0
+                || !cursor.is_empty()
+            {
+                return Err(IdentityFailure);
+            }
+            return Ok(Self::MaintenanceRun(MaintenanceRunAuditEntry {
+                position,
+                actor,
+                idempotency_key,
+                task,
+                tenant,
+                signal,
+                shard,
+                resource_generation,
+                submitted_at_unix_seconds,
+            }));
+        }
         if intent.starts_with(&TLS_MATERIAL_RELOAD_MAGIC) {
             return TlsMaterialReloadAuditRequest::decode(position, transaction_id, intent)
                 .map(Self::TlsMaterialReload);

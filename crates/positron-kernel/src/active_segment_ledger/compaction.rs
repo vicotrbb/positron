@@ -45,6 +45,26 @@ impl PreparedCompactionTask {
             .submit_compaction_and_persist(catalog, self.task.clone(), self.binding, submitted_at)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))
     }
+
+    /// Publishes the prepared binding and its operator audit receipt in the
+    /// same Catalog transaction before the task becomes visible.
+    pub fn submit_and_persist_audited(
+        self,
+        coordinator: &crate::MaintenanceCoordinator,
+        catalog: &crate::Catalog<'_>,
+        submitted_at: u64,
+        audit: crate::AuditIntent,
+    ) -> Result<crate::MaintenanceTask, LedgerFailure> {
+        coordinator
+            .submit_compaction_and_persist_audited(
+                catalog,
+                self.task.clone(),
+                self.binding,
+                submitted_at,
+                audit,
+            )
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))
+    }
 }
 
 impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
