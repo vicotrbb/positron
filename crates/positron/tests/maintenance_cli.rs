@@ -79,19 +79,19 @@ fn maintenance_controls_forward_bounded_requests_and_report_canonical_tasks()
                 format!(
                     r#"{{"class":"compaction","tenant":"{TENANT}","signal":"logs","shard":7,"idempotency_key":"{IDEMPOTENCY_KEY}"}}"#
                 ),
-                task_response("queued"),
+                run_response(),
             ),
             (
                 "/v1/maintenance:pause",
                 format!(
                     r#"{{"identity":"{TASK_ID}","resource_generation":4,"duration_seconds":3600,"idempotency_key":"{IDEMPOTENCY_KEY}"}}"#
                 ),
-                control_response("deferred", 13),
+                control_response("pause", 13),
             ),
             (
                 "/v1/maintenance:resume",
                 format!(r#"{{"identity":"{TASK_ID}","idempotency_key":"{IDEMPOTENCY_KEY}"}}"#),
-                control_response("queued", 14),
+                control_response("resume", 14),
             ),
         ] {
             let (mut stream, _) = listener.accept()?;
@@ -135,7 +135,7 @@ fn maintenance_controls_forward_bounded_requests_and_report_canonical_tasks()
         ],
     )?;
     assert!(run.status.success(), "{run:?}");
-    assert!(stdout(&run)?.contains("phase=queued"));
+    assert!(stdout(&run)?.contains("resource_generation=4"));
 
     let pause = run_control(
         &endpoint,
@@ -153,7 +153,7 @@ fn maintenance_controls_forward_bounded_requests_and_report_canonical_tasks()
     )?;
     assert!(pause.status.success(), "{pause:?}");
     let pause_stdout = stdout(&pause)?;
-    assert!(pause_stdout.contains("phase=deferred"));
+    assert!(pause_stdout.contains("action=pause resource_generation=4"));
     assert!(pause_stdout.contains("audit_position=13"));
 
     let resume = run_control(
@@ -168,7 +168,7 @@ fn maintenance_controls_forward_bounded_requests_and_report_canonical_tasks()
     )?;
     assert!(resume.status.success(), "{resume:?}");
     let resume_stdout = stdout(&resume)?;
-    assert!(resume_stdout.contains("phase=queued"));
+    assert!(resume_stdout.contains("action=resume resource_generation=none"));
     assert!(resume_stdout.contains("audit_position=14"));
     server.join().map_err(|_| "server panicked")??;
     Ok(())
@@ -363,10 +363,30 @@ fn task_response(phase: &str) -> String {
     format!(r#"{{"task":{}}}"#, task(phase))
 }
 
-fn control_response(phase: &str, audit_position: u64) -> String {
+fn run_response() -> String {
     format!(
-        r#"{{"task":{},"audit_position":{audit_position}}}"#,
-        task(phase)
+        r#"{{"task":{},"resource_generation":4}}"#,
+        acknowledgement()
+    )
+}
+
+fn control_response(action: &str, audit_position: u64) -> String {
+    match action {
+        "pause" => format!(
+            r#"{{"task":{},"action":"pause","resource_generation":4,"pause_until_unix_seconds":3723,"audit_position":{audit_position}}}"#,
+            acknowledgement()
+        ),
+        "resume" => format!(
+            r#"{{"task":{},"action":"resume","audit_position":{audit_position}}}"#,
+            acknowledgement()
+        ),
+        _ => String::new(),
+    }
+}
+
+fn acknowledgement() -> String {
+    format!(
+        r#"{{"identity":"{TASK_ID}","class":"compaction","scope":"tenant:{TENANT}","submitted_at_unix_seconds":123}}"#
     )
 }
 

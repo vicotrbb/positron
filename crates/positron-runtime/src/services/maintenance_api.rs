@@ -6,8 +6,8 @@ use positron_api::maintenance::{
     MaintenanceControlResponse, MaintenanceExplainRequest, MaintenanceExplainResponse,
     MaintenancePauseRequest, MaintenanceResourceReservations, MaintenanceResumeRequest,
     MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceStatusRequest,
-    MaintenanceStatusResponse, MaintenanceTaskStatus, MaintenanceWindowRequest,
-    MaintenanceWindowResponse,
+    MaintenanceStatusResponse, MaintenanceTaskAcknowledgement, MaintenanceTaskStatus,
+    MaintenanceWindowRequest, MaintenanceWindowResponse,
 };
 use positron_domain::{
     identity::{PrincipalId, TenantId},
@@ -15,8 +15,8 @@ use positron_domain::{
 };
 use positron_governance::{
     AdministrativeIdempotencyKey, AuthorizedContext, CompatibilityHints, GovernanceAuditEntry,
-    Identity, PresentedCredential, RequestedIntent, maintenance_control_audit_intent,
-    maintenance_window_audit_intent,
+    Identity, MaintenanceControlAuditEntry, PresentedCredential, RequestedIntent,
+    maintenance_control_audit_intent, maintenance_window_audit_intent,
 };
 use positron_kernel::{
     ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, LifecycleClockState,
@@ -173,12 +173,8 @@ impl ServiceHandle {
                     && status.task().scope() == expected_scope =>
             {
                 return Ok(MaintenanceRunResponse {
-                    task: task_status_for_coordinator(
-                        self.instance.maintenance_coordinator(),
-                        status,
-                        Some(now),
-                    )
-                    .map_err(|_| (503, "administration_unavailable"))?,
+                    resource_generation: status.task().preconditions().resource_generation(),
+                    task: task_acknowledgement(status),
                 });
             },
             Ok(_) => return Err((409, "idempotency_conflict")),
@@ -210,12 +206,8 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceRunResponse {
-            task: task_status_for_coordinator(
-                self.instance.maintenance_coordinator(),
-                status,
-                Some(now),
-            )
-            .map_err(|_| (503, "administration_unavailable"))?,
+            resource_generation: status.task().preconditions().resource_generation(),
+            task: task_acknowledgement(status),
         })
     }
 
@@ -235,7 +227,7 @@ impl ServiceHandle {
             .map_err(|_| (400, "invalid_request"))?;
         let catalog = self.open_maintenance_catalog()?;
         let now = self.maintenance_status_now()?;
-        if let Some(audit_position) = maintenance_control_replay(
+        if let Some(audit) = maintenance_control_replay(
             &catalog,
             actor.principal_id(),
             idempotency,
@@ -249,15 +241,7 @@ impl ServiceHandle {
                 .maintenance_coordinator()
                 .status(identity)
                 .map_err(control_failure)?;
-            return Ok(MaintenanceControlResponse {
-                task: task_status_for_coordinator(
-                    self.instance.maintenance_coordinator(),
-                    status,
-                    None,
-                )
-                .map_err(|_| (503, "administration_unavailable"))?,
-                audit_position,
-            });
+            return Ok(control_acknowledgement(status, &audit));
         }
         let until = now
             .checked_add(request.duration_seconds())
@@ -284,19 +268,20 @@ impl ServiceHandle {
             )
             .map_err(control_failure)?;
         let status = coordinator.status(identity).map_err(control_failure)?;
-        let audit_position = latest_control_audit_position(&catalog)?;
+        let audit = maintenance_control_replay(
+            &catalog,
+            actor.principal_id(),
+            idempotency,
+            identity,
+            true,
+            request.resource_generation(),
+            request.duration_seconds(),
+        )?
+        .ok_or((503, "administration_unavailable"))?;
         drop(catalog);
         drop(_catalog_operation);
         self.notify_maintenance_worker();
-        Ok(MaintenanceControlResponse {
-            task: task_status_for_coordinator(
-                self.instance.maintenance_coordinator(),
-                status,
-                None,
-            )
-            .map_err(|_| (503, "administration_unavailable"))?,
-            audit_position,
-        })
+        Ok(control_acknowledgement(status, &audit))
     }
 
     pub(crate) fn resume_maintenance(
@@ -314,7 +299,7 @@ impl ServiceHandle {
         let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
             .map_err(|_| (400, "invalid_request"))?;
         let catalog = self.open_maintenance_catalog()?;
-        if let Some(audit_position) = maintenance_control_replay(
+        if let Some(audit) = maintenance_control_replay(
             &catalog,
             actor.principal_id(),
             idempotency,
@@ -328,15 +313,7 @@ impl ServiceHandle {
                 .maintenance_coordinator()
                 .status(identity)
                 .map_err(control_failure)?;
-            return Ok(MaintenanceControlResponse {
-                task: task_status_for_coordinator(
-                    self.instance.maintenance_coordinator(),
-                    status,
-                    None,
-                )
-                .map_err(|_| (503, "administration_unavailable"))?,
-                audit_position,
-            });
+            return Ok(control_acknowledgement(status, &audit));
         }
         let audit = maintenance_control_audit_intent(
             actor.principal_id(),
@@ -353,19 +330,20 @@ impl ServiceHandle {
             .resume_and_persist_audited(&catalog, identity, audit)
             .map_err(control_failure)?;
         let status = coordinator.status(identity).map_err(control_failure)?;
-        let audit_position = latest_control_audit_position(&catalog)?;
+        let audit = maintenance_control_replay(
+            &catalog,
+            actor.principal_id(),
+            idempotency,
+            identity,
+            false,
+            0,
+            0,
+        )?
+        .ok_or((503, "administration_unavailable"))?;
         drop(catalog);
         drop(_catalog_operation);
         self.notify_maintenance_worker();
-        Ok(MaintenanceControlResponse {
-            task: task_status_for_coordinator(
-                self.instance.maintenance_coordinator(),
-                status,
-                None,
-            )
-            .map_err(|_| (503, "administration_unavailable"))?,
-            audit_position,
-        })
+        Ok(control_acknowledgement(status, &audit))
     }
 
     /// Authenticates before decoding a bounded whole-coordinator Maintenance
@@ -427,7 +405,7 @@ impl ServiceHandle {
                 audit,
             )
             .map_err(control_failure)?;
-        let audit_position = latest_control_audit_position(&catalog)?;
+        let audit_position = latest_governance_audit_position(&catalog)?;
         drop(catalog);
         drop(_catalog_operation);
         self.notify_maintenance_worker();
@@ -531,7 +509,7 @@ fn maintenance_control_replay(
     pause: bool,
     resource_generation: u64,
     duration_seconds: u64,
-) -> Result<Option<u64>, (u16, &'static str)> {
+) -> Result<Option<MaintenanceControlAuditEntry>, (u16, &'static str)> {
     let records = catalog
         .governance_audit_records()
         .map_err(|_| (503, "administration_unavailable"))?;
@@ -553,7 +531,7 @@ fn maintenance_control_replay(
         {
             return Err((409, "idempotency_conflict"));
         }
-        return Ok(Some(candidate.position()));
+        return Ok(Some(candidate));
     }
     Ok(None)
 }
@@ -632,7 +610,17 @@ fn window_class_names(deferred: &[MaintenanceTaskClass]) -> Vec<String> {
     names
 }
 
-fn latest_control_audit_position(catalog: &Catalog<'_>) -> Result<u64, (u16, &'static str)> {
+fn control_failure(failure: MaintenanceFailure) -> (u16, &'static str) {
+    match failure {
+        MaintenanceFailure::UnknownTask => (404, "task_unavailable"),
+        MaintenanceFailure::PreconditionFailed
+        | MaintenanceFailure::InvalidTransition
+        | MaintenanceFailure::InvalidInput => (409, "precondition_failed"),
+        _ => (503, "administration_unavailable"),
+    }
+}
+
+fn latest_governance_audit_position(catalog: &Catalog<'_>) -> Result<u64, (u16, &'static str)> {
     catalog
         .governance_audit_records()
         .map_err(|_| (503, "administration_unavailable"))?
@@ -641,13 +629,32 @@ fn latest_control_audit_position(catalog: &Catalog<'_>) -> Result<u64, (u16, &'s
         .ok_or((503, "administration_unavailable"))
 }
 
-fn control_failure(failure: MaintenanceFailure) -> (u16, &'static str) {
-    match failure {
-        MaintenanceFailure::UnknownTask => (404, "task_unavailable"),
-        MaintenanceFailure::PreconditionFailed
-        | MaintenanceFailure::InvalidTransition
-        | MaintenanceFailure::InvalidInput => (409, "precondition_failed"),
-        _ => (503, "administration_unavailable"),
+fn task_acknowledgement(
+    status: positron_kernel::MaintenanceTaskStatus,
+) -> MaintenanceTaskAcknowledgement {
+    let task = status.task();
+    MaintenanceTaskAcknowledgement {
+        identity: hex(task.identity().to_bytes()),
+        class: class_name(task.class()).to_owned(),
+        scope: scope_name(task.scope()),
+        submitted_at_unix_seconds: status.submitted_at(),
+    }
+}
+
+fn control_acknowledgement(
+    status: positron_kernel::MaintenanceTaskStatus,
+    audit: &MaintenanceControlAuditEntry,
+) -> MaintenanceControlResponse {
+    MaintenanceControlResponse {
+        task: task_acknowledgement(status),
+        action: if audit.is_pause() {
+            "pause".to_owned()
+        } else {
+            "resume".to_owned()
+        },
+        resource_generation: audit.is_pause().then_some(audit.resource_generation()),
+        pause_until_unix_seconds: audit.is_pause().then_some(audit.pause_until_unix_seconds()),
+        audit_position: audit.position(),
     }
 }
 
@@ -1176,12 +1183,25 @@ mod tests {
             .run_maintenance(&administrator, &body)
             .map_err(|failure| format!("first run: {failure:?}"))?;
         assert_eq!(first.task.class, "compaction");
-        assert_eq!(first.task.phase, "queued");
+        assert_eq!(first.resource_generation, 1);
         let replay = services
             .run_maintenance(&administrator, &body)
             .map_err(|failure| format!("replayed run: {failure:?}"))?;
         assert_eq!(replay, first, "retry attaches to the durable task");
         let identity = super::task_identity(&first.task.identity).ok_or("task identity")?;
+        let catalog = open_catalog(&initialized)?;
+        initialized
+            .maintenance_coordinator()
+            .cancel_and_persist(&catalog, identity)
+            .map_err(|failure| format!("terminal successor: {failure:?}"))?;
+        drop(catalog);
+        assert_eq!(
+            services
+                .run_maintenance(&administrator, &body)
+                .map_err(|failure| format!("terminal replay: {failure:?}"))?,
+            first,
+            "a terminal successor cannot change the durable run acknowledgement"
+        );
         drop(services);
         drop(initialized);
 
@@ -1193,8 +1213,8 @@ mod tests {
                 .status(identity)
                 .map_err(|failure| format!("restored task: {failure:?}"))?
                 .phase(),
-            MaintenanceTaskPhase::Queued,
-            "the acknowledged run remains durably queued after reopen"
+            MaintenanceTaskPhase::Cancelled,
+            "the terminal successor remains durable after reopen"
         );
         Ok(())
     }
@@ -1311,8 +1331,9 @@ mod tests {
         let paused = services
             .pause_maintenance(&administrator, &pause.encode()?)
             .map_err(|failure| format!("pause task: {failure:?}"))?;
-        assert_eq!(paused.task.phase, "deferred");
-        assert!(paused.task.pause_until_unix_seconds.is_some());
+        assert_eq!(paused.action, "pause");
+        assert_eq!(paused.resource_generation, Some(1));
+        assert!(paused.pause_until_unix_seconds.is_some());
         assert_ne!(paused.audit_position, 0);
         let status = services
             .maintenance_status(&administrator, br"{}")
@@ -1399,11 +1420,12 @@ mod tests {
         let resumed = services
             .resume_maintenance(&administrator, &resume.encode()?)
             .map_err(|failure| format!("resume task: {failure:?}"))?;
-        assert_eq!(resumed.task.phase, "queued");
-        assert_eq!(resumed.task.pause_until_unix_seconds, None);
+        assert_eq!(resumed.action, "resume");
+        assert_eq!(resumed.resource_generation, None);
+        assert_eq!(resumed.pause_until_unix_seconds, None);
         assert_eq!(
-            resumed.task.backlog_age_seconds, None,
-            "an acknowledged control result omits live inspection age so its exact replay is stable"
+            resumed.task, paused.task,
+            "both controls identify the same immutable task descriptor"
         );
         assert_eq!(
             services
@@ -1411,6 +1433,13 @@ mod tests {
                 .map_err(|failure| format!("replay resume: {failure:?}"))?,
             resumed,
             "an exact operator retry replays its acknowledged durable resume"
+        );
+        assert_eq!(
+            services
+                .pause_maintenance(&administrator, &pause.encode()?)
+                .map_err(|failure| format!("pause replay after successor: {failure:?}"))?,
+            paused,
+            "a later resume cannot change the acknowledged pause receipt"
         );
         Ok(())
     }

@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use positron_api::maintenance::{
     MaintenanceControlResponse, MaintenanceExplainRequest, MaintenancePauseRequest,
     MaintenanceResumeRequest, MaintenanceRunRequest, MaintenanceServiceClient,
-    MaintenanceServiceClientFailure, MaintenanceStatusRequest, MaintenanceTaskStatus,
-    MaintenanceTransport, MaintenanceWindowRequest,
+    MaintenanceServiceClientFailure, MaintenanceStatusRequest, MaintenanceTaskAcknowledgement,
+    MaintenanceTaskStatus, MaintenanceTransport, MaintenanceWindowRequest,
 };
 use zeroize::Zeroizing;
 
@@ -67,7 +67,8 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
         },
         Command::Run(request) => {
             let response = client.run(bearer, &request).map_err(client_failure)?;
-            print_task(&response.task);
+            print_acknowledgement(&response.task);
+            println!("resource_generation={}", response.resource_generation);
         },
         Command::Pause(request) => {
             let response = client.pause(bearer, &request).map_err(client_failure)?;
@@ -92,8 +93,25 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
 }
 
 fn print_control(response: &MaintenanceControlResponse) {
-    print_task(&response.task);
-    println!("audit_position={}", response.audit_position);
+    print_acknowledgement(&response.task);
+    println!(
+        "action={} resource_generation={} pause_until_unix_seconds={} audit_position={}",
+        response.action,
+        response
+            .resource_generation
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        response
+            .pause_until_unix_seconds
+            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        response.audit_position,
+    );
+}
+
+fn print_acknowledgement(task: &MaintenanceTaskAcknowledgement) {
+    println!(
+        "identity={} class={} scope={} submitted_at_unix_seconds={}",
+        task.identity, task.class, task.scope, task.submitted_at_unix_seconds,
+    );
 }
 
 fn print_task(task: &MaintenanceTaskStatus) {

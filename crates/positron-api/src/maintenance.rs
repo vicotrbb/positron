@@ -518,15 +518,43 @@ pub struct MaintenanceExplainResponse {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct MaintenanceTaskAcknowledgement {
+    pub identity: String,
+    pub class: String,
+    pub scope: String,
+    pub submitted_at_unix_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceRunResponse {
-    pub task: MaintenanceTaskStatus,
+    pub task: MaintenanceTaskAcknowledgement,
+    pub resource_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceControlResponse {
-    pub task: MaintenanceTaskStatus,
+    pub task: MaintenanceTaskAcknowledgement,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_until_unix_seconds: Option<u64>,
     pub audit_position: u64,
+}
+
+impl MaintenanceTaskAcknowledgement {
+    fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        (valid_task_identity(&self.identity)
+            && !self.class.is_empty()
+            && self.class.len() <= 64
+            && !self.scope.is_empty()
+            && self.scope.len() <= 128
+            && self.submitted_at_unix_seconds != 0)
+            .then_some(())
+            .ok_or(MaintenanceWireFailure)
+    }
 }
 
 impl MaintenanceControlResponse {
@@ -538,10 +566,18 @@ impl MaintenanceControlResponse {
         if response.audit_position == 0 {
             return Err(MaintenanceWireFailure);
         }
-        MaintenanceRunResponse {
-            task: response.task.clone(),
+        response.task.validate()?;
+        if !matches!(response.action.as_str(), "pause" | "resume")
+            || response.audit_position == 0
+            || (response.action == "pause"
+                && (response.resource_generation.is_none()
+                    || response.pause_until_unix_seconds.is_none()))
+            || (response.action == "resume"
+                && (response.resource_generation.is_some()
+                    || response.pause_until_unix_seconds.is_some()))
+        {
+            return Err(MaintenanceWireFailure);
         }
-        .encode()?;
         Ok(response)
     }
 
@@ -552,6 +588,25 @@ impl MaintenanceControlResponse {
 }
 
 impl MaintenanceRunResponse {
+    pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        let response: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
+        response.task.validate()?;
+        if response.resource_generation == 0 {
+            return Err(MaintenanceWireFailure);
+        }
+        Ok(response)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
+        Self::decode(&serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)?)?;
+        serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)
+    }
+}
+
+impl MaintenanceExplainResponse {
     pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
         if body.len() > MAX_RESPONSE_BYTES {
             return Err(MaintenanceWireFailure);
@@ -571,25 +626,6 @@ impl MaintenanceRunResponse {
             )),
         }
         .validate()?;
-        Ok(response)
-    }
-
-    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
-        Self::decode(&serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)?)?;
-        serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)
-    }
-}
-
-impl MaintenanceExplainResponse {
-    pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
-        if body.len() > MAX_RESPONSE_BYTES {
-            return Err(MaintenanceWireFailure);
-        }
-        let response: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
-        MaintenanceRunResponse {
-            task: response.task.clone(),
-        }
-        .encode()?;
         Ok(response)
     }
 

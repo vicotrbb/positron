@@ -445,8 +445,18 @@ message MaintenanceRunRequest {
   string idempotency_key = 5;
 }
 
+// Immutable acknowledgement of one durable task descriptor. Live phase,
+// blocking, reservation and progress facts are exposed only by Status/Explain.
+message MaintenanceTaskAcknowledgement {
+  string identity = 1;
+  string task_class = 2;
+  string scope = 3;
+  uint64 submitted_at_unix_seconds = 4;
+}
+
 message MaintenanceRunResponse {
-  MaintenanceTaskStatus task = 1;
+  MaintenanceTaskAcknowledgement task = 1;
+  uint64 resource_generation = 2;
 }
 
 // Defers only one existing optional task for a bounded server-derived
@@ -466,8 +476,11 @@ message MaintenanceResumeRequest {
 }
 
 message MaintenanceControlResponse {
-  MaintenanceTaskStatus task = 1;
+  MaintenanceTaskAcknowledgement task = 1;
   uint64 audit_position = 2;
+  string action = 3;
+  optional uint64 resource_generation = 4;
+  optional uint64 pause_until_unix_seconds = 5;
 }
 
 // Defers a closed set of optional maintenance classes until a duration derived

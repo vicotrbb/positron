@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "1c28e525fda176f7a375bb6323d9e851c8e96c0c59ff9690ab801e15dc53241d"
+    "x-positron-schema-digest": "461a3f07f2b96380f09c683689b405adfab44d9950380ec80d580dbe09d02bc1"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1331,6 +1331,16 @@
           "terminal_failure_class": {"type": "string", "enum": ["identity_mismatch", "unclassified"]}
         }
       },
+      "MaintenanceTaskAcknowledgement": {
+        "type": "object", "additionalProperties": false,
+        "required": ["identity", "class", "scope", "submitted_at_unix_seconds"],
+        "properties": {
+          "identity": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+          "class": {"type": "string", "minLength": 1, "maxLength": 64},
+          "scope": {"type": "string", "minLength": 1, "maxLength": 128},
+          "submitted_at_unix_seconds": {"type": "integer", "minimum": 1}
+        }
+      },
       "MaintenanceResourceReservations": {
         "type": "object", "additionalProperties": false,
         "required": ["memory_bytes", "queue_slots", "task_slots", "buffer_cache_bytes", "batch_items", "lease_slots", "retry_slots", "io_permits", "cpu_work_units", "file_descriptors", "disk_headroom_bytes"],
@@ -1385,8 +1395,8 @@
       },
       "MaintenanceRunResponse": {
         "type": "object", "additionalProperties": false,
-        "required": ["task"],
-        "properties": {"task": {"$ref": "#/components/schemas/MaintenanceTaskStatus"}}
+        "required": ["task", "resource_generation"],
+        "properties": {"task": {"$ref": "#/components/schemas/MaintenanceTaskAcknowledgement"}, "resource_generation": {"type": "integer", "minimum": 1}}
       },
       "MaintenancePauseRequest": {
         "type": "object", "additionalProperties": false,
@@ -1408,10 +1418,13 @@
       },
       "MaintenanceControlResponse": {
         "type": "object", "additionalProperties": false,
-        "required": ["task", "audit_position"],
+        "required": ["task", "audit_position", "action"],
         "properties": {
-          "task": {"$ref": "#/components/schemas/MaintenanceTaskStatus"},
-          "audit_position": {"type": "integer", "minimum": 1}
+          "task": {"$ref": "#/components/schemas/MaintenanceTaskAcknowledgement"},
+          "audit_position": {"type": "integer", "minimum": 1},
+          "action": {"type": "string", "enum": ["pause", "resume"]},
+          "resource_generation": {"type": "integer", "minimum": 1},
+          "pause_until_unix_seconds": {"type": "integer", "minimum": 1}
         }
       },
       "MaintenanceWindowRequest": {

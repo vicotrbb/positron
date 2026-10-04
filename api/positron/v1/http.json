@@ -1,5 +1,5 @@
 {
-  "schema_digest": "1c28e525fda176f7a375bb6323d9e851c8e96c0c59ff9690ab801e15dc53241d",
+  "schema_digest": "461a3f07f2b96380f09c683689b405adfab44d9950380ec80d580dbe09d02bc1",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -677,7 +677,8 @@
         {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":5,"deprecated":false}
       ],
       "response_fields": [
-        {"proto":"task","json":"task","type":"MaintenanceTaskStatus","number":1,"deprecated":false}
+        {"proto":"task","json":"task","type":"MaintenanceTaskAcknowledgement","number":1,"deprecated":false},
+        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":2,"deprecated":false}
       ],
       "responses":{"200":"MaintenanceRunResponse","400":"invalid_request","401":"authentication_rejected","404":"source_unavailable","409":"idempotency_conflict","503":"administration_unavailable"}
     },
@@ -698,8 +699,11 @@
         {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":4,"deprecated":false}
       ],
       "response_fields": [
-        {"proto":"task","json":"task","type":"MaintenanceTaskStatus","number":1,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":2,"deprecated":false}
+        {"proto":"task","json":"task","type":"MaintenanceTaskAcknowledgement","number":1,"deprecated":false},
+        {"proto":"audit_position","json":"audit_position","type":"uint64","number":2,"deprecated":false},
+        {"proto":"action","json":"action","type":"string","number":3,"deprecated":false},
+        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":4,"deprecated":false,"optional":true},
+        {"proto":"pause_until_unix_seconds","json":"pause_until_unix_seconds","type":"uint64","number":5,"deprecated":false,"optional":true}
       ],
       "responses":{"200":"MaintenanceControlResponse","400":"invalid_request","401":"authentication_rejected","404":"task_unavailable","409":["precondition_failed","idempotency_conflict"],"503":"administration_unavailable"}
     },
@@ -718,8 +722,11 @@
         {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":2,"deprecated":false}
       ],
       "response_fields": [
-        {"proto":"task","json":"task","type":"MaintenanceTaskStatus","number":1,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":2,"deprecated":false}
+        {"proto":"task","json":"task","type":"MaintenanceTaskAcknowledgement","number":1,"deprecated":false},
+        {"proto":"audit_position","json":"audit_position","type":"uint64","number":2,"deprecated":false},
+        {"proto":"action","json":"action","type":"string","number":3,"deprecated":false},
+        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":4,"deprecated":false,"optional":true},
+        {"proto":"pause_until_unix_seconds","json":"pause_until_unix_seconds","type":"uint64","number":5,"deprecated":false,"optional":true}
       ],
       "responses":{"200":"MaintenanceControlResponse","400":"invalid_request","401":"authentication_rejected","404":"task_unavailable","409":["precondition_failed","idempotency_conflict"],"503":"administration_unavailable"}
     },

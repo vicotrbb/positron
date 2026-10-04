@@ -2,8 +2,8 @@ use positron_api::maintenance::{
     MAX_PAUSE_DURATION_SECONDS, MAX_TASKS, MaintenancePauseRequest,
     MaintenanceResourceReservations, MaintenanceResumeRequest, MaintenanceRunRequest,
     MaintenanceRunResponse, MaintenanceServiceClient, MaintenanceStatusRequest,
-    MaintenanceStatusResponse, MaintenanceTaskStatus, MaintenanceTransport,
-    MaintenanceWindowRequest, MaintenanceWindowResponse,
+    MaintenanceStatusResponse, MaintenanceTaskAcknowledgement, MaintenanceTaskStatus,
+    MaintenanceTransport, MaintenanceWindowRequest, MaintenanceWindowResponse,
 };
 
 #[test]
@@ -335,7 +335,7 @@ fn maintenance_run_client_uses_the_canonical_explicit_scope_route()
         assert!(request.starts_with("POST /v1/maintenance:run HTTP/1.1\r\n"));
         assert!(request.contains(r#""class":"compaction""#));
         assert!(request.contains(r#""signal":"logs""#));
-        let body = r#"{"task":{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","phase":"queued","submitted_at_unix_seconds":1,"cancellation_requested":false}}"#;
+        let body = r#"{"task":{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","submitted_at_unix_seconds":1},"resource_generation":1}"#;
         stream.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -358,30 +358,13 @@ fn maintenance_run_client_uses_the_canonical_explicit_scope_route()
             ),
         )?,
         MaintenanceRunResponse {
-            task: MaintenanceTaskStatus {
+            task: MaintenanceTaskAcknowledgement {
                 identity: "00000000000000000000000000000001".to_owned(),
                 class: "compaction".to_owned(),
                 scope: "segment:00000000-0000-0000-0000-000000000001:logs:1".to_owned(),
-                phase: "queued".to_owned(),
                 submitted_at_unix_seconds: 1,
-                checkpoint_sequence: None,
-                pause_until_unix_seconds: None,
-                cancellation_requested: false,
-                resource_generation: None,
-                reservations: None,
-                expected_foreground_impact: None,
-                blocked_precondition: None,
-                maintenance_window_until_unix_seconds: None,
-                safe_actions: Vec::new(),
-                backlog_age_seconds: None,
-                conflict_owner: None,
-                checkpoint_completed_inputs: None,
-                input_object_count: 0,
-                output_object_count: 0,
-                estimated_output_object_amplification_milli: None,
-                terminal_outcome: None,
-                terminal_failure_class: None,
             },
+            resource_generation: 1,
         }
     );
     server.join().map_err(|_| "server panicked")??;
@@ -401,12 +384,12 @@ fn maintenance_control_client_uses_the_canonical_bounded_routes()
             (
                 "/v1/maintenance:pause",
                 "\"resource_generation\":1",
-                r#"{"task":{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","phase":"deferred","submitted_at_unix_seconds":1,"pause_until_unix_seconds":61,"cancellation_requested":false},"audit_position":3}"#,
+                r#"{"task":{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","submitted_at_unix_seconds":1},"audit_position":3,"action":"pause","resource_generation":1,"pause_until_unix_seconds":61}"#,
             ),
             (
                 "/v1/maintenance:resume",
                 "\"idempotency_key\":\"00000000-0000-0000-0000-000000000002\"",
-                r#"{"task":{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","phase":"queued","submitted_at_unix_seconds":1,"cancellation_requested":false},"audit_position":4}"#,
+                r#"{"task":{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","submitted_at_unix_seconds":1},"audit_position":4,"action":"resume"}"#,
             ),
         ] {
             let (mut stream, _) = listener.accept()?;
@@ -436,13 +419,15 @@ fn maintenance_control_client_uses_the_canonical_bounded_routes()
             "00000000-0000-0000-0000-000000000002".to_owned(),
         ),
     )?;
-    assert_eq!(paused.task.phase, "deferred");
+    assert_eq!(paused.action, "pause");
+    assert_eq!(paused.resource_generation, Some(1));
     assert_eq!(paused.audit_position, 3);
     let resumed = client.resume(
         "system-administrator",
         &MaintenanceResumeRequest::new(identity, "00000000-0000-0000-0000-000000000002".to_owned()),
     )?;
-    assert_eq!(resumed.task.phase, "queued");
+    assert_eq!(resumed.action, "resume");
+    assert_eq!(resumed.resource_generation, None);
     assert_eq!(resumed.audit_position, 4);
     server.join().map_err(|_| "server panicked")??;
     Ok(())
