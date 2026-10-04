@@ -23,7 +23,7 @@ use positron_runtime::{
 };
 
 #[test]
-fn native_listener_reload_updates_visible_plaintext_generation_and_rejected_staging_preserves_it()
+fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_plaintext_generation()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = roots::TestRoots::new("native-listener-reload-visibility")?;
     let control = std::env::temp_dir().join(format!(
@@ -213,6 +213,10 @@ fn native_listener_reload_updates_visible_plaintext_generation_and_rejected_stag
         }
         std::thread::yield_now();
     };
+    // Continuously authenticated status and explain calls are normal operator
+    // observation. They must not make the local worker treat the shared
+    // Catalog gate as a storage outage and exponentially defer this durable
+    // reclamation.
     loop {
         let task = maintenance_client
             .explain(

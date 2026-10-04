@@ -233,6 +233,7 @@ impl OtlpSignal {
             },
             ServiceFailure::InvalidRequestWithLimit(detail) => self.limit_exceeded(detail),
             ServiceFailure::KeyUnavailable
+            | ServiceFailure::CatalogBusy
             | ServiceFailure::CatalogUnavailable
             | ServiceFailure::LedgerUnavailable
             | ServiceFailure::StorageUnavailable => OtlpFailure {

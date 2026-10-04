@@ -151,7 +151,7 @@ fn start_installed_maintenance<'authority>(
         return Err(ServiceFailure::Cancelled);
     }
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
-        return Err(ServiceFailure::CatalogUnavailable);
+        return Err(ServiceFailure::CatalogBusy);
     };
     let instance = &services.instance;
     let now = instance
@@ -234,7 +234,7 @@ fn complete_installed_maintenance(
         return Err(ServiceFailure::Cancelled);
     }
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
-        return Err(ServiceFailure::CatalogUnavailable);
+        return Err(ServiceFailure::CatalogBusy);
     };
     let instance = &services.instance;
     let catalog = Catalog::open(
@@ -442,7 +442,7 @@ fn discover_retention_publications(
         return Ok(false);
     }
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
-        return Err(ServiceFailure::CatalogUnavailable);
+        return Err(ServiceFailure::CatalogBusy);
     };
     let catalog = Catalog::open(
         &instance._authority,
@@ -573,6 +573,10 @@ pub(super) fn run_runtime_maintenance_worker(
                 retry_delay = INITIAL_TRANSIENT_BACKOFF;
                 wake_signal.idle_delay()
             },
+            // Public API calls share the in-process Catalog gate. They are
+            // healthy work and must not turn a local scheduling collision into
+            // exponential I/O backoff that can starve a durable task.
+            Err(ServiceFailure::CatalogBusy) => WORK_YIELD,
             Err(
                 ServiceFailure::CapacityUnavailable
                 | ServiceFailure::CatalogUnavailable

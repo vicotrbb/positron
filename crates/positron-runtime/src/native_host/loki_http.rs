@@ -130,6 +130,7 @@ fn service_response(service_failure: ServiceFailure) -> Response {
             failure(400, "Loki Push request was rejected")
         },
         ServiceFailure::KeyUnavailable
+        | ServiceFailure::CatalogBusy
         | ServiceFailure::CatalogUnavailable
         | ServiceFailure::LedgerUnavailable
         | ServiceFailure::StorageUnavailable => {
