@@ -137,7 +137,7 @@ pub use maintenance::{
     MaintenanceObjectId, MaintenancePreconditions, MaintenancePriority, MaintenanceReservation,
     MaintenanceScope, MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId,
     MaintenanceTaskPhase, MaintenanceTaskRecord, MaintenanceTaskStatus, MaintenanceTerminalFailure,
-    MaintenanceTrigger,
+    MaintenanceTrigger, NO_DURABLE_PROGRESS_SLO_SECONDS,
 };
 #[cfg(feature = "test-support")]
 pub use retention_time::ManualRetentionTime;
