@@ -4,9 +4,9 @@ use sha2::{Digest, Sha256};
 
 use positron_api::maintenance::{
     MaintenanceControlResponse, MaintenanceExplainRequest, MaintenanceExplainResponse,
-    MaintenancePauseRequest, MaintenanceResumeRequest, MaintenanceRunRequest,
-    MaintenanceRunResponse, MaintenanceStatusRequest, MaintenanceStatusResponse,
-    MaintenanceTaskStatus,
+    MaintenancePauseRequest, MaintenanceResourceReservations, MaintenanceResumeRequest,
+    MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceStatusRequest,
+    MaintenanceStatusResponse, MaintenanceTaskStatus,
 };
 use positron_domain::{
     identity::{PrincipalId, TenantId},
@@ -18,7 +18,8 @@ use positron_governance::{
 };
 use positron_kernel::{
     ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, MaintenanceFailure,
-    MaintenanceScope, MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase, SegmentScope,
+    MaintenanceScope, MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase,
+    ResourceDimension, SegmentScope,
 };
 
 use crate::ServiceHandle;
@@ -36,20 +37,30 @@ impl ServiceHandle {
             .catalog_operation()
             .map_err(|_| (503, "administration_unavailable"))?;
         self.authorize_system_administration(bearer)?;
-        MaintenanceStatusRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
+        let request =
+            MaintenanceStatusRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
+        let cursor = match request.cursor() {
+            Some(value) => Some(task_identity(value).ok_or((400, "invalid_request"))?),
+            None => None,
+        };
+        let now = self.maintenance_status_now()?;
         let statuses = self
             .instance
             .maintenance_coordinator()
             .statuses()
             .map_err(|_| (503, "administration_unavailable"))?;
         let mut response = MaintenanceStatusResponse {
-            tasks: Vec::with_capacity(statuses.len()),
+            tasks: Vec::with_capacity(request.page_limit()),
+            returned: 0,
+            total: u32::try_from(statuses.len())
+                .map_err(|_| (503, "administration_unavailable"))?,
+            next_cursor: None,
             queued: 0,
             running: 0,
             deferred: 0,
             terminal: 0,
         };
-        for status in statuses {
+        for status in &statuses {
             match status.phase() {
                 MaintenanceTaskPhase::Queued => response.queued += 1,
                 MaintenanceTaskPhase::Running => response.running += 1,
@@ -58,7 +69,24 @@ impl ServiceHandle {
                 | MaintenanceTaskPhase::Succeeded
                 | MaintenanceTaskPhase::Failed => response.terminal += 1,
             }
-            response.tasks.push(task_status(status));
+        }
+        let page_start = cursor.map_or(0, |cursor| {
+            statuses.partition_point(|status| status.task().identity() <= cursor)
+        });
+        let remaining = statuses.len().saturating_sub(page_start);
+        let page_len = remaining.min(request.page_limit());
+        let has_more = remaining > page_len;
+        response.tasks.extend(
+            statuses
+                .into_iter()
+                .skip(page_start)
+                .take(page_len)
+                .map(|status| task_status(status, now)),
+        );
+        response.returned =
+            u32::try_from(response.tasks.len()).map_err(|_| (503, "administration_unavailable"))?;
+        if has_more {
+            response.next_cursor = response.tasks.last().map(|task| task.identity.clone());
         }
         response
             .validate()
@@ -78,13 +106,14 @@ impl ServiceHandle {
         let request =
             MaintenanceExplainRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
         let identity = task_identity(&request.identity).ok_or((400, "invalid_request"))?;
+        let now = self.maintenance_status_now()?;
         let status = self
             .instance
             .maintenance_coordinator()
             .status(identity)
             .map_err(|_| (404, "task_unavailable"))?;
         Ok(MaintenanceExplainResponse {
-            task: task_status(status),
+            task: task_status(status, now),
         })
     }
 
@@ -108,6 +137,7 @@ impl ServiceHandle {
         let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
             .map_err(|_| (400, "invalid_request"))?;
         let task_identity = maintenance_task_id(actor.principal_id(), idempotency)?;
+        let now = self.maintenance_status_now()?;
         let instance = &self.instance;
         let catalog = Catalog::open(
             &instance._authority,
@@ -140,7 +170,7 @@ impl ServiceHandle {
                     && status.task().scope() == expected_scope =>
             {
                 return Ok(MaintenanceRunResponse {
-                    task: task_status(status),
+                    task: task_status(status, now),
                 });
             },
             Ok(_) => return Err((409, "idempotency_conflict")),
@@ -161,12 +191,8 @@ impl ServiceHandle {
         let task = ledger
             .prepare_compaction_task(bucket, task_identity)
             .map_err(|_| (503, "administration_unavailable"))?;
-        let now = instance
-            .retention_time
-            .governance_now_seconds()
-            .map_err(|_| (503, "administration_unavailable"))?;
         let submitted = task
-            .submit_and_persist(&coordinator, &catalog, now)
+            .submit_and_persist(coordinator, &catalog, now)
             .map_err(|_| (503, "administration_unavailable"))?;
         let status = coordinator
             .status(submitted.identity())
@@ -176,7 +202,7 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceRunResponse {
-            task: task_status(status),
+            task: task_status(status, now),
         })
     }
 
@@ -195,6 +221,7 @@ impl ServiceHandle {
         let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
             .map_err(|_| (400, "invalid_request"))?;
         let catalog = self.open_maintenance_catalog()?;
+        let now = self.maintenance_status_now()?;
         if let Some(audit_position) = maintenance_control_replay(
             &catalog,
             actor.principal_id(),
@@ -210,15 +237,10 @@ impl ServiceHandle {
                 .status(identity)
                 .map_err(control_failure)?;
             return Ok(MaintenanceControlResponse {
-                task: task_status(status),
+                task: task_status(status, now),
                 audit_position,
             });
         }
-        let now = self
-            .instance
-            .retention_time
-            .governance_now_seconds()
-            .map_err(|_| (503, "administration_unavailable"))?;
         let until = now
             .checked_add(request.duration_seconds())
             .ok_or((400, "invalid_request"))?;
@@ -249,7 +271,7 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceControlResponse {
-            task: task_status(status),
+            task: task_status(status, now),
             audit_position,
         })
     }
@@ -269,6 +291,7 @@ impl ServiceHandle {
         let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
             .map_err(|_| (400, "invalid_request"))?;
         let catalog = self.open_maintenance_catalog()?;
+        let now = self.maintenance_status_now()?;
         if let Some(audit_position) = maintenance_control_replay(
             &catalog,
             actor.principal_id(),
@@ -284,7 +307,7 @@ impl ServiceHandle {
                 .status(identity)
                 .map_err(control_failure)?;
             return Ok(MaintenanceControlResponse {
-                task: task_status(status),
+                task: task_status(status, now),
                 audit_position,
             });
         }
@@ -308,7 +331,7 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceControlResponse {
-            task: task_status(status),
+            task: task_status(status, now),
             audit_position,
         })
     }
@@ -324,6 +347,13 @@ impl ServiceHandle {
                 .map_err(|_| (503, "administration_unavailable"))?,
         )
         .map_err(|_| (503, "administration_unavailable"))
+    }
+
+    fn maintenance_status_now(&self) -> Result<u64, (u16, &'static str)> {
+        self.instance
+            .retention_time
+            .governance_now_seconds()
+            .map_err(|_| (503, "administration_unavailable"))
     }
 
     fn authorize_system_administration(
@@ -435,16 +465,78 @@ fn control_failure(failure: MaintenanceFailure) -> (u16, &'static str) {
     }
 }
 
-fn task_status(status: positron_kernel::MaintenanceTaskStatus) -> MaintenanceTaskStatus {
+fn task_status(status: positron_kernel::MaintenanceTaskStatus, now: u64) -> MaintenanceTaskStatus {
+    let task = status.task();
+    let phase = status.phase();
+    let paused = phase == MaintenanceTaskPhase::Deferred && status.pause_until().is_some();
+    let reservations = task.reservations();
+    let input_object_count = task.inputs().len() as u32;
+    let output_object_count = task.outputs().len() as u32;
+    let estimated_output_object_amplification_milli = (input_object_count != 0
+        && output_object_count != 0)
+        .then(|| {
+            output_object_count
+                .checked_mul(1_000)
+                .and_then(|scaled| scaled.checked_div(input_object_count))
+        })
+        .flatten();
+    let conflict_owner = status.conflict_owner();
+    let blocked_precondition = if paused {
+        Some("maintenance_pause_active".to_owned())
+    } else if conflict_owner.is_some() {
+        Some("conflict_owner_active".to_owned())
+    } else if phase == MaintenanceTaskPhase::Queued && task.not_before() > now {
+        Some("scheduled_start_time".to_owned())
+    } else {
+        None
+    };
     MaintenanceTaskStatus {
-        identity: hex(status.task().identity().to_bytes()),
-        class: class_name(status.task().class()).to_owned(),
-        scope: scope_name(status.task().scope()),
-        phase: phase_name(status.phase()).to_owned(),
+        identity: hex(task.identity().to_bytes()),
+        class: class_name(task.class()).to_owned(),
+        scope: scope_name(task.scope()),
+        phase: phase_name(phase).to_owned(),
         submitted_at_unix_seconds: status.submitted_at(),
         checkpoint_sequence: status.checkpoint().map(|checkpoint| checkpoint.sequence()),
         pause_until_unix_seconds: status.pause_until(),
         cancellation_requested: status.cancellation_requested(),
+        resource_generation: Some(task.preconditions().resource_generation()),
+        reservations: Some(MaintenanceResourceReservations {
+            memory_bytes: reservations.get(ResourceDimension::MemoryBytes),
+            queue_slots: reservations.get(ResourceDimension::QueueSlots),
+            task_slots: reservations.get(ResourceDimension::TaskSlots),
+            buffer_cache_bytes: reservations.get(ResourceDimension::BufferCacheBytes),
+            batch_items: reservations.get(ResourceDimension::BatchItems),
+            lease_slots: reservations.get(ResourceDimension::LeaseSlots),
+            retry_slots: reservations.get(ResourceDimension::RetrySlots),
+            io_permits: reservations.get(ResourceDimension::IoPermits),
+            cpu_work_units: reservations.get(ResourceDimension::CpuWorkUnits),
+            file_descriptors: reservations.get(ResourceDimension::FileDescriptors),
+            disk_headroom_bytes: reservations.get(ResourceDimension::DiskHeadroomBytes),
+        }),
+        blocked_precondition,
+        safe_actions: if paused {
+            vec!["resume".to_owned()]
+        } else if phase == MaintenanceTaskPhase::Queued && task.class().is_deferrable() {
+            vec!["pause".to_owned()]
+        } else {
+            Vec::new()
+        },
+        backlog_age_seconds: Some(now.saturating_sub(status.submitted_at())),
+        conflict_owner: conflict_owner.map(|identity| hex(identity.to_bytes())),
+        checkpoint_completed_inputs: status
+            .checkpoint()
+            .map(positron_kernel::MaintenanceCheckpoint::completed_inputs),
+        input_object_count,
+        output_object_count,
+        estimated_output_object_amplification_milli,
+        terminal_outcome: match phase {
+            MaintenanceTaskPhase::Cancelled => Some("cancelled".to_owned()),
+            MaintenanceTaskPhase::Succeeded => Some("succeeded".to_owned()),
+            MaintenanceTaskPhase::Failed => Some("failed".to_owned()),
+            MaintenanceTaskPhase::Queued
+            | MaintenanceTaskPhase::Running
+            | MaintenanceTaskPhase::Deferred => None,
+        },
     }
 }
 
@@ -537,9 +629,13 @@ mod tests {
 
     use positron_api::maintenance::{
         MaintenancePauseRequest, MaintenanceResumeRequest, MaintenanceRunRequest,
+        MaintenanceStatusRequest,
     };
     use positron_domain::routing::SignalKind;
-    use positron_kernel::{ActiveSegmentLedger, MaintenanceTaskPhase};
+    use positron_kernel::{
+        ActiveSegmentLedger, MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId,
+        MaintenanceTaskPhase,
+    };
     use prost::Message;
 
     use super::super::ServiceHandle;
@@ -578,6 +674,54 @@ mod tests {
         request
             .join()
             .map_err(|_| "maintenance request thread panicked")?;
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_maintenance_status_pages_the_full_registry_without_hiding_queued_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        for value in 1_u8..=33 {
+            initialized
+                .maintenance_coordinator()
+                .submit_at(
+                    MaintenanceTask::new(
+                        MaintenanceTaskId::new([value; 16])
+                            .map_err(|failure| format!("task identity: {failure:?}"))?,
+                        MaintenanceTaskClass::SchemaStatistics,
+                    ),
+                    u64::from(value),
+                )
+                .map_err(|failure| format!("queued task: {failure:?}"))?;
+        }
+
+        let first = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("first page: {failure:?}"))?;
+        assert_eq!(first.total, 33);
+        assert_eq!(first.queued, 33);
+        assert_eq!(first.returned, 32);
+        let cursor = first.next_cursor.clone().ok_or("first page continuation")?;
+        assert_eq!(first.tasks.len(), 32);
+        let second_body = serde_json::to_vec(&MaintenanceStatusRequest::page_after(cursor, 32))?;
+        let second = services
+            .maintenance_status(&administrator, &second_body)
+            .map_err(|failure| format!("second page: {failure:?}"))?;
+        assert_eq!(second.total, 33);
+        assert_eq!(second.queued, 33);
+        assert_eq!(second.returned, 1);
+        assert_eq!(second.next_cursor, None);
+        assert_eq!(second.tasks.len(), 1);
+        let second_task = second.tasks.first().ok_or("second page task")?;
+        assert!(
+            first
+                .tasks
+                .iter()
+                .all(|first_task| first_task.identity != second_task.identity),
+            "the continuation must expose the queued task omitted from the first bounded page"
+        );
         Ok(())
     }
 
@@ -699,6 +843,43 @@ mod tests {
         assert_eq!(paused.task.phase, "deferred");
         assert!(paused.task.pause_until_unix_seconds.is_some());
         assert_ne!(paused.audit_position, 0);
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("paused status: {failure:?}"))?;
+        assert_eq!(status.returned, 1);
+        assert_eq!(status.total, 1);
+        assert_eq!(status.next_cursor, None);
+        assert_eq!(status.queued, 0);
+        assert_eq!(status.running, 0);
+        assert_eq!(status.deferred, 1);
+        assert_eq!(status.terminal, 0);
+        let observed = status
+            .tasks
+            .iter()
+            .find(|candidate| candidate.identity == task.identity)
+            .ok_or("paused task status")?;
+        assert_eq!(
+            observed.blocked_precondition.as_deref(),
+            Some("maintenance_pause_active"),
+            "status reports the durable scheduling precondition"
+        );
+        assert_eq!(observed.resource_generation, Some(1));
+        assert_eq!(
+            observed
+                .reservations
+                .as_ref()
+                .ok_or("task reservation profile")?
+                .task_slots,
+            1
+        );
+        assert_eq!(observed.safe_actions, ["resume"]);
+        assert!(observed.backlog_age_seconds.is_some());
+        assert_eq!(observed.conflict_owner, None);
+        assert_eq!(observed.checkpoint_completed_inputs, Some(0));
+        assert_eq!(observed.input_object_count, 1);
+        assert_eq!(observed.output_object_count, 0);
+        assert_eq!(observed.estimated_output_object_amplification_milli, None);
+        assert_eq!(observed.terminal_outcome, None);
         assert_eq!(
             services
                 .pause_maintenance(&administrator, &pause.encode()?)

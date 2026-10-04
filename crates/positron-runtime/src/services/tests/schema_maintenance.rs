@@ -210,7 +210,7 @@ fn runtime_maintenance_worker_wake_dispatches_and_completes_a_due_snapshot_lease
     )?;
     let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-        &coordinator,
+        coordinator,
         0,
         std::num::NonZeroU64::new(1).ok_or("nonzero ttl")?,
         catalog.pin()?.identity(),
@@ -430,7 +430,7 @@ fn cancellation_after_maintenance_dispatch_preserves_the_lease_for_recovery()
     )?;
     let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-        &coordinator,
+        coordinator,
         0,
         std::num::NonZeroU64::new(1).ok_or("nonzero ttl")?,
         catalog.pin()?.identity(),
@@ -522,7 +522,7 @@ fn runtime_worker_wakes_for_a_poststart_future_lease_expiry() -> Result<(), Box<
     let now = initialized.retention_time.governance_now_seconds()?;
     let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-        &coordinator,
+        coordinator,
         now,
         std::num::NonZeroU64::new(1).ok_or("nonzero ttl")?,
         catalog.pin()?.identity(),
@@ -586,7 +586,7 @@ fn runtime_worker_retries_a_running_expiry_after_terminal_publication_outage()
     )?;
     let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-        &coordinator,
+        coordinator,
         0,
         std::num::NonZeroU64::new(1).ok_or("nonzero ttl")?,
         catalog.pin()?.identity(),
@@ -793,7 +793,7 @@ fn native_runtime_worker_expires_a_durable_lease_and_joins_before_reopen()
     )?;
     let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-        &coordinator,
+        coordinator,
         0,
         std::num::NonZeroU64::new(1).ok_or("nonzero ttl")?,
         catalog.pin()?.identity(),
@@ -919,7 +919,7 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
     let now = services.instance.retention_time.governance_now_seconds()?;
     let coordinator = services.instance.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-        &coordinator,
+        coordinator,
         now,
         std::num::NonZeroU64::new(1).ok_or("nonzero ttl")?,
         catalog.pin()?.identity(),

@@ -85,7 +85,7 @@ fn runtime_worker_executes_a_persisted_log_compaction_and_preserves_it_across_re
         MaintenanceTaskId::new([0xc1; 16]).map_err(|failure| format!("task id: {failure:?}"))?;
     let task = ledger.prepare_compaction_task(bucket, identity)?;
     let coordinator = initialized.maintenance_coordinator();
-    task.submit_and_persist(&coordinator, &catalog, 1)?;
+    task.submit_and_persist(coordinator, &catalog, 1)?;
     drop(ledger);
     drop(catalog);
 
@@ -224,7 +224,7 @@ fn runtime_worker_executes_a_persisted_trace_compaction_and_preserves_spans_acro
         MaintenanceTaskId::new([0xc2; 16]).map_err(|failure| format!("task id: {failure:?}"))?;
     let task = ledger.prepare_compaction_task(bucket, identity)?;
     let coordinator = initialized.maintenance_coordinator();
-    task.submit_and_persist(&coordinator, &catalog, 1)?;
+    task.submit_and_persist(coordinator, &catalog, 1)?;
     drop(ledger);
     drop(catalog);
 

@@ -167,7 +167,7 @@ impl InitializedInstance {
         let checkpoint = self.complete_governance_audit_checkpoint_execution_with_coordinator(
             &catalog,
             &execution,
-            &coordinator,
+            coordinator,
         )?;
         let live = catalog
             .latest_audit_checkpoint()

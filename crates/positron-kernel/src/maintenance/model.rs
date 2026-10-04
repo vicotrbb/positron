@@ -60,6 +60,14 @@ impl MaintenanceTaskClass {
         )
     }
 
+    /// Whether an audited, expiring maintenance pause may defer this class.
+    /// This remains a coordinator-owned policy; callers cannot make another
+    /// class deferrable by supplying a request field.
+    #[must_use]
+    pub const fn is_deferrable(self) -> bool {
+        self.deferrable()
+    }
+
     pub(super) const fn destructive(self) -> bool {
         matches!(
             self,

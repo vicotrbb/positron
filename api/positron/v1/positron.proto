@@ -363,7 +363,14 @@ message CapabilityRequest {
   Capability capability = 2;
 }
 
-message MaintenanceStatusRequest {}
+// Status selects a bounded page from the coordinator's identity-ordered
+// registry. An omitted cursor selects the first page; an omitted limit uses
+// the published safe default. The cursor is the prior page's opaque task
+// identity and never names a Catalog object.
+message MaintenanceStatusRequest {
+  optional string cursor = 1;
+  optional uint32 limit = 2;
+}
 
 message MaintenanceTaskStatus {
   string identity = 1;
@@ -374,6 +381,33 @@ message MaintenanceTaskStatus {
   optional uint64 checkpoint_sequence = 6;
   optional uint64 pause_until_unix_seconds = 7;
   bool cancellation_requested = 8;
+  optional uint64 resource_generation = 9;
+  optional MaintenanceResourceReservations reservations = 10;
+  optional string blocked_precondition = 11;
+  repeated string safe_actions = 12;
+  optional uint64 backlog_age_seconds = 13;
+  optional string conflict_owner = 14;
+  optional uint32 checkpoint_completed_inputs = 15;
+  uint32 input_object_count = 16;
+  uint32 output_object_count = 17;
+  optional uint32 estimated_output_object_amplification_milli = 18;
+  optional string terminal_outcome = 19;
+}
+
+// A task's coordinator-derived peak Resource Governor reservation. This is
+// redacted to bounded aggregate amounts and never contains object identities.
+message MaintenanceResourceReservations {
+  uint64 memory_bytes = 1;
+  uint64 queue_slots = 2;
+  uint64 task_slots = 3;
+  uint64 buffer_cache_bytes = 4;
+  uint64 batch_items = 5;
+  uint64 lease_slots = 6;
+  uint64 retry_slots = 7;
+  uint64 io_permits = 8;
+  uint64 cpu_work_units = 9;
+  uint64 file_descriptors = 10;
+  uint64 disk_headroom_bytes = 11;
 }
 
 message MaintenanceStatusResponse {
@@ -382,6 +416,9 @@ message MaintenanceStatusResponse {
   uint32 running = 3;
   uint32 deferred = 4;
   uint32 terminal = 5;
+  uint32 returned = 6;
+  uint32 total = 7;
+  optional string next_cursor = 8;
 }
 
 message MaintenanceExplainRequest {

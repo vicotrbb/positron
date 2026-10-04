@@ -1,8 +1,8 @@
 use positron_api::maintenance::{
-    MAX_PAUSE_DURATION_SECONDS, MaintenancePauseRequest, MaintenanceResumeRequest,
-    MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceServiceClient,
-    MaintenanceStatusRequest, MaintenanceStatusResponse, MaintenanceTaskStatus,
-    MaintenanceTransport,
+    MAX_PAUSE_DURATION_SECONDS, MAX_TASKS, MaintenancePauseRequest,
+    MaintenanceResourceReservations, MaintenanceResumeRequest, MaintenanceRunRequest,
+    MaintenanceRunResponse, MaintenanceServiceClient, MaintenanceStatusRequest,
+    MaintenanceStatusResponse, MaintenanceTaskStatus, MaintenanceTransport,
 };
 
 #[test]
@@ -19,12 +19,14 @@ fn maintenance_status_client_uses_the_canonical_bounded_system_administration_ro
         let read = stream.read(&mut bytes)?;
         let request = String::from_utf8_lossy(&bytes[..read]);
         assert!(request.starts_with("POST /v1/maintenance:status HTTP/1.1\r\n"));
+        assert!(request.contains(r#""cursor":"00000000000000000000000000000001""#));
+        assert!(request.contains(r#""limit":1"#));
         assert!(
             request
                 .to_ascii_lowercase()
                 .contains("authorization: bearer system-administrator\r\n")
         );
-        let body = r#"{"tasks":[],"queued":0,"running":0,"deferred":0,"terminal":0}"#;
+        let body = r#"{"tasks":[{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","phase":"deferred","submitted_at_unix_seconds":1,"checkpoint_sequence":2,"pause_until_unix_seconds":61,"cancellation_requested":false,"resource_generation":1,"reservations":{"memory_bytes":0,"queue_slots":0,"task_slots":1,"buffer_cache_bytes":0,"batch_items":0,"lease_slots":0,"retry_slots":0,"io_permits":0,"cpu_work_units":0,"file_descriptors":0,"disk_headroom_bytes":0},"blocked_precondition":"maintenance_pause_active","safe_actions":["resume"],"backlog_age_seconds":3,"checkpoint_completed_inputs":0,"input_object_count":1,"output_object_count":0}],"returned":1,"total":1,"queued":0,"running":0,"deferred":1,"terminal":0}"#;
         stream.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -35,18 +37,93 @@ fn maintenance_status_client_uses_the_canonical_bounded_system_administration_ro
         Ok(())
     });
     let client = MaintenanceServiceClient::new(MaintenanceTransport::PlaintextOptOut { endpoint })?;
+    let response = client.status(
+        "system-administrator",
+        &MaintenanceStatusRequest::page_after("00000000000000000000000000000001".to_owned(), 1),
+    )?;
+    assert_eq!(response.returned, 1);
+    assert_eq!(response.total, 1);
+    assert_eq!(response.next_cursor, None);
+    assert_eq!(response.queued, 0);
+    assert_eq!(response.running, 0);
+    assert_eq!(response.deferred, 1);
+    assert_eq!(response.terminal, 0);
+    let task = response.tasks.first().ok_or("missing maintenance task")?;
+    assert_eq!(task.resource_generation, Some(1));
     assert_eq!(
-        client.status("system-administrator", &MaintenanceStatusRequest {})?,
+        task.reservations.as_ref().map(|value| value.task_slots),
+        Some(1)
+    );
+    assert_eq!(
+        task.blocked_precondition.as_deref(),
+        Some("maintenance_pause_active")
+    );
+    assert_eq!(task.safe_actions, ["resume"]);
+    assert_eq!(task.backlog_age_seconds, Some(3));
+    assert_eq!(task.checkpoint_completed_inputs, Some(0));
+    assert_eq!(task.input_object_count, 1);
+    assert_eq!(task.output_object_count, 0);
+    assert_eq!(task.estimated_output_object_amplification_milli, None);
+    assert_eq!(task.terminal_outcome, None);
+    server.join().map_err(|_| "server panicked")??;
+    Ok(())
+}
+
+#[test]
+fn full_valid_maintenance_registry_page_fits_the_bounded_response() {
+    let tasks = (0..positron_api::maintenance::MAX_STATUS_PAGE_TASKS)
+        .map(|index| MaintenanceTaskStatus {
+            identity: format!("{index:032x}"),
+            class: "catalog_reclamation".to_owned(),
+            scope: "segment:00000000-0000-0000-0000-000000000001:traces:4294967295".to_owned(),
+            phase: "queued".to_owned(),
+            submitted_at_unix_seconds: u64::MAX,
+            checkpoint_sequence: Some(u64::MAX),
+            pause_until_unix_seconds: None,
+            cancellation_requested: false,
+            resource_generation: Some(u64::MAX),
+            reservations: Some(MaintenanceResourceReservations {
+                memory_bytes: u64::MAX,
+                queue_slots: u64::MAX,
+                task_slots: u64::MAX,
+                buffer_cache_bytes: u64::MAX,
+                batch_items: u64::MAX,
+                lease_slots: u64::MAX,
+                retry_slots: u64::MAX,
+                io_permits: u64::MAX,
+                cpu_work_units: u64::MAX,
+                file_descriptors: u64::MAX,
+                disk_headroom_bytes: u64::MAX,
+            }),
+            blocked_precondition: Some("conflict_owner_active".to_owned()),
+            safe_actions: vec!["pause".to_owned()],
+            backlog_age_seconds: Some(u64::MAX),
+            conflict_owner: Some(format!("{:032x}", (index + 1) % MAX_TASKS)),
+            checkpoint_completed_inputs: Some(16),
+            input_object_count: 16,
+            output_object_count: 16,
+            estimated_output_object_amplification_milli: Some(1_000),
+            terminal_outcome: None,
+        })
+        .collect();
+    assert!(
         MaintenanceStatusResponse {
-            tasks: Vec::new(),
-            queued: 0,
+            tasks,
+            returned: positron_api::maintenance::MAX_STATUS_PAGE_TASKS as u32,
+            total: MAX_TASKS as u32,
+            next_cursor: Some(format!(
+                "{:032x}",
+                positron_api::maintenance::MAX_STATUS_PAGE_TASKS - 1
+            )),
+            queued: MAX_TASKS as u32,
             running: 0,
             deferred: 0,
             terminal: 0,
         }
+        .encode()
+        .is_ok(),
+        "a full valid registry has a bounded, explicitly continued status page"
     );
-    server.join().map_err(|_| "server panicked")??;
-    Ok(())
 }
 
 #[test]
@@ -109,6 +186,28 @@ fn maintenance_status_contract_is_canonical_and_bounded() {
     assert_eq!(route["authentication"], "Bearer SystemAdministration");
     assert_eq!(route["max_request_bytes"], 128);
     assert_eq!(route["max_response_bytes"], 65_536);
+    let fields = route["request_fields"]
+        .as_array()
+        .expect("status request fields");
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0]["json"], "cursor");
+    assert_eq!(fields[1]["json"], "limit");
+    let response_fields = route["response_fields"]
+        .as_array()
+        .expect("status response fields");
+    assert!(
+        response_fields
+            .iter()
+            .any(|field| field["json"] == "returned")
+    );
+    assert!(response_fields.iter().any(|field| field["json"] == "total"));
+    assert!(
+        response_fields
+            .iter()
+            .any(|field| field["json"] == "next_cursor")
+    );
+    assert!(MaintenanceStatusRequest::decode(br#"{"limit":33}"#).is_err());
+    assert!(MaintenanceStatusRequest::decode(br#"{"cursor":"not-a-task"}"#).is_err());
     let run = mapping["mappings"]
         .as_array()
         .expect("mapping routes")
@@ -169,6 +268,17 @@ fn maintenance_run_client_uses_the_canonical_explicit_scope_route()
                 checkpoint_sequence: None,
                 pause_until_unix_seconds: None,
                 cancellation_requested: false,
+                resource_generation: None,
+                reservations: None,
+                blocked_precondition: None,
+                safe_actions: Vec::new(),
+                backlog_age_seconds: None,
+                conflict_owner: None,
+                checkpoint_completed_inputs: None,
+                input_object_count: 0,
+                output_object_count: 0,
+                estimated_output_object_amplification_milli: None,
+                terminal_outcome: None,
             },
         }
     );

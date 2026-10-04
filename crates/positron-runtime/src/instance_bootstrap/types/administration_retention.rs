@@ -59,7 +59,7 @@ impl InitializedInstance {
             self.instance,
             &identity,
             &signer,
-            &coordinator,
+            coordinator,
             request,
         )
         .map_err(map_system_audit_retention_failure)

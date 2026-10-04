@@ -47,7 +47,7 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
     match command {
         Command::Status => {
             let status = client
-                .status(bearer, &MaintenanceStatusRequest {})
+                .status(bearer, &MaintenanceStatusRequest::default())
                 .map_err(client_failure)?;
             println!(
                 "queued={} running={} deferred={} terminal={} tasks={}",

@@ -195,7 +195,7 @@ impl InitializedInstance {
         self.complete_governance_audit_checkpoint_execution_with_coordinator(
             &catalog,
             &execution,
-            &coordinator,
+            coordinator,
         )
     }
 
@@ -208,7 +208,7 @@ impl InitializedInstance {
         self.complete_governance_audit_checkpoint_execution_with_coordinator(
             catalog,
             execution,
-            &coordinator,
+            coordinator,
         )
     }
 

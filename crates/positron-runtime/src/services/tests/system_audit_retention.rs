@@ -641,7 +641,7 @@ fn audit_reclaimer_cancellation_before_physical_work_preserves_the_prefix_and_te
         .cancel_and_persist(&catalog, task)
         .expect("durably request cancellation before physical work");
 
-    catalog.complete_running_audit_retention_reclamation(&coordinator, &execution)?;
+    catalog.complete_running_audit_retention_reclamation(coordinator, &execution)?;
     assert_eq!(
         coordinator
             .status(task)
@@ -745,7 +745,7 @@ fn audit_reclaimer_recovers_a_prephysical_cancellation_when_its_terminal_write_f
 
     let terminal_write =
         with_catalog_publication_fault_after(CatalogPublicationFault::SynchronizeCommit, 0, || {
-            catalog.complete_running_audit_retention_reclamation(&coordinator, &execution)
+            catalog.complete_running_audit_retention_reclamation(coordinator, &execution)
         });
     assert!(
         terminal_write.is_err(),

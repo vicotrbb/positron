@@ -19,18 +19,65 @@ pub const MAX_RUN_REQUEST_BYTES: usize = 256;
 pub const MAX_CONTROL_REQUEST_BYTES: usize = 192;
 pub const MAX_PAUSE_DURATION_SECONDS: u64 = 86_400;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+/// The total number of durable tasks the coordinator may expose in one
+/// bounded registry snapshot.
 pub const MAX_TASKS: usize = 128;
+/// A status page is deliberately smaller than the coordinator registry so a
+/// complete row, including its resource reservation, always fits the HTTP
+/// response bound at the registry's maximum valid values.
+pub const MAX_STATUS_PAGE_TASKS: usize = 32;
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct MaintenanceStatusRequest {}
+pub struct MaintenanceStatusRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u32>,
+}
 
 impl MaintenanceStatusRequest {
+    #[must_use]
+    pub fn page_after(cursor: String, limit: u32) -> Self {
+        Self {
+            cursor: Some(cursor),
+            limit: Some(limit),
+        }
+    }
+
     pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
         if body.len() > MAX_REQUEST_BYTES {
             return Err(MaintenanceWireFailure);
         }
-        serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)
+        let request: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
+        request.validate()?;
+        Ok(request)
+    }
+
+    #[must_use]
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+
+    #[must_use]
+    pub fn page_limit(&self) -> usize {
+        self.limit
+            .map(|limit| limit as usize)
+            .unwrap_or(MAX_STATUS_PAGE_TASKS)
+    }
+
+    pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        if self
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| !valid_task_identity(cursor))
+            || self
+                .limit
+                .is_some_and(|limit| limit == 0 || limit as usize > MAX_STATUS_PAGE_TASKS)
+        {
+            return Err(MaintenanceWireFailure);
+        }
+        Ok(())
     }
 }
 
@@ -256,7 +303,6 @@ fn valid_task_identity(identity: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct MaintenanceTaskStatus {
     pub identity: String,
     pub class: String,
@@ -268,12 +314,58 @@ pub struct MaintenanceTaskStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_until_unix_seconds: Option<u64>,
     pub cancellation_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservations: Option<MaintenanceResourceReservations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_precondition: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlog_age_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_completed_inputs: Option<u32>,
+    #[serde(default)]
+    pub input_object_count: u32,
+    #[serde(default)]
+    pub output_object_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_output_object_amplification_milli: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_outcome: Option<String>,
+}
+
+/// Bounded Resource Governor amounts requested by one maintenance task.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceResourceReservations {
+    pub memory_bytes: u64,
+    pub queue_slots: u64,
+    pub task_slots: u64,
+    pub buffer_cache_bytes: u64,
+    pub batch_items: u64,
+    pub lease_slots: u64,
+    pub retry_slots: u64,
+    pub io_permits: u64,
+    pub cpu_work_units: u64,
+    pub file_descriptors: u64,
+    pub disk_headroom_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceStatusResponse {
     pub tasks: Vec<MaintenanceTaskStatus>,
+    /// Number of rows returned on this page. It is distinct from `total` so
+    /// an operator never mistakes a bounded page for the complete registry.
+    pub returned: u32,
+    /// Number of coordinator tasks across all returned and later pages.
+    pub total: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     pub queued: u32,
     pub running: u32,
     pub deferred: u32,
@@ -329,6 +421,9 @@ impl MaintenanceRunResponse {
         let response: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
         MaintenanceStatusResponse {
             tasks: vec![response.task.clone()],
+            returned: 1,
+            total: 1,
+            next_cursor: None,
             queued: u32::from(response.task.phase == "queued"),
             running: u32::from(response.task.phase == "running"),
             deferred: u32::from(response.task.phase == "deferred"),
@@ -385,7 +480,19 @@ impl MaintenanceStatusResponse {
     }
 
     pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
-        if self.tasks.len() > MAX_TASKS
+        if self.tasks.len() > MAX_STATUS_PAGE_TASKS
+            || self.returned as usize != self.tasks.len()
+            || self.total as usize > MAX_TASKS
+            || self.queued + self.running + self.deferred + self.terminal != self.total
+            || self
+                .next_cursor
+                .as_deref()
+                .is_some_and(|cursor| !valid_task_identity(cursor))
+            || self.next_cursor.is_some()
+                && self
+                    .tasks
+                    .last()
+                    .is_none_or(|task| self.next_cursor.as_deref() != Some(task.identity.as_str()))
             || self.tasks.iter().any(|task| {
                 task.identity.len() != 32
                     || !task.identity.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -399,17 +506,39 @@ impl MaintenanceStatusResponse {
                     )
                     || task.checkpoint_sequence == Some(0)
                     || task.pause_until_unix_seconds == Some(0)
+                    || task.resource_generation == Some(0)
+                    || task
+                        .blocked_precondition
+                        .as_deref()
+                        .is_some_and(|value| value.is_empty() || value.len() > 64)
+                    || task.safe_actions.len() > 1
+                    || task
+                        .safe_actions
+                        .iter()
+                        .any(|action| !matches!(action.as_str(), "pause" | "resume"))
+                    || task
+                        .conflict_owner
+                        .as_deref()
+                        .is_some_and(|value| !valid_task_identity(value))
+                    || task
+                        .checkpoint_completed_inputs
+                        .is_some_and(|completed| completed > task.input_object_count)
+                    || task
+                        .estimated_output_object_amplification_milli
+                        .is_some_and(|value| task.input_object_count == 0 || value == 0)
+                    || task.terminal_outcome.as_deref().is_some_and(|outcome| {
+                        !matches!(outcome, "cancelled" | "succeeded" | "failed")
+                    })
             })
         {
             return Err(MaintenanceWireFailure);
         }
-        let total = u32::try_from(self.tasks.len()).map_err(|_| MaintenanceWireFailure)?;
         if self
             .queued
             .checked_add(self.running)
             .and_then(|total| total.checked_add(self.deferred))
             .and_then(|total| total.checked_add(self.terminal))
-            != Some(total)
+            != Some(self.total)
         {
             return Err(MaintenanceWireFailure);
         }

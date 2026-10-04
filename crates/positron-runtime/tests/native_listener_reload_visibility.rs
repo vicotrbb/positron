@@ -194,7 +194,8 @@ fn native_listener_reload_updates_visible_plaintext_generation_and_rejected_stag
         })?;
     let deadline = Instant::now() + Duration::from_secs(3);
     let task_identity = loop {
-        let status = maintenance_client.status(claim.secret(), &MaintenanceStatusRequest {})?;
+        let status =
+            maintenance_client.status(claim.secret(), &MaintenanceStatusRequest::default())?;
         let tasks = status
             .tasks
             .into_iter()

@@ -387,6 +387,7 @@ pub struct MaintenanceTaskStatus {
     checkpoint: Option<MaintenanceCheckpoint>,
     pause_until: Option<u64>,
     cancellation_requested: bool,
+    conflict_owner: Option<MaintenanceTaskId>,
 }
 
 /// A live Resource Governor grant attached to a running task. The coordinator
@@ -587,6 +588,41 @@ impl MaintenanceTaskStatus {
     #[must_use]
     pub const fn cancellation_requested(&self) -> bool {
         self.cancellation_requested
+    }
+    /// Identifies the running task that currently blocks this task through
+    /// the coordinator conflict graph, without exposing object identities.
+    #[must_use]
+    pub const fn conflict_owner(&self) -> Option<MaintenanceTaskId> {
+        self.conflict_owner
+    }
+}
+
+fn maintenance_task_status(
+    state: &CoordinatorState,
+    identity: MaintenanceTaskId,
+    task: &TaskState,
+) -> MaintenanceTaskStatus {
+    let conflict_owner = (task.phase == MaintenanceTaskPhase::Queued)
+        .then(|| {
+            state
+                .tasks
+                .iter()
+                .find(|(candidate, active)| {
+                    **candidate != identity
+                        && active.phase == MaintenanceTaskPhase::Running
+                        && scheduling::tasks_conflict(&task.task, &active.task)
+                })
+                .map(|(candidate, _)| *candidate)
+        })
+        .flatten();
+    MaintenanceTaskStatus {
+        task: task.task.clone(),
+        phase: task.phase,
+        submitted_at: task.submitted_at,
+        checkpoint: task.checkpoint.clone(),
+        pause_until: task.pause_until,
+        cancellation_requested: task.cancellation_requested,
+        conflict_owner,
     }
 }
 
@@ -983,14 +1019,7 @@ impl MaintenanceCoordinator {
             .tasks
             .get(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        Ok(MaintenanceTaskStatus {
-            task: task.task.clone(),
-            phase: task.phase,
-            submitted_at: task.submitted_at,
-            checkpoint: task.checkpoint.clone(),
-            pause_until: task.pause_until,
-            cancellation_requested: task.cancellation_requested,
-        })
+        Ok(maintenance_task_status(&state, identity, task))
     }
 
     /// Returns the complete bounded task view for authenticated administration
@@ -1002,15 +1031,8 @@ impl MaintenanceCoordinator {
             .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
         Ok(state
             .tasks
-            .values()
-            .map(|task| MaintenanceTaskStatus {
-                task: task.task.clone(),
-                phase: task.phase,
-                submitted_at: task.submitted_at,
-                checkpoint: task.checkpoint.clone(),
-                pause_until: task.pause_until,
-                cancellation_requested: task.cancellation_requested,
-            })
+            .iter()
+            .map(|(identity, task)| maintenance_task_status(&state, *identity, task))
             .collect())
     }
 

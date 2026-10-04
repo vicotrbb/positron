@@ -256,7 +256,7 @@ fn complete_installed_maintenance(
     if let InstalledMaintenanceExecution::CatalogReclamation { execution } = execution {
         let coordinator = instance.maintenance_coordinator();
         catalog
-            .complete_running_audit_retention_reclamation(&coordinator, execution)
+            .complete_running_audit_retention_reclamation(coordinator, execution)
             .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
         return Ok(true);
     }
@@ -313,7 +313,7 @@ fn complete_installed_maintenance(
             .map(|current| current as &dyn positron_signals::ScanCancellation)
             .unwrap_or(&uncancelled);
         let maintenance =
-            MaintenanceCompactionExecution::new(&coordinator, execution, cancellation, &observer);
+            MaintenanceCompactionExecution::new(coordinator, execution, cancellation, &observer);
         match scope.signal_kind() {
             positron_domain::routing::SignalKind::Logs => {
                 let policy = LogRetentionPolicy::from_catalog(&snapshot)
@@ -340,12 +340,12 @@ fn complete_installed_maintenance(
             execution,
             identity,
             ..
-        } => ledger.complete_running_snapshot_lease_expiry_task(&coordinator, execution, *identity),
+        } => ledger.complete_running_snapshot_lease_expiry_task(coordinator, execution, *identity),
         InstalledMaintenanceExecution::RetentionPublication { execution, .. } => ledger
-            .complete_running_retention_publication_task(&coordinator, execution)
+            .complete_running_retention_publication_task(coordinator, execution)
             .map(|_| ()),
         InstalledMaintenanceExecution::RetentionReclamation { execution, .. } => {
-            ledger.complete_running_retention_reclamation_task(&coordinator, execution)
+            ledger.complete_running_retention_reclamation_task(coordinator, execution)
         },
         InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. } => {
             return Err(ServiceFailure::Internal);
@@ -506,7 +506,7 @@ fn discover_retention_publications(
         match ledger.prepare_retention_publication() {
             Ok(preparation) => {
                 preparation
-                    .submit_and_persist(&coordinator, &catalog, now)
+                    .submit_and_persist(coordinator, &catalog, now)
                     .map_err(|failure| super::classify_ledger_failure_code(failure.code()))?;
                 submitted = true;
             },

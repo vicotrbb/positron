@@ -1,5 +1,5 @@
 {
-  "schema_digest": "fc5e9eb8b6d0adca54a3715ce024653c8de55a38e9a144d0b71be37d438d332f",
+  "schema_digest": "c2a7ec0315803933b9455b2c5d735bc95c83fd5dffdfebd0564981eae577d9a7",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -625,13 +625,19 @@
       "max_request_bytes": 128,
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
-      "request_fields": [],
+      "request_fields": [
+        {"proto":"cursor","json":"cursor","type":"string","number":1,"deprecated":false,"optional":true},
+        {"proto":"limit","json":"limit","type":"uint32","number":2,"deprecated":false,"optional":true}
+      ],
       "response_fields": [
         {"proto":"tasks","json":"tasks","type":"MaintenanceTaskStatus","number":1,"deprecated":false,"repeated":true},
         {"proto":"queued","json":"queued","type":"uint32","number":2,"deprecated":false},
         {"proto":"running","json":"running","type":"uint32","number":3,"deprecated":false},
         {"proto":"deferred","json":"deferred","type":"uint32","number":4,"deprecated":false},
-        {"proto":"terminal","json":"terminal","type":"uint32","number":5,"deprecated":false}
+        {"proto":"terminal","json":"terminal","type":"uint32","number":5,"deprecated":false},
+        {"proto":"returned","json":"returned","type":"uint32","number":6,"deprecated":false},
+        {"proto":"total","json":"total","type":"uint32","number":7,"deprecated":false},
+        {"proto":"next_cursor","json":"next_cursor","type":"string","number":8,"deprecated":false,"optional":true}
       ],
       "responses":{"200":"MaintenanceStatusResponse","400":"invalid_request","401":"authentication_rejected","503":"administration_unavailable"}
     },

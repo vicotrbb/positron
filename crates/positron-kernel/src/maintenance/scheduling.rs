@@ -263,7 +263,7 @@ pub(super) fn remove_task_and_clear_empty_scope(
     Ok(())
 }
 
-fn tasks_conflict(left: &MaintenanceTask, right: &MaintenanceTask) -> bool {
+pub(super) fn tasks_conflict(left: &MaintenanceTask, right: &MaintenanceTask) -> bool {
     let object_conflict = left.inputs.iter().any(|object| {
         right.inputs.binary_search(object).is_ok() || right.outputs.binary_search(object).is_ok()
     }) || left.outputs.iter().any(|object| {

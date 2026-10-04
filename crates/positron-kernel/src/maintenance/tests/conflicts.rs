@@ -21,6 +21,7 @@ fn conflicting_copy_on_write_work_waits_for_the_running_owner_across_scopes() {
     );
     second.scope =
         MaintenanceScope::tenant(TenantId::from_bytes([4; 16]).expect("tenant identity"));
+    let second_identity = second.identity();
     coordinator
         .submit_at(first.clone(), 1)
         .expect("system task accepted");
@@ -38,6 +39,17 @@ fn conflicting_copy_on_write_work_waits_for_the_running_owner_across_scopes() {
             .expect("object conflict is evaluated"),
         None,
         "the same immutable object cannot be read or written concurrently across scopes"
+    );
+    let blocked = coordinator
+        .statuses()
+        .expect("bounded public coordinator statuses")
+        .into_iter()
+        .find(|status| status.task().identity() == first.identity())
+        .expect("blocked task remains visible");
+    assert_eq!(
+        blocked.conflict_owner(),
+        Some(second_identity),
+        "the status identifies the running conflict owner without exposing its object"
     );
     coordinator
         .complete(
