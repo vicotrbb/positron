@@ -253,7 +253,7 @@ impl ServiceHandle {
                 task: task_status_for_coordinator(
                     self.instance.maintenance_coordinator(),
                     status,
-                    Some(now),
+                    None,
                 )
                 .map_err(|_| (503, "administration_unavailable"))?,
                 audit_position,
@@ -292,7 +292,7 @@ impl ServiceHandle {
             task: task_status_for_coordinator(
                 self.instance.maintenance_coordinator(),
                 status,
-                Some(now),
+                None,
             )
             .map_err(|_| (503, "administration_unavailable"))?,
             audit_position,
@@ -314,7 +314,6 @@ impl ServiceHandle {
         let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
             .map_err(|_| (400, "invalid_request"))?;
         let catalog = self.open_maintenance_catalog()?;
-        let now = self.maintenance_status_now()?;
         if let Some(audit_position) = maintenance_control_replay(
             &catalog,
             actor.principal_id(),
@@ -333,7 +332,7 @@ impl ServiceHandle {
                 task: task_status_for_coordinator(
                     self.instance.maintenance_coordinator(),
                     status,
-                    Some(now),
+                    None,
                 )
                 .map_err(|_| (503, "administration_unavailable"))?,
                 audit_position,
@@ -362,7 +361,7 @@ impl ServiceHandle {
             task: task_status_for_coordinator(
                 self.instance.maintenance_coordinator(),
                 status,
-                Some(now),
+                None,
             )
             .map_err(|_| (503, "administration_unavailable"))?,
             audit_position,
@@ -1402,6 +1401,10 @@ mod tests {
             .map_err(|failure| format!("resume task: {failure:?}"))?;
         assert_eq!(resumed.task.phase, "queued");
         assert_eq!(resumed.task.pause_until_unix_seconds, None);
+        assert_eq!(
+            resumed.task.backlog_age_seconds, None,
+            "an acknowledged control result omits live inspection age so its exact replay is stable"
+        );
         assert_eq!(
             services
                 .resume_maintenance(&administrator, &resume.encode()?)
