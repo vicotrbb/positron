@@ -4,7 +4,7 @@ use positron_query::{QueryEvent, QueryFailureCode, QueryTerminal};
 
 use super::super::terminal_and_bounds::QueryFixture;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::super::support::{
     FailAfterArmClock, MergeWorkMeter, publish_lifecycle_at_catalog_for_test, zero_work_service,
@@ -322,7 +322,7 @@ fn correlation_sequential_target_admission_failure_releases_the_log_lease()
 fn coupled_source_cleanup_cancels_expiry_when_target_admission_fails() -> Result<(), Box<dyn Error>>
 {
     QueryFixture::scoped("coupled-source-cleanup-after-target-failure", |fixture| {
-        let coordinator = Mutex::new(MaintenanceCoordinator::new());
+        let coordinator = MaintenanceCoordinator::new();
         let service = zero_work_service(
             fixture.kernel.authority.governor(),
             fixture.kernel.ledger()?,
@@ -344,8 +344,6 @@ fn coupled_source_cleanup_cancels_expiry_when_target_admission_fails() -> Result
         assert_eq!(failure.code(), QueryFailureCode::StoreUnavailable);
         assert!(
             coordinator
-                .lock()
-                .map_err(|_| "maintenance lock")?
                 .start_next_with_reservation_and_persist(
                     fixture.kernel.catalog_for_test(),
                     fixture.kernel.authority,

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use positron_domain::identity::{PrincipalId, Scope, TenantId};
 use positron_governance::{AuthorizedContext, Identity};
@@ -32,7 +32,7 @@ pub struct QueryService<'kernel, 'catalog, 'ledger> {
     pub(crate) governor: ResourceGovernor<'kernel>,
     pub(crate) ledger: &'ledger ActiveSegmentLedger<'kernel, 'catalog>,
     pub(crate) trace_ledger: Option<&'ledger ActiveSegmentLedger<'kernel, 'catalog>>,
-    pub(crate) maintenance: Option<&'ledger Mutex<positron_kernel::MaintenanceCoordinator>>,
+    pub(crate) maintenance: Option<&'ledger positron_kernel::MaintenanceCoordinator>,
     pub(crate) batch_limit: u16,
     pub(crate) clock: Arc<dyn crate::QueryClock>,
     pub(crate) work_meter: Arc<dyn crate::QueryWorkMeter>,
@@ -104,7 +104,7 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
     #[must_use]
     pub fn with_maintenance_coordinator(
         mut self,
-        maintenance: &'ledger Mutex<positron_kernel::MaintenanceCoordinator>,
+        maintenance: &'ledger positron_kernel::MaintenanceCoordinator,
     ) -> Self {
         self.maintenance = Some(maintenance);
         self

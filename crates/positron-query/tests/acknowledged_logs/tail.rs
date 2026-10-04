@@ -1,12 +1,13 @@
 use std::error::Error;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier};
 
 use positron_domain::routing::{SignalKind, VirtualShardId};
 use positron_domain::value::AttributeValueKind;
 use positron_kernel::{
     ActiveSegmentLedger, CatalogPublicationFault, CommittedLedgerReader, MaintenanceCoordinator,
-    PrincipalQuota, ResourceAmounts, SegmentProtectionKey, SnapshotLeaseId, WorkClass,
-    with_catalog_publication_fault_after, with_catalog_publication_fault_sequence_after,
+    MaintenanceTaskId, MaintenanceTaskPhase, PrincipalQuota, ResourceAmounts, SegmentProtectionKey,
+    SnapshotLeaseId, WorkClass, with_catalog_publication_fault_after,
+    with_catalog_publication_fault_sequence_after,
 };
 use positron_query::{
     QueryBudget, QueryEvent, QueryFailureCode, QueryService, QueryTerminal, TailCursor,
@@ -51,7 +52,7 @@ fn tail_publishes_an_expiry_task_for_every_new_source_lease() -> Result<(), Box<
         )?;
         let sources =
             TailSourceSet::new(vec![fixture.kernel.ledger()?.reader()?, second.reader()?])?;
-        let coordinator = Mutex::new(MaintenanceCoordinator::new());
+        let coordinator = MaintenanceCoordinator::new();
         fixture.kernel.append_log("initial", 1, 1)?;
         let service = zero_work_clock_service(
             fixture.kernel.authority.governor(),
@@ -66,7 +67,6 @@ fn tail_publishes_an_expiry_task_for_every_new_source_lease() -> Result<(), Box<
             QueryBudget::new(1_048_576, 16, 4, 1_048_576, 1_048_576, 60)?,
         )?;
         let _tail = service.tail_with_sources(query, TailStart::Now, sources)?;
-        let coordinator = coordinator.lock().map_err(|_| "maintenance lock")?;
         assert_eq!(
             coordinator
                 .durable_records()
@@ -81,7 +81,7 @@ fn tail_publishes_an_expiry_task_for_every_new_source_lease() -> Result<(), Box<
 #[test]
 fn released_tail_lease_cancels_its_expiry_task_before_the_due_time() -> Result<(), Box<dyn Error>> {
     QueryFixture::scoped("tail-release-coupled-expiry", |fixture| {
-        let coordinator = Mutex::new(MaintenanceCoordinator::new());
+        let coordinator = MaintenanceCoordinator::new();
         let service = zero_work_clock_service(
             fixture.kernel.authority.governor(),
             fixture.kernel.ledger()?,
@@ -98,8 +98,6 @@ fn released_tail_lease_cancels_its_expiry_task_before_the_due_time() -> Result<(
         drop(tail);
         assert!(
             coordinator
-                .lock()
-                .map_err(|_| "maintenance lock")?
                 .start_next_with_reservation_and_persist(
                     fixture.kernel.catalog_for_test(),
                     fixture.kernel.authority,
@@ -115,9 +113,77 @@ fn released_tail_lease_cancels_its_expiry_task_before_the_due_time() -> Result<(
 }
 
 #[test]
+fn failed_tail_drop_release_recovers_its_expiry_task_from_catalog() -> Result<(), Box<dyn Error>> {
+    QueryFixture::scoped("tail-drop-release-catalog-recovery", |fixture| {
+        let coordinator = MaintenanceCoordinator::new();
+        let service = zero_work_clock_service(
+            fixture.kernel.authority.governor(),
+            fixture.kernel.ledger()?,
+            16,
+            TestClock::shared(100),
+        )
+        .with_maintenance_coordinator(&coordinator);
+        let query = service.plan_pipeline(
+            fixture.context,
+            "pipeline:v1 logs | range query_time -100 100 | limit all",
+            QueryBudget::new(1_048_576, 16, 4, 1_048_576, 1_048_576, 60)?,
+        )?;
+        let mut tail = service.tail(query, TailStart::Now)?;
+        let identity = match tail.poll() {
+            Some(TailEvent::Header(header)) => SnapshotLeaseId::new(header.lease().identity())?,
+            _ => return Err("tail header missing".into()),
+        };
+        with_catalog_publication_fault_after(
+            CatalogPublicationFault::ReadGenerationDirectory,
+            0,
+            || {
+                drop(tail);
+            },
+        );
+
+        drop(service);
+        fixture.kernel.reopen_ledger()?;
+        let recovered =
+            MaintenanceCoordinator::restore_from_catalog(fixture.kernel.catalog_for_test())
+                .map_err(|failure| format!("recover maintenance coordinator: {failure:?}"))?;
+        let task = MaintenanceTaskId::new(identity.to_bytes())
+            .map_err(|failure| format!("construct expiry task identity: {failure:?}"))?;
+        assert_eq!(
+            recovered
+                .status(task)
+                .map_err(|failure| format!("read recovered expiry task: {failure:?}"))?
+                .phase(),
+            MaintenanceTaskPhase::Queued,
+            "a failed Drop release leaves the exact durable expiry task for Catalog recovery"
+        );
+        fixture
+            .kernel
+            .ledger()?
+            .release_snapshot_lease_with_expiry_task(&recovered, identity)?;
+        assert_eq!(
+            recovered
+                .status(task)
+                .map_err(|failure| format!("read terminal expiry task: {failure:?}"))?
+                .phase(),
+            MaintenanceTaskPhase::Cancelled
+        );
+        assert_eq!(
+            fixture
+                .kernel
+                .ledger()?
+                .resume_snapshot_lease(identity, 101)
+                .expect_err("recovered release must terminalize the lease")
+                .code(),
+            positron_kernel::LedgerFailureCode::SnapshotExpired
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn live_tail_lease_roll_replaces_its_expiry_descriptor() -> Result<(), Box<dyn Error>> {
     QueryFixture::scoped("tail-roll-coupled-expiry", |fixture| {
-        let coordinator = Mutex::new(MaintenanceCoordinator::new());
+        let coordinator = MaintenanceCoordinator::new();
         fixture.kernel.append_log("initial", 1, 1)?;
         let service = zero_work_clock_service(
             fixture.kernel.authority.governor(),
@@ -150,8 +216,6 @@ fn live_tail_lease_roll_replaces_its_expiry_descriptor() -> Result<(), Box<dyn E
         }
         assert_eq!(
             coordinator
-                .lock()
-                .map_err(|_| "maintenance lock")?
                 .durable_records()
                 .expect("durable expiry records")
                 .len(),

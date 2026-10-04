@@ -112,18 +112,14 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
             (lease, owner)
         } else {
             let lease = match self.maintenance {
-                Some(maintenance) => {
-                    let coordinator = maintenance
-                        .lock()
-                        .map_err(|_| QueryFailure::new(QueryFailureCode::Internal))?;
-                    self.ledger
-                        .create_snapshot_lease_for_at_catalog_with_expiry_task(
-                            &coordinator,
-                            now,
-                            lease_ttl,
-                            catalog_identity,
-                        )
-                },
+                Some(coordinator) => self
+                    .ledger
+                    .create_snapshot_lease_for_at_catalog_with_expiry_task(
+                        coordinator,
+                        now,
+                        lease_ttl,
+                        catalog_identity,
+                    ),
                 None => self.ledger.create_snapshot_lease_for_at_catalog(
                     now,
                     lease_ttl,
@@ -154,19 +150,15 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                     .lease_authority()
                     .ok_or_else(|| QueryFailure::new(QueryFailureCode::StoreUnavailable))?;
                 let source_lease = match self.maintenance {
-                    Some(maintenance) => {
-                        let coordinator = maintenance
-                            .lock()
-                            .map_err(|_| QueryFailure::new(QueryFailureCode::Internal))?;
-                        authority.create_snapshot_lease_for_at_catalog_with_expiry_task(
-                            &coordinator,
+                    Some(coordinator) => authority
+                        .create_snapshot_lease_for_at_catalog_with_expiry_task(
+                            coordinator,
                             now,
                             lease_ttl,
                             authority
                                 .current_catalog_generation()
                                 .map_err(crate::execution_support::map_ledger_failure)?,
-                        )
-                    },
+                        ),
                     None => authority.create_snapshot_lease_for(now, lease_ttl),
                 }
                 .map_err(crate::execution_support::map_ledger_failure)?;

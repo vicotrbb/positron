@@ -119,19 +119,15 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         // PlannedQuery still owns its admitted CPU reservation while the
         // separately scoped immutable source snapshots are constructed.
         let lease = match self.maintenance {
-            Some(maintenance) => {
-                let coordinator = maintenance
-                    .lock()
-                    .map_err(|_| QueryFailure::new(QueryFailureCode::Internal))?;
-                self.ledger
-                    .create_snapshot_lease_for_at_catalog_with_expiry_task(
-                        &coordinator,
-                        now,
-                        remaining_ttl(now, expiry)?,
-                        catalog_identity,
-                    )
-                    .map_err(map_ledger_failure)?
-            },
+            Some(coordinator) => self
+                .ledger
+                .create_snapshot_lease_for_at_catalog_with_expiry_task(
+                    coordinator,
+                    now,
+                    remaining_ttl(now, expiry)?,
+                    catalog_identity,
+                )
+                .map_err(map_ledger_failure)?,
             None => self
                 .ledger
                 .create_snapshot_lease_for_at_catalog(
@@ -155,17 +151,13 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                     return Err(self.fail_after_source_lease(lease.identity(), failure));
                 }
                 let trace_result = match self.maintenance {
-                    Some(maintenance) => {
-                        let coordinator = maintenance
-                            .lock()
-                            .map_err(|_| QueryFailure::new(QueryFailureCode::Internal))?;
-                        trace_ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-                            &coordinator,
+                    Some(coordinator) => trace_ledger
+                        .create_snapshot_lease_for_at_catalog_with_expiry_task(
+                            coordinator,
                             now,
                             remaining_ttl(now, expiry)?,
                             trace_catalog_identity,
-                        )
-                    },
+                        ),
                     None => trace_ledger.create_snapshot_lease_for_at_catalog(
                         now,
                         remaining_ttl(now, expiry)?,

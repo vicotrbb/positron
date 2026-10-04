@@ -152,14 +152,7 @@ impl<'service, 'kernel, 'catalog, 'ledger> TailSession<'service, 'kernel, 'catal
             .map_err(|_| QueryFailure::new(QueryFailureCode::ResourceExhausted))?;
         let mut primary_grant = if let Some(replacement) = primary.as_mut() {
             let grant = match self.service.maintenance {
-                Some(maintenance) => {
-                    let coordinator = maintenance
-                        .lock()
-                        .map_err(|_| QueryFailure::new(QueryFailureCode::Internal))?;
-                    replacement
-                        .replacement
-                        .commit_with_expiry_task(&coordinator)
-                },
+                Some(coordinator) => replacement.replacement.commit_with_expiry_task(coordinator),
                 None => replacement.replacement.commit(),
             }
             .map_err(crate::execution_support::map_ledger_failure)?;
@@ -172,14 +165,7 @@ impl<'service, 'kernel, 'catalog, 'ledger> TailSession<'service, 'kernel, 'catal
                 .get_mut(index)
                 .ok_or_else(super::super::internal)?;
             let committed = match self.service.maintenance {
-                Some(maintenance) => {
-                    let coordinator = maintenance
-                        .lock()
-                        .map_err(|_| QueryFailure::new(QueryFailureCode::Internal))?;
-                    replacement
-                        .replacement
-                        .commit_with_expiry_task(&coordinator)
-                },
+                Some(coordinator) => replacement.replacement.commit_with_expiry_task(coordinator),
                 None => replacement.replacement.commit(),
             };
             match committed {

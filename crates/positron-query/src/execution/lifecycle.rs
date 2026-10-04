@@ -148,18 +148,13 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
 
 pub(super) fn release_lease(
     ledger: &positron_kernel::ActiveSegmentLedger<'_, '_>,
-    maintenance: Option<&std::sync::Mutex<positron_kernel::MaintenanceCoordinator>>,
+    maintenance: Option<&positron_kernel::MaintenanceCoordinator>,
     identity: positron_kernel::SnapshotLeaseId,
 ) -> Result<(), QueryFailure> {
     match maintenance {
-        Some(maintenance) => {
-            let coordinator = maintenance
-                .lock()
-                .map_err(|_| QueryFailure::new(crate::QueryFailureCode::Internal))?;
-            ledger
-                .release_snapshot_lease_with_expiry_task(&coordinator, identity)
-                .map_err(map_ledger_failure)
-        },
+        Some(coordinator) => ledger
+            .release_snapshot_lease_with_expiry_task(coordinator, identity)
+            .map_err(map_ledger_failure),
         None => ledger
             .release_snapshot_lease(identity)
             .map_err(map_ledger_failure),

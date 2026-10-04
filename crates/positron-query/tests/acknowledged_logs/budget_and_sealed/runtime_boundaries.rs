@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::sync::Mutex;
 
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
 use positron_kernel::MaintenanceCoordinator;
@@ -424,7 +423,7 @@ fn runtime_observations_cover_scan_output_and_pre_delivery_boundaries() -> Resul
 fn failed_query_with_maintenance_cancels_its_coupled_expiry_task() -> Result<(), Box<dyn Error>> {
     QueryFixture::scoped("failed-query-coupled-cleanup", |fixture| {
         fixture.kernel.append_log("failure", 20, 1)?;
-        let coordinator = Mutex::new(MaintenanceCoordinator::new());
+        let coordinator = MaintenanceCoordinator::new();
         let service = QueryService::with_runtime(
             fixture.kernel.authority.governor(),
             fixture.kernel.ledger()?,
@@ -446,7 +445,6 @@ fn failed_query_with_maintenance_cancels_its_coupled_expiry_task() -> Result<(),
             Some(QueryEvent::Terminal(QueryTerminal::Incomplete(failure)))
                 if failure.code() == QueryFailureCode::Internal
         ));
-        let coordinator = coordinator.lock().map_err(|_| "maintenance lock")?;
         assert!(
             coordinator
                 .start_next_with_reservation_and_persist(
