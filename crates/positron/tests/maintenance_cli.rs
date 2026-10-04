@@ -206,6 +206,8 @@ fn maintenance_status_rejects_malformed_or_non_progressing_continuations()
     let endpoint = listener.local_addr()?.to_string();
     let server = std::thread::spawn(move || -> Result<(), std::io::Error> {
         let (mut stream, _) = listener.accept()?;
+        let mut request = [0_u8; 4096];
+        stream.read(&mut request)?;
         let body = format!(
             r#"{{"tasks":[{}],"returned":1,"total":2,"next_cursor":"not-a-task","queued":1,"running":0,"deferred":0,"terminal":1}}"#,
             task("queued")
@@ -235,6 +237,8 @@ fn maintenance_status_rejects_malformed_or_non_progressing_continuations()
             status_page(&task("queued"), None),
         ] {
             let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4096];
+            stream.read(&mut request)?;
             stream.write_all(
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
