@@ -19,7 +19,7 @@ use super::ExecutionResources;
 use crate::QueryFailureCode;
 use crate::cursor::CursorState;
 use crate::{LogicalPlan, QueryBudget, QueryCancellation, TemporalAxis, TemporalRange};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
@@ -41,7 +41,7 @@ fn lease_identity_mismatch_releases_every_pre_stream_resource() -> Result<(), Bo
         SegmentProtectionKey::from_owned(Box::new([0x34; 32])),
     )?;
     let baseline = authority.governor().inspect()?;
-    let coordinator = Mutex::new(MaintenanceCoordinator::new());
+    let coordinator = MaintenanceCoordinator::new();
 
     for iteration in 0..65 {
         let admission = authority.governor().reserve(WorkClaim::tenant(
@@ -49,14 +49,12 @@ fn lease_identity_mismatch_releases_every_pre_stream_resource() -> Result<(), Bo
             WorkKind::InteractiveQueryTail,
             ResourceAmounts::new([1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0]),
         )?)?;
-        let coordinator_guard = coordinator.lock().map_err(|_| "maintenance lock")?;
         let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-            &coordinator_guard,
+            &coordinator,
             100 + iteration,
             std::num::NonZeroU64::new(100).ok_or("nonzero ttl")?,
             catalog.pin()?.identity(),
         )?;
-        drop(coordinator_guard);
         let identity = lease.identity();
         drop(lease);
         let resources = ExecutionResources::new(admission, identity, SnapshotLeaseUsage::default());
@@ -83,8 +81,6 @@ fn lease_identity_mismatch_releases_every_pre_stream_resource() -> Result<(), Bo
         );
         assert!(
             coordinator
-                .lock()
-                .map_err(|_| "maintenance lock")?
                 .start_next_with_reservation_and_persist(&catalog, &authority, 10_000, false)
                 .map_err(|_| "maintenance scheduler")?
                 .is_none(),
