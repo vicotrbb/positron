@@ -209,7 +209,7 @@ pub use active_segment_ledger::fuzz_snapshot_lease_record;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]
-pub use maintenance::fuzz_maintenance_stateful;
+pub use maintenance::{fuzz_maintenance_catalog_stateful, fuzz_maintenance_stateful};
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};

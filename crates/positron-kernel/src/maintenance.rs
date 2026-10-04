@@ -15,8 +15,13 @@ use crate::{
 };
 
 mod compaction;
+#[cfg(fuzzing)]
+mod fuzzing;
 mod persistence;
 mod record;
+
+#[cfg(fuzzing)]
+pub use fuzzing::fuzz_maintenance_catalog_stateful;
 
 pub use compaction::CompactionBinding;
 pub(crate) use compaction::{compaction_task_record_bytes, compaction_task_record_working_bytes};

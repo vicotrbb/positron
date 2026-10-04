@@ -156,6 +156,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "maintenance_wire_json"
+path = "fuzz_targets/maintenance_wire_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "maintenance_catalog_stateful"
+path = "fuzz_targets/maintenance_catalog_stateful.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "log_store_compaction_stateful"
 path = "fuzz_targets/log_store_compaction_stateful.rs"
 test = false
