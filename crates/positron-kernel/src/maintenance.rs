@@ -708,7 +708,7 @@ fn checkpoint_advances(
     previous: Option<&MaintenanceCheckpoint>,
     candidate: &MaintenanceCheckpoint,
 ) -> bool {
-    previous.is_some_and(|current| candidate.completed_inputs > current.completed_inputs)
+    candidate.completed_inputs > previous.map_or(0, |current| current.completed_inputs)
 }
 
 impl MaintenanceCoordinator {
@@ -951,7 +951,13 @@ impl MaintenanceCoordinator {
             .get(&identity)
             .map(|stored| stored.task.clone())
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        dispatch_task(&mut state, self.coordinator_id, identity, now)?;
+        dispatch_task(
+            &mut state,
+            self.coordinator_id,
+            identity,
+            now,
+            clock_uncertain,
+        )?;
         Ok(Some(task))
     }
 
@@ -983,7 +989,13 @@ impl MaintenanceCoordinator {
                 Ok(reservation) => reservation,
                 Err(()) => continue,
             };
-            let dispatch = dispatch_task(&mut state, self.coordinator_id, identity, now)?;
+            let dispatch = dispatch_task(
+                &mut state,
+                self.coordinator_id,
+                identity,
+                now,
+                clock_uncertain,
+            )?;
             self.live_executions.fetch_add(1, Ordering::AcqRel);
             return Ok(Some(MaintenanceExecution {
                 task,

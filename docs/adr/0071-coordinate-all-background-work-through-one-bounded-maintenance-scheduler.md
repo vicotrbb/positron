@@ -4,12 +4,15 @@ Release 1 routes segment rolling, compaction, retention, reclamation, scrub, sch
 
 The server owns one initial no-durable-progress SLO for eligible Running tasks:
 60 seconds from the durable Running transition or a later durably committed
-checkpoint that increases `completed_inputs`. Checkpoint sequence changes,
-opaque cursor rewrites, and failed or ambiguous Catalog publication do not
-reset it. Terminal, queued, paused, window-deferred, conflict-blocked, and
-capacity-refused tasks are not running stalls. A restart recovers a prior
-Running task as queued and establishes a fresh deadline only on its next
-durable admission. `ClockUncertain`, a missing legacy timestamp, or a
-non-monotonic server instant produces an unknown deadline fact, never a
-fabricated healthy result. This deadline is distinct from the existing
-60-second lower-class queued-work priority escalation.
+checkpoint that increases `completed_inputs` and has a trusted server
+lifecycle instant. Checkpoint sequence changes, opaque cursor rewrites, and
+failed or ambiguous Catalog publication do not reset it. An otherwise
+advancing checkpoint without that instant clears the deadline to unknown
+rather than retaining an obsolete age. Terminal, queued, paused,
+window-deferred, conflict-blocked, and capacity-refused tasks are not running
+stalls. A restart recovers a prior Running task as queued and establishes a
+fresh deadline only on its next durable admission. `ClockUncertain`, including
+admission while it is active, a missing legacy timestamp, or a non-monotonic
+server instant produces an unknown deadline fact, never a fabricated healthy
+result. This deadline is distinct from the existing 60-second lower-class
+queued-work priority escalation.

@@ -452,5 +452,6 @@ pub(super) fn matches_catalog_reclamation_predecessor(
     }
     let mut recovered = durable.clone();
     recovered.phase = MaintenanceTaskPhase::Cancelled;
+    recovered.last_progress_at = None;
     Ok(encode_record(&recovered)?.as_bytes() == live_record.as_bytes())
 }

@@ -165,7 +165,13 @@ impl MaintenanceCoordinator {
                 Ok(reservation) => reservation,
                 Err(()) => continue,
             };
-            let dispatch = dispatch_task(&mut prospective, self.coordinator_id, identity, now)?;
+            let dispatch = dispatch_task(
+                &mut prospective,
+                self.coordinator_id,
+                identity,
+                now,
+                clock_uncertain,
+            )?;
             let updated = prospective
                 .tasks
                 .get(&identity)

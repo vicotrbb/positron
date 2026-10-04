@@ -763,6 +763,11 @@ fn audit_reclaimer_recovers_a_prephysical_cancellation_when_its_terminal_write_f
         recovered_live.cancellation_requested(),
         "reconciliation preserves the durable cancellation flag rather than making a pre-physical retry eligible"
     );
+    assert_eq!(
+        recovered_live.last_progress_at(),
+        None,
+        "the canonical recovered cancellation never retains a Running-only progress anchor"
+    );
     drop(catalog);
     assert_eq!(
         initialized.governance_audit_for_test()?,

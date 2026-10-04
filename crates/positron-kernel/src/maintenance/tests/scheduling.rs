@@ -37,7 +37,7 @@ fn submitted_work_is_visible_to_the_single_scheduler() {
 }
 
 #[test]
-fn uncertain_clock_pauses_only_age_derived_destruction() {
+fn uncertain_clock_pauses_only_age_derived_destruction_without_fabricating_an_slo_anchor() {
     let coordinator = MaintenanceCoordinator::new();
     let retention = task(
         4,
@@ -62,6 +62,15 @@ fn uncertain_clock_pauses_only_age_derived_destruction() {
         coordinator.start_next(1, true).expect("scheduler runs"),
         Some(compaction)
     );
+    let running = coordinator
+        .status_with_progress_slo(
+            MaintenanceTaskId::new([5; 16]).expect("stable task identity"),
+            Some(61),
+            false,
+        )
+        .expect("running event work remains inspectable after clock recovery");
+    assert_eq!(running.last_progress_at(), None);
+    assert_eq!(running.no_durable_progress_slo_breached(), None);
 }
 
 #[test]

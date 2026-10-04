@@ -55,7 +55,7 @@ fn catalog_checkpoint_reopen_restores_one_queued_task_with_its_progress()
         MaintenanceScope::system(),
         MaintenanceTrigger::Event,
         MaintenancePreconditions::new(4, 9).expect("preconditions"),
-        Vec::new(),
+        vec![MaintenanceObjectId::new([43; 32]).expect("checkpoint input")],
         Vec::new(),
         ResourceAmounts::new([1; 11]),
     );
@@ -80,7 +80,7 @@ fn catalog_checkpoint_reopen_restores_one_queued_task_with_its_progress()
             execution.checkpoint_and_persist_at(
                 &coordinator,
                 &catalog,
-                MaintenanceCheckpoint::new(1, 0, vec![4, 2]).expect("checkpoint"),
+                MaintenanceCheckpoint::new(1, 1, vec![4, 2]).expect("checkpoint"),
                 20,
             )
         });
@@ -100,9 +100,14 @@ fn catalog_checkpoint_reopen_restores_one_queued_task_with_its_progress()
         .checkpoint_and_persist(
             &coordinator,
             &catalog,
-            MaintenanceCheckpoint::new(1, 0, vec![4, 2]).expect("checkpoint"),
+            MaintenanceCheckpoint::new(1, 1, vec![4, 2]).expect("checkpoint"),
         )
         .expect("checkpoint must publish");
+    let untimed_progress = coordinator
+        .status_with_progress_slo(identity, Some(68), false)
+        .expect("checkpoint status");
+    assert_eq!(untimed_progress.last_progress_at(), None);
+    assert_eq!(untimed_progress.no_durable_progress_slo_breached(), None);
     drop(execution);
     drop(catalog);
 

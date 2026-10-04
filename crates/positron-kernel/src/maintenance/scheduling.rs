@@ -86,6 +86,7 @@ pub(super) fn dispatch_task(
     coordinator_id: u64,
     identity: MaintenanceTaskId,
     now: u64,
+    clock_uncertain: bool,
 ) -> Result<MaintenanceDispatch, MaintenanceFailure> {
     require_unreserved_task_transition(state, identity)?;
     let (dispatch, fairness_key, next_fairness) = {
@@ -123,7 +124,9 @@ pub(super) fn dispatch_task(
         .get_mut(&identity)
         .ok_or(MaintenanceFailure::UnknownTask)?;
     task.phase = MaintenanceTaskPhase::Running;
-    task.last_progress_at = Some(now);
+    // `now` orders the scheduler even when lifecycle time is uncertain, but it
+    // cannot establish a trustworthy durable-progress age in that state.
+    task.last_progress_at = (!clock_uncertain).then_some(now);
     task.dispatches = dispatch.attempt;
     task.active_dispatch = Some(dispatch);
     state.fairness.insert(fairness_key, next_fairness);
