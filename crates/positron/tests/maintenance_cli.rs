@@ -206,8 +206,7 @@ fn maintenance_status_rejects_malformed_or_non_progressing_continuations()
     let endpoint = listener.local_addr()?.to_string();
     let server = std::thread::spawn(move || -> Result<(), std::io::Error> {
         let (mut stream, _) = listener.accept()?;
-        let mut request = [0_u8; 4096];
-        stream.read(&mut request)?;
+        read_maintenance_status_request(&mut stream)?;
         let body = format!(
             r#"{{"tasks":[{}],"returned":1,"total":2,"next_cursor":"not-a-task","queued":1,"running":0,"deferred":0,"terminal":1}}"#,
             task("queued")
@@ -237,8 +236,7 @@ fn maintenance_status_rejects_malformed_or_non_progressing_continuations()
             status_page(&task("queued"), None),
         ] {
             let (mut stream, _) = listener.accept()?;
-            let mut request = [0_u8; 4096];
-            stream.read(&mut request)?;
+            read_maintenance_status_request(&mut stream)?;
             stream.write_all(
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -589,6 +587,61 @@ fn run_with_credential<'a>(
         .ok_or_else(|| std::io::Error::other("stdin unavailable"))?
         .write_all(CREDENTIAL.as_bytes())?;
     child.wait_with_output()
+}
+
+fn read_maintenance_status_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
+    let mut headers = Vec::with_capacity(256);
+    while !headers.ends_with(b"\r\n\r\n") {
+        if headers.len() == 4096 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "maintenance request headers exceed the fixture bound",
+            ));
+        }
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte)?;
+        headers.push(byte[0]);
+    }
+    let headers = std::str::from_utf8(&headers).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "maintenance request headers are not UTF-8",
+        )
+    })?;
+    let mut lines = headers.split("\r\n");
+    if lines.next() != Some("POST /v1/maintenance:status HTTP/1.1") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected maintenance request route",
+        ));
+    }
+    let content_length = lines
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then_some(value.trim())
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "maintenance request has no content length",
+            )
+        })?
+        .parse::<usize>()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "maintenance request has invalid content length",
+            )
+        })?;
+    if content_length > positron_api::maintenance::MAX_REQUEST_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "maintenance request body exceeds the fixture bound",
+        ));
+    }
+    let mut body = vec![0_u8; content_length];
+    stream.read_exact(&mut body)
 }
 
 fn status_page(task: &str, next_cursor: Option<&str>) -> String {
