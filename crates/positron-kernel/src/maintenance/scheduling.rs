@@ -34,13 +34,7 @@ pub(super) fn eligible_task_ids(
         .try_reserve_exact(state.tasks.len())
         .map_err(|_| MaintenanceFailure::CapacityExceeded)?;
     for (identity, task) in &state.tasks {
-        let clock_blocks = clock_uncertain
-            && task.task.class.destructive()
-            && matches!(
-                task.task.trigger,
-                MaintenanceTrigger::AgeDerived | MaintenanceTrigger::Scheduled
-            )
-            && !state.clock_uncertain_durable_eligibility.contains(identity);
+        let clock_blocks = clock_uncertain_blocks(state, *identity, task, clock_uncertain);
         let window_blocks = state.window.as_ref().is_some_and(|window| {
             window.deferred.contains(&task.task.class)
                 && task
@@ -68,6 +62,23 @@ pub(super) fn eligible_task_ids(
         }
     });
     Ok(candidates)
+}
+
+pub(super) fn clock_uncertain_blocks(
+    state: &CoordinatorState,
+    identity: MaintenanceTaskId,
+    task: &TaskState,
+    clock_uncertain: bool,
+) -> bool {
+    clock_uncertain
+        && task.task.class.destructive()
+        && matches!(
+            task.task.trigger,
+            MaintenanceTrigger::AgeDerived | MaintenanceTrigger::Scheduled
+        )
+        && !state
+            .clock_uncertain_durable_eligibility
+            .contains(&identity)
 }
 
 pub(super) fn dispatch_task(

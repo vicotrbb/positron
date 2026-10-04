@@ -26,7 +26,7 @@ fn maintenance_status_client_uses_the_canonical_bounded_system_administration_ro
                 .to_ascii_lowercase()
                 .contains("authorization: bearer system-administrator\r\n")
         );
-        let body = r#"{"tasks":[{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","phase":"deferred","submitted_at_unix_seconds":1,"checkpoint_sequence":2,"pause_until_unix_seconds":61,"cancellation_requested":false,"resource_generation":1,"reservations":{"memory_bytes":0,"queue_slots":0,"task_slots":1,"buffer_cache_bytes":0,"batch_items":0,"lease_slots":0,"retry_slots":0,"io_permits":0,"cpu_work_units":0,"file_descriptors":0,"disk_headroom_bytes":0},"blocked_precondition":"maintenance_pause_active","safe_actions":["resume"],"backlog_age_seconds":3,"checkpoint_completed_inputs":0,"input_object_count":1,"output_object_count":0}],"returned":1,"total":1,"queued":0,"running":0,"deferred":1,"terminal":0}"#;
+        let body = r#"{"tasks":[{"identity":"00000000000000000000000000000001","class":"compaction","scope":"segment:00000000-0000-0000-0000-000000000001:logs:1","phase":"deferred","submitted_at_unix_seconds":1,"checkpoint_sequence":2,"pause_until_unix_seconds":61,"cancellation_requested":false,"resource_generation":1,"reservations":{"memory_bytes":0,"queue_slots":0,"task_slots":1,"buffer_cache_bytes":0,"batch_items":0,"lease_slots":0,"retry_slots":0,"io_permits":0,"cpu_work_units":0,"file_descriptors":0,"disk_headroom_bytes":0},"expected_foreground_impact":{"memory_bytes":0,"queue_slots":0,"task_slots":1,"buffer_cache_bytes":0,"batch_items":0,"lease_slots":0,"retry_slots":0,"io_permits":0,"cpu_work_units":0,"file_descriptors":0,"disk_headroom_bytes":0},"blocked_precondition":"maintenance_pause_active","safe_actions":["resume"],"backlog_age_seconds":3,"checkpoint_completed_inputs":0,"input_object_count":1,"output_object_count":0}],"returned":1,"total":1,"queued":0,"running":0,"deferred":1,"terminal":0}"#;
         stream.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -52,6 +52,12 @@ fn maintenance_status_client_uses_the_canonical_bounded_system_administration_ro
     assert_eq!(task.resource_generation, Some(1));
     assert_eq!(
         task.reservations.as_ref().map(|value| value.task_slots),
+        Some(1)
+    );
+    assert_eq!(
+        task.expected_foreground_impact
+            .as_ref()
+            .map(|value| value.task_slots),
         Some(1)
     );
     assert_eq!(
@@ -83,6 +89,19 @@ fn full_valid_maintenance_registry_page_fits_the_bounded_response() {
             cancellation_requested: false,
             resource_generation: Some(u64::MAX),
             reservations: Some(MaintenanceResourceReservations {
+                memory_bytes: u64::MAX,
+                queue_slots: u64::MAX,
+                task_slots: u64::MAX,
+                buffer_cache_bytes: u64::MAX,
+                batch_items: u64::MAX,
+                lease_slots: u64::MAX,
+                retry_slots: u64::MAX,
+                io_permits: u64::MAX,
+                cpu_work_units: u64::MAX,
+                file_descriptors: u64::MAX,
+                disk_headroom_bytes: u64::MAX,
+            }),
+            expected_foreground_impact: Some(MaintenanceResourceReservations {
                 memory_bytes: u64::MAX,
                 queue_slots: u64::MAX,
                 task_slots: u64::MAX,
@@ -270,6 +289,7 @@ fn maintenance_run_client_uses_the_canonical_explicit_scope_route()
                 cancellation_requested: false,
                 resource_generation: None,
                 reservations: None,
+                expected_foreground_impact: None,
                 blocked_precondition: None,
                 safe_actions: Vec::new(),
                 backlog_age_seconds: None,

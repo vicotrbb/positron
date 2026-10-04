@@ -388,6 +388,7 @@ pub struct MaintenanceTaskStatus {
     pause_until: Option<u64>,
     cancellation_requested: bool,
     conflict_owner: Option<MaintenanceTaskId>,
+    clock_uncertain_blocked: bool,
 }
 
 /// A live Resource Governor grant attached to a running task. The coordinator
@@ -595,12 +596,19 @@ impl MaintenanceTaskStatus {
     pub const fn conflict_owner(&self) -> Option<MaintenanceTaskId> {
         self.conflict_owner
     }
+    /// True when the coordinator's exact scheduler predicate refuses this
+    /// queued task while the lifecycle clock is uncertain.
+    #[must_use]
+    pub const fn clock_uncertain_blocked(&self) -> bool {
+        self.clock_uncertain_blocked
+    }
 }
 
 fn maintenance_task_status(
     state: &CoordinatorState,
     identity: MaintenanceTaskId,
     task: &TaskState,
+    clock_uncertain: bool,
 ) -> MaintenanceTaskStatus {
     let conflict_owner = (task.phase == MaintenanceTaskPhase::Queued)
         .then(|| {
@@ -623,6 +631,12 @@ fn maintenance_task_status(
         pause_until: task.pause_until,
         cancellation_requested: task.cancellation_requested,
         conflict_owner,
+        clock_uncertain_blocked: scheduling::clock_uncertain_blocks(
+            state,
+            identity,
+            task,
+            clock_uncertain,
+        ),
     }
 }
 
@@ -1019,7 +1033,30 @@ impl MaintenanceCoordinator {
             .tasks
             .get(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        Ok(maintenance_task_status(&state, identity, task))
+        Ok(maintenance_task_status(&state, identity, task, false))
+    }
+
+    /// Returns one status with the same ClockUncertain scheduling predicate
+    /// used by dispatch. Inspection does not sample uncertain lifecycle time.
+    pub fn status_with_clock_uncertainty(
+        &self,
+        identity: MaintenanceTaskId,
+        clock_uncertain: bool,
+    ) -> Result<MaintenanceTaskStatus, MaintenanceFailure> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        let task = state
+            .tasks
+            .get(&identity)
+            .ok_or(MaintenanceFailure::UnknownTask)?;
+        Ok(maintenance_task_status(
+            &state,
+            identity,
+            task,
+            clock_uncertain,
+        ))
     }
 
     /// Returns the complete bounded task view for authenticated administration
@@ -1032,7 +1069,26 @@ impl MaintenanceCoordinator {
         Ok(state
             .tasks
             .iter()
-            .map(|(identity, task)| maintenance_task_status(&state, *identity, task))
+            .map(|(identity, task)| maintenance_task_status(&state, *identity, task, false))
+            .collect())
+    }
+
+    /// Returns the bounded task registry with the exact ClockUncertain
+    /// scheduler blocker rendered for authenticated inspection.
+    pub fn statuses_with_clock_uncertainty(
+        &self,
+        clock_uncertain: bool,
+    ) -> Result<Vec<MaintenanceTaskStatus>, MaintenanceFailure> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        Ok(state
+            .tasks
+            .iter()
+            .map(|(identity, task)| {
+                maintenance_task_status(&state, *identity, task, clock_uncertain)
+            })
             .collect())
     }
 

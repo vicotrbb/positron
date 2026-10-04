@@ -62,3 +62,38 @@ fn conflicting_copy_on_write_work_waits_for_the_running_owner_across_scopes() {
         Some(first)
     );
 }
+
+#[test]
+fn clock_uncertain_inspection_reports_the_same_destructive_schedule_blocker_as_dispatch() {
+    let coordinator = MaintenanceCoordinator::new();
+    let task = task(
+        9,
+        MaintenanceTaskClass::RetentionReclamation,
+        MaintenanceTrigger::Scheduled,
+        MaintenancePriority::Urgent,
+        Vec::new(),
+    );
+    let identity = task.identity();
+    coordinator
+        .submit_at(task, 1)
+        .expect("scheduled task accepted");
+
+    assert!(
+        coordinator
+            .status_with_clock_uncertainty(identity, true)
+            .expect("inspection status")
+            .clock_uncertain_blocked(),
+        "inspection must expose the scheduler's ClockUncertain blocker"
+    );
+    assert_eq!(
+        coordinator.start_next(2, true).expect("scheduler result"),
+        None,
+        "dispatch applies the same blocker"
+    );
+    assert!(
+        !coordinator
+            .status_with_clock_uncertainty(identity, false)
+            .expect("certain status")
+            .clock_uncertain_blocked()
+    );
+}

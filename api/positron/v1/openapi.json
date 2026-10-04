@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "c2a7ec0315803933b9455b2c5d735bc95c83fd5dffdfebd0564981eae577d9a7"
+    "x-positron-schema-digest": "8f8bd53eb7b7857a20a80c01409903a37bc1170fff4d7cb63cbd95e43e52cae6"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1301,7 +1301,8 @@
           "cancellation_requested": {"type": "boolean"},
           "resource_generation": {"type": "integer", "minimum": 1},
           "reservations": {"$ref": "#/components/schemas/MaintenanceResourceReservations"},
-          "blocked_precondition": {"type": "string", "minLength": 1, "maxLength": 64},
+          "expected_foreground_impact": {"$ref": "#/components/schemas/MaintenanceResourceReservations"},
+          "blocked_precondition": {"type": "string", "enum": ["maintenance_pause_active", "conflict_owner_active", "scheduled_start_time", "clock_uncertain_destructive_schedule"]},
           "safe_actions": {"type": "array", "maxItems": 1, "items": {"type": "string", "enum": ["pause", "resume"]}},
           "backlog_age_seconds": {"type": "integer", "minimum": 0},
           "conflict_owner": {"type": "string", "pattern": "^[0-9a-f]{32}$"},

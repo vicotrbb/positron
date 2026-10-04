@@ -318,6 +318,10 @@ pub struct MaintenanceTaskStatus {
     pub resource_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reservations: Option<MaintenanceResourceReservations>,
+    /// The task's declared peak Resource Governor demand that can contend
+    /// with foreground work. It is coordinator-derived, never caller input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_foreground_impact: Option<MaintenanceResourceReservations>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_precondition: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

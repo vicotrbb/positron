@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_from": "api/positron/v1/positron.proto",
-  "schema_digest": "c2a7ec0315803933b9455b2c5d735bc95c83fd5dffdfebd0564981eae577d9a7",
+  "schema_digest": "8f8bd53eb7b7857a20a80c01409903a37bc1170fff4d7cb63cbd95e43e52cae6",
   "cases": [
     {"id": "current-client", "class": "positive", "grpc_hex": "08011001", "http_json": "{\"api_major\":1,\"capability\":1}", "expected_availability": "CAPABILITY_AVAILABILITY_IMPLEMENTED", "expected_error": "PUBLIC_ERROR_CODE_UNSPECIFIED"},
     {"id": "maximum-api-major", "class": "boundary", "grpc_hex": "08ffffffff0f1001", "http_json": "{\"api_major\":4294967295,\"capability\":1}", "expected_availability": "CAPABILITY_AVAILABILITY_VERSION_INCOMPATIBLE", "expected_error": "PUBLIC_ERROR_CODE_UNSUPPORTED_API_VERSION"},

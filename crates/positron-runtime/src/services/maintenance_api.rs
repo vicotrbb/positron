@@ -17,9 +17,9 @@ use positron_governance::{
     Identity, PresentedCredential, RequestedIntent, maintenance_control_audit_intent,
 };
 use positron_kernel::{
-    ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, MaintenanceFailure,
-    MaintenanceScope, MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase,
-    ResourceDimension, SegmentScope,
+    ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, LifecycleClockState,
+    MaintenanceFailure, MaintenanceScope, MaintenanceTaskClass, MaintenanceTaskId,
+    MaintenanceTaskPhase, ResourceDimension, SegmentScope,
 };
 
 use crate::ServiceHandle;
@@ -43,11 +43,11 @@ impl ServiceHandle {
             Some(value) => Some(task_identity(value).ok_or((400, "invalid_request"))?),
             None => None,
         };
-        let now = self.maintenance_status_now()?;
+        let (clock_uncertain, now) = self.maintenance_inspection_clock()?;
         let statuses = self
             .instance
             .maintenance_coordinator()
-            .statuses()
+            .statuses_with_clock_uncertainty(clock_uncertain)
             .map_err(|_| (503, "administration_unavailable"))?;
         let mut response = MaintenanceStatusResponse {
             tasks: Vec::with_capacity(request.page_limit()),
@@ -106,11 +106,11 @@ impl ServiceHandle {
         let request =
             MaintenanceExplainRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
         let identity = task_identity(&request.identity).ok_or((400, "invalid_request"))?;
-        let now = self.maintenance_status_now()?;
+        let (clock_uncertain, now) = self.maintenance_inspection_clock()?;
         let status = self
             .instance
             .maintenance_coordinator()
-            .status(identity)
+            .status_with_clock_uncertainty(identity, clock_uncertain)
             .map_err(|_| (404, "task_unavailable"))?;
         Ok(MaintenanceExplainResponse {
             task: task_status(status, now),
@@ -170,7 +170,7 @@ impl ServiceHandle {
                     && status.task().scope() == expected_scope =>
             {
                 return Ok(MaintenanceRunResponse {
-                    task: task_status(status, now),
+                    task: task_status(status, Some(now)),
                 });
             },
             Ok(_) => return Err((409, "idempotency_conflict")),
@@ -202,7 +202,7 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceRunResponse {
-            task: task_status(status, now),
+            task: task_status(status, Some(now)),
         })
     }
 
@@ -237,7 +237,7 @@ impl ServiceHandle {
                 .status(identity)
                 .map_err(control_failure)?;
             return Ok(MaintenanceControlResponse {
-                task: task_status(status, now),
+                task: task_status(status, Some(now)),
                 audit_position,
             });
         }
@@ -271,7 +271,7 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceControlResponse {
-            task: task_status(status, now),
+            task: task_status(status, Some(now)),
             audit_position,
         })
     }
@@ -307,7 +307,7 @@ impl ServiceHandle {
                 .status(identity)
                 .map_err(control_failure)?;
             return Ok(MaintenanceControlResponse {
-                task: task_status(status, now),
+                task: task_status(status, Some(now)),
                 audit_position,
             });
         }
@@ -331,7 +331,7 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceControlResponse {
-            task: task_status(status, now),
+            task: task_status(status, Some(now)),
             audit_position,
         })
     }
@@ -354,6 +354,15 @@ impl ServiceHandle {
             .retention_time
             .governance_now_seconds()
             .map_err(|_| (503, "administration_unavailable"))
+    }
+
+    /// Inspection exposes exact scheduler blockers even while lifecycle time
+    /// cannot safely derive an age or deadline.
+    fn maintenance_inspection_clock(&self) -> Result<(bool, Option<u64>), (u16, &'static str)> {
+        if self.instance.retention_time.status().state() == LifecycleClockState::ClockUncertain {
+            return Ok((true, None));
+        }
+        self.maintenance_status_now().map(|now| (false, Some(now)))
     }
 
     fn authorize_system_administration(
@@ -465,7 +474,10 @@ fn control_failure(failure: MaintenanceFailure) -> (u16, &'static str) {
     }
 }
 
-fn task_status(status: positron_kernel::MaintenanceTaskStatus, now: u64) -> MaintenanceTaskStatus {
+fn task_status(
+    status: positron_kernel::MaintenanceTaskStatus,
+    now: Option<u64>,
+) -> MaintenanceTaskStatus {
     let task = status.task();
     let phase = status.phase();
     let paused = phase == MaintenanceTaskPhase::Deferred && status.pause_until().is_some();
@@ -481,14 +493,31 @@ fn task_status(status: positron_kernel::MaintenanceTaskStatus, now: u64) -> Main
         })
         .flatten();
     let conflict_owner = status.conflict_owner();
-    let blocked_precondition = if paused {
+    let blocked_precondition = if status.clock_uncertain_blocked() {
+        Some("clock_uncertain_destructive_schedule".to_owned())
+    } else if paused {
         Some("maintenance_pause_active".to_owned())
     } else if conflict_owner.is_some() {
         Some("conflict_owner_active".to_owned())
-    } else if phase == MaintenanceTaskPhase::Queued && task.not_before() > now {
+    } else if phase == MaintenanceTaskPhase::Queued
+        && now.is_some_and(|current| task.not_before() > current)
+    {
         Some("scheduled_start_time".to_owned())
     } else {
         None
+    };
+    let reservation_view = MaintenanceResourceReservations {
+        memory_bytes: reservations.get(ResourceDimension::MemoryBytes),
+        queue_slots: reservations.get(ResourceDimension::QueueSlots),
+        task_slots: reservations.get(ResourceDimension::TaskSlots),
+        buffer_cache_bytes: reservations.get(ResourceDimension::BufferCacheBytes),
+        batch_items: reservations.get(ResourceDimension::BatchItems),
+        lease_slots: reservations.get(ResourceDimension::LeaseSlots),
+        retry_slots: reservations.get(ResourceDimension::RetrySlots),
+        io_permits: reservations.get(ResourceDimension::IoPermits),
+        cpu_work_units: reservations.get(ResourceDimension::CpuWorkUnits),
+        file_descriptors: reservations.get(ResourceDimension::FileDescriptors),
+        disk_headroom_bytes: reservations.get(ResourceDimension::DiskHeadroomBytes),
     };
     MaintenanceTaskStatus {
         identity: hex(task.identity().to_bytes()),
@@ -500,19 +529,8 @@ fn task_status(status: positron_kernel::MaintenanceTaskStatus, now: u64) -> Main
         pause_until_unix_seconds: status.pause_until(),
         cancellation_requested: status.cancellation_requested(),
         resource_generation: Some(task.preconditions().resource_generation()),
-        reservations: Some(MaintenanceResourceReservations {
-            memory_bytes: reservations.get(ResourceDimension::MemoryBytes),
-            queue_slots: reservations.get(ResourceDimension::QueueSlots),
-            task_slots: reservations.get(ResourceDimension::TaskSlots),
-            buffer_cache_bytes: reservations.get(ResourceDimension::BufferCacheBytes),
-            batch_items: reservations.get(ResourceDimension::BatchItems),
-            lease_slots: reservations.get(ResourceDimension::LeaseSlots),
-            retry_slots: reservations.get(ResourceDimension::RetrySlots),
-            io_permits: reservations.get(ResourceDimension::IoPermits),
-            cpu_work_units: reservations.get(ResourceDimension::CpuWorkUnits),
-            file_descriptors: reservations.get(ResourceDimension::FileDescriptors),
-            disk_headroom_bytes: reservations.get(ResourceDimension::DiskHeadroomBytes),
-        }),
+        reservations: Some(reservation_view.clone()),
+        expected_foreground_impact: Some(reservation_view),
         blocked_precondition,
         safe_actions: if paused {
             vec!["resume".to_owned()]
@@ -521,7 +539,7 @@ fn task_status(status: positron_kernel::MaintenanceTaskStatus, now: u64) -> Main
         } else {
             Vec::new()
         },
-        backlog_age_seconds: Some(now.saturating_sub(status.submitted_at())),
+        backlog_age_seconds: now.map(|current| current.saturating_sub(status.submitted_at())),
         conflict_owner: conflict_owner.map(|identity| hex(identity.to_bytes())),
         checkpoint_completed_inputs: status
             .checkpoint()
@@ -624,22 +642,35 @@ const fn class_name(class: MaintenanceTaskClass) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier, mpsc};
+    use std::sync::{Arc, Barrier, Mutex, mpsc};
     use std::time::Duration;
 
     use positron_api::maintenance::{
-        MaintenancePauseRequest, MaintenanceResumeRequest, MaintenanceRunRequest,
-        MaintenanceStatusRequest,
+        MaintenanceExplainRequest, MaintenancePauseRequest, MaintenanceResumeRequest,
+        MaintenanceRunRequest, MaintenanceStatusRequest,
     };
-    use positron_domain::routing::SignalKind;
+    use positron_domain::{routing::SignalKind, time::UnixNanoseconds};
     use positron_kernel::{
-        ActiveSegmentLedger, MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId,
-        MaintenanceTaskPhase,
+        ActiveSegmentLedger, LifecycleClockFailure, LifecycleClockPolicy, LifecycleClockSource,
+        MaintenancePreconditions, MaintenanceScope, MaintenanceTask, MaintenanceTaskClass,
+        MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger, ResourceAmounts,
+        RetentionTimeAuthority, SegmentScope,
     };
     use prost::Message;
 
     use super::super::ServiceHandle;
     use super::super::tests::schema_maintenance::{Fixture, open_catalog, request};
+
+    struct MutableWallClock(Arc<Mutex<UnixNanoseconds>>);
+
+    impl LifecycleClockSource for MutableWallClock {
+        fn read(&self) -> Result<UnixNanoseconds, LifecycleClockFailure> {
+            self.0
+                .lock()
+                .map(|value| *value)
+                .map_err(|_| LifecycleClockFailure::Unavailable)
+        }
+    }
 
     #[test]
     fn authenticated_maintenance_status_waits_for_catalog_ownership_before_attribution()
@@ -674,6 +705,75 @@ mod tests {
         request
             .join()
             .map_err(|_| "maintenance request thread panicked")?;
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_status_and_explain_report_clock_uncertain_destructive_blocking()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let mut initialized = Arc::try_unwrap(initialized)
+            .map_err(|_| "maintenance fixture retains the initialized instance")?;
+        let wall = Arc::new(Mutex::new(UnixNanoseconds::new(1_000)));
+        initialized.install_retention_time_for_test(
+            RetentionTimeAuthority::establish_with_source(
+                MutableWallClock(Arc::clone(&wall)),
+                LifecycleClockPolicy::new(10)?,
+            )?,
+        )?;
+        *wall.lock().map_err(|_| "maintenance test wall clock")? = UnixNanoseconds::new(500);
+        let scope = SegmentScope::new(
+            initialized.default_tenant_id(),
+            SignalKind::Logs,
+            positron_domain::routing::VirtualShardId::new(1)?,
+        );
+        initialized.retention_time.governance_time_seconds(scope)?;
+        let task = MaintenanceTask::with_contract(
+            MaintenanceTaskId::new([0x44; 16])
+                .map_err(|failure| format!("maintenance identity: {failure:?}"))?,
+            MaintenanceTaskClass::RepositoryCleanup,
+            MaintenanceScope::System,
+            MaintenanceTrigger::Scheduled,
+            MaintenancePreconditions::new(1, 1)
+                .map_err(|failure| format!("maintenance preconditions: {failure:?}"))?,
+            Vec::new(),
+            Vec::new(),
+            ResourceAmounts::new([64, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+        )
+        .map_err(|failure| format!("scheduled destructive task: {failure:?}"))?;
+        let initialized = Arc::new(initialized);
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        initialized
+            .maintenance_coordinator()
+            .submit_at(task, 1)
+            .map_err(|failure| format!("queue destructive task: {failure:?}"))?;
+
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("uncertain maintenance status: {failure:?}"))?;
+        let observed = status.tasks.first().ok_or("uncertain task status")?;
+        assert_eq!(
+            observed.blocked_precondition.as_deref(),
+            Some("clock_uncertain_destructive_schedule")
+        );
+        assert_eq!(
+            observed.backlog_age_seconds, None,
+            "inspection must not invent an age from an uncertain lifecycle clock"
+        );
+        let explain = services
+            .explain_maintenance_task(
+                &administrator,
+                &serde_json::to_vec(&MaintenanceExplainRequest {
+                    identity: observed.identity.clone(),
+                })?,
+            )
+            .map_err(|failure| format!("uncertain maintenance explain: {failure:?}"))?;
+        assert_eq!(
+            explain.task.blocked_precondition.as_deref(),
+            Some("clock_uncertain_destructive_schedule")
+        );
+        assert_eq!(explain.task.backlog_age_seconds, None);
         Ok(())
     }
 
@@ -871,6 +971,15 @@ mod tests {
                 .ok_or("task reservation profile")?
                 .task_slots,
             1
+        );
+        assert_eq!(
+            observed
+                .expected_foreground_impact
+                .as_ref()
+                .ok_or("foreground impact")?
+                .task_slots,
+            1,
+            "the declared task reservation is the exact foreground-impact estimate"
         );
         assert_eq!(observed.safe_actions, ["resume"]);
         assert!(observed.backlog_age_seconds.is_some());
