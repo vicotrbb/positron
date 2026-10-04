@@ -1322,6 +1322,7 @@ impl MaintenanceCoordinator {
                 } else {
                     MaintenanceTaskPhase::Queued
                 };
+                state.last_progress_at = None;
             }
             let mut inner = coordinator
                 .state
