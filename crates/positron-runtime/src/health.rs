@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
 use positron_kernel::{
-    LifecycleClockState, MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS, MaintenanceTaskPhase,
-    MaintenanceTerminalFailure, WorkClass,
+    LifecycleClockState, MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS, MaintenancePriority,
+    MaintenanceTaskPhase, MaintenanceTerminalFailure, WorkClass,
 };
 
 use crate::{
@@ -352,7 +352,7 @@ impl HealthState {
                                 .oldest_queued_age_seconds
                                 .map_or(age, |oldest| oldest.max(age)),
                         );
-                        if age >= MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS {
+                        if lower_class_queue_delay_breached(&status, now) {
                             maintenance.lower_class_queue_delay_breaches = maintenance
                                 .lower_class_queue_delay_breaches
                                 .checked_add(1)
@@ -442,6 +442,16 @@ impl HealthState {
     }
 }
 
+fn lower_class_queue_delay_breached(
+    status: &positron_kernel::MaintenanceTaskStatus,
+    now: u64,
+) -> bool {
+    matches!(
+        status.task().priority(),
+        MaintenancePriority::Ordinary | MaintenancePriority::Required
+    ) && now.saturating_sub(status.submitted_at()) >= MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS
+}
+
 pub(crate) struct ProcessState {
     health: HealthState,
 }
@@ -518,6 +528,43 @@ fn plaintext_role_bit(role: ListenerRole) -> Option<u8> {
         ListenerRole::OtlpGrpc => Some(1 << 2),
         ListenerRole::OtlpHttp => Some(1 << 3),
         ListenerRole::LokiPush => Some(1 << 4),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use positron_kernel::{
+        MaintenanceCoordinator, MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId,
+    };
+
+    use super::lower_class_queue_delay_breached;
+
+    #[test]
+    fn queue_delay_breach_counts_only_promotable_priorities() {
+        let coordinator = MaintenanceCoordinator::new();
+        let required = MaintenanceTask::new(
+            MaintenanceTaskId::new([0x71; 16]).expect("required identity"),
+            MaintenanceTaskClass::SchemaStatistics,
+        );
+        let urgent = MaintenanceTask::new(
+            MaintenanceTaskId::new([0x72; 16]).expect("urgent identity"),
+            MaintenanceTaskClass::CatalogReclamation,
+        );
+        coordinator.submit_at(required, 10).expect("required task");
+        coordinator.submit_at(urgent, 10).expect("urgent task");
+
+        assert!(lower_class_queue_delay_breached(
+            &coordinator
+                .status(MaintenanceTaskId::new([0x71; 16]).expect("required identity"))
+                .expect("required status"),
+            70,
+        ));
+        assert!(!lower_class_queue_delay_breached(
+            &coordinator
+                .status(MaintenanceTaskId::new([0x72; 16]).expect("urgent identity"))
+                .expect("urgent status"),
+            70,
+        ));
     }
 }
 

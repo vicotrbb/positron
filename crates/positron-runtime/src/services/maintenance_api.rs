@@ -383,11 +383,13 @@ impl ServiceHandle {
         let actor = self.authorize_system_administration(bearer)?;
         let request =
             MaintenanceWindowRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
-        let deferred = request
+        let mut deferred = request
             .deferred_classes()
             .iter()
             .map(|class| window_class(class).ok_or((400, "invalid_request")))
             .collect::<Result<Vec<_>, _>>()?;
+        deferred.sort_unstable();
+        let deferred_classes = window_class_names(&deferred);
         let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
             .map_err(|_| (400, "invalid_request"))?;
         let catalog = self.open_maintenance_catalog()?;
@@ -431,7 +433,7 @@ impl ServiceHandle {
         drop(_catalog_operation);
         self.notify_maintenance_worker();
         Ok(MaintenanceWindowResponse {
-            deferred_classes: request.deferred_classes().to_vec(),
+            deferred_classes,
             until_unix_seconds: until,
             catalog_generation,
             audit_position,
@@ -586,11 +588,7 @@ fn maintenance_window_replay(
             return Err((409, "idempotency_conflict"));
         }
         return Ok(Some(MaintenanceWindowResponse {
-            deferred_classes: deferred
-                .iter()
-                .map(window_class_name)
-                .map(str::to_owned)
-                .collect(),
+            deferred_classes: window_class_names(deferred),
             until_unix_seconds: candidate.until_unix_seconds(),
             catalog_generation: expected_catalog_generation
                 .checked_add(1)
@@ -623,6 +621,16 @@ const fn window_class_name(class: &MaintenanceTaskClass) -> &'static str {
         MaintenanceTaskClass::DurableExport => "durable_export",
         _ => "",
     }
+}
+
+fn window_class_names(deferred: &[MaintenanceTaskClass]) -> Vec<String> {
+    let mut names = deferred
+        .iter()
+        .map(window_class_name)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
 }
 
 fn latest_control_audit_position(catalog: &Catalog<'_>) -> Result<u64, (u16, &'static str)> {
@@ -1219,7 +1227,7 @@ mod tests {
         );
         let expected = open_catalog(&initialized)?.pin()?.number();
         let request = MaintenanceWindowRequest::new(
-            vec!["compaction".to_owned(), "durable_export".to_owned()],
+            vec!["backup_snapshot".to_owned(), "compaction".to_owned()],
             expected,
             60,
             "00000000-0000-0000-0000-000000000021".to_owned(),

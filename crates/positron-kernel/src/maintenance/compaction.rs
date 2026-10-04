@@ -31,7 +31,10 @@ pub(crate) fn compaction_task_record_bytes(
     8_usize
         .checked_add(16 + 1 + scope_bytes + 1 + 1 + 1 + 8 + 8 + 8 + 1 + 1)
         .and_then(|bytes| bytes.checked_add(inputs.checked_mul(32)?))
-        .and_then(|bytes| bytes.checked_add(11 * 8 + 1 + 8 + 1 + 8 + 1 + 8 + 1))
+        // `record::encode_record` writes these state fields after the input
+        // list. PMTC0004 added the terminal-failure byte immediately after
+        // the phase; Catalog admission must reserve that durable byte too.
+        .and_then(|bytes| bytes.checked_add(11 * 8 + 1 + 1 + 8 + 1 + 8 + 1 + 8 + 1))
         .and_then(|bytes| bytes.checked_add(8 + 4 + 4 + checkpoint.opaque_progress.len()))
         .ok_or(MaintenanceFailure::CapacityExceeded)
 }

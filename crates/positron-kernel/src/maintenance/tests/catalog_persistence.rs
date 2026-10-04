@@ -374,7 +374,10 @@ fn catalog_pause_and_finite_window_survive_reopen_without_deferring_past_expiry(
     coordinator
         .set_window_and_persist(
             &catalog,
-            [MaintenanceTaskClass::RepositoryVerification],
+            [
+                MaintenanceTaskClass::BackupSnapshot,
+                MaintenanceTaskClass::RepositoryVerification,
+            ],
             20,
             9,
         )
