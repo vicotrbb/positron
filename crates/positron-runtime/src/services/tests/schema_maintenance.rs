@@ -545,7 +545,19 @@ fn runtime_worker_wakes_for_a_poststart_future_lease_expiry() -> Result<(), Box<
     {
         if Instant::now() >= deadline {
             cancellation.cancel();
-            return Err("runtime maintenance worker did not wake for poststart expiry work".into());
+            services.notify_maintenance_worker();
+            let phase = initialized
+                .maintenance_coordinator()
+                .status(task)
+                .map_err(|_| "maintenance task status after timeout")?
+                .phase();
+            let worker = worker
+                .join()
+                .map_err(|_| "maintenance worker panicked after wake timeout")?;
+            return Err(format!(
+                "runtime maintenance worker did not wake for poststart expiry work (phase: {phase:?}, worker: {worker:?})"
+            )
+            .into());
         }
         std::thread::sleep(Duration::from_millis(5));
     }
