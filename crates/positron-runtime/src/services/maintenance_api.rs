@@ -1466,6 +1466,25 @@ mod tests {
             .maintenance_coordinator()
             .cancel_and_persist(&catalog, identity)
             .map_err(|failure| format!("terminal successor: {failure:?}"))?;
+        for raw in 1..=128_u8 {
+            let filler = MaintenanceTask::new(
+                MaintenanceTaskId::new([raw; 16])
+                    .map_err(|failure| format!("filler identity: {failure:?}"))?,
+                MaintenanceTaskClass::SchemaPromotion,
+            );
+            initialized
+                .maintenance_coordinator()
+                .submit_and_persist(&catalog, filler.clone(), 2)
+                .map_err(|failure| format!("fill retained task capacity: {failure:?}"))?;
+            initialized
+                .maintenance_coordinator()
+                .cancel_and_persist(&catalog, filler.identity())
+                .map_err(|failure| format!("terminal filler task: {failure:?}"))?;
+        }
+        assert!(matches!(
+            initialized.maintenance_coordinator().status(identity),
+            Err(positron_kernel::MaintenanceFailure::UnknownTask)
+        ));
         drop(catalog);
         assert_eq!(
             services
@@ -1499,14 +1518,12 @@ mod tests {
             first,
             "a reopened terminal successor cannot change the durable run acknowledgement"
         );
-        assert_eq!(
-            reopened
-                .maintenance_coordinator()
-                .status(identity)
-                .map_err(|failure| format!("restored task: {failure:?}"))?
-                .phase(),
-            MaintenanceTaskPhase::Cancelled,
-            "the terminal successor remains durable after reopen"
+        assert!(
+            matches!(
+                reopened.maintenance_coordinator().status(identity),
+                Err(positron_kernel::MaintenanceFailure::UnknownTask)
+            ),
+            "terminal retention reclamation removes the mutable task record while the audit receipt remains replayable after reopen"
         );
         Ok(())
     }
