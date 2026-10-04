@@ -1474,6 +1474,19 @@ mod tests {
             first,
             "a terminal successor cannot change the durable run acknowledgement"
         );
+        let conflicting = MaintenanceRunRequest::new(
+            "compaction".to_owned(),
+            initialized.default_tenant_id().to_canonical_text(),
+            "traces".to_owned(),
+            scope.shard_id().value(),
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+        )
+        .encode()?;
+        assert_eq!(
+            services.run_maintenance(&administrator, &conflicting),
+            Err((409, "idempotency_conflict")),
+            "a retained immutable receipt rejects a different request before source lookup"
+        );
         drop(services);
         drop(initialized);
 
