@@ -1,13 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Read};
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use positron_api::maintenance::{
-    MaintenanceControlResponse, MaintenanceExplainRequest, MaintenancePauseRequest,
-    MaintenanceResumeRequest, MaintenanceRunRequest, MaintenanceServiceClient,
-    MaintenanceServiceClientFailure, MaintenanceStatusRequest, MaintenanceTaskAcknowledgement,
-    MaintenanceTaskStatus, MaintenanceTransport, MaintenanceWindowRequest,
+    MAX_STATUS_PAGE_TASKS, MAX_TASKS, MaintenanceControlResponse, MaintenanceExplainRequest,
+    MaintenancePauseRequest, MaintenanceResumeRequest, MaintenanceRunRequest,
+    MaintenanceServiceClient, MaintenanceServiceClientFailure, MaintenanceStatusRequest,
+    MaintenanceTaskAcknowledgement, MaintenanceTaskStatus, MaintenanceTransport,
+    MaintenanceWindowRequest,
 };
 use zeroize::Zeroizing;
 
@@ -46,18 +47,18 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
         MaintenanceServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     match command {
         Command::Status => {
-            let status = client
-                .status(bearer, &MaintenanceStatusRequest::default())
-                .map_err(client_failure)?;
+            let (status, tasks, pages) = complete_status(&client, bearer)?;
             println!(
-                "queued={} running={} deferred={} terminal={} tasks={}",
+                "queued={} running={} deferred={} terminal={} total={} tasks={} pages={}",
                 status.queued,
                 status.running,
                 status.deferred,
                 status.terminal,
-                status.tasks.len()
+                status.total,
+                tasks.len(),
+                pages,
             );
-            for task in &status.tasks {
+            for task in &tasks {
                 print_task(task);
             }
         },
@@ -92,6 +93,69 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
     Ok(())
 }
 
+fn complete_status(
+    client: &MaintenanceServiceClient,
+    bearer: &str,
+) -> Result<(MaintenanceStatus, Vec<MaintenanceTaskStatus>, usize), &'static str> {
+    let mut request = MaintenanceStatusRequest::default();
+    let mut cursors = BTreeSet::new();
+    let mut identities = BTreeSet::new();
+    let mut tasks = Vec::with_capacity(MAX_TASKS);
+    let mut pages = 0;
+    let status = loop {
+        if pages == MAX_TASKS / MAX_STATUS_PAGE_TASKS {
+            return Err("maintenance status pagination exceeded its bounded registry");
+        }
+        let response = client.status(bearer, &request).map_err(client_failure)?;
+        pages += 1;
+        let status = MaintenanceStatus::from(&response);
+        if tasks.len() + response.tasks.len() > MAX_TASKS
+            || response
+                .tasks
+                .iter()
+                .any(|task| !identities.insert(task.identity.clone()))
+        {
+            return Err(
+                "maintenance status pagination did not advance; inspect current state before retrying",
+            );
+        }
+        tasks.extend(response.tasks);
+        match response.next_cursor {
+            Some(cursor) => {
+                if !cursors.insert(cursor.clone()) {
+                    return Err(
+                        "maintenance status pagination did not advance; inspect current state before retrying",
+                    );
+                }
+                request =
+                    MaintenanceStatusRequest::page_after(cursor, MAX_STATUS_PAGE_TASKS as u32);
+            },
+            None => break status,
+        }
+    };
+    Ok((status, tasks, pages))
+}
+
+struct MaintenanceStatus {
+    queued: u32,
+    running: u32,
+    deferred: u32,
+    terminal: u32,
+    total: u32,
+}
+
+impl From<&positron_api::maintenance::MaintenanceStatusResponse> for MaintenanceStatus {
+    fn from(response: &positron_api::maintenance::MaintenanceStatusResponse) -> Self {
+        Self {
+            queued: response.queued,
+            running: response.running,
+            deferred: response.deferred,
+            terminal: response.terminal,
+            total: response.total,
+        }
+    }
+}
+
 fn print_control(response: &MaintenanceControlResponse) {
     print_acknowledgement(&response.task);
     println!(
@@ -116,23 +180,69 @@ fn print_acknowledgement(task: &MaintenanceTaskAcknowledgement) {
 
 fn print_task(task: &MaintenanceTaskStatus) {
     println!(
-        "identity={} class={} scope={} phase={} submitted_at_unix_seconds={} checkpoint_sequence={} pause_until_unix_seconds={} automatic_resume_at_unix_seconds={} capacity_risk={} retention_impact={} recovery_impact={} cancellation_requested={}",
+        "identity={} class={} scope={} phase={} submitted_at_unix_seconds={} checkpoint_sequence={} checkpoint_completed_inputs={} last_progress_at_unix_seconds={} no_durable_progress_slo_breached={} no_durable_progress_slo_seconds={} resource_generation={} reservations={} expected_foreground_impact={} conflict_owner={} blocked_precondition={} backlog_age_seconds={} input_object_count={} output_object_count={} estimated_output_object_amplification_milli={} pause_until_unix_seconds={} maintenance_window_until_unix_seconds={} automatic_resume_at_unix_seconds={} capacity_risk={} retention_impact={} recovery_impact={} terminal_outcome={} terminal_failure_class={} safe_actions={} cancellation_requested={}",
         task.identity,
         task.class,
         task.scope,
         task.phase,
         task.submitted_at_unix_seconds,
-        task.checkpoint_sequence
-            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-        task.pause_until_unix_seconds
-            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
-        task.automatic_resume_at_unix_seconds
-            .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        unknown(task.checkpoint_sequence),
+        unknown(task.checkpoint_completed_inputs),
+        unknown(task.last_progress_at_unix_seconds),
+        unknown(task.no_durable_progress_slo_breached),
+        unknown(task.no_durable_progress_slo_seconds),
+        unknown(task.resource_generation),
+        reservations(task.reservations.as_ref()),
+        reservations(task.expected_foreground_impact.as_ref()),
+        task.conflict_owner.as_deref().unwrap_or("unknown"),
+        task.blocked_precondition.as_deref().unwrap_or("unknown"),
+        unknown(task.backlog_age_seconds),
+        task.input_object_count,
+        task.output_object_count,
+        unknown(task.estimated_output_object_amplification_milli),
+        unknown(task.pause_until_unix_seconds),
+        unknown(task.maintenance_window_until_unix_seconds),
+        unknown(task.automatic_resume_at_unix_seconds),
         task.capacity_risk.as_deref().unwrap_or("unknown"),
         task.retention_impact.as_deref().unwrap_or("unknown"),
         task.recovery_impact.as_deref().unwrap_or("unknown"),
+        task.terminal_outcome.as_deref().unwrap_or("unknown"),
+        task.terminal_failure_class.as_deref().unwrap_or("unknown"),
+        if task.safe_actions.is_empty() {
+            "none".to_owned()
+        } else {
+            task.safe_actions.join(",")
+        },
         task.cancellation_requested,
     );
+}
+
+fn unknown(value: Option<impl ToString>) -> String {
+    value.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+}
+
+fn reservations(
+    reservations: Option<&positron_api::maintenance::MaintenanceResourceReservations>,
+) -> String {
+    reservations.map_or_else(
+        || "unknown".to_owned(),
+        |reservations| {
+            format!(
+                "memory_bytes={},queue_slots={},task_slots={},buffer_cache_bytes={},batch_items={},lease_slots={},retry_slots={},io_permits={},cpu_work_units={},file_descriptors={},disk_headroom_bytes={}",
+                reservations.memory_bytes,
+                reservations.queue_slots,
+                reservations.task_slots,
+                reservations.buffer_cache_bytes,
+                reservations.batch_items,
+                reservations.lease_slots,
+                reservations.retry_slots,
+                reservations.io_permits,
+                reservations.cpu_work_units,
+                reservations.file_descriptors,
+                reservations.disk_headroom_bytes,
+            )
+        },
+    )
 }
 
 fn client_failure(failure: MaintenanceServiceClientFailure) -> &'static str {
@@ -198,6 +308,8 @@ fn parse(
         if !matches!(
             option.as_str(),
             "--endpoint"
+                | "--server-name"
+                | "--trust-file"
                 | "--task-id"
                 | "--tenant"
                 | "--signal"
@@ -220,15 +332,7 @@ fn parse(
             "--credential-stdin is required; secrets are never accepted as arguments or environment variables",
         );
     }
-    if !allow_plaintext {
-        return Err("--allow-plaintext is required for this maintenance endpoint");
-    }
-    let endpoint: SocketAddr = take(&mut options, "--endpoint")?
-        .parse()
-        .map_err(|_| "invalid API endpoint")?;
-    if endpoint.port() == 0 {
-        return Err("invalid API endpoint");
-    }
+    let transport = transport(&mut options, allow_plaintext)?;
     let command = match operation.as_str() {
         "status" => Command::Status,
         "explain" => Command::Explain(MaintenanceExplainRequest {
@@ -290,7 +394,31 @@ fn parse(
             .validate()
             .map_err(|_| "invalid maintenance window request")?,
     }
-    Ok((MaintenanceTransport::PlaintextOptOut { endpoint }, command))
+    Ok((transport, command))
+}
+
+fn transport(
+    options: &mut BTreeMap<String, String>,
+    allow_plaintext: bool,
+) -> Result<MaintenanceTransport, &'static str> {
+    let endpoint: SocketAddr = take(options, "--endpoint")?
+        .parse()
+        .map_err(|_| "invalid API endpoint")?;
+    if endpoint.port() == 0 {
+        return Err("invalid API endpoint");
+    }
+    if allow_plaintext {
+        if options.contains_key("--server-name") || options.contains_key("--trust-file") {
+            return Err("TLS options do not apply to plaintext opt-out");
+        }
+        Ok(MaintenanceTransport::PlaintextOptOut { endpoint })
+    } else {
+        Ok(MaintenanceTransport::Tls {
+            endpoint,
+            server_name: take(options, "--server-name")?,
+            trust_file: take(options, "--trust-file")?.into(),
+        })
+    }
 }
 
 fn take(options: &mut BTreeMap<String, String>, name: &str) -> Result<String, &'static str> {
@@ -299,4 +427,59 @@ fn take(options: &mut BTreeMap<String, String>, name: &str) -> Result<String, &'
         .ok_or("required maintenance option absent")
 }
 
-const USAGE: &str = "usage: positron maintenance status|explain|run|pause|resume|window --endpoint IP:PORT --credential-stdin [operation options] --allow-plaintext";
+const USAGE: &str = "usage: positron maintenance status|explain|run|pause|resume|window --endpoint IP:PORT --credential-stdin [operation options] [--server-name NAME --trust-file PATH | --allow-plaintext]";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_maintenance_operation_defaults_to_tls_with_explicit_plaintext_opt_out() {
+        for command in [
+            "status",
+            "explain --task-id abababababababababababababababab",
+            "run --tenant 22222222-2222-2222-2222-222222222222 --signal logs --shard 1 --idempotency-key 01010101-0101-0101-0101-010101010101",
+            "pause --task-id abababababababababababababababab --resource-generation 1 --duration-seconds 60 --idempotency-key 01010101-0101-0101-0101-010101010101",
+            "resume --task-id abababababababababababababababab --idempotency-key 01010101-0101-0101-0101-010101010101",
+            "window --deferred-classes compaction --expected-catalog-generation 1 --duration-seconds 60 --idempotency-key 01010101-0101-0101-0101-010101010101",
+        ] {
+            let parsed = parse(valid(command).split_whitespace().map(ToOwned::to_owned))
+                .expect("TLS maintenance command");
+            assert!(
+                matches!(parsed.0, MaintenanceTransport::Tls { .. }),
+                "{command}"
+            );
+        }
+        let plaintext = parse(
+            "status --endpoint 127.0.0.1:8080 --credential-stdin --allow-plaintext"
+                .split_whitespace()
+                .map(ToOwned::to_owned),
+        )
+        .expect("plaintext opt-out");
+        assert!(matches!(
+            plaintext.0,
+            MaintenanceTransport::PlaintextOptOut { .. }
+        ));
+    }
+
+    #[test]
+    fn maintenance_transport_rejects_ambiguous_or_incomplete_tls_options() {
+        for command in [
+            "status --endpoint 127.0.0.1:8080 --credential-stdin --server-name localhost",
+            "status --endpoint 127.0.0.1:8080 --credential-stdin --trust-file ca.pem",
+            "status --endpoint 127.0.0.1:8080 --credential-stdin --allow-plaintext --server-name localhost",
+            "status --endpoint 127.0.0.1:8080 --credential-stdin --allow-plaintext --trust-file ca.pem",
+        ] {
+            assert!(
+                parse(command.split_whitespace().map(ToOwned::to_owned)).is_err(),
+                "{command}"
+            );
+        }
+    }
+
+    fn valid(command: &str) -> String {
+        format!(
+            "{command} --endpoint 127.0.0.1:8080 --credential-stdin --server-name localhost --trust-file ca.pem"
+        )
+    }
+}
