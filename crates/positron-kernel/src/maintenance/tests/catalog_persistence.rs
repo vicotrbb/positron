@@ -115,6 +115,18 @@ fn catalog_checkpoint_reopen_restores_one_queued_task_with_its_progress()
     let status = restored.status(identity).expect("restored status");
     assert_eq!(status.phase(), MaintenanceTaskPhase::Queued);
     assert_eq!(
+        status.last_progress_at(),
+        None,
+        "recovery requeues an interrupted execution without carrying its running deadline"
+    );
+    assert_eq!(
+        restored
+            .durable_records()
+            .expect("requeued recovery state must remain persistable")
+            .len(),
+        1
+    );
+    assert_eq!(
         status
             .checkpoint()
             .map(MaintenanceCheckpoint::opaque_progress),
@@ -124,6 +136,11 @@ fn catalog_checkpoint_reopen_restores_one_queued_task_with_its_progress()
         .start_next_with_reservation_and_persist(&reopened, &authority, 9, false)
         .expect("resumed dispatch admission")
         .expect("recovered task must dispatch");
+    let resumed = restored
+        .status_with_progress_slo(identity, Some(9), false)
+        .expect("resumed status");
+    assert_eq!(resumed.last_progress_at(), Some(9));
+    assert_eq!(resumed.no_durable_progress_slo_breached(), Some(false));
     let failure =
         crate::catalog::with_catalog_fault(crate::catalog::CatalogFileEvent::WriteMarker, || {
             execution.complete_and_persist(&restored, &reopened, true)
