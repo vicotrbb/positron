@@ -125,6 +125,7 @@ pub(super) fn outcome(
         audit,
         _authority: authority,
         maintenance: positron_kernel::MaintenanceCoordinator::new(),
+        governance_audit_checkpoint_gate: std::sync::Mutex::new(()),
         retention_time,
         instance: record.instance,
         tenant: record.tenant,

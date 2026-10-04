@@ -341,6 +341,10 @@ pub struct InitializedInstance {
     /// The sole runtime-owned maintenance task registry. Its internal state
     /// serializes transitions; handlers retain only their narrow authorities.
     pub(crate) maintenance: positron_kernel::MaintenanceCoordinator,
+    /// Serializes the complete public Governance Audit checkpoint attachment
+    /// transaction. It holds no durable state or task authority: the Catalog
+    /// and maintenance coordinator remain authoritative.
+    pub(in crate::instance_bootstrap) governance_audit_checkpoint_gate: Mutex<()>,
     pub(crate) retention_time: RetentionTimeAuthority,
     pub(crate) instance: InstanceId,
     pub(crate) tenant: TenantId,

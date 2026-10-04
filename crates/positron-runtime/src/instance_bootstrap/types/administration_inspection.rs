@@ -49,6 +49,10 @@ impl InitializedInstance {
             .key
             .catalog_secret(self.instance)
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        let _checkpoint_request = self
+            .governance_audit_checkpoint_gate
+            .lock()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         // The coordinator serializes public requests from their read-only
         // attachment decision through execution. This prevents a concurrent
         // reader from racing the selected caller's Catalog writer. A worker
