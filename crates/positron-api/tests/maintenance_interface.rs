@@ -1,5 +1,5 @@
 use positron_api::maintenance::{
-    MAX_PAUSE_DURATION_SECONDS, MAX_TASKS, MaintenancePauseRequest,
+    MAX_PAUSE_DURATION_SECONDS, MAX_TASKS, MaintenanceExplainResponse, MaintenancePauseRequest,
     MaintenanceResourceReservations, MaintenanceResumeRequest, MaintenanceRunRequest,
     MaintenanceRunResponse, MaintenanceServiceClient, MaintenanceStatusRequest,
     MaintenanceStatusResponse, MaintenanceTaskAcknowledgement, MaintenanceTaskStatus,
@@ -158,6 +158,56 @@ fn maintenance_status_client_uses_the_canonical_bounded_system_administration_ro
     assert_eq!(task.terminal_outcome, None);
     server.join().map_err(|_| "server panicked")??;
     Ok(())
+}
+
+#[test]
+fn maintenance_status_and_explain_preserve_an_epoch_progress_instant() {
+    let task = r#"{"identity":"00000000000000000000000000000001","class":"compaction","scope":"system","phase":"running","submitted_at_unix_seconds":1,"last_progress_at_unix_seconds":0,"no_durable_progress_slo_breached":false,"no_durable_progress_slo_seconds":60,"cancellation_requested":false,"input_object_count":0,"output_object_count":0}"#;
+    let status = format!(
+        r#"{{"tasks":[{task}],"returned":1,"total":1,"queued":0,"running":1,"deferred":0,"terminal":0}}"#
+    );
+    let explain = format!(r#"{{"task":{task}}}"#);
+
+    let status = MaintenanceStatusResponse::decode(status.as_bytes())
+        .expect("an epoch lifecycle instant is a valid running-status progress timestamp");
+    let explained = MaintenanceExplainResponse::decode(explain.as_bytes())
+        .expect("an epoch lifecycle instant is a valid running-explain progress timestamp");
+
+    assert_eq!(status.tasks[0].last_progress_at_unix_seconds, Some(0));
+    assert_eq!(
+        status.tasks[0].no_durable_progress_slo_breached,
+        Some(false)
+    );
+    assert_eq!(explained.task.last_progress_at_unix_seconds, Some(0));
+    assert_eq!(explained.task.no_durable_progress_slo_breached, Some(false));
+    assert_eq!(
+        MaintenanceStatusResponse::decode(&status.encode().expect("status encodes"))
+            .expect("status round trip decodes"),
+        status
+    );
+    assert_eq!(
+        MaintenanceExplainResponse::decode(&explained.encode().expect("explain encodes"))
+            .expect("explain round trip decodes"),
+        explained
+    );
+
+    let unknown_task = r#"{"identity":"00000000000000000000000000000001","class":"compaction","scope":"system","phase":"running","submitted_at_unix_seconds":1,"no_durable_progress_slo_seconds":60,"cancellation_requested":false,"input_object_count":0,"output_object_count":0}"#;
+    let unknown = format!(
+        r#"{{"tasks":[{unknown_task}],"returned":1,"total":1,"queued":0,"running":1,"deferred":0,"terminal":0}}"#
+    );
+    let unknown = MaintenanceStatusResponse::decode(unknown.as_bytes())
+        .expect("a missing trusted progress instant represents an unknown SLO outcome");
+    assert_eq!(unknown.tasks[0].last_progress_at_unix_seconds, None);
+    assert_eq!(unknown.tasks[0].no_durable_progress_slo_breached, None);
+
+    let untrusted = r#"{"identity":"00000000000000000000000000000001","class":"compaction","scope":"system","phase":"running","submitted_at_unix_seconds":1,"no_durable_progress_slo_breached":false,"no_durable_progress_slo_seconds":60,"cancellation_requested":false,"input_object_count":0,"output_object_count":0}"#;
+    let untrusted = format!(
+        r#"{{"tasks":[{untrusted}],"returned":1,"total":1,"queued":0,"running":1,"deferred":0,"terminal":0}}"#
+    );
+    assert!(
+        MaintenanceStatusResponse::decode(untrusted.as_bytes()).is_err(),
+        "a response without a trusted progress instant cannot assert a healthy SLO"
+    );
 }
 
 #[test]

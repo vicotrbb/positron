@@ -700,7 +700,6 @@ impl MaintenanceStatusResponse {
                         "queued" | "running" | "deferred" | "cancelled" | "succeeded" | "failed"
                     )
                     || task.checkpoint_sequence == Some(0)
-                    || task.last_progress_at_unix_seconds == Some(0)
                     || task.no_durable_progress_slo_breached.is_some()
                         && (task.phase != "running" || task.last_progress_at_unix_seconds.is_none())
                     || task.no_durable_progress_slo_seconds == Some(0)
