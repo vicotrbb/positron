@@ -6,8 +6,8 @@ use std::{
 };
 
 use positron_kernel::{
-    ActiveSegmentLedger, Catalog, MaintenanceCoordinator, MaintenanceExecution, MaintenanceFailure,
-    MaintenanceScope, MaintenanceTaskClass, SegmentScope, SnapshotLeaseId,
+    ActiveSegmentLedger, Catalog, MaintenanceExecution, MaintenanceFailure, MaintenanceScope,
+    MaintenanceTaskClass, SegmentScope, SnapshotLeaseId,
 };
 use positron_signals::{
     LogRetentionPolicy, LogStore, LogStoreFailureCode, MaintenanceCompactionExecution,
@@ -81,14 +81,10 @@ pub(super) fn restore(instance: &crate::InitializedInstance) -> Result<(), Servi
             .map_err(|_| ServiceFailure::KeyUnavailable)?,
     )
     .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
-    let restored = MaintenanceCoordinator::restore_from_catalog(&catalog).map_err(map_failure)?;
-    drop(catalog);
-    let mut coordinator = instance
+    instance
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| ServiceFailure::Internal)?;
-    *coordinator = restored;
-    Ok(())
+        .replace_from_catalog(&catalog)
+        .map_err(map_failure)
 }
 
 const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
@@ -171,10 +167,7 @@ fn start_installed_maintenance<'authority>(
             .map_err(|_| ServiceFailure::KeyUnavailable)?,
     )
     .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
-    let coordinator = instance
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| ServiceFailure::Internal)?;
+    let coordinator = instance.maintenance_coordinator();
     let selected = coordinator.start_next_with_reservation_and_persist_for_classes(
         &catalog,
         &instance._authority,
@@ -261,19 +254,13 @@ fn complete_installed_maintenance(
         return Ok(true);
     }
     if let InstalledMaintenanceExecution::CatalogReclamation { execution } = execution {
-        let coordinator = instance
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| ServiceFailure::Internal)?;
+        let coordinator = instance.maintenance_coordinator();
         catalog
             .complete_running_audit_retention_reclamation(&coordinator, execution)
             .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
         return Ok(true);
     }
-    let coordinator = instance
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| ServiceFailure::Internal)?;
+    let coordinator = instance.maintenance_coordinator();
     let scope = match execution {
         InstalledMaintenanceExecution::Compaction { scope, .. }
         | InstalledMaintenanceExecution::SnapshotLeaseExpiry { scope, .. }
@@ -493,10 +480,7 @@ fn discover_retention_publications(
         .retention_time
         .governance_now_seconds()
         .map_err(|_| ServiceFailure::StorageUnavailable)?;
-    let coordinator = instance
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| ServiceFailure::Internal)?;
+    let coordinator = instance.maintenance_coordinator();
     let mut submitted = false;
     for scope in scopes {
         if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {

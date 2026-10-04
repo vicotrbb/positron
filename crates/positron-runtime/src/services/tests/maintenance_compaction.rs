@@ -84,12 +84,8 @@ fn runtime_worker_executes_a_persisted_log_compaction_and_preserves_it_across_re
     let identity =
         MaintenanceTaskId::new([0xc1; 16]).map_err(|failure| format!("task id: {failure:?}"))?;
     let task = ledger.prepare_compaction_task(bucket, identity)?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance coordinator")?;
+    let coordinator = initialized.maintenance_coordinator();
     task.submit_and_persist(&coordinator, &catalog, 1)?;
-    drop(coordinator);
     drop(ledger);
     drop(catalog);
 
@@ -100,8 +96,6 @@ fn runtime_worker_executes_a_persisted_log_compaction_and_preserves_it_across_re
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance coordinator")?
             .status(identity)
             .map_err(|failure| format!("compaction status: {failure:?}"))?
             .phase(),
@@ -142,8 +136,6 @@ fn runtime_worker_executes_a_persisted_log_compaction_and_preserves_it_across_re
     assert_eq!(
         reopened
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "reopened maintenance coordinator")?
             .status(identity)
             .map_err(|failure| format!("restored compaction status: {failure:?}"))?
             .phase(),
@@ -231,12 +223,8 @@ fn runtime_worker_executes_a_persisted_trace_compaction_and_preserves_spans_acro
     let identity =
         MaintenanceTaskId::new([0xc2; 16]).map_err(|failure| format!("task id: {failure:?}"))?;
     let task = ledger.prepare_compaction_task(bucket, identity)?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance coordinator")?;
+    let coordinator = initialized.maintenance_coordinator();
     task.submit_and_persist(&coordinator, &catalog, 1)?;
-    drop(coordinator);
     drop(ledger);
     drop(catalog);
 
@@ -247,8 +235,6 @@ fn runtime_worker_executes_a_persisted_trace_compaction_and_preserves_spans_acro
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance coordinator")?
             .status(identity)
             .map_err(|failure| format!("compaction status: {failure:?}"))?
             .phase(),
@@ -289,8 +275,6 @@ fn runtime_worker_executes_a_persisted_trace_compaction_and_preserves_spans_acro
     assert_eq!(
         reopened
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "reopened maintenance coordinator")?
             .status(identity)
             .map_err(|failure| format!("restored compaction status: {failure:?}"))?
             .phase(),

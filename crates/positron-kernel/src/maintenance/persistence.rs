@@ -170,11 +170,13 @@ impl MaintenanceCoordinator {
                 .tasks
                 .get(&identity)
                 .ok_or(MaintenanceFailure::UnknownTask)?;
-            let pending_execution = MaintenanceExecution {
+            let mut pending_execution = MaintenanceExecution {
                 task: task.clone(),
                 checkpoint: updated.checkpoint.clone(),
                 reservation,
                 dispatch,
+                live_executions: Arc::clone(&self.live_executions),
+                tracked_live: false,
             };
             if task.class == MaintenanceTaskClass::GovernanceAuditCheckpoint {
                 persist_task_state_admitted(catalog, updated, None, &pending_execution)?;
@@ -182,13 +184,11 @@ impl MaintenanceCoordinator {
                 persist_task_state(catalog, updated, None)?;
             }
             let updated = updated.clone();
-            let checkpoint = updated.checkpoint.clone();
             state.tasks.insert(identity, updated);
             state.fairness = prospective.fairness;
-            return Ok(Some(MaintenanceExecution {
-                checkpoint,
-                ..pending_execution
-            }));
+            self.live_executions.fetch_add(1, Ordering::AcqRel);
+            pending_execution.tracked_live = true;
+            return Ok(Some(pending_execution));
         }
         Err(MaintenanceFailure::ResourceAdmissionRefused)
     }
@@ -593,6 +593,31 @@ impl MaintenanceCoordinator {
         state.window = window;
         drop(state);
         Ok(coordinator)
+    }
+
+    /// Initializes an otherwise empty coordinator from the authenticated
+    /// Catalog source. Live dispatches and pending transitions remain owned by
+    /// the current coordinator, so replacing either state would lose its
+    /// authoritative reservation or completion handoff.
+    pub fn replace_from_catalog(&self, catalog: &Catalog<'_>) -> Result<(), MaintenanceFailure> {
+        let restored = Self::restore_from_catalog(catalog)?;
+        let recovered = restored
+            .state
+            .into_inner()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        if self.live_executions.load(Ordering::Acquire) != 0
+            || !state.pending_submissions.is_empty()
+            || !state.pending_terminal_reclamations.is_empty()
+            || !state.pending_task_transitions.is_empty()
+        {
+            return Err(MaintenanceFailure::PreconditionFailed);
+        }
+        *state = recovered;
+        Ok(())
     }
 
     /// Publishes the bounded, finite maintenance-window intent before it

@@ -280,6 +280,64 @@ fn catalog_dispatch_fault_keeps_work_queued_and_reopen_recovers_durable_running(
 }
 
 #[test]
+fn catalog_reload_refuses_to_replace_a_live_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    let root = CatalogRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority(volume)?;
+    let instance = InstanceId::new(nonzero_id(24))?;
+    let catalog = Catalog::open(
+        &authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([0x75; 32]), Box::new([0x76; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(25))?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(b"maintenance reload basis".to_vec())?],
+        )?,
+        None,
+    )?;
+
+    let coordinator = MaintenanceCoordinator::new();
+    let task = catalog_task(46);
+    let identity = task.identity();
+    coordinator
+        .submit_and_persist(&catalog, task, 7)
+        .expect("queued task must publish");
+    let execution = coordinator
+        .start_next_with_reservation_and_persist(&catalog, &authority, 8, false)
+        .expect("dispatch admission")
+        .expect("queued task must dispatch");
+
+    assert_eq!(
+        coordinator
+            .replace_from_catalog(&catalog)
+            .expect_err("reload must preserve the live dispatch authority"),
+        MaintenanceFailure::PreconditionFailed
+    );
+    assert_eq!(
+        coordinator.status(identity).expect("running task").phase(),
+        MaintenanceTaskPhase::Running,
+        "a rejected reload cannot discard the in-flight reservation"
+    );
+    drop(execution);
+    coordinator
+        .replace_from_catalog(&catalog)
+        .expect("a stopped execution may recover from the authenticated Catalog");
+    assert_eq!(
+        coordinator
+            .status(identity)
+            .expect("recovered task")
+            .phase(),
+        MaintenanceTaskPhase::Queued,
+        "the durable running checkpoint resumes only after its live reservation is released"
+    );
+    Ok(())
+}
+
+#[test]
 fn catalog_pause_and_finite_window_survive_reopen_without_deferring_past_expiry()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = CatalogRoot::new()?;

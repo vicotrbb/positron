@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
-    Mutex,
-    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 use positron_domain::identity::TenantId;
@@ -212,6 +212,7 @@ pub enum MaintenanceFailure {
 pub struct MaintenanceCoordinator {
     state: Mutex<CoordinatorState>,
     coordinator_id: u64,
+    live_executions: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -419,6 +420,16 @@ pub struct MaintenanceExecution<'authority> {
     checkpoint: Option<MaintenanceCheckpoint>,
     reservation: MaintenanceReservation<'authority>,
     dispatch: MaintenanceDispatch,
+    live_executions: Arc<AtomicUsize>,
+    tracked_live: bool,
+}
+
+impl Drop for MaintenanceExecution<'_> {
+    fn drop(&mut self) {
+        if self.tracked_live {
+            self.live_executions.fetch_sub(1, Ordering::Release);
+        }
+    }
 }
 
 impl MaintenanceExecution<'_> {
@@ -589,6 +600,7 @@ impl MaintenanceCoordinator {
                 next_terminal_order: 1,
             }),
             coordinator_id: NEXT_COORDINATOR_ID.fetch_add(1, Ordering::Relaxed),
+            live_executions: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -844,6 +856,7 @@ impl MaintenanceCoordinator {
                 Err(()) => continue,
             };
             let dispatch = dispatch_task(&mut state, self.coordinator_id, identity, now)?;
+            self.live_executions.fetch_add(1, Ordering::AcqRel);
             return Ok(Some(MaintenanceExecution {
                 task,
                 checkpoint: state
@@ -852,6 +865,8 @@ impl MaintenanceCoordinator {
                     .and_then(|stored| stored.checkpoint.clone()),
                 reservation,
                 dispatch,
+                live_executions: Arc::clone(&self.live_executions),
+                tracked_live: true,
             }));
         }
         Err(MaintenanceFailure::ResourceAdmissionRefused)

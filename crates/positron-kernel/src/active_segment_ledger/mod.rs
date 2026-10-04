@@ -480,22 +480,17 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
                 .recover_scope(scope, durable)
                 .map_err(map_retention_time_failure)?;
         }
-        let lease_recovery_time = match retention_time {
-            Some(authority) => authority
-                .lease_recovery_time(scope, durable)
-                .map_err(map_retention_time_failure)?,
-            None => lifecycle_now,
+        let lease_recovery_clock = if retention_time.is_some() {
+            snapshot_lease_recovery::LeaseRecoveryClock::Conservative
+        } else {
+            snapshot_lease_recovery::LeaseRecoveryClock::Strict(lifecycle_now)
         };
         let recovered_leases = snapshot_lease_recovery::recover_reservations(
             authority,
             catalog,
             scope,
             &snapshot,
-            if retention_time.is_some() {
-                snapshot_lease_recovery::LeaseRecoveryClock::Conservative(lease_recovery_time)
-            } else {
-                snapshot_lease_recovery::LeaseRecoveryClock::Strict(lease_recovery_time)
-            },
+            lease_recovery_clock,
         )?;
         let snapshot = catalog.pin()?;
         let mut metadata = storage.catalog_segments(&snapshot, scope)?;

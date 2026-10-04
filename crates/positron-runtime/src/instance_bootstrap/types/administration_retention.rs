@@ -53,10 +53,7 @@ impl InitializedInstance {
             audit_ingest_time_unix_seconds,
         )
         .map_err(map_system_audit_retention_failure)?;
-        let coordinator = self
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let coordinator = self.maintenance_coordinator();
         positron_governance::SystemAuditRetentionAdministration::update(
             &catalog,
             self.instance,

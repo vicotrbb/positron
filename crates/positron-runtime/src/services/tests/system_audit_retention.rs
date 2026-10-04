@@ -625,10 +625,7 @@ fn audit_reclaimer_cancellation_before_physical_work_preserves_the_prefix_and_te
     )?;
     let audit_before = initialized.governance_audit_for_test()?;
     let catalog = open_catalog(&initialized)?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     let execution = coordinator
         .start_next_with_reservation_and_persist_for_class(
             &catalog,
@@ -660,17 +657,13 @@ fn audit_reclaimer_cancellation_before_physical_work_preserves_the_prefix_and_te
         "cancellation before the first unlink preserves every audit frame"
     );
     drop(execution);
-    drop(coordinator);
 
     let subsequent_task = MaintenanceTask::new(
         MaintenanceTaskId::new([0xfa; 16]).expect("stable later-work identity"),
         MaintenanceTaskClass::SchemaPromotion,
     );
     let subsequent_catalog = open_catalog(&initialized)?;
-    let subsequent_coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let subsequent_coordinator = initialized.maintenance_coordinator();
     subsequent_coordinator
         .submit_and_persist(&subsequent_catalog, subsequent_task.clone(), 2)
         .expect("submit later coordinator work");
@@ -690,7 +683,6 @@ fn audit_reclaimer_cancellation_before_physical_work_preserves_the_prefix_and_te
         "dropping the cancelled execution releases its reservation for later exact work"
     );
     drop(subsequent_execution);
-    drop(subsequent_coordinator);
     drop(subsequent_catalog);
     drop(initialized);
 
@@ -735,10 +727,7 @@ fn audit_reclaimer_recovers_a_prephysical_cancellation_when_its_terminal_write_f
     )?;
     let audit_before = initialized.governance_audit_for_test()?;
     let catalog = open_catalog(&initialized)?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     let execution = coordinator
         .start_next_with_reservation_and_persist_for_class(
             &catalog,
@@ -781,7 +770,6 @@ fn audit_reclaimer_recovers_a_prephysical_cancellation_when_its_terminal_write_f
         "terminal-write recovery before physical work never reclaims an audit frame"
     );
     drop(execution);
-    drop(coordinator);
 
     let successor = initialized.update_system_audit_retention(
         actor,
@@ -935,8 +923,6 @@ fn audit_reclaimer_recovers_same_process_when_terminal_and_requeue_task_records_
     let task = {
         let records = initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .durable_records()
             .map_err(|_| "durable audit-reclaimer record")?;
         let record = records
@@ -971,8 +957,6 @@ fn audit_reclaimer_recovers_same_process_when_terminal_and_requeue_task_records_
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .map_err(|_| "post-failure task status")?
             .phase(),
@@ -987,8 +971,6 @@ fn audit_reclaimer_recovers_same_process_when_terminal_and_requeue_task_records_
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .map_err(|_| "same-process terminal task status")?
             .phase(),
@@ -1025,8 +1007,6 @@ fn system_audit_retention_successor_replaces_the_queued_reclaimer_authority()
     )?;
     let predecessor = initialized
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
         .durable_records()
         .expect("predecessor durable records");
     assert_eq!(
@@ -1044,8 +1024,6 @@ fn system_audit_retention_successor_replaces_the_queued_reclaimer_authority()
 
     let successor = initialized
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
         .durable_records()
         .expect("successor durable records");
     assert_eq!(
@@ -1083,10 +1061,7 @@ fn system_audit_retention_refuses_a_successor_while_its_reclaimer_is_running()
         AdministrativeIdempotencyKey::new([0xb5; 16])?,
     )?;
     let catalog = open_catalog(&initialized)?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     let execution = coordinator
         .start_next_with_reservation_and_persist_for_class(
             &catalog,
@@ -1108,7 +1083,6 @@ fn system_audit_retention_refuses_a_successor_while_its_reclaimer_is_running()
             .phase(),
         MaintenanceTaskPhase::Running
     );
-    drop(coordinator);
     drop(catalog);
     let generation_before = initialized.catalog_generation();
 
@@ -1122,10 +1096,7 @@ fn system_audit_retention_refuses_a_successor_while_its_reclaimer_is_running()
         .expect_err("a running predecessor must reject a policy successor");
     assert_eq!(failure.code(), BootstrapFailureCode::CatalogUnavailable);
     assert_eq!(initialized.catalog_generation(), generation_before);
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     assert_eq!(
         coordinator
             .status(reclaimer)
@@ -1172,10 +1143,7 @@ fn lost_system_audit_retention_ack_replays_only_its_exact_queued_reclaimer()
     let running_id = running.identity();
     let paused_id = paused.identity();
     let catalog = open_catalog(&initialized)?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     coordinator
         .submit_and_persist(&catalog, running, 1)
         .expect("submit unrelated running task");
@@ -1230,7 +1198,6 @@ fn lost_system_audit_retention_ack_replays_only_its_exact_queued_reclaimer()
         .ok_or("durable unrelated paused task record")?
         .as_bytes()
         .to_vec();
-    drop(coordinator);
     drop(catalog);
 
     let key = AdministrativeIdempotencyKey::new([0xba; 16])?;
@@ -1280,8 +1247,6 @@ fn lost_system_audit_retention_ack_replays_only_its_exact_queued_reclaimer()
     drop(catalog);
     let live_records_before_replay = initialized
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
         .durable_records()
         .expect("live durable records before replay");
     assert!(
@@ -1299,10 +1264,7 @@ fn lost_system_audit_retention_ack_replays_only_its_exact_queued_reclaimer()
         key,
     )?;
     assert_eq!(replay.policy_generation(), ResourceGeneration::new(3)?);
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     assert_eq!(
         coordinator
             .status(running_id)

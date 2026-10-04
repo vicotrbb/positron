@@ -40,8 +40,6 @@ impl ServiceHandle {
         let statuses = self
             .instance
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| (503, "administration_unavailable"))?
             .statuses()
             .map_err(|_| (503, "administration_unavailable"))?;
         let mut response = MaintenanceStatusResponse {
@@ -83,8 +81,6 @@ impl ServiceHandle {
         let status = self
             .instance
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| (503, "administration_unavailable"))?
             .status(identity)
             .map_err(|_| (404, "task_unavailable"))?;
         Ok(MaintenanceExplainResponse {
@@ -137,10 +133,7 @@ impl ServiceHandle {
         {
             return Err((404, "source_unavailable"));
         }
-        let coordinator = instance
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| (503, "administration_unavailable"))?;
+        let coordinator = instance.maintenance_coordinator();
         match coordinator.status(task_identity) {
             Ok(status)
                 if status.task().class() == MaintenanceTaskClass::Compaction
@@ -178,7 +171,6 @@ impl ServiceHandle {
         let status = coordinator
             .status(submitted.identity())
             .map_err(|_| (503, "administration_unavailable"))?;
-        drop(coordinator);
         drop(ledger);
         drop(catalog);
         drop(_catalog_operation);
@@ -215,8 +207,6 @@ impl ServiceHandle {
             let status = self
                 .instance
                 .maintenance_coordinator()
-                .lock()
-                .map_err(|_| (503, "administration_unavailable"))?
                 .status(identity)
                 .map_err(control_failure)?;
             return Ok(MaintenanceControlResponse {
@@ -242,11 +232,7 @@ impl ServiceHandle {
             Some(until),
         )
         .map_err(|_| (503, "administration_unavailable"))?;
-        let coordinator = self
-            .instance
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| (503, "administration_unavailable"))?;
+        let coordinator = self.instance.maintenance_coordinator();
         coordinator
             .pause_and_persist_audited(
                 &catalog,
@@ -258,7 +244,6 @@ impl ServiceHandle {
             )
             .map_err(control_failure)?;
         let status = coordinator.status(identity).map_err(control_failure)?;
-        drop(coordinator);
         let audit_position = latest_control_audit_position(&catalog)?;
         drop(catalog);
         drop(_catalog_operation);
@@ -296,8 +281,6 @@ impl ServiceHandle {
             let status = self
                 .instance
                 .maintenance_coordinator()
-                .lock()
-                .map_err(|_| (503, "administration_unavailable"))?
                 .status(identity)
                 .map_err(control_failure)?;
             return Ok(MaintenanceControlResponse {
@@ -315,16 +298,11 @@ impl ServiceHandle {
             None,
         )
         .map_err(|_| (503, "administration_unavailable"))?;
-        let coordinator = self
-            .instance
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| (503, "administration_unavailable"))?;
+        let coordinator = self.instance.maintenance_coordinator();
         coordinator
             .resume_and_persist_audited(&catalog, identity, audit)
             .map_err(control_failure)?;
         let status = coordinator.status(identity).map_err(control_failure)?;
-        drop(coordinator);
         let audit_position = latest_control_audit_position(&catalog)?;
         drop(catalog);
         drop(_catalog_operation);
@@ -652,8 +630,6 @@ mod tests {
         assert_eq!(
             reopened
                 .maintenance_coordinator()
-                .lock()
-                .map_err(|_| "maintenance coordinator")?
                 .status(identity)
                 .map_err(|failure| format!("restored task: {failure:?}"))?
                 .phase(),
@@ -748,9 +724,7 @@ mod tests {
         let services = ServiceHandle::new(Arc::clone(&reopened))?;
         let reopened_phase = {
             let coordinator_handle = reopened.maintenance_coordinator();
-            let coordinator = coordinator_handle
-                .lock()
-                .map_err(|_| "maintenance coordinator")?;
+            let coordinator = coordinator_handle;
             coordinator
                 .status(identity)
                 .map_err(|failure| format!("reopened task: {failure:?}"))?

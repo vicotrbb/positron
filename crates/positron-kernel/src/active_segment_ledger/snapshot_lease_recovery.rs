@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{ResourceReservation, WorkClaim, WorkKind};
+use crate::{
+    MaintenanceCoordinator, MaintenanceFailure, MaintenanceTaskClass, MaintenanceTaskId,
+    MaintenanceTaskPhase, ResourceReservation, WorkClaim, WorkKind,
+};
 
 use super::capacity::lease_claim;
 use super::snapshot_lease::{MAX_SNAPSHOT_LEASES, expired_in_scope, publish_many, records};
@@ -22,7 +25,7 @@ enum LeaseRecoveryObservation {
 }
 
 pub(super) enum LeaseRecoveryClock {
-    Conservative(Option<u64>),
+    Conservative,
     Strict(Option<u64>),
 }
 
@@ -44,6 +47,40 @@ impl LeaseRecoveryObservation {
     }
 }
 
+fn protected_coupled_leases(
+    catalog: &crate::Catalog<'_>,
+    leases: &BTreeSet<SnapshotLeaseId>,
+) -> Result<BTreeSet<SnapshotLeaseId>, LedgerFailure> {
+    if leases.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let coordinator = MaintenanceCoordinator::restore_from_catalog(catalog)
+        .map_err(|_| LedgerFailure::new(LedgerFailureCode::RecoveryRequired))?;
+    let mut protected = BTreeSet::new();
+    for lease in leases {
+        let task = MaintenanceTaskId::new(lease.to_bytes())
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
+        match coordinator.status(task) {
+            Ok(status) => {
+                if status.task().class() != MaintenanceTaskClass::SnapshotLeaseExpiry {
+                    return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+                }
+                if matches!(
+                    status.phase(),
+                    MaintenanceTaskPhase::Queued
+                        | MaintenanceTaskPhase::Running
+                        | MaintenanceTaskPhase::Deferred
+                ) {
+                    protected.insert(*lease);
+                }
+            },
+            Err(MaintenanceFailure::UnknownTask) => {},
+            Err(_) => return Err(LedgerFailure::new(LedgerFailureCode::RecoveryRequired)),
+        }
+    }
+    Ok(protected)
+}
+
 pub(super) fn recover_reservations<'kernel>(
     ledger_authority: &'kernel crate::StorageKernelResourceAuthority,
     catalog: &crate::Catalog<'_>,
@@ -60,41 +97,74 @@ pub(super) fn recover_reservations<'kernel>(
         .map(|record| record.observed_at)
         .max()
         .unwrap_or(0);
-    let now = match clock {
-        LeaseRecoveryClock::Conservative(now) => now,
+    let observation = match clock {
+        // A retention-time opener is not the expiry handler. It may recover a
+        // scope after the lease becomes due, but must leave the coupled lease
+        // and its durable expiry descriptor for the coordinator to terminalize
+        // together. Removing only the lease would make the Running task
+        // unrecoverable after a crash or a competing Catalog publication.
+        LeaseRecoveryClock::Conservative => LeaseRecoveryObservation::ConservativeFloor,
         LeaseRecoveryClock::Strict(now) => {
             if now.is_some_and(|now| now < persisted_last_observed) {
                 return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
             }
-            now
+            LeaseRecoveryObservation::from_durable(now, persisted_last_observed)
         },
     };
-    let observation = LeaseRecoveryObservation::from_durable(now, persisted_last_observed);
     let expiry_time = observation.expiry_time();
     let expired =
         expiry_time.map_or_else(BTreeSet::new, |now| expired_in_scope(&scoped, scope, now));
+    // A recovered lease can predate a task handler. Retain every nonterminal
+    // paired lease unchanged until that handler can atomically replace both
+    // durable records. Rewriting only `observed_at` also changes the task's
+    // immutable binding, so it is just as invalid as removing only a due
+    // lease. Legacy unpaired leases still reclaim through this path.
+    let leases = scoped
+        .iter()
+        .map(|record| record.identity)
+        .collect::<BTreeSet<_>>();
+    let protected = protected_coupled_leases(catalog, &leases)?;
+    let removable = expired
+        .difference(&protected)
+        .copied()
+        .collect::<BTreeSet<_>>();
     let mut active = scoped
         .into_iter()
-        .filter(|record| !expired.contains(&record.identity))
+        .filter(|record| !removable.contains(&record.identity))
         .collect::<Vec<_>>();
     for record in &active {
-        validate_active_lease(record, expiry_time.unwrap_or(record.observed_at))?;
+        let validation_time = if protected.contains(&record.identity) {
+            record.observed_at
+        } else {
+            expiry_time.unwrap_or(record.observed_at)
+        };
+        validate_active_lease(record, validation_time)?;
     }
     if active.len() > MAX_SNAPSHOT_LEASES {
         return Err(LedgerFailure::new(LedgerFailureCode::LimitExceeded));
     }
-    if let Some(now) = expiry_time
-        .filter(|now| !expired.is_empty() || active.iter().any(|record| record.observed_at != *now))
-    {
+    if let Some(now) = expiry_time.filter(|now| {
+        !removable.is_empty()
+            || active
+                .iter()
+                .any(|record| !protected.contains(&record.identity) && record.observed_at != *now)
+    }) {
         let remove = active
             .iter()
+            .filter(|record| !protected.contains(&record.identity))
             .map(|record| record.identity)
-            .chain(expired.iter().copied())
+            .chain(removable.iter().copied())
             .collect::<BTreeSet<_>>();
         for record in &mut active {
-            record.observed_at = now;
+            if !protected.contains(&record.identity) {
+                record.observed_at = now;
+            }
         }
-        let additions = active.iter().map(encode).collect::<Result<Vec<_>, _>>()?;
+        let additions = active
+            .iter()
+            .filter(|record| !protected.contains(&record.identity))
+            .map(encode)
+            .collect::<Result<Vec<_>, _>>()?;
         publish_many(catalog, snapshot, &remove, additions)?;
     }
     let mut retained = BTreeMap::new();

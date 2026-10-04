@@ -761,23 +761,6 @@ impl RetentionTimeAuthority {
         Ok(IngestTime::from_authenticated_durable(advanced))
     }
 
-    pub(crate) fn lease_recovery_time(
-        &self,
-        scope: SegmentScope,
-        durable: Option<IngestTime>,
-    ) -> Result<Option<u64>, LifecycleClockFailure> {
-        let Some(durable) = durable else {
-            return Ok(None);
-        };
-        self.ingest_time(scope, Some(durable))?
-            .instant()
-            .value()
-            .checked_div(1_000_000_000)
-            .and_then(|value| u64::try_from(value).ok())
-            .map(Some)
-            .ok_or(LifecycleClockFailure::OutOfRange)
-    }
-
     pub(crate) fn lease_time(&self, scope: SegmentScope) -> Result<u64, LifecycleClockFailure> {
         self.ingest_time(scope, None)?
             .instant()

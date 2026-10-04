@@ -99,8 +99,6 @@ impl InitializedInstance {
             .governance_now_seconds()
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         self.maintenance_coordinator()
-            .lock()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
             .submit_governance_audit_checkpoint_and_persist(&catalog, task.clone(), binding, now)
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         Ok(task.identity())
@@ -155,10 +153,7 @@ impl InitializedInstance {
             .retention_time
             .governance_now_seconds()
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
-        let coordinator = self
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let coordinator = self.maintenance_coordinator();
         let execution = coordinator
             .start_task_with_reservation_and_persist(
                 &catalog,
@@ -205,10 +200,7 @@ impl InitializedInstance {
             .retention_time
             .governance_now_seconds()
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
-        let coordinator = self
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let coordinator = self.maintenance_coordinator();
         let execution = coordinator
             .start_task_with_reservation_and_persist(
                 &catalog,
@@ -234,8 +226,6 @@ impl InitializedInstance {
         identity: MaintenanceTaskId,
     ) -> Result<MaintenanceTaskPhase, BootstrapFailure> {
         self.maintenance_coordinator()
-            .lock()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
             .status(identity)
             .map(|status| status.phase())
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))
@@ -257,8 +247,6 @@ impl InitializedInstance {
             .is_some();
         let tasks = self
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
             .durable_records()
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
             .len();

@@ -795,8 +795,10 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
                 return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration));
             }
         }
-        let descriptor =
-            descriptor.ok_or_else(|| LedgerFailure::new(LedgerFailureCode::RecoveryRequired))?;
+        let descriptor = match descriptor {
+            Some(descriptor) => descriptor,
+            None => return Err(LedgerFailure::new(LedgerFailureCode::RecoveryRequired)),
+        };
         let record = records(&basis)?
             .into_iter()
             .find(|record| record.identity == identity && record.scope == self.scope);

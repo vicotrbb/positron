@@ -54,10 +54,7 @@ impl InitializedInstance {
         // reader from racing the selected caller's Catalog writer. A worker
         // has released the coordinator before its handler, so a worker-owned
         // request below returns immediately rather than waiting on it.
-        let coordinator = self
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let coordinator = self.maintenance_coordinator();
         // A worker's live durability reservation intentionally prevents a
         // second Catalog Writer from attaching to its task. Inspect the
         // authenticated read view first so an equivalent public request can
@@ -207,10 +204,7 @@ impl InitializedInstance {
         catalog: &Catalog<'_>,
         execution: &positron_kernel::MaintenanceExecution<'_>,
     ) -> Result<positron_kernel::GovernanceAuditCheckpoint, BootstrapFailure> {
-        let coordinator = self
-            .maintenance_coordinator()
-            .lock()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let coordinator = self.maintenance_coordinator();
         self.complete_governance_audit_checkpoint_execution_with_coordinator(
             catalog,
             execution,

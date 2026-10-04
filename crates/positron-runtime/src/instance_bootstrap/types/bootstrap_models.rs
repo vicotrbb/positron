@@ -338,9 +338,9 @@ pub struct InitializedInstance {
     #[cfg(any(test, fuzzing))]
     pub(in crate::instance_bootstrap) audit: Vec<positron_governance::GovernanceAuditEntry>,
     pub(crate) _authority: StorageKernelResourceAuthority,
-    /// The sole runtime-owned maintenance task registry. Handlers retain their
-    /// narrow storage authorities; this lock owns only task coordination state.
-    pub(crate) maintenance: Mutex<positron_kernel::MaintenanceCoordinator>,
+    /// The sole runtime-owned maintenance task registry. Its internal state
+    /// serializes transitions; handlers retain only their narrow authorities.
+    pub(crate) maintenance: positron_kernel::MaintenanceCoordinator,
     pub(crate) retention_time: RetentionTimeAuthority,
     pub(crate) instance: InstanceId,
     pub(crate) tenant: TenantId,
@@ -376,9 +376,7 @@ impl std::fmt::Debug for InitializedInstance {
 
 impl InitializedInstance {
     #[must_use]
-    pub(crate) fn maintenance_coordinator(
-        &self,
-    ) -> &Mutex<positron_kernel::MaintenanceCoordinator> {
+    pub(crate) fn maintenance_coordinator(&self) -> &positron_kernel::MaintenanceCoordinator {
         &self.maintenance
     }
     /// Returns the bootstrap-pinned system administrator that acts for

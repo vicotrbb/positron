@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -34,6 +34,15 @@ use crate::{
 
 pub(crate) type InitializedCredentials = (Arc<crate::InitializedInstance>, String, String, String);
 
+static LIVE_NATIVE_MAINTENANCE_TEST: Mutex<()> = Mutex::new(());
+
+fn live_native_maintenance_test_guard() -> MutexGuard<'static, ()> {
+    match LIVE_NATIVE_MAINTENANCE_TEST.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[test]
 fn service_startup_restores_catalog_backed_maintenance_before_serving() -> Result<(), Box<dyn Error>>
 {
@@ -47,8 +56,6 @@ fn service_startup_restores_catalog_backed_maintenance_before_serving() -> Resul
     let catalog = open_catalog(&initialized)?;
     initialized
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
         .submit_and_persist(&catalog, task, 7)
         .expect("durable task submission");
     drop(catalog);
@@ -57,8 +64,6 @@ fn service_startup_restores_catalog_backed_maintenance_before_serving() -> Resul
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(identity)
             .expect("restored task")
             .task()
@@ -154,8 +159,6 @@ fn production_query_publishes_a_durable_snapshot_lease_expiry_task() -> Result<(
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .durable_records()
             .expect("query expiry task is coordinator-owned")
             .len(),
@@ -166,8 +169,6 @@ fn production_query_publishes_a_durable_snapshot_lease_expiry_task() -> Result<(
     assert!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .start_next_with_reservation_and_persist(
                 &catalog,
                 &initialized._authority,
@@ -207,10 +208,7 @@ fn runtime_maintenance_worker_wake_dispatches_and_completes_a_due_snapshot_lease
         scope,
         protection,
     )?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
         &coordinator,
         0,
@@ -220,7 +218,6 @@ fn runtime_maintenance_worker_wake_dispatches_and_completes_a_due_snapshot_lease
     let lease_id = lease.identity();
     let task = MaintenanceTaskId::new(lease_id.to_bytes()).expect("lease task id");
     drop(lease);
-    drop(coordinator);
     drop(ledger);
     drop(catalog);
     elapsed.advance(1_000_000_000)?;
@@ -248,8 +245,6 @@ fn runtime_maintenance_worker_wake_dispatches_and_completes_a_due_snapshot_lease
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .expect("terminal task")
             .phase(),
@@ -358,8 +353,6 @@ fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_rete
     let idle_generation = catalog.pin()?.number();
     let idle_task_count = initialized
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
         .durable_records()
         .map_err(|_| "durable maintenance records")?
         .len();
@@ -379,8 +372,6 @@ fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_rete
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .durable_records()
             .map_err(|_| "durable maintenance records")?
             .len(),
@@ -437,10 +428,7 @@ fn cancellation_after_maintenance_dispatch_preserves_the_lease_for_recovery()
         scope,
         protection,
     )?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
         &coordinator,
         0,
@@ -450,7 +438,6 @@ fn cancellation_after_maintenance_dispatch_preserves_the_lease_for_recovery()
     let lease_id = lease.identity();
     let task = MaintenanceTaskId::new(lease_id.to_bytes()).expect("lease task id");
     drop(lease);
-    drop(coordinator);
     drop(ledger);
     drop(catalog);
     elapsed.advance(1_000_000_000)?;
@@ -465,8 +452,6 @@ fn cancellation_after_maintenance_dispatch_preserves_the_lease_for_recovery()
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .expect("running task")
             .phase(),
@@ -478,8 +463,6 @@ fn cancellation_after_maintenance_dispatch_preserves_the_lease_for_recovery()
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .expect("recovered task")
             .phase(),
@@ -537,10 +520,7 @@ fn runtime_worker_wakes_for_a_poststart_future_lease_expiry() -> Result<(), Box<
         protection,
     )?;
     let now = initialized.retention_time.governance_now_seconds()?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
         &coordinator,
         now,
@@ -549,7 +529,6 @@ fn runtime_worker_wakes_for_a_poststart_future_lease_expiry() -> Result<(), Box<
     )?;
     let task = MaintenanceTaskId::new(lease.identity().to_bytes()).expect("lease task id");
     drop(lease);
-    drop(coordinator);
     drop(ledger);
     drop(catalog);
     drop(catalog_operation);
@@ -559,8 +538,6 @@ fn runtime_worker_wakes_for_a_poststart_future_lease_expiry() -> Result<(), Box<
     let deadline = Instant::now() + Duration::from_secs(2);
     while initialized
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
         .status(task)
         .map_err(|_| "maintenance task status")?
         .phase()
@@ -607,10 +584,7 @@ fn runtime_worker_retries_a_running_expiry_after_terminal_publication_outage()
         scope,
         protection,
     )?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
         &coordinator,
         0,
@@ -619,7 +593,6 @@ fn runtime_worker_retries_a_running_expiry_after_terminal_publication_outage()
     )?;
     let task = MaintenanceTaskId::new(lease.identity().to_bytes()).expect("lease task id");
     drop(lease);
-    drop(coordinator);
     drop(ledger);
     drop(catalog);
     drop(catalog_operation);
@@ -637,8 +610,6 @@ fn runtime_worker_retries_a_running_expiry_after_terminal_publication_outage()
     let mut saw_running = false;
     while initialized
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
         .status(task)
         .map_err(|_| "maintenance task status")?
         .phase()
@@ -646,8 +617,6 @@ fn runtime_worker_retries_a_running_expiry_after_terminal_publication_outage()
     {
         let phase = initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .map_err(|_| "maintenance task status")?
             .phase();
@@ -686,8 +655,6 @@ fn public_audit_checkpoint_reports_the_worker_task_before_artifact_publication()
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .map_err(|_| "audit task status")?
             .phase(),
@@ -739,8 +706,6 @@ fn public_audit_checkpoint_reports_the_worker_task_before_artifact_publication()
     assert_eq!(
         initialized
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .map_err(|_| "recovered audit task status")?
             .phase(),
@@ -803,6 +768,7 @@ fn public_audit_checkpoint_returns_a_running_worker_artifact_without_redispatch(
 #[test]
 fn native_runtime_worker_expires_a_durable_lease_and_joins_before_reopen()
 -> Result<(), Box<dyn Error>> {
+    let _test_guard = live_native_maintenance_test_guard();
     let fixture = Fixture::new()?;
     let (mut initialized, _, _) = fixture.initialized()?;
     let (retention_time, elapsed) =
@@ -825,10 +791,7 @@ fn native_runtime_worker_expires_a_durable_lease_and_joins_before_reopen()
         scope,
         protection,
     )?;
-    let coordinator = initialized
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = initialized.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
         &coordinator,
         0,
@@ -837,7 +800,6 @@ fn native_runtime_worker_expires_a_durable_lease_and_joins_before_reopen()
     )?;
     let task = MaintenanceTaskId::new(lease.identity().to_bytes()).expect("lease task id");
     drop(lease);
-    drop(coordinator);
     drop(ledger);
     drop(catalog);
     elapsed.advance(1_000_000_000)?;
@@ -872,8 +834,6 @@ fn native_runtime_worker_expires_a_durable_lease_and_joins_before_reopen()
     while services
         .instance
         .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
         .status(task)
         .map_err(|_| "maintenance task status")?
         .phase()
@@ -897,8 +857,6 @@ fn native_runtime_worker_expires_a_durable_lease_and_joins_before_reopen()
         restored
             .instance
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .map_err(|_| "maintenance task status")?
             .phase(),
@@ -911,6 +869,7 @@ fn native_runtime_worker_expires_a_durable_lease_and_joins_before_reopen()
 #[test]
 fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persists_completion()
 -> Result<(), Box<dyn Error>> {
+    let _test_guard = live_native_maintenance_test_guard();
     let fixture = Fixture::new()?;
     let (initialized, _, _) = fixture.initialized()?;
     drop(initialized);
@@ -958,11 +917,7 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
         protection,
     )?;
     let now = services.instance.retention_time.governance_now_seconds()?;
-    let coordinator = services
-        .instance
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?;
+    let coordinator = services.instance.maintenance_coordinator();
     let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
         &coordinator,
         now,
@@ -971,26 +926,31 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
     )?;
     let task = MaintenanceTaskId::new(lease.identity().to_bytes()).expect("lease task id");
     drop(lease);
-    drop(coordinator);
     drop(ledger);
     drop(catalog);
     drop(_catalog_operation);
 
     let deadline = Instant::now() + Duration::from_secs(4);
-    while services
-        .instance
-        .maintenance_coordinator()
-        .lock()
-        .map_err(|_| "maintenance lock")?
-        .status(task)
-        .map_err(|_| "maintenance task status")?
-        .phase()
-        != MaintenanceTaskPhase::Succeeded
-    {
+    loop {
+        let status = services
+            .instance
+            .maintenance_coordinator()
+            .status(task)
+            .map_err(|_| "maintenance task status")?;
+        let phase = status.phase();
+        if phase == MaintenanceTaskPhase::Succeeded {
+            break;
+        }
         if Instant::now() >= deadline {
-            return Err(
-                "native maintenance role did not complete poststart future expiry work".into(),
-            );
+            let clock = services.instance.retention_time.status().state();
+            let now = services.instance.retention_time.governance_now_seconds();
+            let not_before = status.task().not_before();
+            drop(services);
+            let outcome = process.shutdown(ShutdownTrigger::FirstSignal);
+            return Err(format!(
+                "native maintenance role did not complete poststart future expiry work (phase: {phase:?}, not_before: {not_before}, now: {now:?}, clock: {clock:?}, shutdown: {outcome:?})"
+            )
+            .into());
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -1005,8 +965,6 @@ fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persi
         reopened
             .instance
             .maintenance_coordinator()
-            .lock()
-            .map_err(|_| "maintenance lock")?
             .status(task)
             .map_err(|_| "restored maintenance task status")?
             .phase(),
