@@ -12,6 +12,9 @@ pub(super) fn encode_record(
     if (state.phase == MaintenanceTaskPhase::Failed) != state.terminal_failure.is_some() {
         return Err(MaintenanceFailure::InvalidInput);
     }
+    if state.phase != MaintenanceTaskPhase::Running && state.last_progress_at.is_some() {
+        return Err(MaintenanceFailure::InvalidInput);
+    }
     let checkpoint_bytes = state
         .checkpoint
         .as_ref()
@@ -172,13 +175,7 @@ pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailur
                 let _ = cursor.u64()?;
                 None
             },
-            1 => {
-                let timestamp = cursor.u64()?;
-                (timestamp != 0)
-                    .then_some(timestamp)
-                    .ok_or(MaintenanceFailure::InvalidInput)?
-                    .into()
-            },
+            1 => Some(cursor.u64()?),
             _ => return Err(MaintenanceFailure::InvalidInput),
         }
     } else {
@@ -196,6 +193,9 @@ pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailur
         },
         _ => return Err(MaintenanceFailure::InvalidInput),
     };
+    if phase != MaintenanceTaskPhase::Running && last_progress_at.is_some() {
+        return Err(MaintenanceFailure::InvalidInput);
+    }
     if !cursor.is_finished() {
         return Err(MaintenanceFailure::InvalidInput);
     }
@@ -525,6 +525,48 @@ pub(super) fn window_record(bytes: &[u8]) -> Result<Option<MaintenanceWindow>, M
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn running_state(last_progress_at: Option<u64>) -> TaskState {
+        TaskState {
+            task: MaintenanceTask::with_contract_not_before(
+                MaintenanceTaskId::new([6; 16]).expect("identity"),
+                MaintenanceTaskClass::SchemaPromotion,
+                MaintenanceScope::system(),
+                MaintenanceTrigger::Scheduled,
+                MaintenancePreconditions::new(3, 1).expect("preconditions"),
+                Vec::new(),
+                Vec::new(),
+                ResourceAmounts::new([1; 11]),
+                99,
+            )
+            .expect("task"),
+            phase: MaintenanceTaskPhase::Running,
+            terminal_failure: None,
+            submitted_at: 0,
+            checkpoint: None,
+            last_progress_at,
+            pause_until: None,
+            cancellation_requested: false,
+            dispatches: 1,
+            terminal_order: None,
+            active_dispatch: None,
+        }
+    }
+
+    #[test]
+    fn v5_preserves_the_unix_epoch_progress_anchor_and_rejects_terminal_anchors() {
+        let running = running_state(Some(0));
+        let decoded = decode_record(&encode_record(&running).expect("v5 record").0)
+            .expect("epoch anchor decodes");
+        assert_eq!(decoded.last_progress_at, Some(0));
+
+        let mut terminal = running;
+        terminal.phase = MaintenanceTaskPhase::Succeeded;
+        assert_eq!(
+            encode_record(&terminal).expect_err("terminal tasks cannot keep a progress anchor"),
+            MaintenanceFailure::InvalidInput
+        );
+    }
 
     #[test]
     fn v2_task_record_decodes_with_an_immediately_eligible_schedule() {

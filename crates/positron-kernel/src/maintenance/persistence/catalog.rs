@@ -67,6 +67,7 @@ pub(super) fn durable_compaction_completion_exists(
     }
     let mut succeeded = before.clone();
     succeeded.phase = MaintenanceTaskPhase::Succeeded;
+    succeeded.last_progress_at = None;
     succeeded.cancellation_requested = false;
     succeeded.active_dispatch = None;
     succeeded.terminal_order = Some(terminal_order);
@@ -81,6 +82,7 @@ pub(super) fn durable_running_publication_matches(before: &TaskState, durable: &
         && durable.phase == MaintenanceTaskPhase::Running
         && durable.submitted_at == before.submitted_at
         && durable.checkpoint == before.checkpoint
+        && durable.last_progress_at == before.last_progress_at
         && durable.pause_until == before.pause_until
         && durable.cancellation_requested == before.cancellation_requested
         && durable.dispatches == before.dispatches

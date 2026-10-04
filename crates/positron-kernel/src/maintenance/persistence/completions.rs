@@ -34,6 +34,7 @@ impl MaintenanceCoordinator {
             .ok_or(MaintenanceFailure::CapacityExceeded)?;
         let mut after = before.clone();
         after.phase = MaintenanceTaskPhase::Succeeded;
+        after.last_progress_at = None;
         after.active_dispatch = None;
         after.terminal_order = Some(terminal_order);
         let record = encode_record(&after)?;
@@ -79,6 +80,7 @@ impl MaintenanceCoordinator {
             .ok_or(MaintenanceFailure::CapacityExceeded)?;
         let mut after = before.clone();
         after.phase = MaintenanceTaskPhase::Succeeded;
+        after.last_progress_at = None;
         after.active_dispatch = None;
         after.terminal_order = Some(terminal_order);
         let record = encode_record(&after)?;
@@ -155,6 +157,7 @@ impl MaintenanceCoordinator {
             .ok_or(MaintenanceFailure::CapacityExceeded)?;
         let mut after = before.clone();
         after.phase = MaintenanceTaskPhase::Succeeded;
+        after.last_progress_at = None;
         after.active_dispatch = None;
         after.terminal_order = Some(terminal_order);
         let record = encode_record(&after)?;
@@ -198,6 +201,7 @@ impl MaintenanceCoordinator {
             .ok_or(MaintenanceFailure::CapacityExceeded)?;
         let mut after = before.clone();
         after.phase = MaintenanceTaskPhase::Succeeded;
+        after.last_progress_at = None;
         after.active_dispatch = None;
         after.terminal_order = Some(terminal_order);
         let expected = encode_record(&after)?;
@@ -307,6 +311,7 @@ impl MaintenanceCoordinator {
             .ok_or(MaintenanceFailure::CapacityExceeded)?;
         let mut publication_after = before.clone();
         publication_after.phase = MaintenanceTaskPhase::Succeeded;
+        publication_after.last_progress_at = None;
         publication_after.cancellation_requested = false;
         publication_after.active_dispatch = None;
         publication_after.terminal_order = Some(terminal_order);
@@ -364,6 +369,7 @@ impl MaintenanceCoordinator {
             .get_mut(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
         after.phase = MaintenanceTaskPhase::Succeeded;
+        after.last_progress_at = None;
         after.active_dispatch = None;
         assign_terminal_order(&mut next, identity)?;
         let after = next
@@ -423,6 +429,7 @@ impl MaintenanceCoordinator {
             .get_mut(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
         after.phase = MaintenanceTaskPhase::Succeeded;
+        after.last_progress_at = None;
         after.cancellation_requested = false;
         after.active_dispatch = None;
         assign_terminal_order(&mut next, identity)?;
@@ -604,6 +611,7 @@ impl MaintenanceCoordinator {
             .get_mut(&identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
         after.phase = MaintenanceTaskPhase::Cancelled;
+        after.last_progress_at = None;
         after.cancellation_requested = false;
         assign_terminal_order(&mut next, identity)?;
         let after = next

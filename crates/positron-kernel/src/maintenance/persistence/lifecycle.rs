@@ -117,6 +117,7 @@ impl MaintenanceCoordinator {
             };
             task.phase = phase;
             task.terminal_failure = terminal_failure;
+            task.last_progress_at = None;
             task.active_dispatch = None;
         }
         assign_terminal_order(&mut next, dispatch.identity)?;
@@ -197,6 +198,7 @@ impl MaintenanceCoordinator {
         // that request so its authenticated retry can finish idempotently.
         task.cancellation_requested = false;
         task.phase = MaintenanceTaskPhase::Queued;
+        task.last_progress_at = None;
         task.active_dispatch = None;
         if let Err(failure) = persist_task_state(catalog, task, None) {
             drop(state);
@@ -233,6 +235,7 @@ impl MaintenanceCoordinator {
             // cancellation merely because the failed requeue left a durable
             // Running record with a cancellation request.
             candidate.phase = MaintenanceTaskPhase::Queued;
+            candidate.last_progress_at = None;
             candidate.cancellation_requested = false;
             candidate.active_dispatch = None;
         }
@@ -395,6 +398,7 @@ impl MaintenanceCoordinator {
             return Err(MaintenanceFailure::InvalidTransition);
         }
         task.phase = MaintenanceTaskPhase::Queued;
+        task.last_progress_at = None;
         task.active_dispatch = None;
         persist_task_state_admitted(catalog, task, None, execution)?;
         *state = next;
@@ -428,6 +432,7 @@ impl MaintenanceCoordinator {
         // authority; the next exact attach republishes Running before it signs
         // or terminalizes anything.
         task.phase = MaintenanceTaskPhase::Queued;
+        task.last_progress_at = None;
         task.active_dispatch = None;
         Ok(())
     }
@@ -459,6 +464,7 @@ impl MaintenanceCoordinator {
                 return Err(MaintenanceFailure::InvalidTransition);
             }
             task.phase = MaintenanceTaskPhase::Cancelled;
+            task.last_progress_at = None;
             task.active_dispatch = None;
         }
         assign_terminal_order(&mut next, dispatch.identity)?;
@@ -500,6 +506,7 @@ impl MaintenanceCoordinator {
                 return Err(MaintenanceFailure::InvalidTransition);
             }
             task.phase = MaintenanceTaskPhase::Queued;
+            task.last_progress_at = None;
             task.active_dispatch = None;
         }
         let task = next

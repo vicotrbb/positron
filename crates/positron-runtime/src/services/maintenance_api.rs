@@ -969,6 +969,179 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_status_and_explain_report_the_durable_progress_deadline_boundary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let mut initialized = Arc::try_unwrap(initialized)
+            .map_err(|_| "maintenance fixture retains the initialized instance")?;
+        let (retention_time, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(
+            UnixNanoseconds::new(1_000_000_000),
+        );
+        initialized.install_retention_time_for_test(retention_time)?;
+        let initialized = Arc::new(initialized);
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        let operations = crate::health::ProcessState::starting();
+        operations.set_inspection_authority(Arc::clone(&initialized))?;
+        operations.set_catalog_operation(services.catalog_operation_gate())?;
+        let identity = initialized.queue_governance_audit_checkpoint_for_test()?;
+        let catalog = open_catalog(&initialized)?;
+        let execution = initialized
+            .maintenance_coordinator()
+            .start_task_with_reservation_and_persist(
+                &catalog,
+                &initialized._authority,
+                1,
+                false,
+                identity,
+            )
+            .map_err(|failure| format!("durably start task: {failure:?}"))?
+            .ok_or("running task was not selected")?;
+        drop(execution);
+        drop(catalog);
+        let rendered_identity = super::hex(identity.to_bytes());
+
+        elapsed.advance(59_000_000_000)?;
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("pre-deadline status: {failure:?}"))?;
+        let observed = status
+            .tasks
+            .into_iter()
+            .find(|candidate| candidate.identity == rendered_identity)
+            .ok_or("running task missing before deadline")?;
+        assert_eq!(observed.phase, "running");
+        assert_eq!(observed.last_progress_at_unix_seconds, Some(1));
+        assert_eq!(observed.no_durable_progress_slo_seconds, Some(60));
+        assert_eq!(observed.no_durable_progress_slo_breached, Some(false));
+        let explain = services
+            .explain_maintenance_task(
+                &administrator,
+                &serde_json::to_vec(&MaintenanceExplainRequest {
+                    identity: rendered_identity.clone(),
+                })?,
+            )
+            .map_err(|failure| format!("pre-deadline explain: {failure:?}"))?;
+        assert_eq!(explain.task.no_durable_progress_slo_seconds, Some(60));
+        assert_eq!(explain.task.no_durable_progress_slo_breached, Some(false));
+        let health = operations
+            .health()
+            .authorized_configuration_status(&administrator)
+            .map_err(|failure| format!("pre-deadline operations health: {failure:?}"))?
+            .maintenance;
+        assert_eq!(health.running(), 1);
+        assert_eq!(health.running_no_durable_progress_slo_breaches(), 0);
+        assert_eq!(health.running_no_durable_progress_slo_unknown(), 0);
+
+        elapsed.advance(1_000_000_000)?;
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("deadline status: {failure:?}"))?;
+        let observed = status
+            .tasks
+            .into_iter()
+            .find(|candidate| candidate.identity == rendered_identity)
+            .ok_or("running task missing at deadline")?;
+        assert_eq!(observed.no_durable_progress_slo_breached, Some(true));
+        let explain = services
+            .explain_maintenance_task(
+                &administrator,
+                &serde_json::to_vec(&MaintenanceExplainRequest {
+                    identity: rendered_identity,
+                })?,
+            )
+            .map_err(|failure| format!("deadline explain: {failure:?}"))?;
+        assert_eq!(explain.task.no_durable_progress_slo_breached, Some(true));
+        let health = operations
+            .health()
+            .authorized_configuration_status(&administrator)
+            .map_err(|failure| format!("deadline operations health: {failure:?}"))?
+            .maintenance;
+        assert_eq!(health.running_no_durable_progress_slo_breaches(), 1);
+        assert_eq!(health.running_no_durable_progress_slo_unknown(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_running_status_and_explain_report_progress_unknown_when_clock_is_uncertain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+        let mut initialized = Arc::try_unwrap(initialized)
+            .map_err(|_| "maintenance fixture retains the initialized instance")?;
+        let wall = Arc::new(Mutex::new(UnixNanoseconds::new(10_000_000_000)));
+        initialized.install_retention_time_for_test(
+            RetentionTimeAuthority::establish_with_source(
+                MutableWallClock(Arc::clone(&wall)),
+                LifecycleClockPolicy::new(10)?,
+            )?,
+        )?;
+        let scope = SegmentScope::new(
+            initialized.default_tenant_id(),
+            SignalKind::Logs,
+            positron_domain::routing::VirtualShardId::new(1)?,
+        );
+        let now = initialized.retention_time.governance_time_seconds(scope)?;
+        let initialized = Arc::new(initialized);
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        let operations = crate::health::ProcessState::starting();
+        operations.set_inspection_authority(Arc::clone(&initialized))?;
+        operations.set_catalog_operation(services.catalog_operation_gate())?;
+        let identity = initialized.queue_governance_audit_checkpoint_for_test()?;
+        let catalog = open_catalog(&initialized)?;
+        let execution = initialized
+            .maintenance_coordinator()
+            .start_task_with_reservation_and_persist(
+                &catalog,
+                &initialized._authority,
+                now,
+                false,
+                identity,
+            )
+            .map_err(|failure| format!("durably start task: {failure:?}"))?
+            .ok_or("running task was not selected")?;
+        drop(execution);
+        drop(catalog);
+        *wall.lock().map_err(|_| "maintenance test wall clock")? = UnixNanoseconds::new(500);
+        initialized.retention_time.governance_time_seconds(scope)?;
+        let rendered_identity = super::hex(identity.to_bytes());
+
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("uncertain running status: {failure:?}"))?;
+        let observed = status
+            .tasks
+            .into_iter()
+            .find(|candidate| candidate.identity == rendered_identity)
+            .ok_or("running uncertain task missing from status")?;
+        assert_eq!(observed.phase, "running");
+        assert_eq!(observed.no_durable_progress_slo_seconds, Some(60));
+        assert_eq!(observed.no_durable_progress_slo_breached, None);
+        assert_eq!(observed.backlog_age_seconds, None);
+        let explain = services
+            .explain_maintenance_task(
+                &administrator,
+                &serde_json::to_vec(&MaintenanceExplainRequest {
+                    identity: rendered_identity,
+                })?,
+            )
+            .map_err(|failure| format!("uncertain running explain: {failure:?}"))?;
+        assert_eq!(explain.task.no_durable_progress_slo_seconds, Some(60));
+        assert_eq!(explain.task.no_durable_progress_slo_breached, None);
+        assert_eq!(explain.task.backlog_age_seconds, None);
+        let health = operations
+            .health()
+            .authorized_configuration_status(&administrator)
+            .map_err(|failure| format!("uncertain operations health: {failure:?}"))?
+            .maintenance;
+        assert!(health.clock_uncertain());
+        assert_eq!(health.running(), 1);
+        assert_eq!(health.running_no_durable_progress_slo_breaches(), 0);
+        assert_eq!(health.running_no_durable_progress_slo_unknown(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn authenticated_status_and_explain_report_clock_uncertain_destructive_blocking()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
