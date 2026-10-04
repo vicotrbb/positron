@@ -107,7 +107,8 @@ pub fn fuzz_maintenance_catalog_stateful(data: &[u8]) {
                         )
                     })
                 } else {
-                    coordinator.start_next_with_reservation_and_persist(&catalog, &authority, now, false)
+                    coordinator
+                        .start_next_with_reservation_and_persist(&catalog, &authority, now, false)
                 };
                 if let Ok(Some(execution)) = started {
                     let progress = vec![command, u8::try_from(step).expect("bounded fuzz step")];
@@ -117,18 +118,21 @@ pub fn fuzz_maintenance_catalog_stateful(data: &[u8]) {
                         execution.checkpoint_and_persist(&coordinator, &catalog, checkpoint.clone())
                     };
                     if fault {
-                        let _ = with_catalog_fault(fault_event(command.wrapping_add(1)), checkpoint_result);
+                        let _ = with_catalog_fault(
+                            fault_event(command.wrapping_add(1)),
+                            checkpoint_result,
+                        );
                     } else {
                         let _ = checkpoint_result();
                     }
                 }
             },
             4 => {
-                let started = coordinator.start_next_with_reservation_and_persist(
-                    &catalog, &authority, now, false,
-                );
+                let started = coordinator
+                    .start_next_with_reservation_and_persist(&catalog, &authority, now, false);
                 if let Ok(Some(execution)) = started {
-                    let completion = || execution.complete_and_persist(&coordinator, &catalog, true);
+                    let completion =
+                        || execution.complete_and_persist(&coordinator, &catalog, true);
                     if fault {
                         let _ = with_catalog_fault(fault_event(command), completion);
                     } else {
@@ -161,10 +165,13 @@ fn install_basis(catalog: &Catalog<'_>) -> Result<(), MaintenanceFailure> {
                 .map_err(|_| MaintenanceFailure::CatalogUnavailable)?
                 .identity(),
             CatalogProposal::new(
-                TransactionId::new(nonzero_id(2)).map_err(|_| MaintenanceFailure::CatalogUnavailable)?,
+                TransactionId::new(nonzero_id(2))
+                    .map_err(|_| MaintenanceFailure::CatalogUnavailable)?,
                 FormatEpoch::CATALOG_V1,
-                vec![CatalogObject::new(b"maintenance fuzz basis".to_vec())
-                    .map_err(|_| MaintenanceFailure::CatalogUnavailable)?],
+                vec![
+                    CatalogObject::new(b"maintenance fuzz basis".to_vec())
+                        .map_err(|_| MaintenanceFailure::CatalogUnavailable)?,
+                ],
             )
             .map_err(|_| MaintenanceFailure::CatalogUnavailable)?,
             None,
