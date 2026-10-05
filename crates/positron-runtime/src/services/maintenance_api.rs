@@ -78,15 +78,10 @@ impl ServiceHandle {
             running: 0,
             deferred: 0,
             terminal: 0,
-            // Findings are a complete, independently bounded Catalog view.  Return
-            // them on the first task page only: the CLI already retains that page's
-            // immutable finding set while walking task cursors.  Repeating it on
-            // every page can exceed the canonical response envelope.
-            integrity_findings: if cursor.is_none() {
-                integrity_findings(self)?
-            } else {
-                Vec::new()
-            },
+            // Findings are independently bounded evidence and the canonical
+            // status contract repeats the complete current set on every task
+            // page. Task rows below are trimmed against this exact envelope.
+            integrity_findings: integrity_findings(self)?,
         };
         for status in &statuses {
             match status.phase() {
@@ -1474,7 +1469,10 @@ const fn class_name(class: MaintenanceTaskClass) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
     use std::sync::{Arc, Barrier, Mutex, mpsc};
     use std::time::Duration;
 
@@ -1501,6 +1499,10 @@ mod tests {
     use super::super::tests::schema_maintenance::{Fixture, open_catalog, request};
     use super::super::{OnlineVerificationTestHook, ServiceHandle};
     use super::MaintenanceServiceFailure;
+    use crate::{
+        ApplicationRuntime, HostInputs, InitializationMode, NativeBindings, NativeHost,
+        ServeConfiguration, ShutdownTrigger,
+    };
 
     struct MutableWallClock(Arc<Mutex<UnixNanoseconds>>);
 
@@ -2624,10 +2626,32 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
         let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
-        let services = ServiceHandle::new(Arc::clone(&initialized))?;
-        let health = crate::health::ProcessState::starting();
-        health.transition(crate::health::ProcessPhase::Serving);
-        services.attach_health(health.health());
+        drop(initialized);
+        static NEXT_CONTROL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let control = std::env::temp_dir().join(format!(
+            "positron-online-verification-status-{}-{}.sock",
+            std::process::id(),
+            NEXT_CONTROL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        match fs::remove_file(&control) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+        let host = NativeHost::new(NativeBindings::new(
+            control,
+            loopback(0),
+            loopback(0),
+            loopback(0),
+            loopback(0),
+            loopback(0),
+        )?);
+        let process = ApplicationRuntime::start(
+            ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly),
+            HostInputs::new(&host, &host),
+        )?;
+        let services = process.services().ok_or("serving services")?;
+        let initialized = Arc::clone(&services.instance);
         services.ingest_otlp_logs(
             &ingest,
             request("online-verify-corrupt-source").encode_to_vec(),
@@ -2687,10 +2711,10 @@ mod tests {
         assert!(!report.findings.is_empty());
         assert_eq!(fs::read(&damaged_segment)?, damaged_bytes);
         assert_eq!(
-            health.health().phase(),
+            process.health().phase(),
             crate::health::ProcessPhase::Serving
         );
-        assert!(health.health().integrity_degraded());
+        assert!(process.health().integrity_degraded());
         let catalog = open_catalog(&initialized)?;
         assert!(
             !positron_kernel::integrity_quarantine_findings(&catalog.pin()?)?.is_empty(),
@@ -2709,8 +2733,80 @@ mod tests {
         assert_eq!(quarantine_audit.signal(), SignalKind::Logs);
         assert_eq!(quarantine_audit.shard(), scope.shard_id().value());
         drop(catalog);
+        for value in 1_u8..=33 {
+            initialized
+                .maintenance_coordinator()
+                .submit_at(
+                    MaintenanceTask::new(
+                        MaintenanceTaskId::new([value; 16])
+                            .map_err(|failure| format!("task identity: {failure:?}"))?,
+                        MaintenanceTaskClass::SchemaStatistics,
+                    ),
+                    u64::from(value),
+                )
+                .map_err(|failure| format!("queued task: {failure:?}"))?;
+        }
+        let mut request = MaintenanceStatusRequest::default();
+        let mut identities = BTreeSet::new();
+        let mut expected_findings = None;
+        let mut total = None;
+        loop {
+            let status = services
+                .maintenance_status(&administrator, &serde_json::to_vec(&request)?)
+                .map_err(|failure| format!("paged status: {failure:?}"))?;
+            assert!(
+                status.encode().is_ok(),
+                "each status page remains within the canonical transport envelope"
+            );
+            assert!(status.returned > 0, "a task cursor page must advance");
+            match &expected_findings {
+                Some(expected) => assert_eq!(
+                    &status.integrity_findings, expected,
+                    "every cursor page repeats the current durable quarantine evidence"
+                ),
+                None => expected_findings = Some(status.integrity_findings.clone()),
+            }
+            total.get_or_insert(status.total);
+            assert_eq!(total, Some(status.total));
+            for task in &status.tasks {
+                assert!(
+                    identities.insert(task.identity.clone()),
+                    "a status cursor must not repeat task identities"
+                );
+            }
+            let Some(cursor) = status.next_cursor else {
+                break;
+            };
+            request = MaintenanceStatusRequest::page_after(cursor, MAX_STATUS_PAGE_TASKS as u32);
+        }
+        assert_eq!(
+            identities.len(),
+            usize::try_from(total.ok_or("status total")?)?,
+            "all tasks remain reachable while every page carries findings"
+        );
+        assert_eq!(
+            expected_findings.as_ref(),
+            Some(&report.findings),
+            "the public status projection retains the quarantined segment descriptor"
+        );
+        let api = process
+            .bound_endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.role() == crate::ListenerRole::Api)
+            .and_then(|endpoint| endpoint.socket_address())
+            .ok_or("native API endpoint")?;
+        let status = maintenance_status_over_http(api, &administrator)?;
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        assert!(
+            status.contains("\"base_position\":0"),
+            "the origin quarantine finding must remain encodable over the public HTTP status route: {status}"
+        );
         drop(services);
         drop(initialized);
+        assert_eq!(
+            process.shutdown(ShutdownTrigger::FirstSignal),
+            crate::ExitOutcome::Graceful
+        );
         let reopened = fixture.reopen()?;
         assert!(
             open_catalog(&reopened)?
@@ -2722,6 +2818,30 @@ mod tests {
                 .any(|entry| entry.as_integrity_quarantine().is_some())
         );
         Ok(())
+    }
+
+    fn loopback(port: u16) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
+    }
+
+    fn maintenance_status_over_http(
+        address: SocketAddr,
+        administrator: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let body = b"{}";
+        let mut stream = TcpStream::connect(address)?;
+        stream.write_all(
+            format!(
+                "POST /v1/maintenance:status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {administrator}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )?;
+        stream.write_all(body)?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
     }
 
     #[test]

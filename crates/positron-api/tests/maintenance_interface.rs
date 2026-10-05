@@ -88,7 +88,7 @@ fn integrity_findings_preserve_provenance_and_enforce_the_catalog_bound() {
         signal: "logs".to_owned(),
         shard: 1,
         segment: "00000000000000000000000000000001".to_owned(),
-        base_position: 1,
+        base_position: 0,
         event_range: AuthenticatedTimeRangeDescriptor {
             provenance: "missing_source_time".to_owned(),
             earliest_unix_nanos: None,

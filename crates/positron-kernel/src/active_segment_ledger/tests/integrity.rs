@@ -151,6 +151,181 @@ fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
 }
 
 #[test]
+fn retained_quarantine_allows_bounded_same_scope_resume_and_later_bitrot_detection()
+-> Result<(), Box<dyn Error>> {
+    let root = TemporaryRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(root.path(), MountQualification::LocalHost)?;
+    let authority = establish_authority(volume)?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new([0x9a; 16])?,
+        CatalogSecret::from_owned(Box::new([0x9b; 32]), Box::new([0x9c; 32])),
+    )?;
+    let scope = SegmentScope::new(
+        TenantId::from_bytes([0x64; 16])?,
+        SignalKind::Logs,
+        VirtualShardId::new(9)?,
+    );
+    let key = || SegmentProtectionKey::from_owned(Box::new([0x9d; 32]));
+
+    let first = ActiveSegmentLedger::open(&authority, &catalog, scope, key())?;
+    first.append(PreparedStoreBlock::new_with_authenticated_ranges_for_test(
+        scope,
+        StoreBlockIdentity::new([0x9e; 16])?,
+        b"first damaged source".to_vec(),
+        AuthenticatedEventRange::known(UnixNanoseconds::new(10), UnixNanoseconds::new(20))
+            .map_err(|_| "fixed Event Time range")?,
+        crate::IngestTime::from_authenticated_durable(UnixNanoseconds::new(30)),
+    )?)?;
+    let first_sealed = first.seal()?;
+
+    fs::write(
+        root.path()
+            .join("segments/sealed")
+            .join(segment_name(first_sealed.segment_id())),
+        b"corrupt first source",
+    )?;
+    let first_report = ActiveSegmentLedger::verify_catalog_integrity(
+        &authority,
+        &catalog,
+        scope,
+        key(),
+        IntegrityVerificationMode::Online,
+        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+        &IntegrityCancellation::new(),
+        TransactionId::new([0xa1; 16])?,
+        None,
+    )?;
+    assert_eq!(
+        first_report.outcome(),
+        IntegrityVerificationOutcome::Quarantined
+    );
+    assert_eq!(
+        first_report.quarantined_segment(),
+        Some(first_sealed.segment_id())
+    );
+
+    let second = ActiveSegmentLedger::open(&authority, &catalog, scope, key())?;
+    second.append(PreparedStoreBlock::new_with_authenticated_ranges_for_test(
+        scope,
+        StoreBlockIdentity::new([0x9f; 16])?,
+        b"same scope healthy source".to_vec(),
+        AuthenticatedEventRange::known(UnixNanoseconds::new(40), UnixNanoseconds::new(50))
+            .map_err(|_| "fixed Event Time range")?,
+        crate::IngestTime::from_authenticated_durable(UnixNanoseconds::new(60)),
+    )?)?;
+    let second_sealed = second.seal()?;
+
+    let third = ActiveSegmentLedger::open(&authority, &catalog, scope, key())?;
+    third.append(PreparedStoreBlock::new_with_authenticated_ranges_for_test(
+        scope,
+        StoreBlockIdentity::new([0xa0; 16])?,
+        b"later same scope healthy source".to_vec(),
+        AuthenticatedEventRange::known(UnixNanoseconds::new(70), UnixNanoseconds::new(80))
+            .map_err(|_| "fixed Event Time range")?,
+        crate::IngestTime::from_authenticated_durable(UnixNanoseconds::new(90)),
+    )?)?;
+    let third_sealed = third.seal()?;
+
+    let healthy_report = ActiveSegmentLedger::verify_catalog_integrity(
+        &authority,
+        &catalog,
+        scope,
+        key(),
+        IntegrityVerificationMode::Online,
+        IntegrityScrubBudget::new(1).map_err(|_| "valid scrub budget rejected")?,
+        &IntegrityCancellation::new(),
+        TransactionId::new([0xa2; 16])?,
+        None,
+    )?;
+    assert_eq!(
+        healthy_report.outcome(),
+        IntegrityVerificationOutcome::Incomplete
+    );
+    assert_eq!(
+        healthy_report.quarantined_segment(),
+        Some(first_sealed.segment_id()),
+        "an incomplete later pass retains the existing quarantine evidence"
+    );
+    assert_eq!(
+        healthy_report.examined_segments(),
+        1,
+        "the retained quarantine is skipped while bounded work authenticates one later source"
+    );
+    let continuation = healthy_report
+        .continuation()
+        .ok_or("missing bounded same-scope continuation")?;
+    let resumed_report = ActiveSegmentLedger::verify_catalog_integrity(
+        &authority,
+        &catalog,
+        scope,
+        key(),
+        IntegrityVerificationMode::Online,
+        IntegrityScrubBudget::new(1).map_err(|_| "valid scrub budget rejected")?,
+        &IntegrityCancellation::new(),
+        TransactionId::new([0xa3; 16])?,
+        Some(continuation),
+    )?;
+    assert_eq!(
+        resumed_report.outcome(),
+        IntegrityVerificationOutcome::Quarantined
+    );
+    assert_eq!(
+        resumed_report.quarantined_segment(),
+        Some(first_sealed.segment_id())
+    );
+    assert_eq!(resumed_report.examined_segments(), 1);
+    assert!(
+        CommittedLedgerReader::open(&authority, &catalog, scope, key())?
+            .snapshot()?
+            .blocks()
+            .iter()
+            .filter(|block| {
+                block.segment == second_sealed.segment_id()
+                    || block.segment == third_sealed.segment_id()
+            })
+            .count()
+            == 2,
+        "both authenticated same-scope sources remain readable"
+    );
+
+    fs::write(
+        root.path()
+            .join("segments/sealed")
+            .join(segment_name(third_sealed.segment_id())),
+        b"corrupt late source",
+    )?;
+    let later_report = ActiveSegmentLedger::verify_catalog_integrity(
+        &authority,
+        &catalog,
+        scope,
+        key(),
+        IntegrityVerificationMode::Online,
+        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+        &IntegrityCancellation::new(),
+        TransactionId::new([0xa4; 16])?,
+        None,
+    )?;
+    assert_eq!(
+        later_report.outcome(),
+        IntegrityVerificationOutcome::Quarantined
+    );
+    assert_eq!(
+        later_report.quarantined_segment(),
+        Some(third_sealed.segment_id())
+    );
+    let mut findings = integrity_quarantine_findings(&catalog.pin()?)?
+        .into_iter()
+        .map(|finding| finding.segment())
+        .collect::<Vec<_>>();
+    findings.sort_unstable();
+    let mut expected = vec![first_sealed.segment_id(), third_sealed.segment_id()];
+    expected.sort_unstable();
+    assert_eq!(findings, expected);
+    Ok(())
+}
+
+#[test]
 fn online_scrub_does_not_claim_an_active_tail_is_an_omission() -> Result<(), Box<dyn Error>> {
     let root = TemporaryRoot::new()?;
     let volume = PrimaryDataVolume::acquire(root.path(), MountQualification::LocalHost)?;

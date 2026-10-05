@@ -1087,7 +1087,6 @@ fn valid_integrity_finding(finding: &IntegrityQuarantineDescriptor) -> bool {
         && matches!(finding.signal.as_str(), "logs" | "traces")
         && finding.shard != 0
         && valid_task_identity(&finding.segment)
-        && finding.base_position != 0
         && valid_authenticated_range(&finding.event_range, true)
         && valid_authenticated_range(&finding.ingest_range, false)
 }

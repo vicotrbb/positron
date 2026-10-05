@@ -1254,18 +1254,13 @@ impl RegisteredTask for NativeRegisteredTask {
             // cancelling the retained Control and Operations tasks.
             let task_cancellation = TaskCancellation::new();
             let worker_cancellation = task_cancellation.clone();
-            let maintenance_health = health.clone();
             let handle = std::thread::Builder::new()
                 .name("positron-maintenance".to_owned())
-                .spawn(
-                    move || match services.run_maintenance_worker(&worker_cancellation) {
-                        Ok(()) => Ok(()),
-                        Err(_) => {
-                            maintenance_health.fence();
-                            Err(TaskFailure::JoinUnavailable)
-                        },
-                    },
-                )
+                .spawn(move || {
+                    complete_maintenance_worker(&services, || {
+                        services.run_maintenance_worker(&worker_cancellation)
+                    })
+                })
                 .map_err(|_| TaskFailure::SpawnUnavailable)?;
             return Ok(Box::new(NativeRunningTask {
                 force: task_cancellation,
@@ -1310,6 +1305,19 @@ impl RegisteredTask for NativeRegisteredTask {
             shutdown_cancellation: None,
             handle: Some(handle),
         }))
+    }
+}
+
+fn complete_maintenance_worker(
+    services: &ServiceHandle,
+    worker: impl FnOnce() -> Result<(), crate::ServiceFailure>,
+) -> Result<(), TaskFailure> {
+    match worker() {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            services.request_integrity_fence();
+            Err(TaskFailure::JoinUnavailable)
+        },
     }
 }
 
@@ -2123,11 +2131,20 @@ fn wait_for_rate_window(admission: &Admission, cancellation: &TaskCancellation) 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::path::PathBuf;
+    use std::time::Duration;
 
-    use super::{NativeBindings, NativeHostFailure};
-    use crate::ListenerRole;
+    use super::{
+        NativeBindings, NativeHost, NativeHostFailure, NativeRunningTask,
+        complete_maintenance_worker,
+    };
+    use crate::{
+        ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, InitializationPlan,
+        InstanceBootstrap, ListenerRole, ProcessPhase, RunningTask, ServeConfiguration,
+        ShutdownTrigger, TaskCancellation, TaskFailure,
+    };
 
     #[test]
     fn legacy_bindings_refuse_public_data_endpoints_without_a_complete_transport_profile() {
@@ -2160,6 +2177,82 @@ mod tests {
         assert_eq!(limits.per_address_socket_limit.get(), 16);
         assert_eq!(limits.global_rate_per_second.get(), 1024);
         assert_eq!(limits.per_address_rate_per_second.get(), 128);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_native_maintenance_task_requests_process_owned_fence_before_join_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "positron-native-maintenance-fence-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("data"))?;
+        fs::create_dir_all(root.join("secrets"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.join("secrets"), fs::Permissions::from_mode(0o700))?;
+        }
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            positron_kernel::MountQualification::LocalHost,
+        )?;
+        drop(InstanceBootstrap::initialize(
+            &paths,
+            InitializationPlan::non_interactive(),
+        )?);
+        let control = root.join("control.sock");
+        let host = NativeHost::new(NativeBindings::new(
+            control,
+            loopback(0),
+            loopback(0),
+            loopback(0),
+            loopback(0),
+            loopback(0),
+        )?);
+        let mut process = ApplicationRuntime::start(
+            ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+            HostInputs::new(&host, &host),
+        )?;
+        let services = process.services().ok_or("runtime services")?;
+        let worker_services = services.clone();
+        let mut task = NativeRunningTask {
+            force: TaskCancellation::new(),
+            maintenance_wake: None,
+            shutdown_cancellation: None,
+            handle: Some(std::thread::spawn(move || {
+                complete_maintenance_worker(&worker_services, || {
+                    Err(crate::ServiceFailure::CorruptState)
+                })
+            })),
+        };
+
+        assert!(matches!(
+            task.join_within(Duration::from_secs(1)),
+            Err(TaskFailure::JoinUnavailable)
+        ));
+        drop(task);
+        drop(services);
+        assert!(process.apply_pending_integrity_fence());
+        assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+        assert_eq!(
+            process
+                .bound_endpoints()
+                .into_iter()
+                .map(|endpoint| endpoint.role())
+                .collect::<Vec<_>>(),
+            [ListenerRole::Control, ListenerRole::Operations]
+        );
+        assert!(process.services().is_none());
+        assert_eq!(
+            process.shutdown(ShutdownTrigger::FirstSignal),
+            crate::ExitOutcome::Graceful
+        );
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 

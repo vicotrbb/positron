@@ -118,10 +118,9 @@ pub(crate) fn snapshot_from_record<'kernel>(
             .checked_add(bytes)
             .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))
     })?;
-    // The current Catalog generation authenticates the lease/expiry pair;
-    // every snapshot input below comes solely from the immutable generation
-    // recorded by that pair. A later Catalog publication cannot change the
-    // resumed Query Snapshot.
+    // The current Catalog generation authenticates the lease/expiry pair.
+    // Pin the generation recorded by that pair before admitting recovery, so
+    // a later publication cannot substitute a lease segment identity.
     let original_basis = ledger
         .catalog
         .pin_historical_generation(
@@ -130,7 +129,7 @@ pub(crate) fn snapshot_from_record<'kernel>(
             record.catalog_generation,
         )
         .map_err(|failure| LedgerFailure::new(map_catalog_failure(failure.code())))?;
-    let recovery = resume_recovery_plan(ledger, state, &original_basis, record)?;
+    let recovery = resume_recovery_plan(ledger, state, &original_basis, lease_basis, record)?;
     let admitted = if recovery.segments.is_empty() {
         // Creating a lease clones only already-retained blocks. The caller's
         // admitted query task covers construction work, while this claim must
@@ -166,10 +165,9 @@ pub(crate) fn snapshot_from_record<'kernel>(
         .governor()
         .reserve(maximum_claim)
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
-    // The original basis remains the sole source for the cursor identity,
-    // immutable data and recovery plan.  A current authenticated quarantine
-    // is nevertheless a safety overlay: a cursor must never resume and hand
-    // a newly quarantined leased segment to query execution.
+    // The recorded basis binds cursor identity. A current authenticated
+    // quarantine is a safety overlay: a cursor must never resume and hand a
+    // newly quarantined leased segment to query execution.
     let mut quarantined_holes =
         super::super::integrity::integrity_quarantine_findings(&original_basis)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
@@ -247,6 +245,7 @@ fn resume_recovery_plan(
     ledger: &ActiveSegmentLedger<'_, '_>,
     state: &super::super::state::LedgerState<'_>,
     original_basis: &crate::CatalogSnapshot,
+    current_basis: &crate::CatalogSnapshot,
     record: &LeaseRecord,
 ) -> Result<ResumeRecoveryPlan, LedgerFailure> {
     let mut missing = BTreeSet::new();
@@ -276,16 +275,25 @@ fn resume_recovery_plan(
             encoded_bytes: 0,
         });
     }
-    let metadata = ledger
+    let original_metadata = ledger
         .storage
         .catalog_segments_historical(original_basis, record.scope)?;
+    let current_metadata = ledger
+        .storage
+        .catalog_segments_observed(current_basis, record.scope)?;
     let mut segments = Vec::new();
     segments
         .try_reserve_exact(missing.len())
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
     let mut encoded_bytes = 0_usize;
     for identity in missing {
-        let segment = metadata
+        if !original_metadata
+            .iter()
+            .any(|candidate| candidate.id == identity)
+        {
+            return Err(LedgerFailure::new(LedgerFailureCode::SnapshotExpired));
+        }
+        let segment = current_metadata
             .iter()
             .find(|candidate| {
                 candidate.id == identity

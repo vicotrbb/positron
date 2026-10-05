@@ -105,17 +105,19 @@ fn complete_status(
     let mut identities = BTreeSet::new();
     let mut tasks = Vec::with_capacity(MAX_TASKS);
     let mut pages = 0;
-    let mut findings = None;
+    let mut findings = Vec::new();
     let status = loop {
         if pages == MAX_TASKS / MAX_STATUS_PAGE_TASKS {
             return Err("maintenance status pagination exceeded its bounded registry");
         }
         let response = client.status(bearer, &request).map_err(client_failure)?;
-        if findings.is_none() {
-            findings = Some(response.integrity_findings.clone());
+        let status = MaintenanceStatus::from(&response);
+        for finding in response.integrity_findings {
+            if !findings.contains(&finding) {
+                findings.push(finding);
+            }
         }
         pages += 1;
-        let status = MaintenanceStatus::from(&response);
         if tasks.len() + response.tasks.len() > MAX_TASKS
             || response
                 .tasks
@@ -143,7 +145,7 @@ fn complete_status(
     Ok(CompletedStatus {
         status,
         tasks,
-        findings: findings.unwrap_or_default(),
+        findings,
         pages,
     })
 }

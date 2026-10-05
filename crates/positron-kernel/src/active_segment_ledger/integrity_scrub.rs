@@ -346,6 +346,10 @@ fn verify_integrity_against_snapshot(
         .catalog_segments_observed(basis, scope)
         .map_err(map_ledger_failure)?;
     let immutable_scope = !matches!(mode, IntegrityVerificationMode::Startup);
+    let quarantined = quarantined_segment_ids(basis, scope)?;
+    let retained_quarantine = immutable_scope
+        .then(|| quarantined.first().copied())
+        .flatten();
     let targets = metadata
         .iter()
         .filter(|candidate| {
@@ -356,6 +360,7 @@ fn verify_integrity_against_snapshot(
                     SegmentState::Active
                 }
         })
+        .filter(|candidate| !immutable_scope || !quarantined.contains(&candidate.id))
         .collect::<Vec<_>>();
     let target_count = targets.len();
     let _snapshot_protection = if immutable_scope {
@@ -370,24 +375,6 @@ fn verify_integrity_against_snapshot(
     } else {
         None
     };
-    let quarantined = quarantined_segment_ids(basis, scope)?;
-    if let Some(segment) = targets
-        .iter()
-        .find(|candidate| quarantined.contains(&candidate.id))
-        .map(|candidate| candidate.id)
-    {
-        return Ok(report(
-            mode,
-            scope,
-            basis.number(),
-            0,
-            0,
-            target_count,
-            IntegrityVerificationOutcome::Quarantined,
-            Some(segment),
-            None,
-        ));
-    }
     let source_identity = basis
         .integrity_scope_source_identity(scope)
         .map_err(map_ledger_failure)?;
@@ -642,12 +629,14 @@ fn verify_integrity_against_snapshot(
         examined_segments,
         examined_bytes,
         omitted,
-        if omitted == 0 {
-            IntegrityVerificationOutcome::Verified
-        } else {
+        if omitted != 0 {
             IntegrityVerificationOutcome::Incomplete
+        } else if retained_quarantine.is_some() {
+            IntegrityVerificationOutcome::Quarantined
+        } else {
+            IntegrityVerificationOutcome::Verified
         },
-        None,
+        retained_quarantine,
         continuation_for(source_identity, last_segment).filter(|_| omitted != 0),
     ))
 }

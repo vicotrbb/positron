@@ -1700,6 +1700,14 @@ impl Fixture {
         self.root.join("data/segments/sealed")
     }
 
+    pub(crate) fn paths(&self) -> Result<BootstrapPaths, Box<dyn Error>> {
+        Ok(BootstrapPaths::new(
+            &self.root.join("data"),
+            &self.root.join("secrets"),
+            MountQualification::LocalHost,
+        )?)
+    }
+
     pub(super) fn initialized(
         &self,
     ) -> Result<(Arc<crate::InitializedInstance>, String, String), Box<dyn Error>> {

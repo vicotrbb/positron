@@ -1413,7 +1413,7 @@
           "signal": {"type": "string", "enum": ["logs", "traces"]},
           "shard": {"type": "integer", "minimum": 1},
           "segment": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-          "base_position": {"type": "integer", "minimum": 1},
+          "base_position": {"type": "integer", "minimum": 0},
           "event_range": {"$ref": "#/components/schemas/AuthenticatedTimeRange"},
           "ingest_range": {"$ref": "#/components/schemas/AuthenticatedTimeRange"}
         }

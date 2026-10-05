@@ -83,10 +83,13 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
     /// blocks. A concurrent publication causes a bounded retry, never a mixed
     /// generation result.
     pub fn snapshot(&self) -> Result<LedgerSnapshot<'kernel>, LedgerFailure> {
-        // Immutable localized corruption is represented by the authenticated
-        // Catalog holes below. Observed reconstruction decides availability
-        // from that basis; it must not inherit a stale in-memory scope-wide
-        // condition before it can exclude the corrupt segment.
+        if let Some(ledger) = self.lease_authority {
+            ledger
+                .state
+                .lock()
+                .map_err(|_| LedgerFailure::new(LedgerFailureCode::ConcurrentWriter))?
+                .require_healthy()?;
+        }
         for attempt in 0..MAX_SNAPSHOT_RETRIES {
             let barrier = SnapshotProtection::read_barrier(self.authority.snapshot_barrier())?;
             self.catalog.refresh_state()?;

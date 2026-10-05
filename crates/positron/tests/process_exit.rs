@@ -13,7 +13,7 @@ use std::process::Stdio;
 #[cfg(unix)]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
-use std::{io::Read, io::Write, net::TcpStream};
+use std::{io::BufRead, io::BufReader, io::Read, io::Write, net::TcpStream};
 
 #[cfg(unix)]
 static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -217,7 +217,7 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
             .then_some(())
             .ok_or_else(|| format!("reload signal failed with {status}").into())
     };
-    let (restored_status, restored_with_retry) = match restore_configuration_with_at_most_one_retry(
+    let (restored_status, _) = match restore_configuration_with_at_most_one_retry(
         &pending,
         &mut send_reload,
         || configuration_status(operations_port, &authorization),
@@ -237,32 +237,56 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
     assert_eq!(restored.observed_generation, pending.observed_generation);
     assert!(restored.is_restored());
 
-    fs::write(
-        &config_path,
-        "schema_version = 1\n[diagnostics]\nlog_level = \"invalid\"\n",
-    )?;
-    assert!(
-        Command::new("/bin/kill")
-            .args(["-HUP", &child.id().to_string()])
-            .status()?
-            .success()
-    );
-    std::thread::sleep(Duration::from_millis(100));
-    assert!(child.try_wait()?.is_none());
-    wait_for_ready(operations_port)?;
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &child.id().to_string()])
             .status()?
             .success()
     );
-    let output = child.wait_with_output()?;
-    assert_eq!(output.status.code(), Some(0));
-    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(child.wait_with_output()?.status.code(), Some(0));
+
+    // A reload signal reads its source when the owner consumes it. Keep the
+    // rejected-source scenario in a fresh child so the one permitted restore
+    // retry cannot still be pending when this fixture replaces the document.
+    fs::write(&config_path, &base_configuration)?;
+    let mut rejected_child = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["serve", "--config"])
+        .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    wait_for_ready(operations_port)?;
+    fs::write(
+        &config_path,
+        "schema_version = 1\n[diagnostics]\nlog_level = \"invalid\"\n",
+    )?;
     assert!(
-        reconciliation_stderr_is_exact(restored_with_retry, &stderr,),
-        "unexpected child stderr: {stderr}"
+        Command::new("/bin/kill")
+            .args(["-HUP", &rejected_child.id().to_string()])
+            .status()?
+            .success()
     );
+    let stderr = rejected_child.stderr.take().ok_or("child stderr")?;
+    let mut stderr = BufReader::new(stderr);
+    let mut observed = String::new();
+    stderr.read_line(&mut observed)?;
+    stderr.read_line(&mut observed)?;
+    assert_eq!(
+        observed,
+        "positron: warning: operations transport is plaintext\npositron: configuration reload rejected category=source_rejected\n"
+    );
+    assert!(rejected_child.try_wait()?.is_none());
+    wait_for_ready(operations_port)?;
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-TERM", &rejected_child.id().to_string()])
+            .status()?
+            .success()
+    );
+    assert_eq!(rejected_child.wait()?.code(), Some(0));
+    let mut tail = String::new();
+    stderr.read_to_string(&mut tail)?;
+    assert!(tail.is_empty(), "unexpected child stderr: {tail}");
     fs::remove_dir_all(root)?;
     Ok(())
 }
