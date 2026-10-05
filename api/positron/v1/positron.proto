@@ -53,6 +53,7 @@ service MaintenanceService {
   rpc Pause(MaintenancePauseRequest) returns (MaintenanceControlResponse);
   rpc Resume(MaintenanceResumeRequest) returns (MaintenanceControlResponse);
   rpc Window(MaintenanceWindowRequest) returns (MaintenanceWindowResponse);
+  rpc Verify(OnlineVerificationRequest) returns (OnlineVerificationReport);
 }
 
 // Authenticated system administration for explicit tenant registry entries.
@@ -466,6 +467,33 @@ message MaintenanceExplainRequest {
 
 message MaintenanceExplainResponse {
   MaintenanceTaskStatus task = 1;
+}
+
+// A bounded authenticated pass over one explicit immutable signal scope. A
+// continuation is accepted only with its exact prior Catalog generation.
+message OnlineVerificationRequest {
+  string tenant = 1;
+  string signal = 2;
+  uint32 shard = 3;
+  optional uint64 expected_catalog_generation = 4;
+  optional string continuation = 5;
+}
+
+// Secret-free, versioned evidence for one online verification pass. A true
+// completion is only emitted for a fully authenticated healthy scope.
+message OnlineVerificationReport {
+  uint32 report_version = 1;
+  string tenant = 2;
+  string signal = 3;
+  uint32 shard = 4;
+  uint64 catalog_generation = 5;
+  uint32 examined_segments = 6;
+  uint64 examined_bytes = 7;
+  uint32 omitted_segments = 8;
+  string outcome = 9;
+  bool verification_complete = 10;
+  optional string continuation = 11;
+  repeated IntegrityQuarantineFinding findings = 12;
 }
 
 // An authenticated system-administration request for one explicit existing

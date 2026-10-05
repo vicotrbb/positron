@@ -5,8 +5,50 @@ use positron_api::maintenance::{
     MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceServiceClient,
     MaintenanceStatusRequest, MaintenanceStatusResponse, MaintenanceTaskAcknowledgement,
     MaintenanceTaskStatus, MaintenanceTransport, MaintenanceWindowRequest,
-    MaintenanceWindowResponse,
+    MaintenanceWindowResponse, OnlineVerificationReport, OnlineVerificationRequest,
 };
+
+#[test]
+fn online_verification_wire_requires_an_explicit_scope_and_never_marks_partial_work_complete() {
+    let continuation = "ab".repeat(56);
+    let request = OnlineVerificationRequest::new(
+        "00000000-0000-0000-0000-000000000001".to_owned(),
+        "logs".to_owned(),
+        1,
+        Some(7),
+        Some(continuation.clone()),
+    );
+    assert_eq!(
+        OnlineVerificationRequest::decode(&request.encode().expect("request")),
+        Ok(request)
+    );
+    assert!(
+        OnlineVerificationRequest::new(
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+            "logs".to_owned(),
+            1,
+            None,
+            Some(continuation),
+        )
+        .encode()
+        .is_err()
+    );
+    let partial = OnlineVerificationReport {
+        report_version: 1,
+        tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+        signal: "logs".to_owned(),
+        shard: 1,
+        catalog_generation: 7,
+        examined_segments: 1,
+        examined_bytes: 42,
+        omitted_segments: 1,
+        outcome: "incomplete".to_owned(),
+        verification_complete: true,
+        continuation: Some("ab".repeat(56)),
+        findings: Vec::new(),
+    };
+    assert!(partial.encode().is_err());
+}
 
 #[test]
 fn integrity_findings_preserve_provenance_and_enforce_the_catalog_bound() {

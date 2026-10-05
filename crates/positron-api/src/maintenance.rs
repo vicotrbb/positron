@@ -15,12 +15,14 @@ pub const RUN_HTTP_PATH: &str = "/v1/maintenance:run";
 pub const PAUSE_HTTP_PATH: &str = "/v1/maintenance:pause";
 pub const RESUME_HTTP_PATH: &str = "/v1/maintenance:resume";
 pub const WINDOW_HTTP_PATH: &str = "/v1/maintenance:window";
+pub const VERIFY_HTTP_PATH: &str = "/v1/maintenance:verify";
 pub const MAX_REQUEST_BYTES: usize = 128;
 pub const MAX_RUN_REQUEST_BYTES: usize = 256;
 pub const MAX_CONTROL_REQUEST_BYTES: usize = 192;
 /// The exact largest canonical JSON window request: six permitted classes,
 /// maximum generation and duration, and a canonical idempotency key.
 pub const MAX_WINDOW_REQUEST_BYTES: usize = 266;
+pub const MAX_VERIFY_REQUEST_BYTES: usize = 256;
 pub const MAX_PAUSE_DURATION_SECONDS: u64 = 86_400;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// The total number of durable tasks the coordinator may expose in one
@@ -91,6 +93,91 @@ impl MaintenanceStatusRequest {
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceExplainRequest {
     pub identity: String,
+}
+
+/// One bounded, authenticated, source-read-only verification pass over the
+/// sealed objects reachable from an explicit immutable signal scope.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnlineVerificationRequest {
+    tenant: String,
+    signal: String,
+    shard: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_catalog_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuation: Option<String>,
+}
+
+impl OnlineVerificationRequest {
+    #[must_use]
+    pub fn new(
+        tenant: String,
+        signal: String,
+        shard: u32,
+        expected_catalog_generation: Option<u64>,
+        continuation: Option<String>,
+    ) -> Self {
+        Self {
+            tenant,
+            signal,
+            shard,
+            expected_catalog_generation,
+            continuation,
+        }
+    }
+
+    pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
+        if body.len() > MAX_VERIFY_REQUEST_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        let request: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
+        self.validate()?;
+        serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)
+    }
+
+    #[must_use]
+    pub fn tenant(&self) -> &str {
+        &self.tenant
+    }
+
+    #[must_use]
+    pub fn signal(&self) -> &str {
+        &self.signal
+    }
+
+    #[must_use]
+    pub const fn shard(&self) -> u32 {
+        self.shard
+    }
+
+    #[must_use]
+    pub const fn expected_catalog_generation(&self) -> Option<u64> {
+        self.expected_catalog_generation
+    }
+
+    #[must_use]
+    pub fn continuation(&self) -> Option<&str> {
+        self.continuation.as_deref()
+    }
+
+    pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        (identifier(&self.tenant)
+            && matches!(self.signal.as_str(), "logs" | "traces")
+            && self.shard != 0
+            && self
+                .expected_catalog_generation
+                .is_none_or(|generation| generation != 0)
+            && self.continuation.as_deref().is_none_or(valid_continuation)
+            && (self.continuation.is_none() || self.expected_catalog_generation.is_some()))
+        .then_some(())
+        .ok_or(MaintenanceWireFailure)
+    }
 }
 
 /// A bounded operator request for the coordinator to prepare one already
@@ -563,6 +650,77 @@ pub struct AuthenticatedTimeRangeDescriptor {
     pub latest_unix_nanos: Option<i64>,
 }
 
+/// Fixed-version machine-readable result from one online immutable-scope
+/// verification pass. It carries only authenticated identifiers, ranges, and
+/// bounded aggregate work; it never includes payload, key, path, or error
+/// detail.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnlineVerificationReport {
+    pub report_version: u8,
+    pub tenant: String,
+    pub signal: String,
+    pub shard: u32,
+    pub catalog_generation: u64,
+    pub examined_segments: u32,
+    pub examined_bytes: u64,
+    pub omitted_segments: u32,
+    pub outcome: String,
+    pub verification_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<IntegrityQuarantineDescriptor>,
+}
+
+impl OnlineVerificationReport {
+    pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        let report: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
+        report.validate()?;
+        Ok(report)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        Ok(bytes)
+    }
+
+    pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        (self.report_version == 1
+            && identifier(&self.tenant)
+            && matches!(self.signal.as_str(), "logs" | "traces")
+            && self.shard != 0
+            && self.catalog_generation != 0
+            && self.findings.len() <= MAX_INTEGRITY_FINDINGS
+            && self.findings.iter().all(valid_integrity_finding)
+            && match self.outcome.as_str() {
+                "verified" => {
+                    self.verification_complete
+                        && self.omitted_segments == 0
+                        && self.continuation.is_none()
+                },
+                "incomplete" => {
+                    !self.verification_complete
+                        && self.omitted_segments != 0
+                        && self.continuation.as_deref().is_some_and(valid_continuation)
+                },
+                "stale" | "quarantined" | "fenced" => {
+                    !self.verification_complete && self.continuation.is_none()
+                },
+                _ => false,
+            })
+        .then_some(())
+        .ok_or(MaintenanceWireFailure)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceExplainResponse {
@@ -803,15 +961,10 @@ impl MaintenanceStatusResponse {
                         })
                     || task.phase == "failed" && task.terminal_failure_class.is_none()
             })
-            || self.integrity_findings.iter().any(|finding| {
-                !identifier(&finding.tenant)
-                    || !matches!(finding.signal.as_str(), "logs" | "traces")
-                    || finding.shard == 0
-                    || !valid_task_identity(&finding.segment)
-                    || finding.base_position == 0
-                    || !valid_authenticated_range(&finding.event_range, true)
-                    || !valid_authenticated_range(&finding.ingest_range, false)
-            })
+            || self
+                .integrity_findings
+                .iter()
+                .any(|finding| !valid_integrity_finding(finding))
         {
             return Err(MaintenanceWireFailure);
         }
@@ -842,6 +995,20 @@ fn valid_authenticated_range(range: &AuthenticatedTimeRangeDescriptor, event: bo
         },
         _ => false,
     }
+}
+
+fn valid_integrity_finding(finding: &IntegrityQuarantineDescriptor) -> bool {
+    identifier(&finding.tenant)
+        && matches!(finding.signal.as_str(), "logs" | "traces")
+        && finding.shard != 0
+        && valid_task_identity(&finding.segment)
+        && finding.base_position != 0
+        && valid_authenticated_range(&finding.event_range, true)
+        && valid_authenticated_range(&finding.ingest_range, false)
+}
+
+fn valid_continuation(value: &str) -> bool {
+    value.len() == 112 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

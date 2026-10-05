@@ -93,6 +93,41 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         )
     }
 
+    /// Verifies an exact caller-pinned online Catalog generation. Localized
+    /// immutable corruption may publish only the canonical quarantine bound to
+    /// that same generation; a concurrent successor therefore cannot become
+    /// an implicit verification basis.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_pinned_catalog_integrity(
+        authority: &'kernel crate::StorageKernelResourceAuthority,
+        catalog: &'catalog crate::Catalog<'kernel>,
+        snapshot: &crate::CatalogSnapshot,
+        scope: SegmentScope,
+        protection: SegmentProtectionKey,
+        budget: IntegrityScrubBudget,
+        cancellation: &IntegrityCancellation,
+        transaction: TransactionId,
+        continuation: Option<IntegrityScrubContinuation>,
+    ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
+        let volume = authority
+            .primary_data_volume()
+            .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
+        let storage = LedgerStorage::open(volume).map_err(map_ledger_failure)?;
+        verify_integrity_against_snapshot(
+            &storage,
+            snapshot,
+            catalog.instance(),
+            Some(catalog),
+            scope,
+            &protection,
+            IntegrityVerificationMode::Online,
+            budget,
+            cancellation,
+            transaction,
+            continuation,
+        )
+    }
+
     /// Observes an already authenticated Catalog snapshot without acquiring a
     /// Catalog writer, creating storage directories, publishing a finding, or
     /// attempting recovery. Offline callers may only use Offline mode.

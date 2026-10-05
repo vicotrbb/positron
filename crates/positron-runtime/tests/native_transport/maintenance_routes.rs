@@ -83,6 +83,41 @@ fn maintenance_status_rejects_an_unauthenticated_request_before_decoding()
 }
 
 #[test]
+fn online_verification_rejects_an_unauthenticated_request_before_decoding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = live_test_guard();
+    let roots = TestRoots::new("maintenance-verify-auth")?;
+    let paths = roots.paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        positron_runtime::InitializationPlan::non_interactive(),
+    )?);
+    let host = NativeHost::new(bindings(&roots, "maintenance-verify-auth")?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    assert_status(
+        http(
+            address(
+                &process.bound_endpoints(),
+                positron_runtime::ListenerRole::Api,
+            )?,
+            "POST",
+            positron_api::maintenance::VERIFY_HTTP_PATH,
+            &[("Content-Type", "application/json")],
+            br#"{"unexpected":"body must remain unread"}"#,
+        )?,
+        401,
+    );
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+#[test]
 fn system_administrator_can_explain_one_bounded_maintenance_task()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = live_test_guard();

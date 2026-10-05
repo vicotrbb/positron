@@ -371,6 +371,124 @@ fn repeated_idle_integrity_discovery_does_not_republish_terminal_source()
 }
 
 #[test]
+fn runtime_integrity_scrub_revisits_an_unchanged_scope_and_quarantines_later_bit_rot()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (mut initialized, _, _) = fixture.initialized()?;
+    let (retention_time, elapsed) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
+    Arc::get_mut(&mut initialized)
+        .ok_or("sole initialized instance")?
+        .install_retention_time_for_test(retention_time)?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+
+    let scope = SegmentScope::new(
+        initialized.tenant,
+        positron_domain::routing::SignalKind::Logs,
+        initialized.logs_shard,
+    );
+    let sealed_directory = fixture.root.join("data/segments/sealed");
+    let before_seal = fs::read_dir(&sealed_directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    let catalog = open_catalog(&initialized)?;
+    let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+    let key = super::super::tenant_segment_key(&initialized, &identity, scope)?;
+    let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        key,
+    )?;
+    let PolicyEvaluation::Accepted(evaluated) = IngestPolicy::preserving(1)?.evaluate(
+        NativeLogCandidate::new(Some(40), None, None, Vec::new(), LogMetadata::empty()),
+        PolicyReceiver::OtlpGrpc,
+    )?
+    else {
+        return Err("preserving policy rejected scrub fixture".into());
+    };
+    let capacity = initialized
+        ._authority
+        .governor()
+        .reserve(WorkClaim::tenant(
+            initialized.tenant,
+            WorkKind::Ingest,
+            ResourceAmounts::only(ResourceDimension::MemoryBytes, 1_048_576)?,
+        )?)?;
+    ledger.append(
+        LogStore::new()
+            .prepare(
+                ledger.begin_store_block(capacity, StoreBlockIdentity::new([0xc8; 16])?)?,
+                vec![StoredLogRecord::checked_evaluated(
+                    positron_domain::value::ValueLimitProfile::release_1_system_maximum(),
+                    *evaluated,
+                )?],
+            )?
+            .into_store_block(),
+    )?;
+    ledger.seal()?;
+    drop(catalog);
+    let damaged_segment = fs::read_dir(&sealed_directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| !before_seal.contains(path))
+        .ok_or("newly sealed block-bearing segment")?;
+
+    while services.wake_maintenance_worker()? {}
+    let first_passes = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|failure| format!("first integrity status: {failure:?}"))?
+        .into_iter()
+        .filter(|status| {
+            status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                && status.phase() == MaintenanceTaskPhase::Succeeded
+        })
+        .count();
+    assert!(first_passes > 0, "the first due pass is durably recorded");
+
+    fs::write(&damaged_segment, b"corrupt after a successful scrub")?;
+    elapsed.advance(86_400_000_000_000)?;
+    for _ in 0..8 {
+        let _ = services
+            .wake_maintenance_worker()
+            .map_err(|failure| format!("scheduled integrity scrub failed: {failure:?}"))?;
+        let catalog = open_catalog(&initialized)?;
+        let snapshot = catalog.pin()?;
+        let quarantined = positron_kernel::integrity_quarantine_findings(&snapshot)?;
+        if !quarantined.is_empty() {
+            break;
+        }
+    }
+    let revisited = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|failure| format!("revisited integrity status: {failure:?}"))?
+        .into_iter()
+        .filter(|status| {
+            status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                && matches!(
+                    status.phase(),
+                    MaintenanceTaskPhase::Succeeded | MaintenanceTaskPhase::Failed
+                )
+        })
+        .count();
+    assert!(
+        revisited > first_passes,
+        "a source that stays reachable is authenticated again in its next bounded pass"
+    );
+    let catalog = open_catalog(&initialized)?;
+    let snapshot = catalog.pin()?;
+    assert!(
+        !positron_kernel::integrity_quarantine_findings(&snapshot)?.is_empty(),
+        "a later corruption is durably quarantined by the next due scrub"
+    );
+    Ok(())
+}
+
+#[test]
 fn startup_frontier_verification_fences_an_authenticated_active_scope_failure()
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
@@ -488,6 +606,13 @@ fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_rete
     for _ in 0..3 {
         assert!(services.wake_maintenance_worker()?);
     }
+    // Retention changes each affected scope's sealed source once. The worker
+    // therefore reauthenticates each resulting immutable basis before it can
+    // become idle again. Two scopes complete that finite follow-up in four
+    // bounded worker turns (one discovery/dispatch and one completion each).
+    for _ in 0..4 {
+        assert!(services.wake_maintenance_worker()?);
+    }
     let catalog = open_catalog(&initialized)?;
     let idle_generation = catalog.pin()?.number();
     let idle_task_count = initialized
@@ -499,7 +624,7 @@ fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_rete
     for _ in 0..4 {
         assert!(
             !services.wake_maintenance_worker()?,
-            "an idle maintenance pass must not roll an empty active segment"
+            "a quiescent maintenance worker must not roll an empty active segment"
         );
     }
     let catalog = open_catalog(&initialized)?;
@@ -1495,6 +1620,10 @@ impl Fixture {
             fs::set_permissions(root.join("secrets"), fs::Permissions::from_mode(0o700))?;
         }
         Ok(Self { root })
+    }
+
+    pub(crate) fn sealed_segments_directory(&self) -> PathBuf {
+        self.root.join("data/segments/sealed")
     }
 
     pub(super) fn initialized(

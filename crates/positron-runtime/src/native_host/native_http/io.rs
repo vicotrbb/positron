@@ -264,14 +264,16 @@ pub(in crate::native_host) fn health_response(
 
 pub(in crate::native_host) fn configuration_status_response(
     phase: ProcessPhase,
+    integrity_degraded: bool,
     status: &ConfigurationObservation,
     maintenance: MaintenanceHealth,
 ) -> Response {
     Response::json(
         200,
         format!(
-            "{{\"phase\":\"{}\",\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
+            "{{\"phase\":\"{}\",\"integrity_degraded\":{},\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
             process_phase_name(phase),
+            integrity_degraded,
             status.generation(),
             hexadecimal_digest(crate::configuration_catalog::configuration_digest(
                 status.effective()
@@ -319,7 +321,6 @@ fn process_phase_name(phase: ProcessPhase) -> &'static str {
         ProcessPhase::Fenced => "fenced",
         ProcessPhase::Stopping => "stopping",
         ProcessPhase::Stopped => "stopped",
-        ProcessPhase::Degraded => "degraded",
     }
 }
 

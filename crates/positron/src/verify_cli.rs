@@ -1,11 +1,18 @@
 use std::{
+    io::{IsTerminal, Read},
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
+use positron_api::maintenance::{
+    MaintenanceServiceClient, MaintenanceServiceClientFailure, MaintenanceTransport,
+    OnlineVerificationReport, OnlineVerificationRequest,
+};
 use positron_config::{ConfigurationInputs, resolve};
 use positron_kernel::MountQualification;
 use positron_runtime::{BootstrapPaths, OfflineIntegrityFailure, verify_offline_integrity};
+use zeroize::Zeroizing;
 
 const EXIT_CONFIGURATION: u8 = 2;
 const EXIT_INTEGRITY: u8 = 3;
@@ -34,8 +41,8 @@ fn execute(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> Result<(ExitCode, String), VerifyFailure> {
     let options = VerifyOptions::parse(arguments)?;
-    if !options.offline {
-        return Err(VerifyFailure::Usage);
+    if options.online {
+        return execute_online(&options);
     }
     let inputs = ConfigurationInputs::try_from_sources(
         options.config.as_deref().map(Path::new),
@@ -83,6 +90,85 @@ fn execute(
                 failure_status(failure)
             ),
         )),
+    }
+}
+
+fn execute_online(options: &VerifyOptions) -> Result<(ExitCode, String), VerifyFailure> {
+    let input = std::io::stdin();
+    if input.is_terminal() {
+        return Err(VerifyFailure::Usage);
+    }
+    let mut credential = Zeroizing::new(String::new());
+    input
+        .take(1025)
+        .read_to_string(&mut credential)
+        .map_err(|_| VerifyFailure::Configuration)?;
+    let bearer = credential.trim_end_matches(['\r', '\n']);
+    if credential.len() > 1024
+        || bearer.is_empty()
+        || bearer.len() > 1024
+        || !bearer
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(VerifyFailure::Usage);
+    }
+    let request = OnlineVerificationRequest::new(
+        options.tenant.clone().ok_or(VerifyFailure::Usage)?,
+        options.signal.clone().ok_or(VerifyFailure::Usage)?,
+        options.shard.ok_or(VerifyFailure::Usage)?,
+        options.expected_catalog_generation,
+        options.continuation.clone(),
+    );
+    online_request(options, bearer, &request)
+}
+
+fn online_request(
+    options: &VerifyOptions,
+    bearer: &str,
+    request: &OnlineVerificationRequest,
+) -> Result<(ExitCode, String), VerifyFailure> {
+    let transport = online_transport(options)?;
+    let client =
+        MaintenanceServiceClient::new(transport).map_err(|_| VerifyFailure::Configuration)?;
+    let report = client.verify(bearer, request).map_err(online_failure)?;
+    let exit = if report.verification_complete && report.outcome == "verified" {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_INTEGRITY)
+    };
+    Ok((exit, render_online_report(&report)))
+}
+
+fn online_transport(options: &VerifyOptions) -> Result<MaintenanceTransport, VerifyFailure> {
+    let endpoint = options.endpoint.ok_or(VerifyFailure::Usage)?;
+    if endpoint.port() == 0 {
+        return Err(VerifyFailure::Usage);
+    }
+    if options.allow_plaintext {
+        if options.server_name.is_some() || options.trust_file.is_some() {
+            return Err(VerifyFailure::Usage);
+        }
+        Ok(MaintenanceTransport::PlaintextOptOut { endpoint })
+    } else {
+        Ok(MaintenanceTransport::Tls {
+            endpoint,
+            server_name: options.server_name.clone().ok_or(VerifyFailure::Usage)?,
+            trust_file: options.trust_file.clone().ok_or(VerifyFailure::Usage)?,
+        })
+    }
+}
+
+fn online_failure(failure: MaintenanceServiceClientFailure) -> VerifyFailure {
+    match failure {
+        MaintenanceServiceClientFailure::InvalidRequest
+        | MaintenanceServiceClientFailure::AuthenticationRejected
+        | MaintenanceServiceClientFailure::SourceUnavailable => VerifyFailure::Usage,
+        MaintenanceServiceClientFailure::TaskUnavailable
+        | MaintenanceServiceClientFailure::PreconditionFailed
+        | MaintenanceServiceClientFailure::IdempotencyConflict
+        | MaintenanceServiceClientFailure::AdministrationUnavailable
+        | MaintenanceServiceClientFailure::Transport => VerifyFailure::Configuration,
     }
 }
 
@@ -165,6 +251,41 @@ fn render_report(report: positron_kernel::IntegrityVerificationReport) -> String
     )
 }
 
+fn render_online_report(report: &OnlineVerificationReport) -> String {
+    let continuation = report.continuation.as_deref().unwrap_or("none");
+    let mut output = format!(
+        "report_version={}\nmode=online\nstatus={}\nverification_complete={}\nreport_scope_tenant={} report_scope_signal={} report_scope_shard={} catalog_generation={} examined_segments={} examined_bytes={} omitted_segments={} continuation={}\n",
+        report.report_version,
+        report.outcome,
+        report.verification_complete,
+        report.tenant,
+        report.signal,
+        report.shard,
+        report.catalog_generation,
+        report.examined_segments,
+        report.examined_bytes,
+        report.omitted_segments,
+        continuation,
+    );
+    for finding in &report.findings {
+        output.push_str(&format!(
+            "quarantine_tenant={} quarantine_signal={} quarantine_shard={} quarantine_segment={} quarantine_base_position={} quarantine_event_provenance={} quarantine_event_earliest_unix_nanos={} quarantine_event_latest_unix_nanos={} quarantine_ingest_provenance={} quarantine_ingest_earliest_unix_nanos={} quarantine_ingest_latest_unix_nanos={}\n",
+            finding.tenant,
+            finding.signal,
+            finding.shard,
+            finding.segment,
+            finding.base_position,
+            finding.event_range.provenance,
+            finding.event_range.earliest_unix_nanos.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+            finding.event_range.latest_unix_nanos.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+            finding.ingest_range.provenance,
+            finding.ingest_range.earliest_unix_nanos.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+            finding.ingest_range.latest_unix_nanos.map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        ));
+    }
+    output
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut result = String::with_capacity(bytes.len().saturating_mul(2));
@@ -189,8 +310,19 @@ fn failure_status(failure: OfflineIntegrityFailure) -> &'static str {
 #[derive(Default)]
 struct VerifyOptions {
     offline: bool,
+    online: bool,
     config: Option<PathBuf>,
     overrides: Vec<(String, String)>,
+    endpoint: Option<SocketAddr>,
+    server_name: Option<String>,
+    trust_file: Option<PathBuf>,
+    allow_plaintext: bool,
+    credential_stdin: bool,
+    tenant: Option<String>,
+    signal: Option<String>,
+    shard: Option<u32>,
+    expected_catalog_generation: Option<u64>,
+    continuation: Option<String>,
 }
 
 impl VerifyOptions {
@@ -199,7 +331,10 @@ impl VerifyOptions {
         let mut arguments = arguments;
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
-                "--offline" if !result.offline => result.offline = true,
+                "--offline" if !result.offline && !result.online => result.offline = true,
+                "--online" if !result.online && !result.offline => result.online = true,
+                "--allow-plaintext" if !result.allow_plaintext => result.allow_plaintext = true,
+                "--credential-stdin" if !result.credential_stdin => result.credential_stdin = true,
                 "--config" if result.config.is_none() => {
                     result.config =
                         Some(PathBuf::from(arguments.next().ok_or(VerifyFailure::Usage)?));
@@ -209,8 +344,81 @@ impl VerifyOptions {
                     let (path, value) = value.split_once('=').ok_or(VerifyFailure::Usage)?;
                     result.overrides.push((path.to_owned(), value.to_owned()));
                 },
+                "--endpoint" if result.endpoint.is_none() => {
+                    result.endpoint = Some(
+                        arguments
+                            .next()
+                            .ok_or(VerifyFailure::Usage)?
+                            .parse()
+                            .map_err(|_| VerifyFailure::Usage)?,
+                    );
+                },
+                "--server-name" if result.server_name.is_none() => {
+                    result.server_name = Some(arguments.next().ok_or(VerifyFailure::Usage)?);
+                },
+                "--trust-file" if result.trust_file.is_none() => {
+                    result.trust_file =
+                        Some(PathBuf::from(arguments.next().ok_or(VerifyFailure::Usage)?));
+                },
+                "--tenant" if result.tenant.is_none() => {
+                    result.tenant = Some(arguments.next().ok_or(VerifyFailure::Usage)?);
+                },
+                "--signal" if result.signal.is_none() => {
+                    result.signal = Some(arguments.next().ok_or(VerifyFailure::Usage)?);
+                },
+                "--shard" if result.shard.is_none() => {
+                    result.shard = Some(
+                        arguments
+                            .next()
+                            .ok_or(VerifyFailure::Usage)?
+                            .parse()
+                            .map_err(|_| VerifyFailure::Usage)?,
+                    );
+                },
+                "--expected-catalog-generation" if result.expected_catalog_generation.is_none() => {
+                    result.expected_catalog_generation = Some(
+                        arguments
+                            .next()
+                            .ok_or(VerifyFailure::Usage)?
+                            .parse()
+                            .map_err(|_| VerifyFailure::Usage)?,
+                    );
+                },
+                "--continuation" if result.continuation.is_none() => {
+                    result.continuation = Some(arguments.next().ok_or(VerifyFailure::Usage)?);
+                },
                 _ => return Err(VerifyFailure::Usage),
             }
+        }
+        if !result.offline && !result.online {
+            return Err(VerifyFailure::Usage);
+        }
+        if result.offline
+            && (result.endpoint.is_some()
+                || result.server_name.is_some()
+                || result.trust_file.is_some()
+                || result.allow_plaintext
+                || result.tenant.is_some()
+                || result.signal.is_some()
+                || result.shard.is_some()
+                || result.expected_catalog_generation.is_some()
+                || result.continuation.is_some())
+        {
+            return Err(VerifyFailure::Usage);
+        }
+        if result.online
+            && (result.config.is_some()
+                || !result.overrides.is_empty()
+                || !result.credential_stdin
+                || result.tenant.is_none()
+                || result.signal.is_none()
+                || result.shard.is_none()
+                || result
+                    .continuation
+                    .as_ref()
+                    .is_some_and(|_| result.expected_catalog_generation.is_none()))
+        {
+            return Err(VerifyFailure::Usage);
         }
         Ok(result)
     }
@@ -233,7 +441,10 @@ impl VerifyFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::VerifyOptions;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    use super::{VerifyFailure, VerifyOptions, online_request};
 
     #[test]
     fn offline_arguments_require_explicit_mode_and_accept_configuration_overrides() {
@@ -257,11 +468,111 @@ mod tests {
             options.overrides,
             [("runtime.max_registered_tenants".to_owned(), "4".to_owned())]
         );
-        assert!(
-            !VerifyOptions::parse(["--config".to_owned(), "x".to_owned()].into_iter())
-                .expect("parse without mode")
-                .offline
+        assert!(matches!(
+            VerifyOptions::parse(["--config".to_owned(), "x".to_owned()].into_iter()),
+            Err(VerifyFailure::Usage)
+        ));
+    }
+
+    #[test]
+    fn online_arguments_require_a_piped_credential_and_an_explicit_scope() {
+        let options = VerifyOptions::parse(
+            [
+                "--online".to_owned(),
+                "--credential-stdin".to_owned(),
+                "--endpoint".to_owned(),
+                "127.0.0.1:9443".to_owned(),
+                "--allow-plaintext".to_owned(),
+                "--tenant".to_owned(),
+                "00000000-0000-0000-0000-000000000001".to_owned(),
+                "--signal".to_owned(),
+                "logs".to_owned(),
+                "--shard".to_owned(),
+                "1".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .expect("online CLI arguments");
+        assert!(options.online);
+        assert!(options.credential_stdin);
+        assert!(options.allow_plaintext);
+        assert!(matches!(
+            VerifyOptions::parse(
+                [
+                    "--online".to_owned(),
+                    "--endpoint".to_owned(),
+                    "127.0.0.1:9443".to_owned(),
+                    "--allow-plaintext".to_owned(),
+                    "--tenant".to_owned(),
+                    "00000000-0000-0000-0000-000000000001".to_owned(),
+                    "--signal".to_owned(),
+                    "logs".to_owned(),
+                    "--shard".to_owned(),
+                    "1".to_owned(),
+                ]
+                .into_iter(),
+            ),
+            Err(VerifyFailure::Usage)
+        ));
+    }
+
+    #[test]
+    fn online_cli_renders_the_authenticated_machine_report_and_never_promotes_partial_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> Result<(), std::io::Error> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request)?;
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /v1/maintenance:verify HTTP/1.1\r\n"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer administration-secret")
+            );
+            let body = r#"{"report_version":1,"tenant":"00000000-0000-0000-0000-000000000001","signal":"logs","shard":1,"catalog_generation":7,"examined_segments":1,"examined_bytes":42,"omitted_segments":0,"outcome":"verified","verification_complete":true,"findings":[]}"#;
+            stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+        });
+        let options = VerifyOptions::parse(
+            [
+                "--online".to_owned(),
+                "--credential-stdin".to_owned(),
+                "--endpoint".to_owned(),
+                endpoint.to_string(),
+                "--allow-plaintext".to_owned(),
+                "--tenant".to_owned(),
+                "00000000-0000-0000-0000-000000000001".to_owned(),
+                "--signal".to_owned(),
+                "logs".to_owned(),
+                "--shard".to_owned(),
+                "1".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .map_err(|failure| format!("parse online options: {}", failure.status()))?;
+        let request = positron_api::maintenance::OnlineVerificationRequest::new(
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+            "logs".to_owned(),
+            1,
+            None,
+            None,
         );
+        let (exit, output) = online_request(&options, "administration-secret", &request)
+            .map_err(|failure| format!("online request: {}", failure.status()))?;
+        assert_eq!(exit, std::process::ExitCode::SUCCESS);
+        assert!(output.contains(
+            "report_version=1\nmode=online\nstatus=verified\nverification_complete=true\n"
+        ));
+        server.join().map_err(|_| "server panicked")??;
+        Ok(())
     }
 
     #[test]

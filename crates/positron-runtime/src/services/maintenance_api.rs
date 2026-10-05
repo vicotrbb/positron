@@ -6,7 +6,7 @@ use positron_api::maintenance::{
     MaintenanceResourceReservations, MaintenanceResumeRequest, MaintenanceRunRequest,
     MaintenanceRunResponse, MaintenanceStatusRequest, MaintenanceStatusResponse,
     MaintenanceTaskAcknowledgement, MaintenanceTaskStatus, MaintenanceWindowRequest,
-    MaintenanceWindowResponse,
+    MaintenanceWindowResponse, OnlineVerificationReport, OnlineVerificationRequest,
 };
 use positron_domain::{
     identity::{PrincipalId, TenantId},
@@ -19,11 +19,12 @@ use positron_governance::{
     maintenance_run_audit_intent, maintenance_window_audit_intent,
 };
 use positron_kernel::{
-    ActiveSegmentLedger, AuthenticatedEventRange, AuthenticatedIngestRange, Catalog, LedgerFailure,
+    ActiveSegmentLedger, AuthenticatedEventRange, AuthenticatedIngestRange, Catalog,
+    IntegrityCancellation, IntegrityScrubBudget, IntegrityVerificationOutcome, LedgerFailure,
     LedgerFailureCode, LifecycleClockState, MaintenanceCoordinator, MaintenanceFailure,
     MaintenanceReservationAuthority, MaintenanceScope, MaintenanceTaskClass, MaintenanceTaskId,
     MaintenanceTaskPhase, NO_DURABLE_PROGRESS_SLO_SECONDS, ResourceDimension, SegmentScope,
-    integrity_quarantine_findings,
+    TransactionId, integrity_quarantine_findings,
 };
 
 use crate::ServiceHandle;
@@ -135,6 +136,80 @@ impl ServiceHandle {
             task: task_status_for_coordinator(self.instance.maintenance_coordinator(), status, now)
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         })
+    }
+
+    /// Authenticates before parsing one bounded online verification request.
+    /// The request pins exactly one Catalog generation for key derivation,
+    /// source selection, verification, findings, and any authorized PQUAR
+    /// publication. It never repairs or rewrites source bytes.
+    pub(crate) fn verify_online_integrity(
+        &self,
+        bearer: &str,
+        body: &[u8],
+    ) -> Result<OnlineVerificationReport, MaintenanceServiceFailure> {
+        let _catalog_operation = self
+            .catalog_operation()
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        self.authorize_system_administration(bearer)?;
+        let request = OnlineVerificationRequest::decode(body)
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let tenant = TenantId::parse_canonical(request.tenant())
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let signal = signal(request.signal()).ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+        let shard = VirtualShardId::new(request.shard())
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let scope = SegmentScope::new(tenant, signal, shard);
+        let continuation = request
+            .continuation()
+            .map(decode_continuation)
+            .transpose()?;
+        let catalog = self.open_maintenance_catalog()?;
+        let snapshot = catalog
+            .pin()
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        if !snapshot
+            .reachable_ledger_scopes(tenant, signal)
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
+            .into_iter()
+            .any(|candidate| candidate == scope)
+        {
+            return Err(MaintenanceServiceFailure::SourceUnavailable);
+        }
+        if request
+            .expected_catalog_generation()
+            .is_some_and(|expected| expected != snapshot.number())
+        {
+            return Ok(stale_online_report(scope, snapshot.number()));
+        }
+        let identity = Identity::open(&snapshot)
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        let protection = super::tenant_segment_key(&self.instance, &identity, scope)
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        let transaction = online_verification_transaction(scope, snapshot.identity().to_bytes())?;
+        let report = ActiveSegmentLedger::verify_pinned_catalog_integrity(
+            &self.instance._authority,
+            &catalog,
+            &snapshot,
+            scope,
+            protection,
+            IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+            &IntegrityCancellation::new(),
+            transaction,
+            continuation,
+        )
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        if report.outcome() == IntegrityVerificationOutcome::Quarantined {
+            self.mark_integrity_degraded();
+        }
+        let findings_snapshot = if report.outcome() == IntegrityVerificationOutcome::Quarantined {
+            catalog
+                .pin()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
+        } else {
+            snapshot.clone()
+        };
+        online_report(report, &findings_snapshot)
     }
 
     /// Submits only the kernel-produced Compaction descriptor for one explicit
@@ -520,20 +595,100 @@ fn integrity_findings(
         .try_reserve(findings.len())
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
     for finding in findings {
-        projected.push(IntegrityQuarantineDescriptor {
-            tenant: finding.scope().tenant_id().to_canonical_text(),
-            signal: match finding.scope().signal_kind() {
-                SignalKind::Logs => "logs".to_owned(),
-                SignalKind::Traces => "traces".to_owned(),
-            },
-            shard: finding.scope().shard_id().value(),
-            segment: hex_bytes(&finding.segment().to_bytes()),
-            base_position: finding.base_position(),
-            event_range: event_range(finding.event_range()),
-            ingest_range: ingest_range(finding.ingest_range()),
-        });
+        projected.push(integrity_finding_descriptor(finding));
     }
     Ok(projected)
+}
+
+fn online_report(
+    report: positron_kernel::IntegrityVerificationReport,
+    snapshot: &positron_kernel::CatalogSnapshot,
+) -> Result<OnlineVerificationReport, MaintenanceServiceFailure> {
+    let outcome = match report.outcome() {
+        IntegrityVerificationOutcome::Verified => "verified",
+        IntegrityVerificationOutcome::Incomplete => "incomplete",
+        IntegrityVerificationOutcome::Stale => "stale",
+        IntegrityVerificationOutcome::Quarantined => "quarantined",
+        IntegrityVerificationOutcome::Fenced => "fenced",
+    };
+    let findings = integrity_findings_for_scope(snapshot, report.scope())?;
+    Ok(OnlineVerificationReport {
+        report_version: 1,
+        tenant: report.scope().tenant_id().to_canonical_text(),
+        signal: match report.scope().signal_kind() {
+            SignalKind::Logs => "logs".to_owned(),
+            SignalKind::Traces => "traces".to_owned(),
+        },
+        shard: report.scope().shard_id().value(),
+        catalog_generation: report.catalog_generation(),
+        examined_segments: u32::try_from(report.examined_segments())
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+        examined_bytes: report.examined_bytes(),
+        omitted_segments: u32::try_from(report.omitted_segments())
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+        outcome: outcome.to_owned(),
+        verification_complete: report.outcome() == IntegrityVerificationOutcome::Verified,
+        continuation: report
+            .continuation()
+            .map(|cursor| hex_bytes(&cursor.encode())),
+        findings,
+    })
+}
+
+fn stale_online_report(scope: SegmentScope, catalog_generation: u64) -> OnlineVerificationReport {
+    OnlineVerificationReport {
+        report_version: 1,
+        tenant: scope.tenant_id().to_canonical_text(),
+        signal: match scope.signal_kind() {
+            SignalKind::Logs => "logs".to_owned(),
+            SignalKind::Traces => "traces".to_owned(),
+        },
+        shard: scope.shard_id().value(),
+        catalog_generation,
+        examined_segments: 0,
+        examined_bytes: 0,
+        omitted_segments: 0,
+        outcome: "stale".to_owned(),
+        verification_complete: false,
+        continuation: None,
+        findings: Vec::new(),
+    }
+}
+
+fn integrity_findings_for_scope(
+    snapshot: &positron_kernel::CatalogSnapshot,
+    scope: SegmentScope,
+) -> Result<Vec<IntegrityQuarantineDescriptor>, MaintenanceServiceFailure> {
+    let findings = integrity_quarantine_findings(snapshot)
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    let mut projected = Vec::new();
+    for finding in findings
+        .into_iter()
+        .filter(|finding| finding.scope() == scope)
+    {
+        projected
+            .try_reserve(1)
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        projected.push(integrity_finding_descriptor(finding));
+    }
+    Ok(projected)
+}
+
+fn integrity_finding_descriptor(
+    finding: positron_kernel::IntegrityQuarantineFinding,
+) -> IntegrityQuarantineDescriptor {
+    IntegrityQuarantineDescriptor {
+        tenant: finding.scope().tenant_id().to_canonical_text(),
+        signal: match finding.scope().signal_kind() {
+            SignalKind::Logs => "logs".to_owned(),
+            SignalKind::Traces => "traces".to_owned(),
+        },
+        shard: finding.scope().shard_id().value(),
+        segment: hex_bytes(&finding.segment().to_bytes()),
+        base_position: finding.base_position(),
+        event_range: event_range(finding.event_range()),
+        ingest_range: ingest_range(finding.ingest_range()),
+    }
 }
 
 fn event_range(range: AuthenticatedEventRange) -> AuthenticatedTimeRangeDescriptor {
@@ -1002,6 +1157,48 @@ fn task_identity(value: &str) -> Option<positron_kernel::MaintenanceTaskId> {
     positron_kernel::MaintenanceTaskId::new(bytes).ok()
 }
 
+fn decode_continuation(
+    value: &str,
+) -> Result<positron_kernel::IntegrityScrubContinuation, MaintenanceServiceFailure> {
+    let bytes = decode_fixed_hex::<56>(value).ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+    positron_kernel::IntegrityScrubContinuation::decode(&bytes)
+        .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
+}
+
+fn online_verification_transaction(
+    scope: SegmentScope,
+    catalog_identity: [u8; 32],
+) -> Result<TransactionId, MaintenanceServiceFailure> {
+    let mut digest = Sha256::new();
+    digest.update(b"positron/online-verification/v1");
+    digest.update(catalog_identity);
+    digest.update(scope.tenant_id().to_bytes());
+    digest.update([match scope.signal_kind() {
+        SignalKind::Logs => 1,
+        SignalKind::Traces => 2,
+    }]);
+    digest.update(scope.shard_id().value().to_be_bytes());
+    let bytes: [u8; 32] = digest.finalize().into();
+    TransactionId::new(
+        bytes
+            .get(..16)
+            .and_then(|prefix| prefix.try_into().ok())
+            .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?,
+    )
+    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)
+}
+
+fn decode_fixed_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.len() != N.checked_mul(2)? {
+        return None;
+    }
+    let mut bytes = [0_u8; N];
+    for (slot, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        *slot = (hex_value(*pair.first()?)? << 4) | hex_value(*pair.get(1)?)?;
+    }
+    Some(bytes)
+}
+
 const fn hex_value(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
@@ -1084,12 +1281,14 @@ const fn class_name(class: MaintenanceTaskClass) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::{Arc, Barrier, Mutex, mpsc};
     use std::time::Duration;
 
     use positron_api::maintenance::{
         MaintenanceExplainRequest, MaintenancePauseRequest, MaintenanceResumeRequest,
         MaintenanceRunRequest, MaintenanceStatusRequest, MaintenanceWindowRequest,
+        OnlineVerificationRequest,
     };
     use positron_domain::{routing::SignalKind, time::UnixNanoseconds};
     use positron_kernel::{
@@ -1694,6 +1893,139 @@ mod tests {
                 Err(positron_kernel::MaintenanceFailure::UnknownTask)
             ),
             "terminal retention reclamation removes the mutable task record while the audit receipt remains replayable after reopen"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_online_verification_uses_one_pinned_scope_and_rejects_a_stale_resume()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        services.ingest_otlp_logs(&ingest, request("online-verify-source").encode_to_vec())?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        let generation = catalog.pin()?.number();
+        drop(catalog);
+        let request = OnlineVerificationRequest::new(
+            initialized.default_tenant_id().to_canonical_text(),
+            "logs".to_owned(),
+            scope.shard_id().value(),
+            None,
+            None,
+        );
+        let verified = services
+            .verify_online_integrity(&administrator, &request.encode()?)
+            .map_err(|failure| format!("online verification: {failure:?}"))?;
+        assert_eq!(verified.catalog_generation, generation);
+        assert_eq!(verified.outcome, "verified");
+        assert!(verified.verification_complete);
+        assert!(verified.findings.is_empty());
+        let stale = services
+            .verify_online_integrity(
+                &administrator,
+                &OnlineVerificationRequest::new(
+                    initialized.default_tenant_id().to_canonical_text(),
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    Some(generation.checked_sub(1).ok_or("generation")?),
+                    None,
+                )
+                .encode()?,
+            )
+            .map_err(|failure| format!("stale online verification: {failure:?}"))?;
+        assert_eq!(stale.outcome, "stale");
+        assert!(!stale.verification_complete);
+        assert_eq!(stale.catalog_generation, generation);
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_online_verification_quarantines_local_damage_without_rewriting_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        let health = crate::health::ProcessState::starting();
+        health.transition(crate::health::ProcessPhase::Serving);
+        services.attach_health(health.health());
+        services.ingest_otlp_logs(
+            &ingest,
+            request("online-verify-corrupt-source").encode_to_vec(),
+        )?;
+
+        let sealed_directory = fixture.sealed_segments_directory();
+        let before_seal = fs::read_dir(&sealed_directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        let generation = catalog.pin()?.number();
+        drop(catalog);
+        let damaged_segment = fs::read_dir(&sealed_directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| !before_seal.contains(path))
+            .ok_or("newly sealed block-bearing segment")?;
+        let damaged_bytes = b"online verification corruption";
+        fs::write(&damaged_segment, damaged_bytes)?;
+
+        let report = services
+            .verify_online_integrity(
+                &administrator,
+                &OnlineVerificationRequest::new(
+                    initialized.default_tenant_id().to_canonical_text(),
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    None,
+                    None,
+                )
+                .encode()?,
+            )
+            .map_err(|failure| format!("online corruption verification: {failure:?}"))?;
+
+        assert_eq!(report.catalog_generation, generation);
+        assert_eq!(report.outcome, "quarantined");
+        assert!(!report.verification_complete);
+        assert!(!report.findings.is_empty());
+        assert_eq!(fs::read(&damaged_segment)?, damaged_bytes);
+        assert_eq!(
+            health.health().phase(),
+            crate::health::ProcessPhase::Serving
+        );
+        assert!(health.health().integrity_degraded());
+        let catalog = open_catalog(&initialized)?;
+        assert!(
+            !positron_kernel::integrity_quarantine_findings(&catalog.pin()?)?.is_empty(),
+            "the authorized online result is a durable Catalog quarantine finding"
         );
         Ok(())
     }

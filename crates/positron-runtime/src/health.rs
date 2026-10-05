@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
@@ -23,7 +23,6 @@ pub enum ProcessPhase {
     Fenced = 4,
     Stopping = 5,
     Stopped = 6,
-    Degraded = 7,
 }
 
 /// Whether data traffic can be admitted safely.
@@ -204,6 +203,7 @@ impl HealthWarning {
 #[derive(Clone)]
 pub struct HealthState {
     phase: Arc<AtomicU8>,
+    integrity_degraded: Arc<AtomicBool>,
     plaintext_listener_roles: Arc<AtomicU8>,
     configuration: Arc<OnceLock<Arc<RuntimeConfiguration>>>,
     inspection_authority: Arc<OnceLock<Weak<InitializedInstance>>>,
@@ -225,8 +225,7 @@ impl std::fmt::Debug for HealthState {
 
 impl HealthState {
     pub(crate) fn degrade_integrity(&self) {
-        self.phase
-            .store(ProcessPhase::Degraded as u8, Ordering::Release);
+        self.integrity_degraded.store(true, Ordering::Release);
     }
     /// Records an integrity or ownership ambiguity in the one process
     /// lifecycle authority so readiness cannot remain serving afterward.
@@ -240,9 +239,16 @@ impl HealthState {
         decode_phase(self.phase.load(Ordering::Acquire))
     }
 
+    /// Reports localized immutable-data corruption while preserving the
+    /// lifecycle phase that continues to govern traffic admission.
+    #[must_use]
+    pub fn integrity_degraded(&self) -> bool {
+        self.integrity_degraded.load(Ordering::Acquire)
+    }
+
     #[must_use]
     pub fn readiness(&self) -> Readiness {
-        if matches!(self.phase(), ProcessPhase::Serving | ProcessPhase::Degraded) {
+        if self.phase() == ProcessPhase::Serving {
             Readiness::Ready
         } else {
             Readiness::NotReady
@@ -512,6 +518,7 @@ impl ProcessState {
         Self {
             health: HealthState {
                 phase: Arc::new(AtomicU8::new(ProcessPhase::Starting as u8)),
+                integrity_degraded: Arc::new(AtomicBool::new(false)),
                 plaintext_listener_roles: Arc::new(AtomicU8::new(0)),
                 configuration: Arc::new(OnceLock::new()),
                 inspection_authority: Arc::new(OnceLock::new()),
@@ -591,7 +598,7 @@ fn decode_phase(value: u8) -> ProcessPhase {
         4 => ProcessPhase::Fenced,
         5 => ProcessPhase::Stopping,
         6 => ProcessPhase::Stopped,
-        _ => ProcessPhase::Degraded,
+        _ => ProcessPhase::Fenced,
     }
 }
 
@@ -612,12 +619,13 @@ mod tests {
     }
 
     #[test]
-    fn localized_quarantine_is_observable_without_removing_readiness() {
+    fn localized_quarantine_keeps_serving_and_reports_degraded_integrity() {
         let state = ProcessState::starting();
         state.transition(ProcessPhase::Serving);
         state.health().degrade_integrity();
-        assert_eq!(state.health().phase(), ProcessPhase::Degraded);
+        assert_eq!(state.health().phase(), ProcessPhase::Serving);
         assert_eq!(state.health().readiness(), super::Readiness::Ready);
+        assert!(state.health().integrity_degraded());
     }
 
     #[test]

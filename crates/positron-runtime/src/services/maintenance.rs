@@ -170,6 +170,12 @@ const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
     MaintenanceTaskClass::IntegrityScrub,
 ];
 
+// A source-bound scrub record is durable evidence for one completed pass. The
+// next lifecycle-clock epoch receives a different stable identity so a source
+// that has not changed is still reauthenticated without turning each Catalog
+// publication into an immediate self-triggering loop.
+const INTEGRITY_SCRUB_CADENCE_SECONDS: u64 = 86_400;
+
 /// Performs one bounded coordinator dispatch for the runtime's installed
 /// maintenance handlers. Unsupported durable classes remain queued for their
 /// own future handlers.
@@ -655,6 +661,13 @@ fn discover_retention_publications(
         return Err(ServiceFailure::Cancelled);
     }
     let integrity_discovered = discover_integrity_scrubs(services, cancellation)?;
+    // Do not let retention open a newly discovered damaged source before its
+    // higher-priority scrub has authenticated it. The next worker turn will
+    // dispatch this durable descriptor and either quarantine localized damage
+    // or preserve the existing fail-closed fence for ambiguous evidence.
+    if integrity_discovered {
+        return Ok(true);
+    }
     let instance = &services.instance;
     if instance.retention_time.status().state() != positron_kernel::LifecycleClockState::Certain {
         return Ok(integrity_discovered);
@@ -737,7 +750,7 @@ fn discover_retention_publications(
             Err(failure) => return Err(super::classify_ledger_failure_code(failure.code())),
         }
     }
-    Ok(submitted || integrity_discovered)
+    Ok(submitted)
 }
 
 fn discover_integrity_scrubs(
@@ -783,6 +796,14 @@ fn discover_integrity_scrubs(
         }
     }
     drop(snapshot);
+    // The Lifecycle Clock remains process-monotonic when wall-clock safety is
+    // uncertain. Integrity authentication is safe work, so it must retain its
+    // cadence instead of being treated like age-derived destruction.
+    let now = instance
+        .retention_time
+        .governance_now_seconds()
+        .map_err(|_| ServiceFailure::StorageUnavailable)?;
+    let verification_epoch = now / INTEGRITY_SCRUB_CADENCE_SECONDS;
     let coordinator = instance.maintenance_coordinator();
     let mut submitted = false;
     for (scope, source_identity) in scopes {
@@ -797,7 +818,7 @@ fn discover_integrity_scrubs(
         {
             continue;
         }
-        let identity = integrity_task_identity(scope, source_identity)?;
+        let identity = integrity_task_identity(scope, source_identity, verification_epoch)?;
         match coordinator.status(identity) {
             Ok(_) => continue,
             Err(positron_kernel::MaintenanceFailure::UnknownTask) => {},
@@ -807,7 +828,7 @@ fn discover_integrity_scrubs(
             identity,
             MaintenanceTaskClass::IntegrityScrub,
             maintenance_scope,
-            positron_kernel::MaintenanceTrigger::Event,
+            positron_kernel::MaintenanceTrigger::Scheduled,
             // A task record publication advances the Catalog generation but
             // does not change the immutable-segment source identity. Read the
             // current generation immediately before each descriptor so later
@@ -827,7 +848,7 @@ fn discover_integrity_scrubs(
         )
         .map_err(map_failure)?;
         coordinator
-            .submit_and_persist(&catalog, task, 0)
+            .submit_and_persist(&catalog, task, now)
             .map_err(map_failure)?;
         submitted = true;
     }
@@ -837,9 +858,10 @@ fn discover_integrity_scrubs(
 fn integrity_task_identity(
     scope: SegmentScope,
     source_identity: [u8; 32],
+    verification_epoch: u64,
 ) -> Result<positron_kernel::MaintenanceTaskId, ServiceFailure> {
     let mut digest = Sha256::new();
-    digest.update(b"positron/integrity-scrub/v1");
+    digest.update(b"positron/integrity-scrub/v2");
     digest.update(scope.tenant_id().to_bytes());
     digest.update([match scope.signal_kind() {
         positron_domain::routing::SignalKind::Logs => 1,
@@ -847,6 +869,7 @@ fn integrity_task_identity(
     }]);
     digest.update(scope.shard_id().value().to_be_bytes());
     digest.update(source_identity);
+    digest.update(verification_epoch.to_be_bytes());
     let bytes = digest.finalize();
     let identity = bytes
         .get(..16)
