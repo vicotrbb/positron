@@ -372,6 +372,12 @@ impl LedgerStorage {
         if metadata.state != SegmentState::Sealed {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
+        // The authenticated Catalog may name a sealed source that has since
+        // disappeared. Its absence is an instance-wide availability
+        // ambiguity, not byte-local corruption eligible for quarantine.
+        if !entry_exists(&self.sealed, &segment_name(metadata.id))? {
+            return Err(LedgerFailure::new(LedgerFailureCode::PhysicalScopeMismatch));
+        }
         let mut file = open_regular(&self.sealed, &segment_name(metadata.id), false)?;
         let mut header = vec![0_u8; MAX_HEADER_BYTES];
         let header_bytes = file.read(&mut header).map_err(map_io_error)?;

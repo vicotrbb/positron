@@ -109,8 +109,14 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 ));
             },
         };
-        let affected_ranges =
+        let mut affected_ranges =
             crate::availability::affected_ranges(&state.plan, snapshot.quarantined_holes());
+        if let Some(trace_snapshot) = trace_snapshot {
+            affected_ranges.extend(crate::availability::dependency_affected_ranges(
+                &state.plan,
+                trace_snapshot.quarantined_holes(),
+            ));
+        }
         if !affected_ranges.is_empty() {
             return self.incomplete_page_with_affected_ranges(
                 super::lifecycle::IncompletePage {

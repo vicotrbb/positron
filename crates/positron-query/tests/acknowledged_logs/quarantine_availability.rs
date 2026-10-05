@@ -141,6 +141,54 @@ fn reopened_query_uses_authenticated_holes_without_hiding_healthy_same_scope_dat
     })
 }
 
+#[test]
+fn correlation_with_a_quarantined_trace_dependency_is_explicitly_incomplete()
+-> Result<(), Box<dyn Error>> {
+    QueryFixture::scoped_compaction("quarantine-trace-correlation", |fixture| {
+        let trace_id = [0x71; 16];
+        fixture.kernel.append_trace(trace_id, [0x72; 8], 20, 1)?;
+        let sealed = fixture.kernel.seal_and_reopen_trace_with_segment()?;
+        fixture
+            .kernel
+            .append_log_with_trace("accepted", 20, trace_id, [0x72; 8], 2)?;
+        fixture.kernel.corrupt_sealed_segment_for_test(sealed)?;
+
+        let scope = fixture.kernel.trace_ledger()?.scope();
+        let report = ActiveSegmentLedger::verify_catalog_integrity(
+            fixture.kernel.authority,
+            fixture.kernel.catalog_for_test(),
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0x35; 32])),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xe2; 16])?,
+            None,
+        )?;
+        assert_eq!(report.outcome(), IntegrityVerificationOutcome::Quarantined);
+        fixture.kernel.reopen_trace_ledger()?;
+
+        let service = fixture.correlation_service(16)?;
+        let query = service.plan_pipeline(
+            fixture.context,
+            "pipeline:v1 logs | range event_time 20 21 | correlate trace | limit 1",
+            QueryBudget::new(1_048_576, 1_024, 1_024, 1_048_576, 1_048_576, 60)?,
+        )?;
+        let stream = service.execute(query)?;
+        let events = stream.collect::<Vec<_>>();
+
+        assert_incomplete(
+            &events,
+            QueryAffectedRange::Known {
+                axis: TemporalAxis::EventTime,
+                earliest_nanoseconds: 20,
+                latest_nanoseconds: 20,
+            },
+        );
+        Ok(())
+    })
+}
+
 fn assert_incomplete(events: &[QueryEvent], expected: QueryAffectedRange) {
     assert!(matches!(
         events.last(),

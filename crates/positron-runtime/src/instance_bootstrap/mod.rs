@@ -13,6 +13,7 @@ const DEFAULT_MAX_REGISTERED_TENANTS: u16 = 2;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use operation::recover_initial_ledgers;
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::GovernanceTestFixture;
 pub(crate) use types::TenantRetentionPreviewConfirmation;

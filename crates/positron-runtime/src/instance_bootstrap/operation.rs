@@ -26,6 +26,7 @@ mod completion;
 pub(super) mod support;
 pub(super) use classification::classify;
 pub(super) use completion::governance_audit_records;
+pub(crate) use completion::recover_initial_ledgers;
 use completion::{ensure_claim, open_initial_ledgers, outcome};
 pub(super) use support::decode_record;
 use support::{
@@ -271,14 +272,6 @@ pub(super) fn reopen(
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))?;
     if catalog.pin().map_err(catalog_failure)?.number() == 0 {
         return Err(BootstrapFailure::new(BootstrapFailureCode::CorruptState));
-    }
-    // Ledger startup may publish unaudited Catalog generations. Preserve the exact
-    // predecessor of a prepared administrative transaction until its owner resolves it.
-    if !catalog
-        .has_prepared_transaction()
-        .map_err(catalog_failure)?
-    {
-        open_initial_ledgers(&authority, &retention_time, &catalog, &key, &record)?;
     }
     let current = catalog.pin().map_err(catalog_failure)?;
     apply_catalog_quota(&authority, &current)?;

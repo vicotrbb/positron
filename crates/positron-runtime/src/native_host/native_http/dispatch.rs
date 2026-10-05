@@ -16,7 +16,7 @@ use super::io::{
     read_body,
 };
 use crate::{
-    HealthState, ListenerRole, Liveness, Readiness, ServiceHandle,
+    HealthState, ListenerRole, Liveness, ProcessPhase, Readiness, ServiceHandle,
     services::MaintenanceServiceFailure,
 };
 
@@ -477,6 +477,23 @@ pub(super) fn route<S: Read + Write>(
             )?;
             policy_activate_response(services, &bearer, &body)
         },
+        (ListenerRole::Control, "GET", "/control/fenced/inspection")
+            if health.phase() == ProcessPhase::Fenced =>
+        {
+            let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
+                Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+            })?);
+            health
+                .authorize_configuration_status(&bearer)
+                .map_err(|_| {
+                    Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+                })?;
+            Ok(Response::json(
+                200,
+                "{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"}"
+                    .to_owned(),
+            ))
+        },
         (ListenerRole::Operations, "GET", "/health/live") => Ok(health_response(
             health.liveness() == Liveness::Live,
             "live",
@@ -635,5 +652,91 @@ mod tests {
         drop(services);
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn fenced_control_inspection_requires_current_administrator_and_admits_no_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-fenced-control-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        #[cfg(unix)]
+        fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
+        let paths = BootstrapPaths::new(&data, &secrets, MountQualification::LocalHost)?;
+        drop(InstanceBootstrap::initialize(
+            &paths,
+            InitializationPlan::non_interactive(),
+        )?);
+        let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
+        let instance = Arc::new(InstanceBootstrap::reopen(&paths)?);
+        let state = ProcessState::starting();
+        state.set_inspection_authority(Arc::clone(&instance))?;
+        state.transition(crate::ProcessPhase::Fenced);
+
+        let response = control_request(&state.health(), None, "/control/fenced/inspection");
+        assert_eq!(response.status(), 401);
+
+        let response = control_request(
+            &state.health(),
+            Some(administrator),
+            "/control/fenced/inspection",
+        );
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.body(),
+            b"{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"}"
+        );
+
+        let response = control_request_with_method(
+            &state.health(),
+            None,
+            "POST",
+            positron_api::maintenance::VERIFY_HTTP_PATH,
+        );
+        assert_eq!(response.status(), 404);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn control_request(
+        health: &crate::HealthState,
+        bearer: Option<String>,
+        path: &str,
+    ) -> super::Response {
+        control_request_with_method(health, bearer, "GET", path)
+    }
+
+    fn control_request_with_method(
+        health: &crate::HealthState,
+        bearer: Option<String>,
+        method: &str,
+        path: &str,
+    ) -> super::Response {
+        let mut stream = Cursor::new(Vec::new());
+        match route(
+            &mut stream,
+            ListenerRole::Control,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            None,
+            RequestHead {
+                method: method.to_owned(),
+                path: path.to_owned(),
+                content_length: 0,
+                bearer,
+                content_type: None,
+                content_encoding: None,
+                tenant_hint: None,
+                forwarded_for: None,
+                forwarded_actor: None,
+            },
+            health,
+            None,
+        ) {
+            Ok(response) | Err(response) => response,
+        }
     }
 }

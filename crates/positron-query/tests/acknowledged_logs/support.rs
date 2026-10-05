@@ -1147,8 +1147,12 @@ impl<'kernel, 'catalog> KernelFixture<'kernel, 'catalog> {
     }
 
     pub fn seal_and_reopen_trace(&mut self) -> Result<(), Box<dyn Error>> {
+        self.seal_and_reopen_trace_with_segment().map(|_| ())
+    }
+
+    pub fn seal_and_reopen_trace_with_segment(&mut self) -> Result<SealedSegment, Box<dyn Error>> {
         let ledger = self.trace_ledger.take().ok_or("trace ledger unavailable")?;
-        ledger.seal()?;
+        let sealed = ledger.seal()?;
         self.trace_ledger = Some(if self.retention_enabled {
             ActiveSegmentLedger::open_with_retention_time(
                 self.authority,
@@ -1165,7 +1169,7 @@ impl<'kernel, 'catalog> KernelFixture<'kernel, 'catalog> {
                 SegmentProtectionKey::from_owned(Box::new([0x35; 32])),
             )?
         });
-        Ok(())
+        Ok(sealed)
     }
 
     pub fn reopen_ledger(&mut self) -> Result<(), Box<dyn Error>> {
@@ -1367,7 +1371,10 @@ impl<'kernel, 'catalog> KernelFixture<'kernel, 'catalog> {
                     UnixNanoseconds::new(event_time),
                     SourceTimeQuality::Usable,
                 )?,
-                end_time: EventTime::missing(),
+                end_time: EventTime::received(
+                    UnixNanoseconds::new(event_time),
+                    SourceTimeQuality::Usable,
+                )?,
                 kind: SpanKind::Internal,
                 sampling: SamplingDecision::Unknown,
                 evaluated: *evaluated,

@@ -15,8 +15,6 @@ pub(super) use integrity_quarantine_codec::{decode_quarantine, encode_quarantine
 mod integrity_quarantine;
 #[path = "integrity_scrub.rs"]
 mod integrity_scrub;
-#[cfg(fuzzing)]
-pub(super) use integrity_quarantine::fuzz_quarantine_record;
 pub use integrity_quarantine::integrity_quarantine_findings;
 pub(super) use integrity_quarantine::{publish_quarantine, quarantined_segment_ids};
 const CONTINUATION_BYTES: usize = 1 + 7 + 32 + 16;

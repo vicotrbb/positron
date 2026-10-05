@@ -166,7 +166,6 @@ pub(crate) fn snapshot_from_record<'kernel>(
         .governor()
         .reserve(maximum_claim)
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
-    let blocks = blocks_for_record(ledger, state, record, &recovery.segments)?;
     let mut quarantined_holes =
         super::super::integrity::integrity_quarantine_findings(&original_basis)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
@@ -174,6 +173,17 @@ pub(crate) fn snapshot_from_record<'kernel>(
             .filter(|finding| finding.scope() == record.scope)
             .collect::<Vec<_>>();
     quarantined_holes.sort_unstable_by_key(|finding| finding.base_position());
+    let empty_frontier_is_quarantined = record.blocks.is_empty()
+        && quarantined_holes
+            .iter()
+            .any(|finding| finding.sealed_frontier() >= record.frontier);
+    let blocks = blocks_for_record(
+        ledger,
+        state,
+        record,
+        &recovery.segments,
+        empty_frontier_is_quarantined,
+    )?;
     let bytes = blocks
         .iter()
         .try_fold(0_usize, |total, block| {
@@ -242,7 +252,7 @@ fn resume_recovery_plan(
     }
     let metadata = ledger
         .storage
-        .catalog_segments_observed(original_basis, record.scope)?;
+        .catalog_segments_historical(original_basis, record.scope)?;
     let mut segments = Vec::new();
     segments
         .try_reserve_exact(missing.len())
@@ -276,6 +286,7 @@ fn blocks_for_record<'kernel>(
     state: &super::super::state::LedgerState<'kernel>,
     record: &LeaseRecord,
     missing_metadata: &[super::super::format::SegmentMetadata],
+    empty_frontier_is_quarantined: bool,
 ) -> Result<Vec<CommittedBlock>, LedgerFailure> {
     let mut missing_segments = BTreeSet::new();
     for expected in &record.blocks {
@@ -345,10 +356,11 @@ fn blocks_for_record<'kernel>(
         }
         previous_position = Some(block.position);
     }
-    if blocks
-        .last()
-        .map_or(CommitPosition::origin(), |block| block.position)
-        != record.frontier
+    if !(blocks.is_empty() && empty_frontier_is_quarantined)
+        && blocks
+            .last()
+            .map_or(CommitPosition::origin(), |block| block.position)
+            != record.frontier
     {
         return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
     }

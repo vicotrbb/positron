@@ -92,6 +92,8 @@ pub struct ServiceHandle {
     ingest_policy_snapshot_test_hook: Arc<Mutex<Option<Arc<dyn IngestPolicySnapshotTestHook>>>>,
     #[cfg(test)]
     query_execution_test_hook: Arc<Mutex<Option<Arc<dyn QueryExecutionTestHook>>>>,
+    #[cfg(test)]
+    online_verification_test_hook: Arc<Mutex<Option<Arc<dyn OnlineVerificationTestHook>>>>,
     // Keep the authority alive until every governed session and admission
     // capability above has released its transferred reservations.
     instance: Arc<InitializedInstance>,
@@ -126,6 +128,13 @@ pub(crate) trait IngestPolicySnapshotTestHook: Send + Sync {
 #[cfg(test)]
 pub(crate) trait QueryExecutionTestHook: Send + Sync {
     fn after_admission(&self);
+}
+
+/// Test-only synchronization point after online verification has captured its
+/// immutable Catalog basis and released all foreground Catalog ownership.
+#[cfg(test)]
+pub(crate) trait OnlineVerificationTestHook: Send + Sync {
+    fn after_basis_capture(&self);
 }
 
 impl std::fmt::Debug for ServiceHandle {
@@ -208,6 +217,14 @@ impl ServiceHandle {
         }
     }
 
+    pub(crate) fn mark_integrity_fenced(&self) {
+        if let Ok(target) = self.integrity_health.lock()
+            && let Some(health) = target.as_ref()
+        {
+            health.fence();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn maintenance_wake_generation(&self) -> u64 {
         self.maintenance_wake.generation()
@@ -255,6 +272,8 @@ impl ServiceHandle {
             ingest_policy_snapshot_test_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             query_execution_test_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            online_verification_test_hook: Arc::new(Mutex::new(None)),
             instance,
         })
     }
@@ -530,6 +549,31 @@ impl ServiceHandle {
             .clone();
         if let Some(hook) = hook {
             hook.after_admission();
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_online_verification_test_hook(
+        &self,
+        hook: Arc<dyn OnlineVerificationTestHook>,
+    ) -> Result<(), ServiceFailure> {
+        *self
+            .online_verification_test_hook
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)? = Some(hook);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn await_online_verification_test_hook(&self) -> Result<(), ServiceFailure> {
+        let hook = self
+            .online_verification_test_hook
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?
+            .clone();
+        if let Some(hook) = hook {
+            hook.after_basis_capture();
         }
         Ok(())
     }

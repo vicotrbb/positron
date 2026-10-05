@@ -147,9 +147,6 @@ impl ServiceHandle {
         bearer: &str,
         body: &[u8],
     ) -> Result<OnlineVerificationReport, MaintenanceServiceFailure> {
-        let _catalog_operation = self
-            .catalog_operation()
-            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         self.authorize_system_administration(bearer)?;
         let request = OnlineVerificationRequest::decode(body)
             .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
@@ -163,9 +160,21 @@ impl ServiceHandle {
             .continuation()
             .map(decode_continuation)
             .transpose()?;
-        let catalog = self.open_maintenance_catalog()?;
-        let snapshot = catalog
-            .pin()
+        // Capture an authenticated immutable basis without the sole Catalog
+        // writer lease. The bounded scan below therefore cannot block safe
+        // foreground reads. A local finding reacquires the writer only for an
+        // exact-G0 quarantine compare-and-swap.
+        let snapshot = Catalog::read_current_snapshot(
+            &self.instance._authority,
+            self.instance.instance,
+            self.instance
+                .key
+                .catalog_secret(self.instance.instance)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+        )
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        #[cfg(test)]
+        self.await_online_verification_test_hook()
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         if !snapshot
             .reachable_ledger_scopes(tenant, signal)
@@ -186,10 +195,10 @@ impl ServiceHandle {
         let protection = super::tenant_segment_key(&self.instance, &identity, scope)
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let transaction = online_verification_transaction(scope, snapshot.identity().to_bytes())?;
-        let report = ActiveSegmentLedger::verify_pinned_catalog_integrity(
+        let report = ActiveSegmentLedger::verify_online_snapshot_integrity(
             &self.instance._authority,
-            &catalog,
             &snapshot,
+            self.instance.instance,
             scope,
             protection,
             IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
@@ -199,14 +208,45 @@ impl ServiceHandle {
             continuation,
         )
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-        if report.outcome() == IntegrityVerificationOutcome::Quarantined {
-            self.mark_integrity_degraded();
+        let current = Catalog::read_current_snapshot(
+            &self.instance._authority,
+            self.instance.instance,
+            self.instance
+                .key
+                .catalog_secret(self.instance.instance)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+        )
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        if current.identity() != snapshot.identity() || current.number() != snapshot.number() {
+            return Ok(stale_online_report(scope, snapshot.number()));
         }
         let findings_snapshot = if report.outcome() == IntegrityVerificationOutcome::Quarantined {
+            let _catalog_operation = self
+                .catalog_operation()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let catalog = self.open_maintenance_catalog()?;
+            let current = catalog
+                .pin()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            if current.identity() != snapshot.identity() || current.number() != snapshot.number() {
+                return Ok(stale_online_report(scope, snapshot.number()));
+            }
+            ActiveSegmentLedger::publish_online_quarantine(
+                &self.instance._authority,
+                &catalog,
+                &snapshot,
+                report,
+                transaction,
+            )
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            self.mark_integrity_degraded();
             catalog
                 .pin()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
         } else {
+            if report.outcome() == IntegrityVerificationOutcome::Fenced {
+                self.mark_integrity_fenced();
+            }
             snapshot.clone()
         };
         online_report(report, &findings_snapshot)
@@ -1290,6 +1330,7 @@ mod tests {
         MaintenanceRunRequest, MaintenanceStatusRequest, MaintenanceWindowRequest,
         OnlineVerificationRequest,
     };
+    use positron_api::tenant_aliases::TenantAliasBindRequest;
     use positron_domain::{routing::SignalKind, time::UnixNanoseconds};
     use positron_kernel::{
         ActiveSegmentLedger, CatalogPublicationFault, LifecycleClockFailure, LifecycleClockPolicy,
@@ -1298,10 +1339,11 @@ mod tests {
         ResourceAmounts, RetentionTimeAuthority, SegmentScope,
         with_catalog_publication_fault_after,
     };
+    use positron_query::QueryBudget;
     use prost::Message;
 
-    use super::super::ServiceHandle;
     use super::super::tests::schema_maintenance::{Fixture, open_catalog, request};
+    use super::super::{OnlineVerificationTestHook, ServiceHandle};
     use super::MaintenanceServiceFailure;
 
     struct MutableWallClock(Arc<Mutex<UnixNanoseconds>>);
@@ -1312,6 +1354,20 @@ mod tests {
                 .lock()
                 .map(|value| *value)
                 .map_err(|_| LifecycleClockFailure::Unavailable)
+        }
+    }
+
+    struct BlockingOnlineVerification {
+        captured: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl OnlineVerificationTestHook for BlockingOnlineVerification {
+        fn after_basis_capture(&self) {
+            let _ = self.captured.send(());
+            if let Ok(release) = self.release.lock() {
+                let _ = release.recv();
+            }
         }
     }
 
@@ -1955,6 +2011,155 @@ mod tests {
     }
 
     #[test]
+    fn online_verification_observation_does_not_block_an_authenticated_query()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, query, administrator) = fixture.initialized_with_admin()?;
+        let services = Arc::new(ServiceHandle::new(Arc::clone(&initialized))?);
+        services.ingest_otlp_logs(
+            &ingest,
+            request("online-verify-nonblocking").encode_to_vec(),
+        )?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        let generation = catalog.pin()?.number();
+        drop(catalog);
+
+        let (captured_tx, captured_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        services.install_online_verification_test_hook(Arc::new(BlockingOnlineVerification {
+            captured: captured_tx,
+            release: Mutex::new(release_rx),
+        }))?;
+        let verifying = Arc::clone(&services);
+        let tenant = initialized.default_tenant_id().to_canonical_text();
+        let verification_administrator = administrator.clone();
+        let verification = std::thread::spawn(move || {
+            verifying.verify_online_integrity(
+                &verification_administrator,
+                &OnlineVerificationRequest::new(
+                    tenant,
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    None,
+                    None,
+                )
+                .encode()
+                .expect("bounded request"),
+            )
+        });
+        captured_rx.recv_timeout(Duration::from_secs(1))?;
+        let query_result = services.query_log_bodies(
+            &query,
+            "logs | range query_time 0 100 | limit 2",
+            QueryBudget::new(1_000_000, 100, 100, 1_000_000, 1_000_000, 60)?
+                .with_cpu_work_units(16)?,
+        )?;
+        assert!(
+            !query_result.is_empty(),
+            "safe query must complete during the immutable scan"
+        );
+        release_tx.send(())?;
+        let report = verification
+            .join()
+            .map_err(|_| "verification thread panicked")?
+            .map_err(|failure| format!("online verification: {failure:?}"))?;
+        assert_eq!(report.catalog_generation, generation);
+        assert_eq!(report.outcome, "stale");
+        assert!(!report.verification_complete);
+        Ok(())
+    }
+
+    #[test]
+    fn online_verification_refuses_to_publish_against_a_successor_generation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = Arc::new(ServiceHandle::new(Arc::clone(&initialized))?);
+        services.ingest_otlp_logs(
+            &ingest,
+            request("online-verify-stale-publication").encode_to_vec(),
+        )?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        let generation = catalog.pin()?.number();
+        drop(catalog);
+
+        let (captured_tx, captured_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        services.install_online_verification_test_hook(Arc::new(BlockingOnlineVerification {
+            captured: captured_tx,
+            release: Mutex::new(release_rx),
+        }))?;
+        let verifying = Arc::clone(&services);
+        let tenant = initialized.default_tenant_id().to_canonical_text();
+        let verification_administrator = administrator.clone();
+        let verification = std::thread::spawn(move || {
+            verifying.verify_online_integrity(
+                &verification_administrator,
+                &OnlineVerificationRequest::new(
+                    tenant,
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    None,
+                    None,
+                )
+                .encode()
+                .expect("bounded request"),
+            )
+        });
+        captured_rx.recv_timeout(Duration::from_secs(1))?;
+        let successor = services
+            .bind_tenant_alias(
+                &administrator,
+                &TenantAliasBindRequest::new(
+                    initialized.default_tenant_id().to_canonical_text(),
+                    "verify-race".to_owned(),
+                    1,
+                    "00000000-0000-0000-0000-000000000082".to_owned(),
+                )
+                .encode()?,
+            )
+            .map_err(|_| "successor alias publication")?;
+        assert_eq!(successor.alias_generation, 2);
+        release_tx.send(())?;
+        let report = verification
+            .join()
+            .map_err(|_| "verification thread panicked")?
+            .map_err(|failure| format!("online verification: {failure:?}"))?;
+        assert_eq!(report.catalog_generation, generation);
+        assert_eq!(report.outcome, "stale");
+        assert!(!report.verification_complete);
+        Ok(())
+    }
+
+    #[test]
     fn authenticated_online_verification_quarantines_local_damage_without_rewriting_source()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = Fixture::new()?;
@@ -2026,6 +2231,68 @@ mod tests {
         assert!(
             !positron_kernel::integrity_quarantine_findings(&catalog.pin()?)?.is_empty(),
             "the authorized online result is a durable Catalog quarantine finding"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_online_verification_fences_unavailable_sealed_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        let health = crate::health::ProcessState::starting();
+        health.transition(crate::health::ProcessPhase::Serving);
+        services.attach_health(health.health());
+        services.ingest_otlp_logs(
+            &ingest,
+            request("online-verify-fenced-source").encode_to_vec(),
+        )?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        drop(catalog);
+        let missing_source = fs::read_dir(fixture.sealed_segments_directory())?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "segment")
+            })
+            .ok_or("sealed segment")?;
+        fs::remove_file(missing_source)?;
+
+        let report = services
+            .verify_online_integrity(
+                &administrator,
+                &OnlineVerificationRequest::new(
+                    initialized.default_tenant_id().to_canonical_text(),
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    None,
+                    None,
+                )
+                .encode()?,
+            )
+            .map_err(|failure| format!("online fenced verification: {failure:?}"))?;
+        assert_eq!(report.outcome, "fenced");
+        assert!(!report.verification_complete);
+        assert_eq!(health.health().phase(), crate::health::ProcessPhase::Fenced);
+        assert_eq!(
+            health.health().readiness(),
+            crate::health::Readiness::NotReady
         );
         Ok(())
     }

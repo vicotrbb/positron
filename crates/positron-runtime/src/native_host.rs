@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroU8;
 use std::num::NonZeroU16;
 use std::path::PathBuf;
@@ -1854,10 +1854,23 @@ fn serve_http(
             #[cfg(unix)]
             NativeListener::Unix(listener) => match listener.accept() {
                 Ok((mut stream, _)) => {
-                    match std::io::Write::write_all(&mut stream, b"positron-control-v1\n") {
-                        Ok(()) => continue,
-                        Err(_) => break,
+                    if !can_serve_accepted_connection(&admission, &cancellation) {
+                        continue;
                     }
+                    let Some(_lease) = admission.accept_connection(IpAddr::V4(Ipv4Addr::LOCALHOST))
+                    else {
+                        continue;
+                    };
+                    let _ = native_http::serve_connection(
+                        &mut stream,
+                        ListenerRole::Control,
+                        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                        None,
+                        &health,
+                        services.as_ref(),
+                        admission.connection_protection(),
+                    );
+                    continue;
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));

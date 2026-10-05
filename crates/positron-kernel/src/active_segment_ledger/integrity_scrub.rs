@@ -27,6 +27,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         transaction: TransactionId,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
         verify_integrity_from(
+            self.authority,
             &self.storage,
             self.catalog,
             self.scope,
@@ -50,6 +51,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         continuation: IntegrityScrubContinuation,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
         verify_integrity_from(
+            self.authority,
             &self.storage,
             self.catalog,
             self.scope,
@@ -81,6 +83,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
         let storage = LedgerStorage::open(volume).map_err(map_ledger_failure)?;
         verify_integrity_from(
+            authority,
             &storage,
             catalog,
             scope,
@@ -114,6 +117,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
         let storage = LedgerStorage::open(volume).map_err(map_ledger_failure)?;
         verify_integrity_against_snapshot(
+            authority,
             &storage,
             snapshot,
             catalog.instance(),
@@ -152,6 +156,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
         let storage = LedgerStorage::open_observed(volume).map_err(map_ledger_failure)?;
         verify_integrity_against_snapshot(
+            authority,
             &storage,
             snapshot,
             instance,
@@ -165,10 +170,82 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             continuation,
         )
     }
+
+    /// Observes an exact authenticated online Catalog snapshot without a
+    /// writer lease. A localized immutable failure is reported for the caller
+    /// to publish through an exact-generation compare-and-swap; this method
+    /// never substitutes a newer Catalog generation or mutates source bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_online_snapshot_integrity(
+        authority: &'kernel crate::StorageKernelResourceAuthority,
+        snapshot: &crate::CatalogSnapshot,
+        instance: InstanceId,
+        scope: SegmentScope,
+        protection: SegmentProtectionKey,
+        budget: IntegrityScrubBudget,
+        cancellation: &IntegrityCancellation,
+        transaction: TransactionId,
+        continuation: Option<IntegrityScrubContinuation>,
+    ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
+        let volume = authority
+            .primary_data_volume()
+            .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
+        let storage = LedgerStorage::open_observed(volume).map_err(map_ledger_failure)?;
+        verify_integrity_against_snapshot(
+            authority,
+            &storage,
+            snapshot,
+            instance,
+            None,
+            scope,
+            &protection,
+            IntegrityVerificationMode::Online,
+            budget,
+            cancellation,
+            transaction,
+            continuation,
+        )
+    }
+
+    /// Publishes the localized result of `verify_online_snapshot_integrity`
+    /// only if the writer still observes its exact original Catalog basis.
+    /// The caller must serialize this short compare-and-swap with other
+    /// Catalog writers; the immutable scan itself deliberately needs neither.
+    pub fn publish_online_quarantine(
+        authority: &'kernel crate::StorageKernelResourceAuthority,
+        catalog: &'catalog crate::Catalog<'kernel>,
+        basis: &crate::CatalogSnapshot,
+        report: IntegrityVerificationReport,
+        transaction: TransactionId,
+    ) -> Result<(), IntegrityFailure> {
+        if report.outcome() != IntegrityVerificationOutcome::Quarantined
+            || report.mode() != IntegrityVerificationMode::Online
+            || report.catalog_generation() != basis.number()
+        {
+            return Err(IntegrityFailure(IntegrityFailureCode::InvalidInput));
+        }
+        let segment = report
+            .quarantined_segment()
+            .ok_or(IntegrityFailure(IntegrityFailureCode::InvalidInput))?;
+        let volume = authority
+            .primary_data_volume()
+            .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
+        let storage = LedgerStorage::open(volume).map_err(map_ledger_failure)?;
+        let metadata = storage
+            .catalog_segments_observed(basis, report.scope())
+            .map_err(map_ledger_failure)?;
+        let metadata = metadata
+            .into_iter()
+            .find(|candidate| candidate.id == segment)
+            .filter(|candidate| can_localize_quarantine(*candidate))
+            .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?;
+        publish_quarantine(catalog, report.scope(), basis, metadata, transaction)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn verify_integrity_from(
+    authority: &crate::StorageKernelResourceAuthority,
     storage: &LedgerStorage,
     catalog: &crate::Catalog<'_>,
     scope: SegmentScope,
@@ -181,6 +258,7 @@ fn verify_integrity_from(
 ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
     let basis = catalog.pin().map_err(map_catalog_failure)?;
     verify_integrity_against_snapshot(
+        authority,
         storage,
         &basis,
         catalog.instance(),
@@ -197,6 +275,7 @@ fn verify_integrity_from(
 
 #[allow(clippy::too_many_arguments)]
 fn verify_integrity_against_snapshot(
+    authority: &crate::StorageKernelResourceAuthority,
     storage: &LedgerStorage,
     basis: &crate::CatalogSnapshot,
     instance: InstanceId,
@@ -225,6 +304,18 @@ fn verify_integrity_against_snapshot(
         })
         .collect::<Vec<_>>();
     let target_count = targets.len();
+    let _snapshot_protection = if immutable_scope {
+        Some(
+            super::super::SnapshotProtection::for_segments(
+                authority.snapshot_protection(),
+                authority.snapshot_barrier(),
+                targets.iter().map(|candidate| candidate.id),
+            )
+            .map_err(map_ledger_failure)?,
+        )
+    } else {
+        None
+    };
     let quarantined = quarantined_segment_ids(basis, scope)?;
     if let Some(segment) = targets
         .iter()
@@ -312,6 +403,19 @@ fn verify_integrity_against_snapshot(
                     && is_isolated_corruption(failure.code()) =>
             {
                 let Some(catalog) = catalog else {
+                    if can_localize_quarantine(*candidate) {
+                        return Ok(report(
+                            mode,
+                            scope,
+                            basis.number(),
+                            examined_segments,
+                            examined_bytes,
+                            target_count.saturating_sub(start.saturating_add(examined_segments)),
+                            IntegrityVerificationOutcome::Quarantined,
+                            Some(candidate.id),
+                            None,
+                        ));
+                    }
                     return Ok(report(
                         mode,
                         scope,
@@ -396,6 +500,19 @@ fn verify_integrity_against_snapshot(
                     && is_isolated_corruption(failure.code()) =>
             {
                 let Some(catalog) = catalog else {
+                    if can_localize_quarantine(*candidate) {
+                        return Ok(report(
+                            mode,
+                            scope,
+                            basis.number(),
+                            examined_segments,
+                            examined_bytes,
+                            target_count.saturating_sub(start.saturating_add(examined_segments)),
+                            IntegrityVerificationOutcome::Quarantined,
+                            Some(candidate.id),
+                            None,
+                        ));
+                    }
                     return Ok(report(
                         mode,
                         scope,

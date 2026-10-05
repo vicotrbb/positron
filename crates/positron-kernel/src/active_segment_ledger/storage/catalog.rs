@@ -24,11 +24,42 @@ impl LedgerStorage {
         self.catalog_segments_mode(snapshot, scope, false)
     }
 
+    /// Returns metadata named by an authenticated historical Catalog snapshot.
+    ///
+    /// A historical snapshot intentionally predates later copy-on-write
+    /// publications, so its closed-world view does not describe every current
+    /// directory entry. Callers must recover only the returned, named artifacts
+    /// through the normal authenticated recovery path.
+    pub(crate) fn catalog_segments_historical(
+        &self,
+        snapshot: &CatalogSnapshot,
+        scope: SegmentScope,
+    ) -> Result<Vec<SegmentMetadata>, LedgerFailure> {
+        self.catalog_segments_from_snapshot(snapshot, scope)
+    }
+
     fn catalog_segments_mode(
         &self,
         snapshot: &CatalogSnapshot,
         scope: SegmentScope,
         repair: bool,
+    ) -> Result<Vec<SegmentMetadata>, LedgerFailure> {
+        let all_segments = self.decode_catalog_segments(snapshot)?;
+        self.reject_unpublished_entries(&all_segments, repair)?;
+        Self::segments_for_scope(all_segments, scope)
+    }
+
+    fn catalog_segments_from_snapshot(
+        &self,
+        snapshot: &CatalogSnapshot,
+        scope: SegmentScope,
+    ) -> Result<Vec<SegmentMetadata>, LedgerFailure> {
+        Self::segments_for_scope(self.decode_catalog_segments(snapshot)?, scope)
+    }
+
+    fn decode_catalog_segments(
+        &self,
+        snapshot: &CatalogSnapshot,
     ) -> Result<Vec<SegmentMetadata>, LedgerFailure> {
         let mut all_segments = Vec::new();
         all_segments
@@ -39,7 +70,13 @@ impl LedgerStorage {
                 all_segments.push(metadata);
             }
         }
-        self.reject_unpublished_entries(&all_segments, repair)?;
+        Ok(all_segments)
+    }
+
+    fn segments_for_scope(
+        all_segments: Vec<SegmentMetadata>,
+        scope: SegmentScope,
+    ) -> Result<Vec<SegmentMetadata>, LedgerFailure> {
         let mut segments = Vec::new();
         segments
             .try_reserve_exact(all_segments.len())

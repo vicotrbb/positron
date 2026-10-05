@@ -110,10 +110,3 @@ fn quarantine_finding_count(snapshot: &crate::CatalogSnapshot) -> Result<usize, 
     }
     Ok(findings)
 }
-
-#[cfg(fuzzing)]
-pub(super) fn fuzz_quarantine_record(data: &[u8]) {
-    // The record is catalog-authenticated in production; fuzzing still proves
-    // malformed retained evidence cannot panic or manufacture a valid scope.
-    let _ = decode_quarantine(data);
-}

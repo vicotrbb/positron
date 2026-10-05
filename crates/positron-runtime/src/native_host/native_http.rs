@@ -4,6 +4,9 @@ use std::io::{Cursor, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+
 use super::TrustedProxy;
 use crate::{ConnectionProtection, HealthState, ListenerRole, ServiceHandle};
 
@@ -141,6 +144,14 @@ pub(super) trait TimeoutStream {
 }
 
 impl TimeoutStream for TcpStream {
+    fn set_timeouts(&mut self, timeout: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(timeout))?;
+        self.set_write_timeout(Some(timeout))
+    }
+}
+
+#[cfg(unix)]
+impl TimeoutStream for UnixStream {
     fn set_timeouts(&mut self, timeout: Duration) -> std::io::Result<()> {
         self.set_read_timeout(Some(timeout))?;
         self.set_write_timeout(Some(timeout))

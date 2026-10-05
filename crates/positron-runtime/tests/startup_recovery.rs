@@ -7,10 +7,19 @@ mod lifecycle;
 use lifecycle::{ObservingListeners, ObservingTasks, TestRoots};
 use positron_runtime::{
     ApplicationRuntime, BootstrapFailureCode, ExitOutcome, HostInputs, InitializationMode,
-    InitializationPlan, InstanceBootstrap, ListenerRole, ProcessPhase, Readiness, RecoveryAttempt,
-    RecoveryAttemptHost, RecoveryDecision, ServeConfiguration, ShutdownTrigger,
+    InitializationPlan, InstanceBootstrap, ListenerRole, NativeBindings, NativeHost, ProcessPhase,
+    Readiness, RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision, ServeConfiguration,
+    ShutdownTrigger,
 };
 use std::cell::Cell;
+#[cfg(unix)]
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::time::Duration;
 
 struct ReleaseOwnershipOnRetry<'volume> {
     held: Cell<Option<positron_kernel::OwnedPrimaryDataVolume>>,
@@ -205,6 +214,174 @@ fn permanent_ambiguity_never_enters_dependency_retry() -> Result<(), Box<dyn std
     assert_eq!(process.health().phase(), ProcessPhase::Fenced);
     assert_eq!(recovery.attempts.get(), 0);
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn corrupted_startup_frontier_keeps_only_authenticated_fenced_control_and_operations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("fenced-startup-frontier")?;
+    let paths = roots.bootstrap_paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
+    let active = std::fs::read_dir(roots.data.join("segments/active"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "segment")
+        })
+        .ok_or("initialized active segment")?;
+    std::fs::write(active, b"corrupt acknowledged frontier")?;
+
+    let control = std::env::temp_dir().join(format!(
+        "positron-fenced-control-{}.sock",
+        std::process::id()
+    ));
+    let loopback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    let host = NativeHost::new(NativeBindings::new(
+        control.clone(),
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+    )?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+
+    assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+    assert_eq!(process.health().readiness(), Readiness::NotReady);
+    assert!(process.services().is_none());
+    assert!(process.configuration().is_none());
+    assert_eq!(
+        process
+            .bound_endpoints()
+            .iter()
+            .map(|endpoint| endpoint.role())
+            .collect::<Vec<_>>(),
+        [ListenerRole::Control, ListenerRole::Operations]
+    );
+
+    let response = control_response(&control, Some(&administrator), "/control/fenced/inspection")?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response
+            .ends_with("{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"}")
+    );
+    let response = control_response(&control, None, "/control/fenced/inspection")?;
+    assert!(response.starts_with("HTTP/1.1 401"));
+    let response = control_response(
+        &control,
+        Some(&administrator),
+        positron_api::maintenance::VERIFY_HTTP_PATH,
+    )?;
+    assert!(response.starts_with("HTTP/1.1 404"));
+
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        ExitOutcome::Graceful
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn corrupt_catalog_fences_without_reusing_a_previously_valid_bearer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("fenced-startup-catalog")?;
+    let paths = roots.bootstrap_paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
+    let marker = std::fs::read_dir(roots.data.join("catalog/generations"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "marker")
+        })
+        .ok_or("initialized catalog marker")?;
+    std::fs::write(marker, b"corrupt catalog marker")?;
+
+    let control = std::env::temp_dir().join(format!(
+        "positron-fenced-catalog-control-{}.sock",
+        std::process::id()
+    ));
+    let loopback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    let host = NativeHost::new(NativeBindings::new(
+        control.clone(),
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+    )?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+
+    assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+    assert_eq!(process.health().readiness(), Readiness::NotReady);
+    assert!(process.services().is_none());
+    assert_eq!(
+        process
+            .bound_endpoints()
+            .iter()
+            .map(|endpoint| endpoint.role())
+            .collect::<Vec<_>>(),
+        [ListenerRole::Control, ListenerRole::Operations]
+    );
+    let response = control_response(&control, Some(&administrator), "/control/fenced/inspection")?;
+    assert!(
+        response.starts_with("HTTP/1.1 401"),
+        "a Catalog ambiguity must not reuse bootstrap-era bearer authority: {response}"
+    );
+
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        ExitOutcome::Graceful
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
+}
+
+#[cfg(unix)]
+fn control_response(
+    control: &std::path::Path,
+    bearer: Option<&str>,
+    path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut stream = (0..100)
+        .find_map(|_| match UnixStream::connect(control) {
+            Ok(stream) => Some(Ok(stream)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::thread::sleep(Duration::from_millis(5));
+                None
+            },
+            Err(error) => Some(Err(error)),
+        })
+        .ok_or("Control socket did not become available")??;
+    let authorization = bearer.map_or_else(String::new, |value| {
+        format!("Authorization: Bearer {value}\r\n")
+    });
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Length: 0\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
 }
 
 #[test]

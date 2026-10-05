@@ -10,6 +10,26 @@ pub(crate) fn affected_ranges(
     plan: &LogicalPlan,
     holes: &[IntegrityQuarantineFinding],
 ) -> Vec<QueryAffectedRange> {
+    affected_ranges_with_intersection(plan, holes, true)
+}
+
+/// Converts quarantines for a source consumed as a query dependency.
+///
+/// Log-to-trace correlation constrains its log input by the user plan but
+/// scans its trace dependency by frontier. A trace hole can therefore omit a
+/// matching target even when its own timestamps fall outside the log range.
+pub(crate) fn dependency_affected_ranges(
+    plan: &LogicalPlan,
+    holes: &[IntegrityQuarantineFinding],
+) -> Vec<QueryAffectedRange> {
+    affected_ranges_with_intersection(plan, holes, false)
+}
+
+fn affected_ranges_with_intersection(
+    plan: &LogicalPlan,
+    holes: &[IntegrityQuarantineFinding],
+    require_intersection: bool,
+) -> Vec<QueryAffectedRange> {
     let mut affected = Vec::new();
     for hole in holes {
         let range = match plan.temporal_axis() {
@@ -18,8 +38,12 @@ pub(crate) fn affected_ranges(
             TemporalAxis::QueryTime => Some(QueryAffectedRange::Unknown {
                 axis: TemporalAxis::QueryTime,
             }),
-            TemporalAxis::EventTime => event_intersection(plan, hole.event_range()),
-            TemporalAxis::IngestTime => ingest_intersection(plan, hole.ingest_range()),
+            TemporalAxis::EventTime => {
+                event_affected_range(plan, hole.event_range(), require_intersection)
+            },
+            TemporalAxis::IngestTime => {
+                ingest_affected_range(plan, hole.ingest_range(), require_intersection)
+            },
         };
         if let Some(range) = range {
             affected.push(range);
@@ -28,14 +52,16 @@ pub(crate) fn affected_ranges(
     affected
 }
 
-fn event_intersection(
+fn event_affected_range(
     plan: &LogicalPlan,
     range: AuthenticatedEventRange,
+    require_intersection: bool,
 ) -> Option<QueryAffectedRange> {
     match range {
         AuthenticatedEventRange::Known { earliest, latest }
-            if plan.temporal_range().start_nanoseconds() <= latest.value()
-                && earliest.value() < plan.temporal_range().end_nanoseconds() =>
+            if !require_intersection
+                || (plan.temporal_range().start_nanoseconds() <= latest.value()
+                    && earliest.value() < plan.temporal_range().end_nanoseconds()) =>
         {
             Some(QueryAffectedRange::Known {
                 axis: TemporalAxis::EventTime,
@@ -50,14 +76,16 @@ fn event_intersection(
     }
 }
 
-fn ingest_intersection(
+fn ingest_affected_range(
     plan: &LogicalPlan,
     range: AuthenticatedIngestRange,
+    require_intersection: bool,
 ) -> Option<QueryAffectedRange> {
     match range {
         AuthenticatedIngestRange::Known { earliest, latest }
-            if plan.temporal_range().start_nanoseconds() <= latest.value()
-                && earliest.value() < plan.temporal_range().end_nanoseconds() =>
+            if !require_intersection
+                || (plan.temporal_range().start_nanoseconds() <= latest.value()
+                    && earliest.value() < plan.temporal_range().end_nanoseconds()) =>
         {
             Some(QueryAffectedRange::Known {
                 axis: TemporalAxis::IngestTime,
