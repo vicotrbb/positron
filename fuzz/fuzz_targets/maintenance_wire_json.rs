@@ -3,8 +3,9 @@
 use libfuzzer_sys::fuzz_target;
 use positron_api::maintenance::{
     MAX_CONTROL_REQUEST_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_RUN_REQUEST_BYTES,
+    MAX_WINDOW_REQUEST_BYTES,
     MaintenanceControlResponse, MaintenanceExplainRequest, MaintenanceExplainResponse,
-    MaintenancePauseRequest, MaintenanceResumeRequest, MaintenanceRunRequest,
+    MaintenancePauseRequest, MaintenanceResumeRequest, MaintenanceRunRequest, MaintenanceWindowRequest,
     MaintenanceRunResponse, MaintenanceStatusRequest, MaintenanceStatusResponse,
 };
 
@@ -30,6 +31,12 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(request) = MaintenanceResumeRequest::decode(data) {
             let encoded = request.encode().expect("accepted resume request encodes");
             assert_eq!(MaintenanceResumeRequest::decode(&encoded), Ok(request));
+        }
+    }
+    if data.len() <= MAX_WINDOW_REQUEST_BYTES {
+        if let Ok(request) = MaintenanceWindowRequest::decode(data) {
+            let encoded = request.encode().expect("accepted window request encodes");
+            assert_eq!(MaintenanceWindowRequest::decode(&encoded), Ok(request));
         }
     }
     if let Ok(response) = MaintenanceStatusResponse::decode(data) {

@@ -18,6 +18,9 @@ pub const WINDOW_HTTP_PATH: &str = "/v1/maintenance:window";
 pub const MAX_REQUEST_BYTES: usize = 128;
 pub const MAX_RUN_REQUEST_BYTES: usize = 256;
 pub const MAX_CONTROL_REQUEST_BYTES: usize = 192;
+/// The exact largest canonical JSON window request: six permitted classes,
+/// maximum generation and duration, and a canonical idempotency key.
+pub const MAX_WINDOW_REQUEST_BYTES: usize = 266;
 pub const MAX_PAUSE_DURATION_SECONDS: u64 = 86_400;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// The total number of durable tasks the coordinator may expose in one
@@ -158,7 +161,7 @@ impl MaintenanceWindowRequest {
     }
 
     pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
-        if body.len() > MAX_CONTROL_REQUEST_BYTES {
+        if body.len() > MAX_WINDOW_REQUEST_BYTES {
             return Err(MaintenanceWireFailure);
         }
         let request: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;

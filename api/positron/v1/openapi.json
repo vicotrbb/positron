@@ -500,7 +500,7 @@
         "operationId": "SetMaintenanceWindow",
         "security": [{"apiKeyBearer": []}],
         "x-positron-availability": "available",
-        "x-positron-max-request-bytes": 192,
+        "x-positron-max-request-bytes": 266,
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceWindowRequest"}}}},
         "responses": {
           "200": {"description": "Durable acknowledgement of one finite optional-class Maintenance Window.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceWindowResponse"}}}},

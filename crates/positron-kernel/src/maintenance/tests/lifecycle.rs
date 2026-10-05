@@ -172,45 +172,45 @@ fn cooperative_cancellation_prevents_terminal_success() {
 }
 
 #[test]
-fn scheduler_order_has_no_priority_fairness_cycle() {
-    let scope = |byte| MaintenanceScope::tenant(TenantId::from_bytes([byte; 16]).expect("tenant"));
-    let state = |identity, class, task_scope| TaskState {
-        task: MaintenanceTask::with_contract(
+fn submitted_urgent_required_and_ordinary_work_start_in_their_public_priority_order() {
+    let coordinator = MaintenanceCoordinator::new();
+    let task = |identity, class, tenant| {
+        MaintenanceTask::with_contract(
             MaintenanceTaskId::new([identity; 16]).expect("identity"),
             class,
-            task_scope,
+            MaintenanceScope::tenant(TenantId::from_bytes([tenant; 16]).expect("tenant")),
             MaintenanceTrigger::Event,
             MaintenancePreconditions::new(1, 1).expect("preconditions"),
             Vec::new(),
             Vec::new(),
             ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
         )
-        .expect("task"),
-        phase: MaintenanceTaskPhase::Queued,
-        terminal_failure: None,
-        submitted_at: 0,
-        checkpoint: None,
-        last_progress_at: None,
-        pause_until: None,
-        cancellation_requested: false,
-        dispatches: 0,
-        terminal_order: None,
-        active_dispatch: None,
+        .expect("task")
     };
-    let ordinary = state(20, MaintenanceTaskClass::SchemaPromotion, scope(1));
-    let required = state(21, MaintenanceTaskClass::SchemaStatistics, scope(2));
-    let urgent = state(22, MaintenanceTaskClass::RetentionPublication, scope(3));
-    let fairness = BTreeMap::from([
-        ((ordinary.task.priority(), ordinary.task.scope()), 0),
-        ((required.task.priority(), required.task.scope()), 1),
-        ((urgent.task.priority(), urgent.task.scope()), 2),
-    ]);
+    let ordinary = task(20, MaintenanceTaskClass::SchemaPromotion, 1);
+    let required = task(21, MaintenanceTaskClass::SchemaStatistics, 2);
+    let urgent = task(22, MaintenanceTaskClass::RetentionPublication, 3);
+    for task in [&ordinary, &required, &urgent] {
+        coordinator.submit(task.clone()).expect("submitted task");
+    }
 
-    let cycle = scheduling_order(&ordinary, &required, &fairness, 0) == std::cmp::Ordering::Greater
-        && scheduling_order(&required, &urgent, &fairness, 0) == std::cmp::Ordering::Greater
-        && scheduling_order(&urgent, &ordinary, &fairness, 0) == std::cmp::Ordering::Greater;
-
-    assert!(!cycle, "priority and fairness must form a total order");
+    for (now, expected) in [(1, &urgent), (2, &required), (3, &ordinary)] {
+        let started = coordinator
+            .start_next(now, false)
+            .expect("scheduler starts submitted work")
+            .expect("one submitted task starts");
+        assert_eq!(started, *expected);
+        coordinator
+            .complete(started.identity(), true)
+            .expect("completed task is observable");
+        assert_eq!(
+            coordinator
+                .status(started.identity())
+                .expect("status")
+                .phase(),
+            MaintenanceTaskPhase::Succeeded
+        );
+    }
 }
 
 #[test]

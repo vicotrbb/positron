@@ -1,9 +1,10 @@
 use positron_api::maintenance::{
-    MAX_PAUSE_DURATION_SECONDS, MAX_TASKS, MaintenanceExplainResponse, MaintenancePauseRequest,
-    MaintenanceResourceReservations, MaintenanceResumeRequest, MaintenanceRunRequest,
-    MaintenanceRunResponse, MaintenanceServiceClient, MaintenanceStatusRequest,
-    MaintenanceStatusResponse, MaintenanceTaskAcknowledgement, MaintenanceTaskStatus,
-    MaintenanceTransport, MaintenanceWindowRequest, MaintenanceWindowResponse,
+    MAX_PAUSE_DURATION_SECONDS, MAX_TASKS, MAX_WINDOW_REQUEST_BYTES, MaintenanceExplainResponse,
+    MaintenancePauseRequest, MaintenanceResourceReservations, MaintenanceResumeRequest,
+    MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceServiceClient,
+    MaintenanceStatusRequest, MaintenanceStatusResponse, MaintenanceTaskAcknowledgement,
+    MaintenanceTaskStatus, MaintenanceTransport, MaintenanceWindowRequest,
+    MaintenanceWindowResponse,
 };
 
 #[test]
@@ -15,6 +16,22 @@ fn maintenance_window_contract_accepts_only_optional_classes_and_server_derived_
         "00000000-0000-0000-0000-000000000001".to_owned(),
     );
     assert!(request.encode().is_ok());
+    let maximum = MaintenanceWindowRequest::new(
+        vec![
+            "backup_snapshot".to_owned(),
+            "compaction".to_owned(),
+            "durable_export".to_owned(),
+            "repository_verification".to_owned(),
+            "schema_demotion".to_owned(),
+            "schema_promotion".to_owned(),
+        ],
+        u64::MAX,
+        MAX_PAUSE_DURATION_SECONDS,
+        "ffffffff-ffff-ffff-ffff-ffffffffffff".to_owned(),
+    );
+    let encoded = maximum.encode().expect("maximum window request encodes");
+    assert_eq!(encoded.len(), MAX_WINDOW_REQUEST_BYTES);
+    assert_eq!(MaintenanceWindowRequest::decode(&encoded), Ok(maximum));
     assert!(
         MaintenanceWindowRequest::new(
             vec!["tenant_purge".to_owned()],
@@ -34,6 +51,23 @@ fn maintenance_window_contract_accepts_only_optional_classes_and_server_derived_
         )
         .encode()
         .is_err()
+    );
+    let mapping: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/http.json"))
+            .expect("canonical HTTP mapping");
+    let window = mapping["mappings"]
+        .as_array()
+        .expect("mapping routes")
+        .iter()
+        .find(|route| route["rpc"] == "positron.v1.MaintenanceService/Window")
+        .expect("maintenance window route");
+    assert_eq!(window["max_request_bytes"], MAX_WINDOW_REQUEST_BYTES);
+    let openapi: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/openapi.json"))
+            .expect("canonical OpenAPI document");
+    assert_eq!(
+        openapi["paths"]["/v1/maintenance:window"]["post"]["x-positron-max-request-bytes"],
+        MAX_WINDOW_REQUEST_BYTES
     );
 }
 

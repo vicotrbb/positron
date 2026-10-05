@@ -394,7 +394,7 @@ fn maintenance_routes_accept_their_canonical_bounded_bodies_before_authenticatio
         ),
         (
             positron_api::maintenance::WINDOW_HTTP_PATH,
-            positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES,
+            positron_api::maintenance::MAX_WINDOW_REQUEST_BYTES,
         ),
     ] {
         let body = vec![b' '; limit];
@@ -462,6 +462,50 @@ fn valid_maintenance_window_larger_than_the_default_body_limit_reaches_generatio
         "a current Catalog publication may advance after fixture inspection, but the valid request must reach its typed generation fence"
     );
 
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+#[test]
+fn maximum_canonical_maintenance_window_reaches_generation_fencing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = live_test_guard();
+    let roots = TestRoots::new("maintenance-window-maximum-body")?;
+    let paths = roots.paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        positron_runtime::InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let host = NativeHost::new(bindings(&roots, "maintenance-window-maximum-body")?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let body = br#"{"deferred_classes":["backup_snapshot","compaction","durable_export","repository_verification","schema_demotion","schema_promotion"],"expected_catalog_generation":18446744073709551615,"duration_seconds":86400,"idempotency_key":"ffffffff-ffff-ffff-ffff-ffffffffffff"}"#;
+    assert_eq!(body.len(), 266, "the complete canonical request is bounded");
+
+    let response = http(
+        address(
+            &process.bound_endpoints(),
+            positron_runtime::ListenerRole::Api,
+        )?,
+        "POST",
+        positron_api::maintenance::WINDOW_HTTP_PATH,
+        &[
+            ("Authorization", &format!("Bearer {}", claim.secret())),
+            ("Content-Type", "application/json"),
+        ],
+        body,
+    )?;
+    assert_status(response.clone(), 409);
+    assert!(
+        response.contains("\"code\":\"precondition_failed\""),
+        "the bounded valid request must reach the Catalog generation fence"
+    );
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         positron_runtime::ExitOutcome::Graceful

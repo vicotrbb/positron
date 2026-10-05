@@ -57,9 +57,11 @@ pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
             positron_api::maintenance::MAX_RUN_REQUEST_BYTES
         },
         positron_api::maintenance::PAUSE_HTTP_PATH
-        | positron_api::maintenance::RESUME_HTTP_PATH
-        | positron_api::maintenance::WINDOW_HTTP_PATH => {
+        | positron_api::maintenance::RESUME_HTTP_PATH => {
             positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES
+        },
+        positron_api::maintenance::WINDOW_HTTP_PATH => {
+            positron_api::maintenance::MAX_WINDOW_REQUEST_BYTES
         },
         positron_api::tenant_aliases::HTTP_PATH => positron_api::tenant_aliases::MAX_REQUEST_BYTES,
         positron_api::tenant_service::CREATE_HTTP_PATH
@@ -263,7 +265,7 @@ pub(super) fn route<S: Read + Write>(
             let body = read_body(
                 stream,
                 head.content_length,
-                positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES,
+                positron_api::maintenance::MAX_WINDOW_REQUEST_BYTES,
             )?;
             match services.pause_maintenance(&bearer, &body) {
                 Ok(response) => Ok(Response {
@@ -303,7 +305,7 @@ pub(super) fn route<S: Read + Write>(
             let body = read_body(
                 stream,
                 head.content_length,
-                positron_api::maintenance::MAX_CONTROL_REQUEST_BYTES,
+                positron_api::maintenance::MAX_WINDOW_REQUEST_BYTES,
             )?;
             match services.set_maintenance_window(&bearer, &body) {
                 Ok(response) => Ok(Response {

@@ -1439,12 +1439,12 @@ pub fn fuzz_maintenance_stateful(data: &[u8]) {
 
 mod scheduling;
 
+#[cfg(test)]
+use scheduling::recovery_kind;
 use scheduling::{
     assign_terminal_order, dispatch_task, eligible_task_ids, reclaim_terminal_slot, reserve_task,
     retains_until_completion,
 };
-#[cfg(test)]
-use scheduling::{recovery_kind, scheduling_order};
 
 impl Default for MaintenanceCoordinator {
     fn default() -> Self {

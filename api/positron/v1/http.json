@@ -737,7 +737,7 @@
       "request": "MaintenanceWindowRequest",
       "response": "MaintenanceWindowResponse",
       "authentication": "Bearer SystemAdministration",
-      "max_request_bytes": 192,
+      "max_request_bytes": 266,
       "max_response_bytes": 2048,
       "unknown_fields": "reject",
       "request_fields": [
