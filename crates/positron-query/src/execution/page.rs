@@ -113,12 +113,14 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
             crate::availability::affected_ranges(&state.plan, snapshot.quarantined_holes());
         if !affected_ranges.is_empty() {
             return self.incomplete_page_with_affected_ranges(
-                Some(header),
-                QueryFailure::new(QueryFailureCode::IncompleteData),
-                affected_ranges,
+                super::lifecycle::IncompletePage {
+                    header: Some(header),
+                    failure: QueryFailure::new(QueryFailureCode::IncompleteData),
+                    affected_ranges,
+                    terminal_stats: stats_before_current(&state),
+                },
                 &state,
                 delivered_before,
-                stats_before_current(&state),
                 resources,
             );
         }

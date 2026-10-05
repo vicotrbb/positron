@@ -192,22 +192,19 @@ impl ServiceHandle {
                 Ok(secret) => secret,
                 Err(_) => return,
             },
-        ) {
-            if let Ok(snapshot) = catalog.pin() {
-                if positron_kernel::integrity_quarantine_findings(&snapshot)
-                    .is_ok_and(|findings| !findings.is_empty())
-                {
-                    self.mark_integrity_degraded();
-                }
-            }
+        ) && let Ok(snapshot) = catalog.pin()
+            && positron_kernel::integrity_quarantine_findings(&snapshot)
+                .is_ok_and(|findings| !findings.is_empty())
+        {
+            self.mark_integrity_degraded();
         }
     }
 
     pub(crate) fn mark_integrity_degraded(&self) {
-        if let Ok(target) = self.integrity_health.lock() {
-            if let Some(health) = target.as_ref() {
-                health.degrade_integrity();
-            }
+        if let Ok(target) = self.integrity_health.lock()
+            && let Some(health) = target.as_ref()
+        {
+            health.degrade_integrity();
         }
     }
 
