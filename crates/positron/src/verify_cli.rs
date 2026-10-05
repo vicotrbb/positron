@@ -458,6 +458,8 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    use positron_api::maintenance::OnlineVerificationReport;
+
     use super::{VerifyFailure, VerifyOptions, online_request, selected_mode};
 
     #[test]
