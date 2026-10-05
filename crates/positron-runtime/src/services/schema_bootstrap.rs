@@ -104,7 +104,7 @@ pub(super) fn recover(
     let mut replayed_blocks = false;
     for scope in scopes {
         let protection = super::tenant_segment_key(instance, &identity, scope)?;
-        let ledger = ActiveSegmentLedger::open_with_retention_time(
+        let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
             &instance._authority,
             &instance.retention_time,
             &catalog,

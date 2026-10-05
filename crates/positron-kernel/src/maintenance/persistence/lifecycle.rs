@@ -30,7 +30,8 @@ impl MaintenanceCoordinator {
                     | MaintenanceTaskClass::RetentionReclamation
             )
             || task.active_dispatch != Some(dispatch)
-            || checkpoint.completed_inputs as usize > task.task.inputs.len()
+            || (task.task.class != MaintenanceTaskClass::IntegrityScrub
+                && checkpoint.completed_inputs as usize > task.task.inputs.len())
             || task
                 .checkpoint
                 .as_ref()

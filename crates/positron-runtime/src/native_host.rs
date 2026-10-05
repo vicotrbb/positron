@@ -1343,8 +1343,12 @@ fn serve_exact_listener_role(
 ) -> Result<(), TaskFailure> {
     let prepared_grpc = if role == ListenerRole::OtlpGrpc {
         Some(
-            otlp_grpc::prepare(Arc::clone(&admission), services.clone())
-                .map_err(|_| TaskFailure::SpawnUnavailable)?,
+            otlp_grpc::prepare(
+                Arc::clone(&admission),
+                services.clone(),
+                Some(health.clone()),
+            )
+            .map_err(|_| TaskFailure::SpawnUnavailable)?,
         )
     } else {
         None
@@ -1396,6 +1400,7 @@ fn serve_listener_role(
             cancellation.clone(),
             force.clone(),
             services.clone(),
+            Some(health),
         )
         .map_err(|_| TaskFailure::JoinUnavailable)?;
     } else {

@@ -551,7 +551,8 @@ impl MaintenanceExecution<'_> {
             .ok_or(MaintenanceFailure::UnknownTask)?;
         if task.phase != MaintenanceTaskPhase::Running
             || task.active_dispatch != Some(self.dispatch)
-            || checkpoint.completed_inputs as usize > task.task.inputs.len()
+            || (task.task.class != MaintenanceTaskClass::IntegrityScrub
+                && checkpoint.completed_inputs as usize > task.task.inputs.len())
         {
             return Err(MaintenanceFailure::InvalidTransition);
         }
@@ -994,7 +995,7 @@ impl MaintenanceCoordinator {
             .state
             .lock()
             .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        let Some(identity) = eligible_task_ids(&mut state, now, clock_uncertain)?
+        let Some(identity) = eligible_task_ids(&mut state, now, clock_uncertain, &BTreeMap::new())?
             .first()
             .copied()
         else {
@@ -1029,7 +1030,7 @@ impl MaintenanceCoordinator {
             .state
             .lock()
             .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        let candidates = eligible_task_ids(&mut state, now, clock_uncertain)?;
+        let candidates = eligible_task_ids(&mut state, now, clock_uncertain, &BTreeMap::new())?;
         if candidates.is_empty() {
             return Ok(None);
         }
@@ -1105,7 +1106,8 @@ impl MaintenanceCoordinator {
             .ok_or(MaintenanceFailure::UnknownTask)?;
         if task.phase != MaintenanceTaskPhase::Running
             || task.task.class == MaintenanceTaskClass::RetentionPublication
-            || checkpoint.completed_inputs as usize > task.task.inputs.len()
+            || (task.task.class != MaintenanceTaskClass::IntegrityScrub
+                && checkpoint.completed_inputs as usize > task.task.inputs.len())
         {
             return Err(MaintenanceFailure::InvalidTransition);
         }

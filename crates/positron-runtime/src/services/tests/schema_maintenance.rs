@@ -310,6 +310,207 @@ fn runtime_maintenance_worker_verifies_a_durable_integrity_scrub_task() -> Resul
 }
 
 #[test]
+fn runtime_integrity_scrub_accumulates_three_passes_and_resumes_after_cancellation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _) = fixture.initialized()?;
+    let services = Arc::new(ServiceHandle::new(Arc::clone(&initialized))?);
+    services.install_integrity_scrub_budget_for_test(2)?;
+    let scope = SegmentScope::new(
+        initialized.tenant,
+        positron_domain::routing::SignalKind::Logs,
+        initialized.logs_shard,
+    );
+    let catalog = open_catalog(&initialized)?;
+    let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+    let pass_segments = 2_usize;
+    let segment_count = pass_segments
+        .checked_mul(3)
+        .and_then(|count| count.checked_add(1))
+        .ok_or("bounded scrub fixture count")?;
+    for _ in 0..segment_count {
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            super::super::tenant_segment_key(&initialized, &identity, scope)?,
+        )?
+        .seal()?;
+    }
+    let active = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        super::super::tenant_segment_key(&initialized, &identity, scope)?,
+    )?;
+    let PolicyEvaluation::Accepted(evaluated) = IngestPolicy::preserving(1)?.evaluate(
+        NativeLogCandidate::new(None, None, None, Vec::new(), LogMetadata::empty()),
+        PolicyReceiver::OtlpGrpc,
+    )?
+    else {
+        return Err("preserving policy rejected scrub fixture".into());
+    };
+    let capacity = initialized
+        ._authority
+        .governor()
+        .reserve(WorkClaim::tenant(
+            initialized.tenant,
+            WorkKind::Ingest,
+            ResourceAmounts::only(ResourceDimension::MemoryBytes, 1_048_576)?,
+        )?)?;
+    active.append(
+        LogStore::new()
+            .prepare(
+                active.begin_store_block(capacity, StoreBlockIdentity::new([0xde; 16])?)?,
+                vec![StoredLogRecord::checked_evaluated(
+                    positron_domain::value::ValueLimitProfile::release_1_system_maximum(),
+                    *evaluated,
+                )?],
+            )?
+            .into_store_block(),
+    )?;
+    drop(active);
+    let generation = catalog.pin()?.number();
+    let task = MaintenanceTask::with_contract(
+        MaintenanceTaskId::new([0xdd; 16]).map_err(|_| "invalid task id")?,
+        MaintenanceTaskClass::IntegrityScrub,
+        positron_kernel::MaintenanceScope::segment(
+            scope.tenant_id(),
+            scope.signal_kind(),
+            scope.shard_id(),
+        ),
+        MaintenanceTrigger::Event,
+        MaintenancePreconditions::new(generation, 1).map_err(|_| "invalid preconditions")?,
+        Vec::new(),
+        Vec::new(),
+        ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+    )
+    .map_err(|_| "invalid integrity scrub task")?;
+    let task_id = task.identity();
+    initialized
+        .maintenance_coordinator()
+        .submit_and_persist(&catalog, task, 0)
+        .map_err(|_| "submit integrity scrub task")?;
+    drop(catalog);
+
+    let cancellation = crate::TaskCancellation::new();
+    let worker_services = Arc::clone(&services);
+    let worker_cancellation = cancellation.clone();
+    let worker =
+        std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancellation));
+    let required_progress = u32::try_from(
+        pass_segments
+            .checked_mul(3)
+            .ok_or("bounded cumulative progress")?,
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let status = initialized
+            .maintenance_coordinator()
+            .status(task_id)
+            .map_err(|_| "integrity scrub status")?;
+        if status
+            .checkpoint()
+            .is_some_and(|checkpoint| checkpoint.completed_inputs() >= required_progress)
+        {
+            cancellation.cancel();
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("three bounded scrub passes did not checkpoint".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        worker.join().map_err(|_| "maintenance worker panicked")?,
+        Ok(())
+    );
+    let before_restart = initialized
+        .maintenance_coordinator()
+        .status(task_id)
+        .map_err(|_| "cancelled integrity scrub status")?;
+    assert_eq!(before_restart.phase(), MaintenanceTaskPhase::Running);
+    assert_eq!(
+        before_restart
+            .checkpoint()
+            .ok_or("checkpoint before restart")?
+            .completed_inputs(),
+        required_progress
+    );
+
+    drop(services);
+    let resumed = Arc::new(ServiceHandle::new(Arc::clone(&initialized))?);
+    let resumed_status = initialized
+        .maintenance_coordinator()
+        .status(task_id)
+        .map_err(|_| "resumed integrity scrub status")?;
+    assert_eq!(resumed_status.phase(), MaintenanceTaskPhase::Queued);
+    assert_eq!(
+        resumed_status
+            .checkpoint()
+            .ok_or("checkpoint after restart")?
+            .completed_inputs(),
+        required_progress
+    );
+    let continuation = positron_kernel::IntegrityScrubContinuation::decode(
+        resumed_status
+            .checkpoint()
+            .ok_or("resumed checkpoint")?
+            .opaque_progress(),
+    )
+    .map_err(|_| "resumed integrity continuation")?;
+    let catalog = open_catalog(&initialized)?;
+    let resumed_snapshot = catalog.pin()?;
+    assert_eq!(
+        continuation.source_identity(),
+        resumed_snapshot.integrity_scope_source_identity(scope)?,
+        "recovery must retain the immutable source binding recorded by the checkpoint"
+    );
+    drop((resumed_snapshot, catalog));
+    let resumed_cancellation = crate::TaskCancellation::new();
+    let resumed_services = Arc::clone(&resumed);
+    let worker_cancellation = resumed_cancellation.clone();
+    let worker =
+        std::thread::spawn(move || resumed_services.run_maintenance_worker(&worker_cancellation));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if initialized
+            .maintenance_coordinator()
+            .status(task_id)
+            .map_err(|_| "completed integrity scrub status")?
+            .phase()
+            == MaintenanceTaskPhase::Succeeded
+        {
+            resumed_cancellation.cancel();
+            break;
+        }
+        if Instant::now() >= deadline {
+            let status = initialized
+                .maintenance_coordinator()
+                .status(task_id)
+                .map_err(|_| "timed out integrity scrub status")?;
+            return Err(format!(
+                "resumed integrity scrub did not complete (phase: {:?}, terminal: {:?}, checkpoint: {:?})",
+                status.phase(),
+                status.terminal_failure(),
+                status.checkpoint().map(positron_kernel::MaintenanceCheckpoint::completed_inputs),
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        worker
+            .join()
+            .map_err(|_| "resumed maintenance worker panicked")?,
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
 fn runtime_maintenance_worker_discovers_and_runs_one_integrity_scrub_per_scope()
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
@@ -830,6 +1031,19 @@ fn runtime_worker_wakes_for_a_poststart_future_lease_expiry() -> Result<(), Box<
         worker.join().map_err(|_| "maintenance worker panicked")?,
         Ok(())
     );
+    drop(services);
+    drop(initialized);
+    let reopened = ServiceHandle::new(fixture.reopen()?)?;
+    assert_eq!(
+        reopened
+            .instance
+            .maintenance_coordinator()
+            .status(task)
+            .map_err(|_| "restored poststart expiry task status")?
+            .phase(),
+        MaintenanceTaskPhase::Succeeded,
+        "the exact poststart expiry completion remains durable after reopen"
+    );
     Ok(())
 }
 
@@ -1138,163 +1352,6 @@ fn native_runtime_worker_expires_a_durable_lease_and_joins_before_reopen()
             .phase(),
         MaintenanceTaskPhase::Succeeded,
         "the worker-published terminal result survives reopen"
-    );
-    Ok(())
-}
-
-#[test]
-fn native_runtime_worker_periodically_expires_a_poststart_future_lease_and_persists_completion()
--> Result<(), Box<dyn Error>> {
-    let _test_guard = live_native_maintenance_test_guard();
-    let fixture = Fixture::new()?;
-
-    let [operations, api, otlp_grpc, otlp_http, loki_push] = reserve_native_addresses()?;
-    static NEXT_POSTSTART_NATIVE_CONTROL: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
-    let control = std::env::temp_dir().join(format!(
-        "positron-poststart-maintenance-worker-{}-{}.sock",
-        std::process::id(),
-        NEXT_POSTSTART_NATIVE_CONTROL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    match fs::remove_file(&control) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(error) => return Err(error.into()),
-    }
-    let host = NativeHost::new(NativeBindings::new(
-        control, operations, api, otlp_grpc, otlp_http, loki_push,
-    )?);
-    let paths = BootstrapPaths::new(
-        &fixture.root.join("data"),
-        &fixture.root.join("secrets"),
-        MountQualification::LocalHost,
-    )?;
-    let process = ApplicationRuntime::start(
-        ServeConfiguration::new(paths, InitializationMode::InitializeIfEmpty),
-        HostInputs::new(&host, &host),
-    )?;
-    let services = process.services().ok_or("serving services")?;
-    let scope = SegmentScope::new(
-        services.instance.tenant,
-        positron_domain::routing::SignalKind::Logs,
-        services.instance.logs_shard,
-    );
-    let _catalog_operation = services.catalog_operation()?;
-    let catalog = open_catalog(&services.instance)?;
-    let identity = positron_governance::Identity::open(&catalog.pin()?)?;
-    let protection = super::super::tenant_segment_key(&services.instance, &identity, scope)?;
-    let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
-        &services.instance._authority,
-        &services.instance.retention_time,
-        &catalog,
-        scope,
-        protection,
-    )?;
-    let PolicyEvaluation::Accepted(evaluated) = IngestPolicy::preserving(1)?.evaluate(
-        NativeLogCandidate::new(None, None, None, Vec::new(), LogMetadata::empty()),
-        PolicyReceiver::OtlpGrpc,
-    )?
-    else {
-        return Err("preserving policy rejected periodic-worker fixture".into());
-    };
-    let capacity = services
-        .instance
-        ._authority
-        .governor()
-        .reserve(WorkClaim::tenant(
-            services.instance.tenant,
-            WorkKind::Ingest,
-            ResourceAmounts::only(ResourceDimension::MemoryBytes, 1_048_576)?,
-        )?)?;
-    ledger.append(
-        LogStore::new()
-            .prepare(
-                ledger.begin_store_block(capacity, StoreBlockIdentity::new([0x94; 16])?)?,
-                vec![StoredLogRecord::checked_evaluated(
-                    positron_domain::value::ValueLimitProfile::release_1_system_maximum(),
-                    *evaluated,
-                )?],
-            )?
-            .into_store_block(),
-    )?;
-    drop(ledger);
-    let protection = super::super::tenant_segment_key(&services.instance, &identity, scope)?;
-    let ledger = ActiveSegmentLedger::open_with_retention_time(
-        &services.instance._authority,
-        &services.instance.retention_time,
-        &catalog,
-        scope,
-        protection,
-    )?;
-    let created_at = services.instance.retention_time.governance_now_seconds()?;
-    let coordinator = services.instance.maintenance_coordinator();
-    let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
-        coordinator,
-        created_at,
-        std::num::NonZeroU64::new(1).ok_or("nonzero ttl")?,
-        catalog.pin()?.identity(),
-    )?;
-    let task = MaintenanceTaskId::new(lease.identity().to_bytes()).expect("lease task id");
-    drop(lease);
-    drop(ledger);
-    drop(catalog);
-    drop(_catalog_operation);
-
-    let deadline = Instant::now() + Duration::from_secs(4);
-    loop {
-        let status = services
-            .instance
-            .maintenance_coordinator()
-            .status(task)
-            .map_err(|_| "maintenance task status")?;
-        let phase = status.phase();
-        if phase == MaintenanceTaskPhase::Succeeded {
-            break;
-        }
-        if Instant::now() >= deadline {
-            let clock = services.instance.retention_time.status().state();
-            let now = services.instance.retention_time.governance_now_seconds();
-            let not_before = status.task().not_before();
-            let active_window = now.ok().and_then(|now| {
-                services
-                    .instance
-                    .maintenance_coordinator()
-                    .active_window_until(task, now)
-                    .ok()
-            });
-            let catalog_gate = match services.try_catalog_operation() {
-                Ok(Some(gate)) => {
-                    drop(gate);
-                    "available"
-                },
-                Ok(None) => "busy",
-                Err(_) => "poisoned",
-            };
-            drop(services);
-            let outcome = process.shutdown(ShutdownTrigger::FirstSignal);
-            return Err(format!(
-                "native maintenance role did not complete poststart future expiry work (created_at: {created_at}, phase: {phase:?}, not_before: {not_before}, now: {now:?}, clock: {clock:?}, active_window: {active_window:?}, catalog_gate: {catalog_gate}, shutdown: {outcome:?})"
-            )
-            .into());
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    drop(services);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        crate::ExitOutcome::Graceful,
-        "shutdown joins the native maintenance role after poststart expiry work"
-    );
-    let reopened = ServiceHandle::new(fixture.reopen()?)?;
-    assert_eq!(
-        reopened
-            .instance
-            .maintenance_coordinator()
-            .status(task)
-            .map_err(|_| "restored maintenance task status")?
-            .phase(),
-        MaintenanceTaskPhase::Succeeded,
-        "the poststart worker completion survives reopen"
     );
     Ok(())
 }

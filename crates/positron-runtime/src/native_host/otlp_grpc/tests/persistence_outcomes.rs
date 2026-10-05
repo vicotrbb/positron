@@ -296,8 +296,14 @@ impl ReceiverHarness {
         let force = TaskCancellation::new();
         let serve_force = force.clone();
         let server = std::thread::spawn(move || {
-            serve(admission, serve_cancellation, serve_force, Some(services))
-                .expect("test OTLP gRPC server");
+            serve(
+                admission,
+                serve_cancellation,
+                serve_force,
+                Some(services),
+                None,
+            )
+            .expect("test OTLP gRPC server");
         });
         Ok(Self {
             endpoint,

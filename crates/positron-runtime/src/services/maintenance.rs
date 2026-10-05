@@ -1,6 +1,7 @@
 //! Runtime composition of the Catalog-backed maintenance coordinator.
 
 use std::{
+    collections::BTreeMap,
     sync::{Arc, Condvar, Mutex, MutexGuard},
     time::Duration,
 };
@@ -252,14 +253,17 @@ fn start_installed_maintenance<'authority>(
     )
     .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
     let coordinator = instance.maintenance_coordinator();
-    let selected = coordinator.start_next_with_reservation_and_persist_for_classes(
-        &catalog,
-        &instance._authority,
-        now,
-        instance.retention_time.status().state()
-            == positron_kernel::LifecycleClockState::ClockUncertain,
-        INSTALLED_TASK_CLASSES,
-    );
+    let snapshot_lease_times = snapshot_lease_schedule_times(services)?;
+    let selected = coordinator
+        .start_next_with_reservation_and_persist_for_classes_with_snapshot_lease_times(
+            &catalog,
+            &instance._authority,
+            now,
+            instance.retention_time.status().state()
+                == positron_kernel::LifecycleClockState::ClockUncertain,
+            INSTALLED_TASK_CLASSES,
+            &snapshot_lease_times,
+        );
     let Some(execution) = (match selected {
         Ok(execution) => execution,
         Err(failure) => return Err(map_failure(failure)),
@@ -311,6 +315,31 @@ fn start_installed_maintenance<'authority>(
         _ => return Err(ServiceFailure::Internal),
     };
     Ok(Some(execution))
+}
+
+fn snapshot_lease_schedule_times(
+    services: &super::ServiceHandle,
+) -> Result<BTreeMap<MaintenanceScope, u64>, ServiceFailure> {
+    let coordinator = services.instance.maintenance_coordinator();
+    let statuses = coordinator.statuses().map_err(map_failure)?;
+    let mut times = BTreeMap::new();
+    for status in statuses {
+        let task = status.task();
+        if status.phase() != positron_kernel::MaintenanceTaskPhase::Queued
+            || task.class() != MaintenanceTaskClass::SnapshotLeaseExpiry
+        {
+            continue;
+        }
+        let scope = task.scope();
+        let segment_scope = scope_for_segment_task(scope)?;
+        let now = services
+            .instance
+            .retention_time
+            .governance_time_seconds(segment_scope)
+            .map_err(|_| ServiceFailure::StorageUnavailable)?;
+        times.insert(scope, now);
+    }
+    Ok(times)
 }
 
 fn complete_installed_maintenance(
@@ -591,8 +620,7 @@ fn complete_integrity_scrub(
         scope,
         key,
         positron_kernel::IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
-            .map_err(|_| ServiceFailure::Internal)?,
+        services.maintenance_integrity_scrub_budget()?,
         cancellation,
         transaction,
         continuation,
@@ -618,8 +646,14 @@ fn complete_integrity_scrub(
             let sequence = status
                 .checkpoint()
                 .map_or(1, |checkpoint| checkpoint.sequence().saturating_add(1));
-            let completed_inputs = u32::try_from(report.examined_segments())
+            let current_completed_inputs = status
+                .checkpoint()
+                .map_or(0, positron_kernel::MaintenanceCheckpoint::completed_inputs);
+            let examined_inputs = u32::try_from(report.examined_segments())
                 .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+            let completed_inputs = current_completed_inputs
+                .checked_add(examined_inputs)
+                .ok_or(ServiceFailure::CapacityUnavailable)?;
             let checkpoint = MaintenanceCheckpoint::new(
                 sequence,
                 completed_inputs,

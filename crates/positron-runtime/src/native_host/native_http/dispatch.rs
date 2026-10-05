@@ -127,6 +127,13 @@ pub(super) fn route<S: Read + Write>(
     health: &HealthState,
     services: Option<&ServiceHandle>,
 ) -> Result<Response, Response> {
+    if matches!(
+        role,
+        ListenerRole::Api | ListenerRole::OtlpHttp | ListenerRole::LokiPush
+    ) && !health.admits_data_or_mutation()
+    {
+        return Ok(Response::empty(503));
+    }
     match (role, head.method.as_str(), head.path.as_str()) {
         (ListenerRole::Api, "POST", positron_api::api_keys::HTTP_PATH) => {
             let services = services.ok_or_else(|| Response::empty(503))?;
@@ -690,6 +697,19 @@ mod tests {
             b"{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"}"
         );
 
+        for (role, path) in [
+            (ListenerRole::Api, "/v1/capabilities:negotiate"),
+            (ListenerRole::OtlpHttp, "/v1/logs"),
+            (ListenerRole::LokiPush, "/loki/api/v1/push"),
+        ] {
+            let response = request_for_role(&state.health(), role, "POST", path, None);
+            assert_eq!(
+                response.status(),
+                503,
+                "the fenced lifecycle authority closes every HTTP data or mutation listener"
+            );
+        }
+
         let response = control_request_with_method(
             &state.health(),
             None,
@@ -716,10 +736,20 @@ mod tests {
         method: &str,
         path: &str,
     ) -> super::Response {
+        request_for_role(health, ListenerRole::Control, method, path, bearer)
+    }
+
+    fn request_for_role(
+        health: &crate::HealthState,
+        role: ListenerRole,
+        method: &str,
+        path: &str,
+        bearer: Option<String>,
+    ) -> super::Response {
         let mut stream = Cursor::new(Vec::new());
         match route(
             &mut stream,
-            ListenerRole::Control,
+            role,
             SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
             None,
             RequestHead {

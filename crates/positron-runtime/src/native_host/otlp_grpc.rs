@@ -29,7 +29,7 @@ use super::api_http::IdleIo;
 use super::h2_observer::H2Observer;
 use super::otlp_outcome::{OtlpFailure, OtlpSignal};
 use super::{Admission, ConnectionLease, TrustedProxy};
-use crate::{ServiceFailure, ServiceHandle, TaskCancellation};
+use crate::{HealthState, ServiceFailure, ServiceHandle, TaskCancellation};
 
 const MAX_MESSAGE_BYTES: usize = 1_048_576;
 
@@ -53,6 +53,7 @@ pub(super) struct PreparedGrpc {
     protection: crate::ConnectionProtection,
     http2_profile: positron_config::Http2Profile,
     services: ServiceHandle,
+    health: Option<HealthState>,
     blocking: BlockingIngestExecutor,
     blocking_handle: BlockingIngestHandle,
 }
@@ -60,6 +61,7 @@ pub(super) struct PreparedGrpc {
 pub(super) fn prepare(
     admission: Arc<Admission>,
     services: Option<ServiceHandle>,
+    health: Option<HealthState>,
 ) -> Result<PreparedGrpc, GrpcFailure> {
     let services = services.ok_or(GrpcFailure)?;
     let listener = admission.tcp_listener().map_err(|_| GrpcFailure)?;
@@ -94,6 +96,7 @@ pub(super) fn prepare(
         protection,
         http2_profile,
         services,
+        health,
         blocking,
         blocking_handle,
     })
@@ -111,6 +114,7 @@ impl PreparedGrpc {
     ) -> Result<(), GrpcFailure> {
         let admission = Arc::clone(&self.admission);
         let services = self.services.clone();
+        let health = self.health.clone();
         let blocking_handle = self.blocking_handle.clone();
         let listener = self.listener;
         let request_admission = Arc::clone(&admission);
@@ -151,6 +155,7 @@ impl PreparedGrpc {
             let receiver = OtlpLogsServer::new(OtlpLogsGrpc {
                 services: services.clone(),
                 blocking: blocking_handle.clone(),
+                health: health.clone(),
             })
             .accept_compressed(CompressionEncoding::Gzip)
             .body_deadline(protection.body_deadline())
@@ -168,6 +173,7 @@ impl PreparedGrpc {
             let trace_receiver = OtlpTracesServer::new(OtlpTracesGrpc {
                 services,
                 blocking: blocking_handle,
+                health,
             })
             .accept_compressed(CompressionEncoding::Gzip)
             .body_deadline(protection.body_deadline())
@@ -422,8 +428,9 @@ pub(super) fn serve(
     cancellation: TaskCancellation,
     force: TaskCancellation,
     services: Option<ServiceHandle>,
+    health: Option<HealthState>,
 ) -> Result<(), GrpcFailure> {
-    prepare(admission, services)?.serve(cancellation, force)
+    prepare(admission, services, health)?.serve(cancellation, force)
 }
 
 fn map_decode_failure<B>(response: http::Response<B>) -> http::Response<B> {
@@ -564,12 +571,14 @@ fn proxy_hints(
 struct OtlpLogsGrpc {
     services: ServiceHandle,
     blocking: BlockingIngestHandle,
+    health: Option<HealthState>,
 }
 
 #[derive(Clone, Debug)]
 struct OtlpTracesGrpc {
     services: ServiceHandle,
     blocking: BlockingIngestHandle,
+    health: Option<HealthState>,
 }
 
 #[tonic::async_trait]
@@ -578,6 +587,15 @@ impl LogsService for OtlpLogsGrpc {
         &self,
         mut request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
+        if self
+            .health
+            .as_ref()
+            .is_some_and(|health| !health.admits_data_or_mutation())
+        {
+            return Err(Status::unavailable(
+                "OTLP Logs ingest is temporarily unavailable",
+            ));
+        }
         let context = request
             .extensions()
             .get::<AuthorizedContext>()
@@ -617,6 +635,15 @@ impl TraceService for OtlpTracesGrpc {
         &self,
         mut request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
+        if self
+            .health
+            .as_ref()
+            .is_some_and(|health| !health.admits_data_or_mutation())
+        {
+            return Err(Status::unavailable(
+                "OTLP Traces ingest is temporarily unavailable",
+            ));
+        }
         let context = request
             .extensions()
             .get::<AuthorizedContext>()

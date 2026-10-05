@@ -94,6 +94,8 @@ pub struct ServiceHandle {
     query_execution_test_hook: Arc<Mutex<Option<Arc<dyn QueryExecutionTestHook>>>>,
     #[cfg(test)]
     online_verification_test_hook: Arc<Mutex<Option<Arc<dyn OnlineVerificationTestHook>>>>,
+    #[cfg(test)]
+    integrity_scrub_budget: Arc<Mutex<Option<usize>>>,
     // Keep the authority alive until every governed session and admission
     // capability above has released its transferred reservations.
     instance: Arc<InitializedInstance>,
@@ -130,10 +132,12 @@ pub(crate) trait QueryExecutionTestHook: Send + Sync {
     fn after_admission(&self);
 }
 
-/// Test-only synchronization point after online verification has captured its
-/// immutable Catalog basis and released all foreground Catalog ownership.
+/// Test-only synchronization points around online verification's admitted
+/// task and immutable Catalog basis. Production admission has no callback.
 #[cfg(test)]
 pub(crate) trait OnlineVerificationTestHook: Send + Sync {
+    fn after_admission(&self) {}
+
     fn after_basis_capture(&self);
 }
 
@@ -274,8 +278,38 @@ impl ServiceHandle {
             query_execution_test_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             online_verification_test_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            integrity_scrub_budget: Arc::new(Mutex::new(None)),
             instance,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_integrity_scrub_budget_for_test(
+        &self,
+        segments: usize,
+    ) -> Result<(), ServiceFailure> {
+        positron_kernel::IntegrityScrubBudget::new(segments)
+            .map_err(|_| ServiceFailure::Internal)?;
+        *self
+            .integrity_scrub_budget
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)? = Some(segments);
+        Ok(())
+    }
+
+    pub(crate) fn maintenance_integrity_scrub_budget(
+        &self,
+    ) -> Result<positron_kernel::IntegrityScrubBudget, ServiceFailure> {
+        #[cfg(test)]
+        let segments = self
+            .integrity_scrub_budget
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?
+            .unwrap_or(positron_kernel::IntegrityScrubBudget::MAX_SEGMENTS);
+        #[cfg(not(test))]
+        let segments = positron_kernel::IntegrityScrubBudget::MAX_SEGMENTS;
+        positron_kernel::IntegrityScrubBudget::new(segments).map_err(|_| ServiceFailure::Internal)
     }
 
     pub(crate) fn prepare_shutdown_schema_checkpoint(&self) -> Result<(), ServiceFailure> {
@@ -574,6 +608,21 @@ impl ServiceHandle {
             .clone();
         if let Some(hook) = hook {
             hook.after_basis_capture();
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn await_online_verification_admission_test_hook(
+        &self,
+    ) -> Result<(), ServiceFailure> {
+        let hook = self
+            .online_verification_test_hook
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?
+            .clone();
+        if let Some(hook) = hook {
+            hook.after_admission();
         }
         Ok(())
     }

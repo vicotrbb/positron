@@ -239,6 +239,16 @@ impl HealthState {
         decode_phase(self.phase.load(Ordering::Acquire))
     }
 
+    /// Whether a live data or mutation request may enter the runtime.
+    ///
+    /// Operations inspection remains available after fencing, but a process
+    /// with ambiguous integrity or ownership evidence must not admit work that
+    /// can expose or alter tenant data.
+    #[must_use]
+    pub(crate) fn admits_data_or_mutation(&self) -> bool {
+        self.phase() == ProcessPhase::Serving
+    }
+
     /// Reports localized immutable-data corruption while preserving the
     /// lifecycle phase that continues to govern traffic admission.
     #[must_use]

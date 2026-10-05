@@ -227,6 +227,9 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::TaskUnavailable)?
                 .ok_or(MaintenanceServiceFailure::TaskUnavailable)?
         };
+        #[cfg(test)]
+        self.await_online_verification_admission_test_hook()
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         // Capture G0 only after the coordinator has admitted the task and
         // acquired its governor reservation. The scan itself holds neither
         // the writer gate nor a catalog writer lease.
@@ -239,6 +242,19 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         )
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        if request
+            .expected_catalog_generation()
+            .is_some_and(|expected| expected != snapshot.number())
+        {
+            let _catalog_operation = self
+                .catalog_operation()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let catalog = self.open_maintenance_catalog()?;
+            execution
+                .complete_and_persist(coordinator, &catalog, false)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            return Ok(stale_online_report(scope, snapshot.number()));
+        }
         #[cfg(test)]
         self.await_online_verification_test_hook()
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
@@ -1476,6 +1492,22 @@ mod tests {
         }
     }
 
+    struct BlockingOnlineVerificationAdmission {
+        captured: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl OnlineVerificationTestHook for BlockingOnlineVerificationAdmission {
+        fn after_admission(&self) {
+            let _ = self.captured.send(());
+            if let Ok(release) = self.release.lock() {
+                let _ = release.recv();
+            }
+        }
+
+        fn after_basis_capture(&self) {}
+    }
+
     #[test]
     fn authenticated_maintenance_status_waits_for_catalog_ownership_before_attribution()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2261,6 +2293,96 @@ mod tests {
         assert!(report.catalog_generation > generation);
         assert_eq!(report.outcome, "stale");
         assert!(!report.verification_complete);
+        Ok(())
+    }
+
+    #[test]
+    fn expected_online_generation_never_rebases_after_admission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = Arc::new(ServiceHandle::new(Arc::clone(&initialized))?);
+        services.ingest_otlp_logs(
+            &ingest,
+            request("online-verify-admission-generation").encode_to_vec(),
+        )?;
+        let catalog = open_catalog(&initialized)?;
+        let snapshot = catalog.pin()?;
+        let scope = snapshot
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        let snapshot = catalog.pin()?;
+        let generation = snapshot.number();
+        let task =
+            super::online_verification_task_identity(scope, snapshot.identity().to_bytes(), None)
+                .map_err(|_| "online verification task identity")?;
+        drop((snapshot, catalog));
+
+        let (captured_tx, captured_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        services.install_online_verification_test_hook(Arc::new(
+            BlockingOnlineVerificationAdmission {
+                captured: captured_tx,
+                release: Mutex::new(release_rx),
+            },
+        ))?;
+        let verifying = Arc::clone(&services);
+        let tenant = initialized.default_tenant_id().to_canonical_text();
+        let verification_administrator = administrator.clone();
+        let verification = std::thread::spawn(move || {
+            verifying.verify_online_integrity(
+                &verification_administrator,
+                &OnlineVerificationRequest::new(
+                    tenant,
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    Some(generation),
+                    None,
+                )
+                .encode()
+                .expect("bounded request"),
+            )
+        });
+        captured_rx.recv_timeout(Duration::from_secs(1))?;
+        services
+            .bind_tenant_alias(
+                &administrator,
+                &TenantAliasBindRequest::new(
+                    initialized.default_tenant_id().to_canonical_text(),
+                    "verify-admission-race".to_owned(),
+                    1,
+                    "00000000-0000-0000-0000-000000000084".to_owned(),
+                )
+                .encode()?,
+            )
+            .map_err(|_| "successor alias publication")?;
+        release_tx.send(())?;
+        let report = verification
+            .join()
+            .map_err(|_| "verification thread panicked")?
+            .map_err(|failure| format!("online verification: {failure:?}"))?;
+        assert_eq!(report.outcome, "stale");
+        assert!(!report.verification_complete);
+        assert!(report.catalog_generation > generation);
+        assert_eq!(
+            initialized
+                .maintenance_coordinator()
+                .status(task)
+                .map_err(|_| "online verification task status")?
+                .phase(),
+            MaintenanceTaskPhase::Failed,
+            "the admitted task is terminal rather than leaking after the stale basis check"
+        );
         Ok(())
     }
 
