@@ -186,24 +186,8 @@ fn publish_scope(
     metadata: &[SegmentMetadata],
     options: PublicationOptions<'_>,
 ) -> Result<crate::CatalogSnapshot, LedgerFailure> {
-    let PublicationOptions {
-        frontier,
-        anchor,
-        lifecycle_clock,
-        exact_scope,
-        additional,
-        replaced_tasks,
-    } = options;
-    let (object_capacity, total_bytes) = publication_preflight(
-        basis,
-        storage,
-        scope,
-        metadata,
-        frontier,
-        lifecycle_clock,
-        &additional,
-        &replaced_tasks,
-    )?;
+    let (object_capacity, total_bytes) =
+        publication_preflight(basis, storage, scope, metadata, &options)?;
     if object_capacity > MAX_CATALOG_OBJECTS || total_bytes > MAX_CATALOG_TOTAL_BYTES {
         return Err(LedgerFailure::new(LedgerFailureCode::LimitExceeded));
     }
@@ -213,27 +197,7 @@ fn publish_scope(
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
     let mut lifecycle_anchor_seen = false;
     for bytes in basis.plaintext_objects() {
-        if storage.is_scope_metadata(bytes, scope) {
-            continue;
-        }
-        if crate::maintenance::durable_task_record_identity(bytes)
-            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
-            .is_some_and(|identity| replaced_tasks.contains(&identity))
-        {
-            continue;
-        }
-        if frontier.is_some()
-            && super::retention_frontier::decode(bytes)?
-                .is_some_and(|(candidate, _)| candidate == scope)
-        {
-            continue;
-        }
-        let lifecycle_anchor = crate::retention_time::validate_catalog_anchor_singleton(
-            bytes,
-            &mut lifecycle_anchor_seen,
-        )
-        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
-        if lifecycle_clock.is_some() && lifecycle_anchor {
+        if !retains_basis_object(storage, scope, &options, bytes, &mut lifecycle_anchor_seen)? {
             continue;
         }
         let mut retained = Vec::new();
@@ -243,6 +207,14 @@ fn publish_scope(
         retained.extend_from_slice(bytes);
         objects.push(CatalogObject::new(retained)?);
     }
+    let PublicationOptions {
+        frontier,
+        anchor,
+        lifecycle_clock,
+        exact_scope,
+        additional,
+        replaced_tasks: _,
+    } = options;
     for segment in metadata {
         objects.push(CatalogObject::new(storage.metadata_object(*segment))?);
     }
@@ -330,42 +302,24 @@ fn publish_scope(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn publication_preflight(
     basis: &crate::CatalogSnapshot,
     storage: &LedgerStorage,
     scope: SegmentScope,
     metadata: &[SegmentMetadata],
-    frontier: Option<IngestTime>,
-    lifecycle_clock: Option<&crate::retention_time::StagedCatalogAnchor<'_>>,
-    additional: &[CatalogObject],
-    replaced_tasks: &BTreeSet<crate::MaintenanceTaskId>,
+    options: &PublicationOptions<'_>,
 ) -> Result<(usize, usize), LedgerFailure> {
     let mut count = 0_usize;
     let mut total_bytes = 0_usize;
     let mut lifecycle_anchor_seen = false;
     for candidate in basis.plaintext_objects() {
-        if storage.is_scope_metadata(candidate, scope) {
-            continue;
-        }
-        if crate::maintenance::durable_task_record_identity(candidate)
-            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
-            .is_some_and(|identity| replaced_tasks.contains(&identity))
-        {
-            continue;
-        }
-        if frontier.is_some()
-            && super::retention_frontier::decode(candidate)?
-                .is_some_and(|(candidate_scope, _)| candidate_scope == scope)
-        {
-            continue;
-        }
-        let lifecycle_anchor = crate::retention_time::validate_catalog_anchor_singleton(
+        if !retains_basis_object(
+            storage,
+            scope,
+            options,
             candidate,
             &mut lifecycle_anchor_seen,
-        )
-        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
-        if lifecycle_clock.is_some() && lifecycle_anchor {
+        )? {
             continue;
         }
         count = count
@@ -381,31 +335,59 @@ fn publication_preflight(
         .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
     count = count
         .checked_add(metadata.len())
-        .and_then(|value| value.checked_add(usize::from(frontier.is_some())))
-        .and_then(|value| value.checked_add(usize::from(lifecycle_clock.is_some())))
-        .and_then(|value| value.checked_add(additional.len()))
+        .and_then(|value| value.checked_add(usize::from(options.frontier.is_some())))
+        .and_then(|value| value.checked_add(usize::from(options.lifecycle_clock.is_some())))
+        .and_then(|value| value.checked_add(options.additional.len()))
         .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
     total_bytes = total_bytes
         .checked_add(metadata_bytes)
         .and_then(|value| {
-            value.checked_add(if frontier.is_some() {
+            value.checked_add(if options.frontier.is_some() {
                 super::retention_frontier::RECORD_BYTES
             } else {
                 0
             })
         })
         .and_then(|value| {
-            value.checked_add(if lifecycle_clock.is_some() {
+            value.checked_add(if options.lifecycle_clock.is_some() {
                 crate::retention_time::CATALOG_ANCHOR_RECORD_BYTES
             } else {
                 0
             })
         })
         .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
-    for object in additional {
+    for object in &options.additional {
         total_bytes = total_bytes
             .checked_add(object.plaintext_len())
             .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
     }
     Ok((count, total_bytes))
+}
+
+fn retains_basis_object(
+    storage: &LedgerStorage,
+    scope: SegmentScope,
+    options: &PublicationOptions<'_>,
+    candidate: &[u8],
+    lifecycle_anchor_seen: &mut bool,
+) -> Result<bool, LedgerFailure> {
+    if storage.is_scope_metadata(candidate, scope) {
+        return Ok(false);
+    }
+    if crate::maintenance::durable_task_record_identity(candidate)
+        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+        .is_some_and(|identity| options.replaced_tasks.contains(&identity))
+    {
+        return Ok(false);
+    }
+    if options.frontier.is_some()
+        && super::retention_frontier::decode(candidate)?
+            .is_some_and(|(candidate_scope, _)| candidate_scope == scope)
+    {
+        return Ok(false);
+    }
+    let lifecycle_anchor =
+        crate::retention_time::validate_catalog_anchor_singleton(candidate, lifecycle_anchor_seen)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
+    Ok(options.lifecycle_clock.is_none() || !lifecycle_anchor)
 }
