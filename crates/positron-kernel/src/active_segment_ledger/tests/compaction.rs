@@ -51,14 +51,14 @@ fn compaction_block(
             return Err("compaction fixture block lacks authenticated ingest time".into());
         },
     };
-    Ok(CompactionBlock::new(
+    Ok(CompactionBlock::new_with_time(
         scope,
         block.segment_id(),
         block.identity(),
         block.position(),
         block.payload().to_vec(),
         block.content_digest()?,
-        ingest_time,
+        crate::active_segment_ledger::CompactionBlockTime::new(ingest_time, block.event_range()),
     )?)
 }
 
@@ -485,13 +485,12 @@ fn compaction_rejects_invalid_inputs_and_repairs_after_output_seal_ambiguity()
         .find(|candidate| candidate.id == missing_metadata_block.source_segment)
         .copied()
         .ok_or("repaired source metadata missing")?;
-    assert_eq!(
+    assert!(
         repaired
             .storage
-            .retired_recovery_encoded_bytes(source_metadata)
-            .expect_err("sealed metadata cannot request retired recovery bytes")
-            .code(),
-        LedgerFailureCode::InvalidInput
+            .snapshot_recovery_encoded_bytes(source_metadata)
+            .expect("the original leased generation may retain sealed recovery metadata")
+            > 0
     );
     assert_eq!(
         repaired
@@ -1444,10 +1443,13 @@ fn successful_compaction_replaces_sealed_sources_and_survives_reopen() -> Result
     let retention_time = RetentionTimeAuthority::establish()?;
     let key = || SegmentProtectionKey::from_owned(Box::new([0xd9; 32]));
 
-    for (identity, payload) in [
+    for (index, (identity, payload)) in [
         ([0xda; 16], b"successful-first".as_slice()),
         ([0xdb; 16], b"successful-second".as_slice()),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let source = ActiveSegmentLedger::open_with_retention_time(
             &authority,
             &retention_time,
@@ -1461,7 +1463,14 @@ fn successful_compaction_replaces_sealed_sources_and_survives_reopen() -> Result
                     preparation_capacity(&authority, tenant)?,
                     StoreBlockIdentity::new(identity)?,
                 )?
-                .finish(payload.to_vec())?,
+                .finish_with_event_range(
+                    payload.to_vec(),
+                    crate::AuthenticatedEventRange::known(
+                        UnixNanoseconds::new(100 + i64::try_from(index)?),
+                        UnixNanoseconds::new(200 + i64::try_from(index)?),
+                    )
+                    .map_err(|_| "fixed Event Time range")?,
+                )?,
         )?;
         source.seal()?;
     }
@@ -1549,6 +1558,16 @@ fn successful_compaction_replaces_sealed_sources_and_survives_reopen() -> Result
     assert_eq!(after.blocks().len(), 2);
     assert_eq!(after.blocks()[0].payload(), b"successful-first");
     assert_eq!(after.blocks()[1].payload(), b"successful-second");
+    assert_eq!(
+        after.blocks()[0].event_range(),
+        crate::AuthenticatedEventRange::known(UnixNanoseconds::new(100), UnixNanoseconds::new(200))
+            .map_err(|_| "fixed Event Time range")?
+    );
+    assert_eq!(
+        after.blocks()[1].event_range(),
+        crate::AuthenticatedEventRange::known(UnixNanoseconds::new(101), UnixNanoseconds::new(201))
+            .map_err(|_| "fixed Event Time range")?
+    );
     drop(before);
     drop(after);
     drop(ledger);
@@ -1564,6 +1583,16 @@ fn successful_compaction_replaces_sealed_sources_and_survives_reopen() -> Result
     assert_eq!(recovered.blocks().len(), 2);
     assert_eq!(recovered.blocks()[0].payload(), b"successful-first");
     assert_eq!(recovered.blocks()[1].payload(), b"successful-second");
+    assert_eq!(
+        recovered.blocks()[0].event_range(),
+        crate::AuthenticatedEventRange::known(UnixNanoseconds::new(100), UnixNanoseconds::new(200))
+            .map_err(|_| "fixed Event Time range")?
+    );
+    assert_eq!(
+        recovered.blocks()[1].event_range(),
+        crate::AuthenticatedEventRange::known(UnixNanoseconds::new(101), UnixNanoseconds::new(201))
+            .map_err(|_| "fixed Event Time range")?
+    );
     Ok(())
 }
 
@@ -2498,6 +2527,7 @@ fn repair_moves_a_catalog_published_active_compaction_output_to_sealed_namespace
         .find(|candidate| candidate.id == current.id)
         .ok_or("active segment missing from Catalog")?;
     published.state = SegmentState::Sealed;
+    published.sealed_frontier = Some(ledger.snapshot()?.frontier());
     publish_segments(&catalog, &basis, &ledger.storage, scope, &metadata)?;
     drop(ledger);
 

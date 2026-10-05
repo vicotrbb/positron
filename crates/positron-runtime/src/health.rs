@@ -23,6 +23,7 @@ pub enum ProcessPhase {
     Fenced = 4,
     Stopping = 5,
     Stopped = 6,
+    Degraded = 7,
 }
 
 /// Whether data traffic can be admitted safely.
@@ -223,6 +224,17 @@ impl std::fmt::Debug for HealthState {
 }
 
 impl HealthState {
+    pub(crate) fn degrade_integrity(&self) {
+        self.phase
+            .store(ProcessPhase::Degraded as u8, Ordering::Release);
+    }
+    /// Records an integrity or ownership ambiguity in the one process
+    /// lifecycle authority so readiness cannot remain serving afterward.
+    pub(crate) fn fence(&self) {
+        self.phase
+            .store(ProcessPhase::Fenced as u8, Ordering::Release);
+    }
+
     #[must_use]
     pub fn phase(&self) -> ProcessPhase {
         decode_phase(self.phase.load(Ordering::Acquire))
@@ -230,7 +242,7 @@ impl HealthState {
 
     #[must_use]
     pub fn readiness(&self) -> Readiness {
-        if self.phase() == ProcessPhase::Serving {
+        if matches!(self.phase(), ProcessPhase::Serving | ProcessPhase::Degraded) {
             Readiness::Ready
         } else {
             Readiness::NotReady
@@ -578,7 +590,8 @@ fn decode_phase(value: u8) -> ProcessPhase {
         3 => ProcessPhase::Draining,
         4 => ProcessPhase::Fenced,
         5 => ProcessPhase::Stopping,
-        _ => ProcessPhase::Stopped,
+        6 => ProcessPhase::Stopped,
+        _ => ProcessPhase::Degraded,
     }
 }
 
@@ -588,7 +601,24 @@ mod tests {
         MaintenanceCoordinator, MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId,
     };
 
-    use super::lower_class_queue_delay_breached;
+    use super::{ProcessPhase, ProcessState, lower_class_queue_delay_breached};
+
+    #[test]
+    fn maintenance_integrity_failure_uses_the_canonical_process_phase() {
+        let state = ProcessState::starting();
+        state.transition(ProcessPhase::Serving);
+        state.health().fence();
+        assert_eq!(state.health().phase(), ProcessPhase::Fenced);
+    }
+
+    #[test]
+    fn localized_quarantine_is_observable_without_removing_readiness() {
+        let state = ProcessState::starting();
+        state.transition(ProcessPhase::Serving);
+        state.health().degrade_integrity();
+        assert_eq!(state.health().phase(), ProcessPhase::Degraded);
+        assert_eq!(state.health().readiness(), super::Readiness::Ready);
+    }
 
     #[test]
     fn queue_delay_breach_counts_only_promotable_priorities() {

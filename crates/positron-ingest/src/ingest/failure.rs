@@ -29,6 +29,7 @@ const fn ingest_code_for_log_store(code: LogStoreFailureCode) -> IngestFailureCo
         | LogStoreFailureCode::ResourceAdmissionRefused => IngestFailureCode::CapacityUnavailable,
         LogStoreFailureCode::IdempotencyConflict => IngestFailureCode::IdempotencyConflict,
         LogStoreFailureCode::StorageUnavailable
+        | LogStoreFailureCode::Quarantined
         | LogStoreFailureCode::IntegrityCorruption
         | LogStoreFailureCode::AuthenticationFailed
         | LogStoreFailureCode::ConcurrentWriter

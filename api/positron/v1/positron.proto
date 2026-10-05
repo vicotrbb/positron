@@ -436,6 +436,28 @@ message MaintenanceStatusResponse {
   uint32 returned = 6;
   uint32 total = 7;
   optional string next_cursor = 8;
+  // Authenticated Catalog-backed evidence for durable immutable corruption.
+  // It is repeated on each task page because it has a separate fixed capacity.
+  repeated IntegrityQuarantineFinding integrity_findings = 9;
+}
+
+// A known Event or Ingest range, or an explicit authenticated absence reason.
+// Endpoints are present only for `known`; no ingest-time fallback is permitted
+// for unavailable Event evidence.
+message AuthenticatedTimeRange {
+  string provenance = 1;
+  optional sint64 earliest_unix_nanos = 2;
+  optional sint64 latest_unix_nanos = 3;
+}
+
+message IntegrityQuarantineFinding {
+  string tenant = 1;
+  string signal = 2;
+  uint32 shard = 3;
+  string segment = 4;
+  uint64 base_position = 5;
+  AuthenticatedTimeRange event_range = 6;
+  AuthenticatedTimeRange ingest_range = 7;
 }
 
 message MaintenanceExplainRequest {

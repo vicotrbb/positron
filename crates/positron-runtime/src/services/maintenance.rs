@@ -5,9 +5,12 @@ use std::{
     time::Duration,
 };
 
+use sha2::{Digest, Sha256};
+
 use positron_kernel::{
-    ActiveSegmentLedger, Catalog, MaintenanceExecution, MaintenanceFailure, MaintenanceScope,
-    MaintenanceTaskClass, SegmentScope, SnapshotLeaseId,
+    ActiveSegmentLedger, Catalog, IntegrityCancellation, IntegrityScrubBudget,
+    IntegrityVerificationOutcome, MaintenanceCheckpoint, MaintenanceExecution, MaintenanceFailure,
+    MaintenanceScope, MaintenanceTaskClass, SegmentScope, SnapshotLeaseId, TransactionId,
 };
 use positron_signals::{
     LogRetentionPolicy, LogStore, LogStoreFailureCode, MaintenanceCompactionExecution,
@@ -71,6 +74,76 @@ impl MaintenanceWake {
     }
 }
 
+/// Startup proves the active durability frontier for every reachable scope.
+/// It intentionally does not scan sealed history; the continuously scheduled
+/// `IntegrityScrub` task covers that larger immutable scope in bounded passes.
+pub(super) fn verify_startup_integrity(
+    instance: &crate::InitializedInstance,
+) -> Result<(), ServiceFailure> {
+    let catalog = Catalog::open(
+        &instance._authority,
+        instance.instance,
+        instance
+            .key
+            .catalog_secret(instance.instance)
+            .map_err(|_| ServiceFailure::KeyUnavailable)?,
+    )
+    .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
+    let snapshot = catalog
+        .pin()
+        .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
+    let identity =
+        positron_governance::Identity::open(&snapshot).map_err(|_| ServiceFailure::CorruptState)?;
+    let tenants = positron_governance::TenantAdministration::registered_tenant_ids(&snapshot)
+        .map_err(|_| ServiceFailure::CorruptState)?;
+    let mut scopes = Vec::new();
+    for tenant in tenants {
+        for signal in [
+            positron_domain::routing::SignalKind::Logs,
+            positron_domain::routing::SignalKind::Traces,
+        ] {
+            let found = snapshot
+                .reachable_ledger_scopes(tenant, signal)
+                .map_err(|failure| super::classify_ledger_failure_code(failure.code()))?;
+            scopes
+                .try_reserve(found.len())
+                .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+            scopes.extend(found);
+        }
+    }
+    drop(snapshot);
+    for scope in scopes {
+        let key = super::tenant_segment_key(instance, &identity, scope)?;
+        let report = ActiveSegmentLedger::verify_catalog_integrity(
+            &instance._authority,
+            &catalog,
+            scope,
+            key,
+            positron_kernel::IntegrityVerificationMode::Startup,
+            IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
+                .map_err(|_| ServiceFailure::Internal)?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0x7c; 16]).map_err(|_| ServiceFailure::Internal)?,
+            None,
+        )
+        .map_err(|failure| match failure.code() {
+            positron_kernel::IntegrityFailureCode::StorageUnavailable => {
+                ServiceFailure::StorageUnavailable
+            },
+            positron_kernel::IntegrityFailureCode::Cancelled => ServiceFailure::Cancelled,
+            positron_kernel::IntegrityFailureCode::InvalidInput
+            | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
+            | positron_kernel::IntegrityFailureCode::FindingCapacity => {
+                ServiceFailure::CorruptState
+            },
+        })?;
+        if report.outcome() != IntegrityVerificationOutcome::Verified {
+            return Err(ServiceFailure::CorruptState);
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn restore(instance: &crate::InitializedInstance) -> Result<(), ServiceFailure> {
     let catalog = Catalog::open(
         &instance._authority,
@@ -94,6 +167,7 @@ const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
     MaintenanceTaskClass::RetentionReclamation,
     MaintenanceTaskClass::CatalogReclamation,
     MaintenanceTaskClass::GovernanceAuditCheckpoint,
+    MaintenanceTaskClass::IntegrityScrub,
 ];
 
 /// Performs one bounded coordinator dispatch for the runtime's installed
@@ -140,6 +214,10 @@ enum InstalledMaintenanceExecution<'authority> {
     },
     CatalogReclamation {
         execution: MaintenanceExecution<'authority>,
+    },
+    IntegrityScrub {
+        execution: MaintenanceExecution<'authority>,
+        scope: SegmentScope,
     },
 }
 
@@ -220,6 +298,10 @@ fn start_installed_maintenance<'authority>(
             }
             InstalledMaintenanceExecution::CatalogReclamation { execution }
         },
+        MaintenanceTaskClass::IntegrityScrub => {
+            let scope = scope_for_segment_task(execution.task().scope())?;
+            InstalledMaintenanceExecution::IntegrityScrub { execution, scope }
+        },
         _ => return Err(ServiceFailure::Internal),
     };
     Ok(Some(execution))
@@ -261,13 +343,24 @@ fn complete_installed_maintenance(
         return Ok(true);
     }
     let coordinator = instance.maintenance_coordinator();
+    if let InstalledMaintenanceExecution::IntegrityScrub { execution, scope } = execution {
+        return complete_integrity_scrub(
+            services,
+            instance,
+            &catalog,
+            coordinator,
+            execution,
+            *scope,
+        );
+    }
     let scope = match execution {
         InstalledMaintenanceExecution::Compaction { scope, .. }
         | InstalledMaintenanceExecution::SnapshotLeaseExpiry { scope, .. }
         | InstalledMaintenanceExecution::RetentionPublication { scope, .. }
         | InstalledMaintenanceExecution::RetentionReclamation { scope, .. } => *scope,
         InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. }
-        | InstalledMaintenanceExecution::CatalogReclamation { .. } => {
+        | InstalledMaintenanceExecution::CatalogReclamation { .. }
+        | InstalledMaintenanceExecution::IntegrityScrub { .. } => {
             return Err(ServiceFailure::Internal);
         },
     };
@@ -302,6 +395,9 @@ fn complete_installed_maintenance(
             return Err(ServiceFailure::Internal);
         },
         InstalledMaintenanceExecution::CatalogReclamation { .. } => {
+            return Err(ServiceFailure::Internal);
+        },
+        InstalledMaintenanceExecution::IntegrityScrub { .. } => {
             return Err(ServiceFailure::Internal);
         },
     }
@@ -369,6 +465,9 @@ fn complete_installed_maintenance(
         InstalledMaintenanceExecution::CatalogReclamation { .. } => {
             return Err(ServiceFailure::Internal);
         },
+        InstalledMaintenanceExecution::IntegrityScrub { .. } => {
+            return Err(ServiceFailure::Internal);
+        },
     };
     if let Err(failure) = completed {
         return Err(super::classify_ledger_failure_code(failure.code()));
@@ -410,6 +509,7 @@ fn map_log_compaction_failure(failure: positron_signals::LogStoreFailure) -> Ser
         LogStoreFailureCode::InvalidInput
         | LogStoreFailureCode::MalformedBlock
         | LogStoreFailureCode::PhysicalScopeMismatch
+        | LogStoreFailureCode::Quarantined
         | LogStoreFailureCode::IntegrityCorruption
         | LogStoreFailureCode::AuthenticationFailed
         | LogStoreFailureCode::UnsupportedFormat
@@ -437,12 +537,113 @@ fn map_trace_compaction_failure(failure: positron_signals::TraceStoreFailure) ->
         TraceStoreFailureCode::InvalidInput
         | TraceStoreFailureCode::MalformedBlock
         | TraceStoreFailureCode::PhysicalScopeMismatch
+        | TraceStoreFailureCode::Quarantined
         | TraceStoreFailureCode::IntegrityCorruption
         | TraceStoreFailureCode::AuthenticationFailed
         | TraceStoreFailureCode::UnsupportedFormat
         | TraceStoreFailureCode::RecoveryRequired
         | TraceStoreFailureCode::StaleResumeMarker => ServiceFailure::CorruptState,
         TraceStoreFailureCode::Internal => ServiceFailure::Internal,
+    }
+}
+
+fn complete_integrity_scrub(
+    services: &super::ServiceHandle,
+    instance: &crate::InitializedInstance,
+    catalog: &Catalog<'_>,
+    coordinator: &positron_kernel::MaintenanceCoordinator,
+    execution: &MaintenanceExecution<'_>,
+    scope: SegmentScope,
+) -> Result<bool, ServiceFailure> {
+    let status = coordinator
+        .status(execution.task().identity())
+        .map_err(map_failure)?;
+    let continuation = status
+        .checkpoint()
+        .map(|checkpoint| {
+            positron_kernel::IntegrityScrubContinuation::decode(checkpoint.opaque_progress())
+                .map_err(|_| ServiceFailure::CorruptState)
+        })
+        .transpose()?;
+    let snapshot = catalog
+        .pin()
+        .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
+    let identity =
+        positron_governance::Identity::open(&snapshot).map_err(|_| ServiceFailure::CorruptState)?;
+    let key = super::tenant_segment_key(instance, &identity, scope)?;
+    let transaction = TransactionId::new(execution.task().identity().to_bytes())
+        .map_err(|_| ServiceFailure::Internal)?;
+    let report = ActiveSegmentLedger::verify_catalog_integrity(
+        &instance._authority,
+        catalog,
+        scope,
+        key,
+        positron_kernel::IntegrityVerificationMode::Online,
+        IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
+            .map_err(|_| ServiceFailure::Internal)?,
+        &IntegrityCancellation::new(),
+        transaction,
+        continuation,
+    )
+    .map_err(|failure| match failure.code() {
+        positron_kernel::IntegrityFailureCode::StorageUnavailable => {
+            ServiceFailure::StorageUnavailable
+        },
+        positron_kernel::IntegrityFailureCode::Cancelled => ServiceFailure::Cancelled,
+        positron_kernel::IntegrityFailureCode::InvalidInput
+        | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
+        | positron_kernel::IntegrityFailureCode::FindingCapacity => ServiceFailure::CorruptState,
+    })?;
+    match report.outcome() {
+        IntegrityVerificationOutcome::Verified => {
+            execution
+                .complete_and_persist(coordinator, catalog, true)
+                .map_err(map_failure)?;
+            Ok(true)
+        },
+        IntegrityVerificationOutcome::Incomplete => {
+            let continuation = report.continuation().ok_or(ServiceFailure::CorruptState)?;
+            let sequence = status
+                .checkpoint()
+                .map_or(1, |checkpoint| checkpoint.sequence().saturating_add(1));
+            let completed_inputs = u32::try_from(report.examined_segments())
+                .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+            let checkpoint = MaintenanceCheckpoint::new(
+                sequence,
+                completed_inputs,
+                continuation.encode().to_vec(),
+            )
+            .map_err(map_failure)?;
+            execution
+                // Integrity authentication is not age-derived work. A clock
+                // uncertainty therefore must not make a bounded scrub lose its
+                // durable resume point or stop responding to corruption.
+                .checkpoint_and_persist(coordinator, catalog, checkpoint)
+                .map_err(map_failure)?;
+            Ok(false)
+        },
+        IntegrityVerificationOutcome::Quarantined => {
+            execution
+                .complete_and_persist(coordinator, catalog, false)
+                .map_err(map_failure)?;
+            services.mark_integrity_degraded();
+            Ok(true)
+        },
+        IntegrityVerificationOutcome::Stale => {
+            // A sealed source changed while this bounded task was waiting.
+            // Leave its truthful terminal record, then let discovery submit
+            // the new source identity without fencing healthy service.
+            execution
+                .complete_and_persist(coordinator, catalog, false)
+                .map_err(map_failure)?;
+            Ok(true)
+        },
+        IntegrityVerificationOutcome::Fenced => {
+            execution
+                .complete_and_persist(coordinator, catalog, false)
+                .map_err(map_failure)?;
+            Err(ServiceFailure::CorruptState)
+        },
     }
 }
 
@@ -453,9 +654,10 @@ fn discover_retention_publications(
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
         return Err(ServiceFailure::Cancelled);
     }
+    let integrity_discovered = discover_integrity_scrubs(services, cancellation)?;
     let instance = &services.instance;
     if instance.retention_time.status().state() != positron_kernel::LifecycleClockState::Certain {
-        return Ok(false);
+        return Ok(integrity_discovered);
     }
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
         return Err(ServiceFailure::CatalogBusy);
@@ -535,7 +737,122 @@ fn discover_retention_publications(
             Err(failure) => return Err(super::classify_ledger_failure_code(failure.code())),
         }
     }
+    Ok(submitted || integrity_discovered)
+}
+
+fn discover_integrity_scrubs(
+    services: &super::ServiceHandle,
+    cancellation: Option<&crate::TaskCancellation>,
+) -> Result<bool, ServiceFailure> {
+    let Some(_catalog_operation) = services.try_catalog_operation()? else {
+        return Err(ServiceFailure::CatalogBusy);
+    };
+    let instance = &services.instance;
+    let catalog = Catalog::open(
+        &instance._authority,
+        instance.instance,
+        instance
+            .key
+            .catalog_secret(instance.instance)
+            .map_err(|_| ServiceFailure::KeyUnavailable)?,
+    )
+    .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
+    let snapshot = catalog
+        .pin()
+        .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
+    let tenants = positron_governance::TenantAdministration::registered_tenant_ids(&snapshot)
+        .map_err(|_| ServiceFailure::CorruptState)?;
+    let mut scopes = Vec::new();
+    for tenant in tenants {
+        for signal in [
+            positron_domain::routing::SignalKind::Logs,
+            positron_domain::routing::SignalKind::Traces,
+        ] {
+            let found = snapshot
+                .reachable_ledger_scopes(tenant, signal)
+                .map_err(|failure| super::classify_ledger_failure_code(failure.code()))?;
+            scopes
+                .try_reserve(found.len())
+                .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+            for scope in found {
+                let source_identity = snapshot
+                    .integrity_scope_source_identity(scope)
+                    .map_err(|failure| super::classify_ledger_failure_code(failure.code()))?;
+                scopes.push((scope, source_identity));
+            }
+        }
+    }
+    drop(snapshot);
+    let coordinator = instance.maintenance_coordinator();
+    let mut submitted = false;
+    for (scope, source_identity) in scopes {
+        if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
+            return Err(ServiceFailure::Cancelled);
+        }
+        let maintenance_scope =
+            MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id());
+        if coordinator
+            .has_nonterminal_task_for_scope(MaintenanceTaskClass::IntegrityScrub, maintenance_scope)
+            .map_err(map_failure)?
+        {
+            continue;
+        }
+        let identity = integrity_task_identity(scope, source_identity)?;
+        match coordinator.status(identity) {
+            Ok(_) => continue,
+            Err(positron_kernel::MaintenanceFailure::UnknownTask) => {},
+            Err(failure) => return Err(map_failure(failure)),
+        }
+        let task = positron_kernel::MaintenanceTask::with_contract(
+            identity,
+            MaintenanceTaskClass::IntegrityScrub,
+            maintenance_scope,
+            positron_kernel::MaintenanceTrigger::Event,
+            // A task record publication advances the Catalog generation but
+            // does not change the immutable-segment source identity. Read the
+            // current generation immediately before each descriptor so later
+            // scopes do not inherit a stale precondition from an earlier
+            // descriptor's publication.
+            positron_kernel::MaintenancePreconditions::new(
+                catalog
+                    .pin()
+                    .map_err(|failure| classify_catalog_failure_code(failure.code()))?
+                    .number(),
+                1,
+            )
+            .map_err(map_failure)?,
+            Vec::new(),
+            Vec::new(),
+            positron_kernel::ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+        )
+        .map_err(map_failure)?;
+        coordinator
+            .submit_and_persist(&catalog, task, 0)
+            .map_err(map_failure)?;
+        submitted = true;
+    }
     Ok(submitted)
+}
+
+fn integrity_task_identity(
+    scope: SegmentScope,
+    source_identity: [u8; 32],
+) -> Result<positron_kernel::MaintenanceTaskId, ServiceFailure> {
+    let mut digest = Sha256::new();
+    digest.update(b"positron/integrity-scrub/v1");
+    digest.update(scope.tenant_id().to_bytes());
+    digest.update([match scope.signal_kind() {
+        positron_domain::routing::SignalKind::Logs => 1,
+        positron_domain::routing::SignalKind::Traces => 2,
+    }]);
+    digest.update(scope.shard_id().value().to_be_bytes());
+    digest.update(source_identity);
+    let bytes = digest.finalize();
+    let identity = bytes
+        .get(..16)
+        .and_then(|value| value.try_into().ok())
+        .ok_or(ServiceFailure::Internal)?;
+    positron_kernel::MaintenanceTaskId::new(identity).map_err(map_failure)
 }
 
 pub(super) fn run_runtime_maintenance_worker(
@@ -581,9 +898,24 @@ pub(super) fn run_runtime_maintenance_worker(
         };
         let delay = match result {
             Ok(true) => {
+                let integrity_completed = in_flight.as_ref().is_some_and(|execution| {
+                    matches!(
+                        execution,
+                        InstalledMaintenanceExecution::IntegrityScrub { .. }
+                    )
+                });
                 in_flight = None;
                 retry_delay = INITIAL_TRANSIENT_BACKOFF;
-                WORK_YIELD
+                if integrity_completed {
+                    // Reuse the coordinator's existing instance-stable idle
+                    // cadence between bounded full-scope passes. A verified
+                    // pass publishes its terminal task and thus advances the
+                    // Catalog generation; immediate rediscovery would turn
+                    // that publication into a tight self-triggering loop.
+                    wake_signal.idle_delay()
+                } else {
+                    WORK_YIELD
+                }
             },
             Ok(false) | Err(ServiceFailure::Cancelled) => {
                 retry_delay = INITIAL_TRANSIENT_BACKOFF;

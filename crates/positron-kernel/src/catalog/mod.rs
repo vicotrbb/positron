@@ -27,8 +27,8 @@ use budget::{
     recovery_resource_claim, reserve_history, retained_artifact_bytes,
 };
 use codec::{
-    CommitRecord, encode_commit, generation_identity, object_set_digest, prepare_audit,
-    snapshot_from_record, transaction_digest,
+    CommitRecord, decode_commit, encode_commit, generation_identity, object_set_digest,
+    prepare_audit, snapshot_from_record, transaction_digest,
 };
 use preparation::PreparedCommit;
 use recovery::load_snapshot;
@@ -436,6 +436,60 @@ impl<'authority> Catalog<'authority> {
             .lock()
             .map(|state| state.current.clone())
             .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))
+    }
+
+    /// Opens one exact, authenticated predecessor of an already-pinned
+    /// generation. This is deliberately crate-private: persistent snapshot
+    /// leases use it to resume their immutable original Catalog generation;
+    /// callers cannot use it as another Catalog authority.
+    ///
+    /// `current` is the same immutable generation that supplied the durable
+    /// lease and its paired expiry descriptor. The walk validates that the
+    /// requested generation is an ancestor of that exact generation before it
+    /// loads any of its objects. The Catalog's bounded generation directory
+    /// limits the walk; it never retains a second history index in memory.
+    pub(crate) fn pin_historical_generation(
+        &self,
+        current: &CatalogSnapshot,
+        identity: CatalogGenerationId,
+        number: u64,
+    ) -> Result<CatalogSnapshot, CatalogFailure> {
+        if number == 0 || number > current.number() {
+            return Err(CatalogFailure::new(CatalogFailureCode::StaleGeneration));
+        }
+        let secret = self
+            .secret
+            .lock()
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+        let mut generation = current.identity();
+        let mut expected_number = current.number();
+        let mut traversed = 0_usize;
+        loop {
+            traversed = traversed
+                .checked_add(1)
+                .filter(|count| *count <= storage::MAX_GENERATIONS)
+                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+            let encoded = self
+                .storage
+                .read_commit(&secret, self.instance, generation)?;
+            let record = decode_commit(generation, &encoded)?;
+            if !record.format_epoch.is_catalog_readable()
+                || record.instance != self.instance
+                || record.number != expected_number
+            {
+                return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
+            }
+            if expected_number == number {
+                if record.generation != identity {
+                    return Err(CatalogFailure::new(CatalogFailureCode::StaleGeneration));
+                }
+                return load_snapshot(&self.storage, &secret, self.instance, &record);
+            }
+            expected_number = expected_number
+                .checked_sub(1)
+                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
+            generation = record.predecessor;
+        }
     }
 
     pub(crate) fn export_output_root(&self) -> Result<File, CatalogFailure> {

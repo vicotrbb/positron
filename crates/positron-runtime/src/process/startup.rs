@@ -163,6 +163,15 @@ impl ApplicationRuntime {
             }
         }
         let instance = Arc::new(instance);
+        if let Err(failure) = crate::services::verify_startup_integrity(&instance) {
+            state.transition(ProcessPhase::Fenced);
+            return Err(cleanup_startup(
+                service_failure_outcome(failure),
+                &cancellation,
+                &mut listeners,
+                &mut tasks,
+            ));
+        }
         state
             .set_inspection_authority(Arc::clone(&instance))
             .map_err(|_| {
@@ -242,6 +251,7 @@ impl ApplicationRuntime {
                 ));
             },
         };
+        services.attach_health(state.health());
         state
             .set_catalog_operation(services.catalog_operation_gate())
             .map_err(|_| {

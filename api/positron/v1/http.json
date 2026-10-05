@@ -1,5 +1,5 @@
 {
-  "schema_digest": "47e817235f3c64cfdd154a0e5b9f36d82659e5dbf66dd8f5155ed8c8580209e2",
+  "schema_digest": "3d8e15900398e8d531096395bedbf627ea87507bedc594a40e2c7d21f4161cd0",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -637,7 +637,8 @@
         {"proto":"terminal","json":"terminal","type":"uint32","number":5,"deprecated":false},
         {"proto":"returned","json":"returned","type":"uint32","number":6,"deprecated":false},
         {"proto":"total","json":"total","type":"uint32","number":7,"deprecated":false},
-        {"proto":"next_cursor","json":"next_cursor","type":"string","number":8,"deprecated":false,"optional":true}
+        {"proto":"next_cursor","json":"next_cursor","type":"string","number":8,"deprecated":false,"optional":true},
+        {"proto":"integrity_findings","json":"integrity_findings","type":"IntegrityQuarantineFinding","number":9,"deprecated":false,"repeated":true,"maximum_items":64}
       ],
       "responses":{"200":"MaintenanceStatusResponse","400":"invalid_request","401":"authentication_rejected","503":"administration_unavailable"}
     },

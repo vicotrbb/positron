@@ -19,10 +19,11 @@ use positron_governance::{
 use positron_ingest::load_schema_checkpoint;
 use positron_kernel::{
     ActiveSegmentLedger, AuditIntent, Catalog, CatalogObject, CatalogProposal,
-    CatalogPublicationFault, FormatEpoch, MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId,
-    MaintenanceTaskPhase, MountQualification, ResourceAmounts, ResourceDimension,
-    RetentionTimeAuthority, SegmentScope, StoreBlockIdentity, TransactionId, WorkClaim, WorkClass,
-    WorkKind, with_catalog_publication_fault_after,
+    CatalogPublicationFault, FormatEpoch, MaintenancePreconditions, MaintenanceTask,
+    MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger,
+    MountQualification, ResourceAmounts, ResourceDimension, RetentionTimeAuthority, SegmentScope,
+    StoreBlockIdentity, TransactionId, WorkClaim, WorkClass, WorkKind,
+    with_catalog_publication_fault_after,
 };
 use positron_policy::{
     IngestPolicy, LogMetadata, NativeLogCandidate, PolicyEvaluation, PolicyReceiver,
@@ -254,6 +255,139 @@ fn runtime_maintenance_worker_wake_dispatches_and_completes_a_due_snapshot_lease
             .expect("terminal task")
             .phase(),
         MaintenanceTaskPhase::Succeeded
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_maintenance_worker_verifies_a_durable_integrity_scrub_task() -> Result<(), Box<dyn Error>>
+{
+    let fixture = Fixture::new()?;
+    let (initialized, _, _) = fixture.initialized()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let scope = SegmentScope::new(
+        initialized.tenant,
+        positron_domain::routing::SignalKind::Logs,
+        initialized.logs_shard,
+    );
+    let catalog = open_catalog(&initialized)?;
+    let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+    let key = super::super::tenant_segment_key(&initialized, &identity, scope)?;
+    ActiveSegmentLedger::open(&initialized._authority, &catalog, scope, key)?.seal()?;
+    let generation = catalog.pin()?.number();
+    let task = MaintenanceTask::with_contract(
+        MaintenanceTaskId::new([0xdc; 16]).map_err(|_| "invalid task id")?,
+        MaintenanceTaskClass::IntegrityScrub,
+        positron_kernel::MaintenanceScope::segment(
+            scope.tenant_id(),
+            scope.signal_kind(),
+            scope.shard_id(),
+        ),
+        MaintenanceTrigger::Event,
+        MaintenancePreconditions::new(generation, 1).map_err(|_| "invalid preconditions")?,
+        Vec::new(),
+        Vec::new(),
+        ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+    )
+    .map_err(|_| "invalid integrity scrub task")?;
+    let task_id = task.identity();
+    initialized
+        .maintenance_coordinator()
+        .submit_and_persist(&catalog, task, 0)
+        .map_err(|_| "submit integrity scrub task")?;
+    drop(catalog);
+
+    assert!(services.wake_maintenance_worker()?);
+    assert_eq!(
+        initialized
+            .maintenance_coordinator()
+            .status(task_id)
+            .map_err(|_| "missing integrity scrub status")?
+            .phase(),
+        MaintenanceTaskPhase::Succeeded
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_maintenance_worker_discovers_and_runs_one_integrity_scrub_per_scope()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _) = fixture.initialized()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+
+    assert!(services.wake_maintenance_worker()?);
+    let statuses = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|_| "integrity task status")?;
+    assert!(statuses.iter().any(|status| {
+        status.task().class() == MaintenanceTaskClass::IntegrityScrub
+            && status.phase() == MaintenanceTaskPhase::Succeeded
+    }));
+    Ok(())
+}
+
+#[test]
+fn repeated_idle_integrity_discovery_does_not_republish_terminal_source()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _) = fixture.initialized()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+
+    assert!(services.wake_maintenance_worker()?);
+    let first_records = initialized
+        .maintenance_coordinator()
+        .durable_records()
+        .map_err(|_| "first integrity task records")?;
+    assert!(
+        initialized
+            .maintenance_coordinator()
+            .statuses()
+            .map_err(|_| "first integrity task statuses")?
+            .iter()
+            .any(|status| status.task().class() == MaintenanceTaskClass::IntegrityScrub),
+        "the first wake publishes the source-bound descriptor"
+    );
+
+    // A fresh process rebuilds the same durable task registry. Its idle wake
+    // may run other eligible maintenance, but must never publish a second
+    // integrity descriptor for unchanged sealed source metadata.
+    drop(services);
+    drop(initialized);
+    let reopened = fixture.reopen()?;
+    let services = ServiceHandle::new(Arc::clone(&reopened))?;
+    let _ = services.wake_maintenance_worker()?;
+    assert_eq!(
+        reopened
+            .maintenance_coordinator()
+            .durable_records()
+            .map_err(|_| "second integrity task records")?
+            .len(),
+        first_records.len(),
+        "idle discovery after reopen must not consume the bounded task registry with duplicate records"
+    );
+    Ok(())
+}
+
+#[test]
+fn startup_frontier_verification_fences_an_authenticated_active_scope_failure()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _) = fixture.initialized()?;
+    let active = fs::read_dir(fixture.root.join("data/segments/active"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "segment")
+        })
+        .ok_or("bootstrap active segment")?;
+    fs::write(active, b"corrupt")?;
+
+    assert_eq!(
+        crate::services::verify_startup_integrity(&initialized),
+        Err(ServiceFailure::CorruptState)
     );
     Ok(())
 }

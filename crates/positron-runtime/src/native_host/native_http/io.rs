@@ -319,6 +319,7 @@ fn process_phase_name(phase: ProcessPhase) -> &'static str {
         ProcessPhase::Fenced => "fenced",
         ProcessPhase::Stopping => "stopping",
         ProcessPhase::Stopped => "stopped",
+        ProcessPhase::Degraded => "degraded",
     }
 }
 

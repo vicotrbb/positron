@@ -131,6 +131,8 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         let metadata = self.storage.catalog_segments(&basis, self.scope)?;
         let (inputs, source_bytes, source_blocks) = compaction_source_manifest_and_bounds(
             &self.storage,
+            &basis,
+            self.scope,
             &metadata,
             &self.protection,
             self.catalog.instance(),
@@ -211,6 +213,8 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         let metadata = self.storage.catalog_segments(&basis, self.scope)?;
         let (inputs, source_bytes, source_blocks) = compaction_source_manifest_and_bounds(
             &self.storage,
+            &basis,
+            self.scope,
             &metadata,
             &self.protection,
             self.catalog.instance(),
@@ -558,6 +562,8 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         let metadata = self.storage.catalog_segments(&basis, self.scope)?;
         let (manifest, _, _) = compaction_source_manifest_and_bounds(
             &self.storage,
+            &basis,
+            self.scope,
             &metadata,
             &self.protection,
             self.catalog.instance(),
@@ -716,6 +722,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         let recovered = reconstruct(
             &self.storage,
             &metadata,
+            &[],
             &self.protection,
             self.catalog.instance(),
             RecoveryMode::Observe,
@@ -998,6 +1005,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             };
             outputs.push(SegmentMetadata {
                 state: SegmentState::Sealed,
+                sealed_frontier: run.last().map(|block| block.position),
                 ..metadata
             });
             output_blocks.extend(written);
@@ -1109,10 +1117,14 @@ fn maintenance_source_manifest_digest(
 
 fn compaction_source_manifest_and_bounds(
     storage: &super::LedgerStorage,
+    basis: &crate::CatalogSnapshot,
+    scope: super::SegmentScope,
     metadata: &[SegmentMetadata],
     protection: &super::SegmentProtectionKey,
     instance: crate::InstanceId,
 ) -> Result<(Vec<crate::MaintenanceObjectId>, usize, usize), LedgerFailure> {
+    let quarantined = super::integrity::quarantined_segment_ids(basis, scope)
+        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
     let mut inputs = Vec::new();
     inputs
         .try_reserve_exact(crate::maintenance::MAX_TASK_OBJECTS)
@@ -1123,6 +1135,9 @@ fn compaction_source_manifest_and_bounds(
         .iter()
         .filter(|candidate| candidate.state == SegmentState::Sealed)
     {
+        if quarantined.contains(&source.id) {
+            return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+        }
         let Some((bytes, blocks)) =
             storage.sealed_compaction_source_bound(*source, protection, instance)?
         else {
@@ -1249,7 +1264,7 @@ fn write_run(
     blocks: &[CompactionBlock],
     is_cancelled: &impl Fn() -> bool,
 ) -> Result<Vec<CommittedBlock>, LedgerFailure> {
-    let mut output = Vec::new();
+    let mut output: Vec<CommittedBlock> = Vec::new();
     output
         .try_reserve_exact(blocks.len())
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
@@ -1272,6 +1287,7 @@ fn write_run(
         plaintext.extend_from_slice(&block.identity.to_bytes());
         plaintext.push(2);
         plaintext.extend_from_slice(&block.ingest_time.instant().value().to_be_bytes());
+        encode_event_range(&mut plaintext, block.event_range);
         plaintext.extend_from_slice(&block.payload);
         let context = key
             .object
@@ -1294,6 +1310,13 @@ fn write_run(
                     sequence,
                     position: block.position,
                     segment_retention: retention,
+                    segment_event_range: output
+                        .iter()
+                        .map(|committed| committed.event_range)
+                        .reduce(super::AuthenticatedEventRange::aggregate)
+                        .map_or(block.event_range, |prior| {
+                            prior.aggregate(block.event_range)
+                        }),
                 },
                 frame_bytes,
                 || {
@@ -1315,9 +1338,33 @@ fn write_run(
             segment,
             frontier_authenticator: authenticator,
             block_retention: SegmentRetention::Complete(block.ingest_time),
+            event_range: block.event_range,
         });
     }
     Ok(output)
+}
+
+fn encode_event_range(bytes: &mut Vec<u8>, range: super::AuthenticatedEventRange) {
+    match range {
+        super::AuthenticatedEventRange::Known { earliest, latest } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&earliest.value().to_be_bytes());
+            bytes.extend_from_slice(&latest.value().to_be_bytes());
+        },
+        super::AuthenticatedEventRange::Unavailable(
+            super::EventRangeUnavailable::MissingSourceTime,
+        ) => {
+            bytes.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        },
+        super::AuthenticatedEventRange::Unavailable(
+            super::EventRangeUnavailable::InvalidSourceTime,
+        ) => {
+            bytes.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        },
+        super::AuthenticatedEventRange::Unavailable(super::EventRangeUnavailable::LegacyFormat) => {
+            bytes.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        },
+    }
 }
 
 fn try_clone_block(block: &CompactionBlock) -> Result<CompactionBlock, LedgerFailure> {
@@ -1329,6 +1376,7 @@ fn try_clone_block(block: &CompactionBlock) -> Result<CompactionBlock, LedgerFai
         payload: try_clone_bytes(&block.payload)?,
         content_digest: block.content_digest,
         ingest_time: block.ingest_time,
+        event_range: block.event_range,
     })
 }
 

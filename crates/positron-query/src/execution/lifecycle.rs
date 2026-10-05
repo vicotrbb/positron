@@ -47,6 +47,31 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         )
     }
 
+    pub(super) fn incomplete_page_with_affected_ranges(
+        &self,
+        header: Option<QueryEvent>,
+        failure: QueryFailure,
+        affected_ranges: Vec<crate::QueryAffectedRange>,
+        state: &CursorState,
+        delivered_before: QueryStats,
+        terminal_stats: QueryStats,
+        resources: ExecutionResources,
+    ) -> Result<QueryStream<'ledger>, QueryFailure> {
+        let mut events = Vec::with_capacity(1);
+        events.extend(header);
+        events.push(QueryEvent::Terminal(QueryTerminal::Incomplete(
+            QueryIncomplete::with_affected_ranges(failure, terminal_stats, affected_ranges),
+        )));
+        self.stream(
+            events,
+            state,
+            false,
+            delivered_before,
+            terminal_stats,
+            resources,
+        )
+    }
+
     pub(super) fn incomplete_events(
         &self,
         mut events: Vec<QueryEvent>,

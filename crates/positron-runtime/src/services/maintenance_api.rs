@@ -1,11 +1,12 @@
 use sha2::{Digest, Sha256};
 
 use positron_api::maintenance::{
-    MaintenanceControlResponse, MaintenanceExplainRequest, MaintenanceExplainResponse,
-    MaintenancePauseRequest, MaintenanceResourceReservations, MaintenanceResumeRequest,
-    MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceStatusRequest,
-    MaintenanceStatusResponse, MaintenanceTaskAcknowledgement, MaintenanceTaskStatus,
-    MaintenanceWindowRequest, MaintenanceWindowResponse,
+    AuthenticatedTimeRangeDescriptor, IntegrityQuarantineDescriptor, MaintenanceControlResponse,
+    MaintenanceExplainRequest, MaintenanceExplainResponse, MaintenancePauseRequest,
+    MaintenanceResourceReservations, MaintenanceResumeRequest, MaintenanceRunRequest,
+    MaintenanceRunResponse, MaintenanceStatusRequest, MaintenanceStatusResponse,
+    MaintenanceTaskAcknowledgement, MaintenanceTaskStatus, MaintenanceWindowRequest,
+    MaintenanceWindowResponse,
 };
 use positron_domain::{
     identity::{PrincipalId, TenantId},
@@ -18,10 +19,11 @@ use positron_governance::{
     maintenance_run_audit_intent, maintenance_window_audit_intent,
 };
 use positron_kernel::{
-    ActiveSegmentLedger, Catalog, LedgerFailure, LedgerFailureCode, LifecycleClockState,
-    MaintenanceCoordinator, MaintenanceFailure, MaintenanceReservationAuthority, MaintenanceScope,
-    MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase, NO_DURABLE_PROGRESS_SLO_SECONDS,
-    ResourceDimension, SegmentScope,
+    ActiveSegmentLedger, AuthenticatedEventRange, AuthenticatedIngestRange, Catalog, LedgerFailure,
+    LedgerFailureCode, LifecycleClockState, MaintenanceCoordinator, MaintenanceFailure,
+    MaintenanceReservationAuthority, MaintenanceScope, MaintenanceTaskClass, MaintenanceTaskId,
+    MaintenanceTaskPhase, NO_DURABLE_PROGRESS_SLO_SECONDS, ResourceDimension, SegmentScope,
+    integrity_quarantine_findings,
 };
 
 use crate::ServiceHandle;
@@ -74,6 +76,7 @@ impl ServiceHandle {
             running: 0,
             deferred: 0,
             terminal: 0,
+            integrity_findings: integrity_findings(self)?,
         };
         for status in &statuses {
             match status.phase() {
@@ -501,6 +504,84 @@ impl ServiceHandle {
             )
             .map_err(|_| MaintenanceServiceFailure::AuthenticationRejected)
     }
+}
+
+fn integrity_findings(
+    services: &ServiceHandle,
+) -> Result<Vec<IntegrityQuarantineDescriptor>, MaintenanceServiceFailure> {
+    let catalog = services.open_maintenance_catalog()?;
+    let snapshot = catalog
+        .pin()
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    let findings = integrity_quarantine_findings(&snapshot)
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    let mut projected = Vec::new();
+    projected
+        .try_reserve(findings.len())
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    for finding in findings {
+        projected.push(IntegrityQuarantineDescriptor {
+            tenant: finding.scope().tenant_id().to_canonical_text(),
+            signal: match finding.scope().signal_kind() {
+                SignalKind::Logs => "logs".to_owned(),
+                SignalKind::Traces => "traces".to_owned(),
+            },
+            shard: finding.scope().shard_id().value(),
+            segment: hex_bytes(&finding.segment().to_bytes()),
+            base_position: finding.base_position(),
+            event_range: event_range(finding.event_range()),
+            ingest_range: ingest_range(finding.ingest_range()),
+        });
+    }
+    Ok(projected)
+}
+
+fn event_range(range: AuthenticatedEventRange) -> AuthenticatedTimeRangeDescriptor {
+    match range {
+        AuthenticatedEventRange::Known { earliest, latest } => {
+            known_range(earliest.value(), latest.value())
+        },
+        AuthenticatedEventRange::Unavailable(reason) => unavailable_range(match reason {
+            positron_kernel::EventRangeUnavailable::MissingSourceTime => "missing_source_time",
+            positron_kernel::EventRangeUnavailable::InvalidSourceTime => "invalid_source_time",
+            positron_kernel::EventRangeUnavailable::LegacyFormat => "legacy_format",
+        }),
+    }
+}
+
+fn ingest_range(range: AuthenticatedIngestRange) -> AuthenticatedTimeRangeDescriptor {
+    match range {
+        AuthenticatedIngestRange::Known { earliest, latest } => {
+            known_range(earliest.value(), latest.value())
+        },
+        AuthenticatedIngestRange::Unavailable => unavailable_range("unavailable"),
+    }
+}
+
+fn known_range(earliest: i64, latest: i64) -> AuthenticatedTimeRangeDescriptor {
+    AuthenticatedTimeRangeDescriptor {
+        provenance: "known".to_owned(),
+        earliest_unix_nanos: Some(earliest),
+        latest_unix_nanos: Some(latest),
+    }
+}
+
+fn unavailable_range(provenance: &str) -> AuthenticatedTimeRangeDescriptor {
+    AuthenticatedTimeRangeDescriptor {
+        provenance: provenance.to_owned(),
+        earliest_unix_nanos: None,
+        latest_unix_nanos: None,
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    text
 }
 
 fn signal(value: &str) -> Option<SignalKind> {

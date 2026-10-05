@@ -114,6 +114,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "integrity_quarantine_record"
+path = "fuzz_targets/integrity_quarantine_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "instance_bootstrap_stateful"
 path = "fuzz_targets/instance_bootstrap_stateful.rs"
 test = false

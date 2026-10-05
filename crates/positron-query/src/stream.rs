@@ -8,7 +8,9 @@ pub use contract::{
 };
 pub(crate) use events::QueryCounters;
 pub(crate) use events::{BatchMemoryAccount, BatchMemoryClaim, correlation_outcomes_arc_bytes};
-pub use events::{QueryBatch, QueryEvent, QueryIncomplete, QueryStats, QueryTerminal};
+pub use events::{
+    QueryAffectedRange, QueryBatch, QueryEvent, QueryIncomplete, QueryStats, QueryTerminal,
+};
 
 use positron_domain::routing::{CommitPosition, RecordOrdinal};
 use positron_domain::time::{EventTime, QueryTime, UnixNanoseconds};

@@ -3,15 +3,18 @@
 use std::sync::Arc;
 
 use crate::{
-    QueryBatch, QueryCursor, QueryEvent, QueryFailure, QueryFailureCode, QueryHeader, QueryStats,
-    QueryTerminal,
+    QueryAffectedRange, QueryBatch, QueryCursor, QueryEvent, QueryFailure, QueryFailureCode,
+    QueryHeader, QueryStats, QueryTerminal, TemporalAxis,
 };
 
 const REQUEST_DOMAIN: &[u8] = b"query-export-request-v2";
 const MANIFEST_DOMAIN: &[u8] = b"query-export-manifest-v1";
 const MAX_MANIFEST_BATCHES: usize = 1_024;
-const MANIFEST_WIRE_MAGIC: &[u8; 8] = b"POSQEM01";
-const TERMINAL_EVIDENCE_MAGIC: &[u8; 8] = b"POSQET01";
+const MANIFEST_WIRE_MAGIC_V1: &[u8; 8] = b"POSQEM01";
+const MANIFEST_WIRE_MAGIC_V2: &[u8; 8] = b"POSQEM02";
+const TERMINAL_EVIDENCE_MAGIC_V1: &[u8; 8] = b"POSQET01";
+const TERMINAL_EVIDENCE_MAGIC_V2: &[u8; 8] = b"POSQET02";
+const MAX_AFFECTED_RANGES: usize = 64;
 
 /// Immutable identity of the preconfigured protected output destination.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -466,7 +469,19 @@ fn manifest_payload(
         .map_err(|_| QueryFailure::new(QueryFailureCode::ResourceExhausted))?;
     let mut payload = Vec::new();
     payload
-        .try_reserve_exact(16 + 1 + 16 + 32 + 32 + 8 + 8 + 2 + batches.len() * 40 + 33)
+        .try_reserve_exact(
+            16 + 1
+                + 16
+                + 32
+                + 32
+                + 8
+                + 8
+                + 2
+                + batches.len() * 40
+                + 33
+                + 1
+                + MAX_AFFECTED_RANGES * 18,
+        )
         .map_err(|_| QueryFailure::new(QueryFailureCode::ResourceExhausted))?;
     payload.extend_from_slice(&destination.identity());
     match output_identity {
@@ -490,6 +505,7 @@ fn manifest_payload(
         ExportTerminal::Incomplete(incomplete) => {
             payload.push(2);
             payload.push(incomplete.code() as u8);
+            append_affected_ranges(&mut payload, incomplete.affected_ranges())?;
         },
     }
     payload.extend_from_slice(&terminal.stats().result_digest());
@@ -505,13 +521,29 @@ fn durable_manifest_bytes(manifest: &ExportManifest) -> Result<Vec<u8>, QueryFai
         .signature
         .ok_or_else(|| QueryFailure::new(QueryFailureCode::Internal))?;
     let capacity = 8_usize
-        .checked_add(16 + 16 + 32 + 32 + 8 + 8 + 2 + 179 + 8 + 32 + 2 + 32 + 32 + 64)
+        .checked_add(
+            16 + 16
+                + 32
+                + 32
+                + 8
+                + 8
+                + 2
+                + 179
+                + 8
+                + 32
+                + 2
+                + 32
+                + 32
+                + 64
+                + 1
+                + MAX_AFFECTED_RANGES * 18,
+        )
         .and_then(|base| base.checked_add(manifest.batches.len().checked_mul(40)?))
         .ok_or_else(|| QueryFailure::new(QueryFailureCode::ResourceExhausted))?;
     output
         .try_reserve_exact(capacity)
         .map_err(|_| QueryFailure::new(QueryFailureCode::ResourceExhausted))?;
-    output.extend_from_slice(MANIFEST_WIRE_MAGIC);
+    output.extend_from_slice(MANIFEST_WIRE_MAGIC_V2);
     output.extend_from_slice(&manifest.destination.identity());
     output.extend_from_slice(&output_identity);
     output.extend_from_slice(&manifest.request_digest);
@@ -534,6 +566,7 @@ fn durable_manifest_bytes(manifest: &ExportManifest) -> Result<Vec<u8>, QueryFai
         ExportTerminal::Incomplete(incomplete) => {
             output.push(2);
             output.push(query_failure_code(incomplete.code()));
+            append_affected_ranges(&mut output, incomplete.affected_ranges())?;
             incomplete
                 .stats()
                 .append_durable_export_encoding(&mut output)?;
@@ -550,9 +583,9 @@ fn durable_manifest_bytes(manifest: &ExportManifest) -> Result<Vec<u8>, QueryFai
 fn terminal_evidence_bytes(terminal: &ExportTerminal) -> Result<Vec<u8>, QueryFailure> {
     let mut bytes = Vec::new();
     bytes
-        .try_reserve_exact(8 + 2 + 179)
+        .try_reserve_exact(8 + 2 + 1 + MAX_AFFECTED_RANGES * 18 + 179)
         .map_err(|_| QueryFailure::new(QueryFailureCode::ResourceExhausted))?;
-    bytes.extend_from_slice(TERMINAL_EVIDENCE_MAGIC);
+    bytes.extend_from_slice(TERMINAL_EVIDENCE_MAGIC_V2);
     match terminal {
         ExportTerminal::Complete(stats) => {
             bytes.push(1);
@@ -562,6 +595,7 @@ fn terminal_evidence_bytes(terminal: &ExportTerminal) -> Result<Vec<u8>, QueryFa
         ExportTerminal::Incomplete(incomplete) => {
             bytes.push(2);
             bytes.push(query_failure_code(incomplete.code()));
+            append_affected_ranges(&mut bytes, incomplete.affected_ranges())?;
             incomplete
                 .stats()
                 .append_durable_export_encoding(&mut bytes)?;
@@ -572,30 +606,44 @@ fn terminal_evidence_bytes(terminal: &ExportTerminal) -> Result<Vec<u8>, QueryFa
 
 fn terminal_from_evidence(bytes: &[u8]) -> Result<ExportTerminal, QueryFailure> {
     let mut offset = 0;
-    if read_manifest_array::<8>(bytes, &mut offset)? != *TERMINAL_EVIDENCE_MAGIC {
-        return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData));
-    }
+    let magic = read_manifest_array::<8>(bytes, &mut offset)?;
+    let has_affected_ranges = match magic {
+        value if value == *TERMINAL_EVIDENCE_MAGIC_V1 => false,
+        value if value == *TERMINAL_EVIDENCE_MAGIC_V2 => true,
+        _ => return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData)),
+    };
     let terminal_tag = read_manifest_byte(bytes, &mut offset)?;
     let failure_tag = read_manifest_byte(bytes, &mut offset)?;
+    let affected_ranges = if terminal_tag == 2 && has_affected_ranges {
+        read_affected_ranges(bytes, &mut offset)?
+    } else {
+        Vec::new()
+    };
     let stats = QueryStats::from_durable_export_encoding(bytes, &mut offset)?;
     if offset != bytes.len() {
         return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData));
     }
     match terminal_tag {
         1 if failure_tag == 0 => Ok(ExportTerminal::Complete(stats)),
-        2 => Ok(ExportTerminal::Incomplete(crate::QueryIncomplete::new(
-            QueryFailure::new(query_failure_code_from(failure_tag)?),
-            stats,
-        ))),
+        2 => Ok(ExportTerminal::Incomplete(
+            crate::QueryIncomplete::with_affected_ranges(
+                QueryFailure::new(query_failure_code_from(failure_tag)?),
+                stats,
+                affected_ranges,
+            ),
+        )),
         _ => Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData)),
     }
 }
 
 fn durable_manifest_from_bytes(bytes: &[u8]) -> Result<ExportManifest, QueryFailure> {
     let mut offset = 0;
-    if read_manifest_array::<8>(bytes, &mut offset)? != *MANIFEST_WIRE_MAGIC {
-        return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData));
-    }
+    let magic = read_manifest_array::<8>(bytes, &mut offset)?;
+    let has_affected_ranges = match magic {
+        value if value == *MANIFEST_WIRE_MAGIC_V1 => false,
+        value if value == *MANIFEST_WIRE_MAGIC_V2 => true,
+        _ => return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData)),
+    };
     let destination = ExportDestination::configured(read_manifest_array(bytes, &mut offset)?)?;
     let output_identity = read_manifest_array(bytes, &mut offset)?;
     if output_identity.iter().all(|byte| *byte == 0) {
@@ -630,12 +678,18 @@ fn durable_manifest_from_bytes(bytes: &[u8]) -> Result<ExportManifest, QueryFail
     }
     let terminal_tag = read_manifest_byte(bytes, &mut offset)?;
     let failure_tag = read_manifest_byte(bytes, &mut offset)?;
+    let affected_ranges = if terminal_tag == 2 && has_affected_ranges {
+        read_affected_ranges(bytes, &mut offset)?
+    } else {
+        Vec::new()
+    };
     let stats = QueryStats::from_durable_export_encoding(bytes, &mut offset)?;
     let terminal = match terminal_tag {
         1 if failure_tag == 0 => ExportTerminal::Complete(stats),
-        2 => ExportTerminal::Incomplete(crate::QueryIncomplete::new(
+        2 => ExportTerminal::Incomplete(crate::QueryIncomplete::with_affected_ranges(
             QueryFailure::new(query_failure_code_from(failure_tag)?),
             stats,
+            affected_ranges,
         )),
         _ => return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData)),
     };
@@ -709,6 +763,92 @@ fn read_manifest_array<const N: usize>(
     Ok(array)
 }
 
+fn append_affected_ranges(
+    bytes: &mut Vec<u8>,
+    ranges: &[QueryAffectedRange],
+) -> Result<(), QueryFailure> {
+    let count = u8::try_from(ranges.len())
+        .ok()
+        .filter(|_| ranges.len() <= MAX_AFFECTED_RANGES)
+        .ok_or_else(|| QueryFailure::new(QueryFailureCode::ResourceExhausted))?;
+    bytes.push(count);
+    for range in ranges {
+        match range {
+            QueryAffectedRange::Known {
+                axis,
+                earliest_nanoseconds,
+                latest_nanoseconds,
+            } if *axis != TemporalAxis::QueryTime && earliest_nanoseconds <= latest_nanoseconds => {
+                bytes.push(1);
+                bytes.push(temporal_axis_tag(*axis));
+                bytes.extend_from_slice(&earliest_nanoseconds.to_be_bytes());
+                bytes.extend_from_slice(&latest_nanoseconds.to_be_bytes());
+            },
+            QueryAffectedRange::Unknown { axis } => {
+                bytes.push(2);
+                bytes.push(temporal_axis_tag(*axis));
+            },
+            QueryAffectedRange::Known { .. } => {
+                return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData));
+            },
+        }
+    }
+    Ok(())
+}
+
+fn read_affected_ranges(
+    bytes: &[u8],
+    offset: &mut usize,
+) -> Result<Vec<QueryAffectedRange>, QueryFailure> {
+    let count = usize::from(read_manifest_byte(bytes, offset)?);
+    if count > MAX_AFFECTED_RANGES {
+        return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData));
+    }
+    let mut ranges = Vec::new();
+    ranges
+        .try_reserve_exact(count)
+        .map_err(|_| QueryFailure::new(QueryFailureCode::ResourceExhausted))?;
+    for _ in 0..count {
+        let kind = read_manifest_byte(bytes, offset)?;
+        let axis = temporal_axis_from_tag(read_manifest_byte(bytes, offset)?)?;
+        let range = match kind {
+            1 => {
+                let earliest = i64::from_be_bytes(read_manifest_array(bytes, offset)?);
+                let latest = i64::from_be_bytes(read_manifest_array(bytes, offset)?);
+                if axis == TemporalAxis::QueryTime || earliest > latest {
+                    return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData));
+                }
+                QueryAffectedRange::Known {
+                    axis,
+                    earliest_nanoseconds: earliest,
+                    latest_nanoseconds: latest,
+                }
+            },
+            2 => QueryAffectedRange::Unknown { axis },
+            _ => return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData)),
+        };
+        ranges.push(range);
+    }
+    Ok(ranges)
+}
+
+const fn temporal_axis_tag(axis: TemporalAxis) -> u8 {
+    match axis {
+        TemporalAxis::QueryTime => 1,
+        TemporalAxis::EventTime => 2,
+        TemporalAxis::IngestTime => 3,
+    }
+}
+
+fn temporal_axis_from_tag(tag: u8) -> Result<TemporalAxis, QueryFailure> {
+    match tag {
+        1 => Ok(TemporalAxis::QueryTime),
+        2 => Ok(TemporalAxis::EventTime),
+        3 => Ok(TemporalAxis::IngestTime),
+        _ => Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData)),
+    }
+}
+
 fn query_failure_code(code: QueryFailureCode) -> u8 {
     match code {
         QueryFailureCode::Unauthorized => 1,
@@ -725,6 +865,7 @@ fn query_failure_code(code: QueryFailureCode) -> u8 {
         QueryFailureCode::StoreUnavailable => 11,
         QueryFailureCode::MalformedPersistentData => 12,
         QueryFailureCode::Internal => 13,
+        QueryFailureCode::IncompleteData => 15,
     }
 }
 
@@ -744,6 +885,7 @@ fn query_failure_code_from(code: u8) -> Result<QueryFailureCode, QueryFailure> {
         11 => Ok(QueryFailureCode::StoreUnavailable),
         12 => Ok(QueryFailureCode::MalformedPersistentData),
         13 => Ok(QueryFailureCode::Internal),
+        15 => Ok(QueryFailureCode::IncompleteData),
         _ => Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData)),
     }
 }
@@ -816,6 +958,7 @@ fn durable_query_failure(
             DurableQueryExportFailureCode::MalformedPersistentData
         },
         QueryFailureCode::Internal => DurableQueryExportFailureCode::Internal,
+        QueryFailureCode::IncompleteData => DurableQueryExportFailureCode::IncompleteData,
     };
     let limiting_budget = match failure.limiting_budget() {
         Some(crate::QueryBudgetDimension::ScannedBytes) => {
@@ -876,6 +1019,7 @@ fn query_failure_from_durable(
             QueryFailureCode::MalformedPersistentData
         },
         DurableQueryExportFailureCode::Internal => QueryFailureCode::Internal,
+        DurableQueryExportFailureCode::IncompleteData => QueryFailureCode::IncompleteData,
     };
     match failure.limiting_budget() {
         Some(DurableQueryBudgetDimension::ScannedBytes) => {
@@ -2002,12 +2146,14 @@ impl<'kernel, 'catalog, 'ledger> crate::QueryService<'kernel, 'catalog, 'ledger>
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportDestination, ExportTerminal, durable_manifest_from_bytes, manifest_payload,
-        terminal_evidence_bytes, terminal_from_evidence,
+        ExportDestination, ExportManifest, ExportTerminal, durable_manifest_bytes,
+        durable_manifest_from_bytes, manifest_payload, terminal_evidence_bytes,
+        terminal_from_evidence,
     };
     use crate::stream::QueryCounters;
     use crate::{
-        QueryBudget, QueryFailure, QueryFailureCode, QueryIncomplete, QueryStats, ResultSnapshot,
+        QueryAffectedRange, QueryBudget, QueryFailure, QueryFailureCode, QueryIncomplete,
+        QueryStats, ResultSnapshot, TemporalAxis,
     };
 
     #[test]
@@ -2041,6 +2187,106 @@ mod tests {
             terminal_from_evidence(&evidence).expect("authenticated format"),
             terminal
         );
+    }
+
+    #[test]
+    fn terminal_evidence_binds_typed_affected_ranges() {
+        let terminal = ExportTerminal::Incomplete(QueryIncomplete::with_affected_ranges(
+            QueryFailure::new(QueryFailureCode::IncompleteData),
+            QueryStats::new(
+                QueryCounters {
+                    records: 0,
+                    scanned_bytes: 0,
+                    decoded_records: 0,
+                    output_bytes: 0,
+                    memory_peak_bytes: 0,
+                    cpu_work_units: 0,
+                    wall_seconds: 0,
+                },
+                None,
+                [0x72; 32],
+                QueryBudget::new(10, 11, 12, 13, 14, 16).expect("fixture budget"),
+                0,
+                0,
+            ),
+            vec![
+                QueryAffectedRange::Known {
+                    axis: TemporalAxis::EventTime,
+                    earliest_nanoseconds: 10,
+                    latest_nanoseconds: 20,
+                },
+                QueryAffectedRange::Unknown {
+                    axis: TemporalAxis::QueryTime,
+                },
+            ],
+        ));
+        let evidence = terminal_evidence_bytes(&terminal).expect("bounded evidence");
+        assert_eq!(
+            terminal_from_evidence(&evidence).expect("typed terminal evidence"),
+            terminal
+        );
+    }
+
+    #[test]
+    fn durable_manifest_round_trips_typed_affected_ranges() {
+        let terminal = ExportTerminal::Incomplete(QueryIncomplete::with_affected_ranges(
+            QueryFailure::new(QueryFailureCode::IncompleteData),
+            QueryStats::new(
+                QueryCounters {
+                    records: 0,
+                    scanned_bytes: 0,
+                    decoded_records: 0,
+                    output_bytes: 0,
+                    memory_peak_bytes: 0,
+                    cpu_work_units: 0,
+                    wall_seconds: 0,
+                },
+                None,
+                [0x73; 32],
+                QueryBudget::new(10, 11, 12, 13, 14, 16).expect("fixture budget"),
+                0,
+                0,
+            ),
+            vec![
+                QueryAffectedRange::Known {
+                    axis: TemporalAxis::IngestTime,
+                    earliest_nanoseconds: 30,
+                    latest_nanoseconds: 40,
+                },
+                QueryAffectedRange::Unknown {
+                    axis: TemporalAxis::EventTime,
+                },
+            ],
+        ));
+        let identity = positron_kernel::BootstrapIntegrityIdentity::from_pinned(
+            [0x01; 32],
+            [
+                0x6c, 0xd5, 0xfc, 0x8e, 0x38, 0xa8, 0x4f, 0x85, 0x22, 0xf6, 0xc1, 0x21, 0xa4, 0x95,
+                0xec, 0xf9, 0x52, 0x62, 0x30, 0x43, 0x8a, 0xf3, 0xeb, 0xac, 0xf2, 0x52, 0x4f, 0xfb,
+                0xfe, 0xb1, 0x60, 0x0e,
+            ],
+        )
+        .expect("fixture identity");
+        let manifest = ExportManifest {
+            destination: ExportDestination::configured([0x11; 16]).expect("fixture destination"),
+            output_identity: Some([0x12; 16]),
+            request_digest: [0x13; 32],
+            snapshot: ResultSnapshot::new([0x14; 32], 15, 16),
+            batches: Vec::new(),
+            terminal: terminal.clone(),
+            authentication: positron_kernel::ControlTokenAuthentication::new(1, [0x15; 32])
+                .expect("fixture authentication"),
+            signature: Some(
+                positron_kernel::ExportManifestSignature::new(identity, [0x16; 64])
+                    .expect("fixture signature"),
+            ),
+        };
+
+        let decoded = durable_manifest_from_bytes(
+            &durable_manifest_bytes(&manifest).expect("bounded durable manifest"),
+        )
+        .expect("durable manifest decodes");
+        assert_eq!(decoded.terminal(), &terminal);
     }
 
     #[test]

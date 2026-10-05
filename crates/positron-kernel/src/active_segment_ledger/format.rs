@@ -1,13 +1,17 @@
 use positron_domain::identity::TenantId;
 use positron_domain::routing::{CommitPosition, SignalKind, VirtualShardId};
 
-use super::{LedgerFailure, LedgerFailureCode, SegmentId, SegmentKeyRoute, SegmentScope};
+use super::{
+    AuthenticatedEventRange, AuthenticatedIngestRange, EventRangeUnavailable, LedgerFailure,
+    LedgerFailureCode, SegmentId, SegmentKeyRoute, SegmentScope,
+};
 
 const METADATA_MAGIC: &[u8; 8] = b"PSEGMET1";
 const SEGMENT_MAGIC: &[u8; 8] = b"PSEGACT3";
-const METADATA_VERSION: u16 = 1;
+const METADATA_VERSION: u16 = 2;
 const SEGMENT_VERSION: u16 = 2;
-pub(super) const METADATA_BYTES: usize = 8 + 2 + 1 + 16 + 1 + 4 + 16 + 8;
+const METADATA_V1_BYTES: usize = 8 + 2 + 1 + 16 + 1 + 4 + 16 + 8;
+pub(super) const METADATA_BYTES: usize = METADATA_V1_BYTES + 17 + 17 + 1 + 8;
 const FRAME_ALGORITHM_AES_256_GCM: u16 = 1;
 const WRAPPING_ALGORITHM_AES_256_KWP: u16 = 1;
 pub(super) const HEADER_PREFIX_BYTES: usize = 8 + 2 + 2 + 2 + 2 + 16 + 8 + 4;
@@ -27,6 +31,13 @@ pub(super) struct SegmentMetadata {
     pub(super) id: SegmentId,
     pub(super) state: SegmentState,
     pub(super) base_position: CommitPosition,
+    /// The authenticated final commit position for an immutable segment.
+    ///
+    /// Legacy records deliberately leave this absent.  They can be recovered
+    /// normally, but cannot authorize skipping a quarantined continuity gap.
+    pub(super) sealed_frontier: Option<CommitPosition>,
+    pub(super) event_range: AuthenticatedEventRange,
+    pub(super) ingest_range: AuthenticatedIngestRange,
 }
 
 pub(super) struct SegmentHeader<'a> {
@@ -53,6 +64,9 @@ pub(super) fn encode_metadata(metadata: SegmentMetadata) -> Vec<u8> {
     bytes.extend_from_slice(&metadata.scope.shard.value().to_be_bytes());
     bytes.extend_from_slice(&metadata.id.to_bytes());
     bytes.extend_from_slice(&metadata.base_position.value().to_be_bytes());
+    encode_event_range(&mut bytes, metadata.event_range);
+    encode_ingest_range(&mut bytes, metadata.ingest_range);
+    encode_sealed_frontier(&mut bytes, metadata.sealed_frontier);
     bytes
 }
 
@@ -60,8 +74,19 @@ pub(super) fn decode_metadata(bytes: &[u8]) -> Result<Option<SegmentMetadata>, L
     if !bytes.starts_with(METADATA_MAGIC) {
         return Ok(None);
     }
-    if bytes.len() != METADATA_BYTES
-        || bytes.get(8..10) != Some(METADATA_VERSION.to_be_bytes().as_slice())
+    let version = u16::from_be_bytes(
+        bytes
+            .get(8..10)
+            .and_then(|value| value.try_into().ok())
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::UnsupportedFormat))?,
+    );
+    if !matches!(version, 1..=METADATA_VERSION)
+        || bytes.len()
+            != match version {
+                1 => METADATA_V1_BYTES,
+                2 => METADATA_BYTES,
+                _ => return Err(LedgerFailure::new(LedgerFailureCode::UnsupportedFormat)),
+            }
     {
         return Err(LedgerFailure::new(LedgerFailureCode::UnsupportedFormat));
     }
@@ -80,6 +105,26 @@ pub(super) fn decode_metadata(bytes: &[u8]) -> Result<Option<SegmentMetadata>, L
     let shard = u32::from_be_bytes(exact(bytes, 28, 4)?);
     let id = SegmentId::new(exact(bytes, 32, 16)?)?;
     let base = u64::from_be_bytes(exact(bytes, 48, 8)?);
+    let event_range = if version >= 2 {
+        decode_event_range(bytes, METADATA_V1_BYTES)?
+    } else {
+        AuthenticatedEventRange::unavailable(EventRangeUnavailable::LegacyFormat)
+    };
+    let ingest_range = if version >= 2 {
+        decode_ingest_range(bytes, METADATA_V1_BYTES + 17)?
+    } else {
+        AuthenticatedIngestRange::unavailable()
+    };
+    let sealed_frontier = if version == 2 {
+        decode_sealed_frontier(bytes, METADATA_V1_BYTES + 17 + 17)?
+    } else {
+        None
+    };
+    if matches!(state, SegmentState::Active) && sealed_frontier.is_some()
+        || version == 2 && matches!(state, SegmentState::Sealed) && sealed_frontier.is_none()
+    {
+        return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+    }
     Ok(Some(SegmentMetadata {
         scope: SegmentScope::new(
             TenantId::from_bytes(tenant)
@@ -91,7 +136,105 @@ pub(super) fn decode_metadata(bytes: &[u8]) -> Result<Option<SegmentMetadata>, L
         id,
         state,
         base_position: position_from_value(base)?,
+        sealed_frontier,
+        event_range,
+        ingest_range,
     }))
+}
+
+fn encode_sealed_frontier(bytes: &mut Vec<u8>, frontier: Option<CommitPosition>) {
+    match frontier {
+        Some(frontier) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&frontier.value().to_be_bytes());
+        },
+        None => bytes.extend_from_slice(&[0; 9]),
+    }
+}
+
+fn decode_sealed_frontier(
+    bytes: &[u8],
+    offset: usize,
+) -> Result<Option<CommitPosition>, LedgerFailure> {
+    let value = u64::from_be_bytes(exact(bytes, offset + 1, 8)?);
+    match bytes.get(offset).copied() {
+        Some(0) if value == 0 => Ok(None),
+        Some(1) => position_from_value(value).map(Some),
+        _ => Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption)),
+    }
+}
+
+fn encode_event_range(bytes: &mut Vec<u8>, range: AuthenticatedEventRange) {
+    match range {
+        AuthenticatedEventRange::Known { earliest, latest } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&earliest.value().to_be_bytes());
+            bytes.extend_from_slice(&latest.value().to_be_bytes());
+        },
+        AuthenticatedEventRange::Unavailable(EventRangeUnavailable::MissingSourceTime) => {
+            bytes.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        },
+        AuthenticatedEventRange::Unavailable(EventRangeUnavailable::InvalidSourceTime) => {
+            bytes.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        },
+        AuthenticatedEventRange::Unavailable(EventRangeUnavailable::LegacyFormat) => {
+            bytes.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        },
+    }
+}
+
+fn encode_ingest_range(bytes: &mut Vec<u8>, range: AuthenticatedIngestRange) {
+    match range {
+        AuthenticatedIngestRange::Known { earliest, latest } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&earliest.value().to_be_bytes());
+            bytes.extend_from_slice(&latest.value().to_be_bytes());
+        },
+        AuthenticatedIngestRange::Unavailable => {
+            bytes.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        },
+    }
+}
+
+fn decode_event_range(
+    bytes: &[u8],
+    offset: usize,
+) -> Result<AuthenticatedEventRange, LedgerFailure> {
+    let earliest = i64::from_be_bytes(exact(bytes, offset + 1, 8)?);
+    let latest = i64::from_be_bytes(exact(bytes, offset + 9, 8)?);
+    match bytes.get(offset).copied() {
+        Some(1) => AuthenticatedEventRange::known(
+            positron_domain::time::UnixNanoseconds::new(earliest),
+            positron_domain::time::UnixNanoseconds::new(latest),
+        )
+        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption)),
+        Some(2) if earliest == 0 && latest == 0 => Ok(AuthenticatedEventRange::unavailable(
+            EventRangeUnavailable::MissingSourceTime,
+        )),
+        Some(3) if earliest == 0 && latest == 0 => Ok(AuthenticatedEventRange::unavailable(
+            EventRangeUnavailable::InvalidSourceTime,
+        )),
+        Some(4) if earliest == 0 && latest == 0 => Ok(AuthenticatedEventRange::unavailable(
+            EventRangeUnavailable::LegacyFormat,
+        )),
+        _ => Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption)),
+    }
+}
+
+fn decode_ingest_range(
+    bytes: &[u8],
+    offset: usize,
+) -> Result<AuthenticatedIngestRange, LedgerFailure> {
+    let earliest = i64::from_be_bytes(exact(bytes, offset + 1, 8)?);
+    let latest = i64::from_be_bytes(exact(bytes, offset + 9, 8)?);
+    match bytes.get(offset).copied() {
+        Some(1) if earliest <= latest => Ok(AuthenticatedIngestRange::Known {
+            earliest: positron_domain::time::UnixNanoseconds::new(earliest),
+            latest: positron_domain::time::UnixNanoseconds::new(latest),
+        }),
+        Some(2) if earliest == 0 && latest == 0 => Ok(AuthenticatedIngestRange::Unavailable),
+        _ => Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption)),
+    }
 }
 
 pub(super) fn encode_header(

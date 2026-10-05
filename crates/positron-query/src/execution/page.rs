@@ -109,6 +109,19 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 ));
             },
         };
+        let affected_ranges =
+            crate::availability::affected_ranges(&state.plan, snapshot.quarantined_holes());
+        if !affected_ranges.is_empty() {
+            return self.incomplete_page_with_affected_ranges(
+                Some(header),
+                QueryFailure::new(QueryFailureCode::IncompleteData),
+                affected_ranges,
+                &state,
+                delivered_before,
+                stats_before_current(&state),
+                resources,
+            );
+        }
         macro_rules! framed {
             ($result:expr) => {
                 match $result {

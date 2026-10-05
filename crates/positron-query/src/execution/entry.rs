@@ -244,14 +244,27 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         let mut lease = {
             let mut retries = 0;
             loop {
-                match self.ledger.resume_snapshot_lease_with_marker_at_catalog(
-                    lease_id,
-                    now_seconds,
-                    state.sequence,
-                    state.prior_digest,
-                    catalog_identity,
-                    catalog_generation,
-                ) {
+                let resumed = if self.maintenance.is_some() {
+                    self.ledger
+                        .resume_snapshot_lease_with_marker_at_catalog_with_expiry_task(
+                            lease_id,
+                            now_seconds,
+                            state.sequence,
+                            state.prior_digest,
+                            catalog_identity,
+                            catalog_generation,
+                        )
+                } else {
+                    self.ledger.resume_snapshot_lease_with_marker_at_catalog(
+                        lease_id,
+                        now_seconds,
+                        state.sequence,
+                        state.prior_digest,
+                        catalog_identity,
+                        catalog_generation,
+                    )
+                };
+                match resumed {
                     Ok(lease) => break lease,
                     Err(failure)
                         if failure.code() == LedgerFailureCode::StaleGeneration
@@ -424,15 +437,26 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                         ));
                     },
                 };
-                let mut target_lease = match trace_ledger
-                    .resume_snapshot_lease_with_marker_at_catalog(
+                let target_resume = if self.maintenance.is_some() {
+                    trace_ledger.resume_snapshot_lease_with_marker_at_catalog_with_expiry_task(
                         target_lease_id,
                         now_seconds,
                         state.sequence,
                         state.prior_digest,
                         target_catalog_identity,
                         target_catalog_generation,
-                    ) {
+                    )
+                } else {
+                    trace_ledger.resume_snapshot_lease_with_marker_at_catalog(
+                        target_lease_id,
+                        now_seconds,
+                        state.sequence,
+                        state.prior_digest,
+                        target_catalog_identity,
+                        target_catalog_generation,
+                    )
+                };
+                let mut target_lease = match target_resume {
                     Ok(lease) => lease,
                     Err(failure) => {
                         return Err(resources.fail_before_stream(

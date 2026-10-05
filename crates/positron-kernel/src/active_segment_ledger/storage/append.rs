@@ -9,6 +9,8 @@ pub(in crate::active_segment_ledger) struct NextFrontier {
     pub(in crate::active_segment_ledger) sequence: u64,
     pub(in crate::active_segment_ledger) position: positron_domain::routing::CommitPosition,
     pub(in crate::active_segment_ledger) segment_retention: SegmentRetention,
+    pub(in crate::active_segment_ledger) segment_event_range:
+        crate::active_segment_ledger::AuthenticatedEventRange,
 }
 
 impl LedgerStorage {
@@ -60,14 +62,17 @@ impl LedgerStorage {
             &self.active,
             metadata.id,
             key,
-            durable_bytes,
-            frontier
-                .sequence
-                .checked_add(1)
-                .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))
-                .map_err(|failure| mutation.failure(failure))?,
-            frontier.position,
-            frontier.segment_retention,
+            super::super::recovery::FrontierPublication {
+                durable_bytes,
+                next_sequence: frontier
+                    .sequence
+                    .checked_add(1)
+                    .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))
+                    .map_err(|failure| mutation.failure(failure))?,
+                position: frontier.position,
+                retention: frontier.segment_retention,
+                event_range: frontier.segment_event_range,
+            },
         )
         .map_err(|failure| mutation.failure(failure))
     }

@@ -18,6 +18,116 @@ mod protection_clone;
 pub use failure::{LedgerCompletionState, LedgerFailure, LedgerFailureCode};
 pub use prepared::{PreparedStoreBlock, StoreBlockPreparation};
 
+/// Why a signal store cannot authenticate an Event Time range for a block.
+///
+/// This is authenticated alongside canonical block bytes. It deliberately
+/// distinguishes a producer-derived absence from pre-range data so integrity
+/// response never invents a localized time range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventRangeUnavailable {
+    MissingSourceTime,
+    InvalidSourceTime,
+    LegacyFormat,
+}
+
+/// Signal-store supplied Event Time evidence carried opaquely by the kernel.
+///
+/// The Storage Kernel authenticates and transports this summary, but never
+/// decodes Log or Trace payloads to derive it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatedEventRange {
+    Known {
+        earliest: UnixNanoseconds,
+        latest: UnixNanoseconds,
+    },
+    Unavailable(EventRangeUnavailable),
+}
+
+/// Kernel-issued Ingest Time range retained with a sealed segment's trusted
+/// Event Time evidence for integrity reporting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthenticatedIngestRange {
+    Known {
+        earliest: UnixNanoseconds,
+        latest: UnixNanoseconds,
+    },
+    Unavailable,
+}
+
+impl AuthenticatedIngestRange {
+    #[must_use]
+    pub const fn one(instant: IngestTime) -> Self {
+        Self::Known {
+            earliest: instant.instant(),
+            latest: instant.instant(),
+        }
+    }
+
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self::Unavailable
+    }
+
+    #[must_use]
+    pub(super) fn aggregate(self, next: Self) -> Self {
+        match (self, next) {
+            (
+                Self::Known {
+                    earliest: left_earliest,
+                    latest: left_latest,
+                },
+                Self::Known {
+                    earliest: right_earliest,
+                    latest: right_latest,
+                },
+            ) => Self::Known {
+                earliest: left_earliest.min(right_earliest),
+                latest: left_latest.max(right_latest),
+            },
+            (Self::Unavailable, _) | (_, Self::Unavailable) => Self::Unavailable,
+        }
+    }
+}
+
+impl AuthenticatedEventRange {
+    pub fn known(
+        earliest: UnixNanoseconds,
+        latest: UnixNanoseconds,
+    ) -> Result<Self, EventRangeUnavailable> {
+        if earliest > latest {
+            return Err(EventRangeUnavailable::InvalidSourceTime);
+        }
+        Ok(Self::Known { earliest, latest })
+    }
+
+    #[must_use]
+    pub const fn unavailable(reason: EventRangeUnavailable) -> Self {
+        Self::Unavailable(reason)
+    }
+
+    #[must_use]
+    pub(super) fn aggregate(self, next: Self) -> Self {
+        match (self, next) {
+            (
+                Self::Known {
+                    earliest: left_earliest,
+                    latest: left_latest,
+                },
+                Self::Known {
+                    earliest: right_earliest,
+                    latest: right_latest,
+                },
+            ) => Self::Known {
+                earliest: left_earliest.min(right_earliest),
+                latest: left_latest.max(right_latest),
+            },
+            (Self::Unavailable(reason), _) | (_, Self::Unavailable(reason)) => {
+                Self::Unavailable(reason)
+            },
+        }
+    }
+}
+
 /// The immutable tenant, Signal Store, and Virtual Shard boundary of one active segment.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SegmentScope {
@@ -310,6 +420,7 @@ pub struct CommittedBlock {
     pub(super) segment: SegmentId,
     pub(super) frontier_authenticator: [u8; 32],
     pub(super) block_retention: SegmentRetention,
+    pub(super) event_range: AuthenticatedEventRange,
 }
 
 /// A verified Log Store block prepared for kernel-owned copy-on-write
@@ -324,6 +435,23 @@ pub struct CompactionBlock {
     pub(super) payload: Vec<u8>,
     pub(super) content_digest: [u8; 32],
     pub(super) ingest_time: IngestTime,
+    pub(super) event_range: AuthenticatedEventRange,
+}
+
+/// Source-owned time evidence retained by a compaction output block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompactionBlockTime {
+    ingest_time: IngestTime,
+    event_range: AuthenticatedEventRange,
+}
+
+impl CompactionBlockTime {
+    pub const fn new(ingest_time: IngestTime, event_range: AuthenticatedEventRange) -> Self {
+        Self {
+            ingest_time,
+            event_range,
+        }
+    }
 }
 
 /// Capacity admitted before a caller materializes compaction inputs.
@@ -356,7 +484,32 @@ impl CompactionBlock {
         content_digest: [u8; 32],
         ingest_time: IngestTime,
     ) -> Result<Self, LedgerFailure> {
-        if payload.is_empty() || !ingest_time.retention_authenticated() {
+        Self::new_with_time(
+            scope,
+            source_segment,
+            identity,
+            position,
+            payload,
+            content_digest,
+            CompactionBlockTime::new(
+                ingest_time,
+                AuthenticatedEventRange::unavailable(EventRangeUnavailable::LegacyFormat),
+            ),
+        )
+    }
+
+    /// Creates one compaction input with source-owned authenticated Event Time
+    /// evidence copied from the verified committed block.
+    pub fn new_with_time(
+        scope: SegmentScope,
+        source_segment: SegmentId,
+        identity: StoreBlockIdentity,
+        position: CommitPosition,
+        payload: Vec<u8>,
+        content_digest: [u8; 32],
+        time: CompactionBlockTime,
+    ) -> Result<Self, LedgerFailure> {
+        if payload.is_empty() || !time.ingest_time.retention_authenticated() {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
         Ok(Self {
@@ -366,7 +519,8 @@ impl CompactionBlock {
             position,
             payload,
             content_digest,
-            ingest_time,
+            ingest_time: time.ingest_time,
+            event_range: time.event_range,
         })
     }
 
@@ -427,6 +581,13 @@ impl CommittedBlock {
         &self.payload
     }
 
+    /// Returns producer-owned authenticated Event Time evidence without
+    /// decoding the Store Block payload.
+    #[must_use]
+    pub const fn event_range(&self) -> AuthenticatedEventRange {
+        self.event_range
+    }
+
     /// Verifies one encoded record timestamp against this authenticated v3 block.
     pub fn authenticate_ingest_time(
         &self,
@@ -476,6 +637,7 @@ pub struct LedgerSnapshot<'kernel> {
     pub(super) catalog_generation: u64,
     pub(super) catalog_identity: crate::CatalogGenerationId,
     pub(super) blocks: Vec<CommittedBlock>,
+    pub(super) quarantined_holes: Vec<super::IntegrityQuarantineFinding>,
 }
 
 impl LedgerSnapshot<'_> {
@@ -503,6 +665,11 @@ impl LedgerSnapshot<'_> {
     #[must_use]
     pub fn blocks(&self) -> &[CommittedBlock] {
         &self.blocks
+    }
+
+    #[must_use]
+    pub fn quarantined_holes(&self) -> &[super::IntegrityQuarantineFinding] {
+        &self.quarantined_holes
     }
 }
 

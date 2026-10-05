@@ -47,7 +47,7 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
         MaintenanceServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     match command {
         Command::Status => {
-            let (status, tasks, pages) = complete_status(&client, bearer)?;
+            let (status, tasks, findings, pages) = complete_status(&client, bearer)?;
             println!(
                 "queued={} running={} deferred={} terminal={} total={} tasks={} pages={}",
                 status.queued,
@@ -60,6 +60,9 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
             );
             for task in &tasks {
                 print_task(task);
+            }
+            for finding in &findings {
+                print_integrity_finding(finding);
             }
         },
         Command::Explain(request) => {
@@ -96,17 +99,29 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
 fn complete_status(
     client: &MaintenanceServiceClient,
     bearer: &str,
-) -> Result<(MaintenanceStatus, Vec<MaintenanceTaskStatus>, usize), &'static str> {
+) -> Result<
+    (
+        MaintenanceStatus,
+        Vec<MaintenanceTaskStatus>,
+        Vec<positron_api::maintenance::IntegrityQuarantineDescriptor>,
+        usize,
+    ),
+    &'static str,
+> {
     let mut request = MaintenanceStatusRequest::default();
     let mut cursors = BTreeSet::new();
     let mut identities = BTreeSet::new();
     let mut tasks = Vec::with_capacity(MAX_TASKS);
     let mut pages = 0;
+    let mut findings = None;
     let status = loop {
         if pages == MAX_TASKS / MAX_STATUS_PAGE_TASKS {
             return Err("maintenance status pagination exceeded its bounded registry");
         }
         let response = client.status(bearer, &request).map_err(client_failure)?;
+        if findings.is_none() {
+            findings = Some(response.integrity_findings.clone());
+        }
         pages += 1;
         let status = MaintenanceStatus::from(&response);
         if tasks.len() + response.tasks.len() > MAX_TASKS
@@ -133,7 +148,24 @@ fn complete_status(
             None => break status,
         }
     };
-    Ok((status, tasks, pages))
+    Ok((status, tasks, findings.unwrap_or_default(), pages))
+}
+
+fn print_integrity_finding(finding: &positron_api::maintenance::IntegrityQuarantineDescriptor) {
+    println!(
+        "integrity_quarantine tenant={} signal={} shard={} segment={} base_position={} event_provenance={} event_earliest_unix_nanos={} event_latest_unix_nanos={} ingest_provenance={} ingest_earliest_unix_nanos={} ingest_latest_unix_nanos={}",
+        finding.tenant,
+        finding.signal,
+        finding.shard,
+        finding.segment,
+        finding.base_position,
+        finding.event_range.provenance,
+        unknown(finding.event_range.earliest_unix_nanos),
+        unknown(finding.event_range.latest_unix_nanos),
+        finding.ingest_range.provenance,
+        unknown(finding.ingest_range.earliest_unix_nanos),
+        unknown(finding.ingest_range.latest_unix_nanos),
+    );
 }
 
 struct MaintenanceStatus {

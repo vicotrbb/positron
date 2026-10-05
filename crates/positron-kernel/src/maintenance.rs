@@ -37,6 +37,38 @@ pub(crate) fn durable_task_record_identity(
     record::record_identity(bytes)
 }
 
+/// Verifies the exact queued expiry descriptor paired with one live Snapshot
+/// Lease. The caller supplies values decoded from the same Catalog generation
+/// as the lease, so a successor Catalog is never used as snapshot authority.
+pub(crate) fn validate_active_snapshot_lease_expiry_descriptor(
+    bytes: &[u8],
+    lease: crate::SnapshotLeaseId,
+    scope: crate::active_segment_ledger::SegmentScope,
+    lease_object: crate::CatalogObjectId,
+    predecessor_generation: u64,
+    expiry: u64,
+) -> Result<(), MaintenanceFailure> {
+    let state = decode_record(bytes)?;
+    let expected = MaintenanceTaskId::new(lease.to_bytes())?;
+    let expected_input = MaintenanceObjectId::new(lease_object.to_bytes())?;
+    if state.task.identity != expected
+        || state.task.class != MaintenanceTaskClass::SnapshotLeaseExpiry
+        || state.task.scope
+            != MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id())
+        || state.task.trigger != MaintenanceTrigger::Scheduled
+        || state.task.preconditions.catalog_generation != predecessor_generation
+        || state.task.preconditions.resource_generation != 1
+        || state.task.inputs.as_slice() != [expected_input]
+        || !state.task.outputs.is_empty()
+        || state.task.not_before != expiry
+        || state.phase != MaintenanceTaskPhase::Queued
+        || state.cancellation_requested
+    {
+        return Err(MaintenanceFailure::InvalidInput);
+    }
+    Ok(())
+}
+
 #[cfg(all(test, feature = "test-support"))]
 pub(crate) fn rewrite_durable_task_record_dispatches_for_test(
     bytes: &[u8],
@@ -1365,6 +1397,30 @@ impl MaintenanceCoordinator {
                     MaintenanceTaskClass::RetentionPublication
                         | MaintenanceTaskClass::RetentionReclamation
                 )
+                && !matches!(
+                    task.phase,
+                    MaintenanceTaskPhase::Cancelled
+                        | MaintenanceTaskPhase::Succeeded
+                        | MaintenanceTaskPhase::Failed
+                )
+        }))
+    }
+
+    /// Reports whether the exact maintenance class already owns a scope.
+    /// Discovery uses this to make periodic submissions idempotent across
+    /// worker wakeups and process recovery.
+    pub fn has_nonterminal_task_for_scope(
+        &self,
+        class: MaintenanceTaskClass,
+        scope: MaintenanceScope,
+    ) -> Result<bool, MaintenanceFailure> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        Ok(state.tasks.values().any(|task| {
+            task.task.scope == scope
+                && task.task.class == class
                 && !matches!(
                     task.phase,
                     MaintenanceTaskPhase::Cancelled

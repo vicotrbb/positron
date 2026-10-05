@@ -48,6 +48,7 @@ pub(crate) fn map_trace_store_failure(
             QueryFailure::budget_exhausted(QueryBudgetDimension::CpuWorkUnits)
         },
         Trace::MalformedBlock
+        | Trace::Quarantined
         | Trace::PhysicalScopeMismatch
         | Trace::IntegrityCorruption
         | Trace::AuthenticationFailed
@@ -75,7 +76,7 @@ pub(crate) fn map_trace_store_failure(
 
 const fn map_store_failure_code(code: positron_signals::LogStoreFailureCode) -> QueryFailureCode {
     match code {
-        Store::MalformedBlock => QueryFailureCode::MalformedPersistentData,
+        Store::MalformedBlock | Store::Quarantined => QueryFailureCode::MalformedPersistentData,
         Store::InvalidInput => QueryFailureCode::InvalidBudget,
         Store::PhysicalScopeMismatch => QueryFailureCode::MalformedPersistentData,
         Store::StorageUnavailable

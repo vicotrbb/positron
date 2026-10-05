@@ -55,6 +55,13 @@ impl InstanceBootstrap {
         operation::reopen(paths, max_registered_tenants)
     }
 
+    pub(crate) fn verify_offline_integrity(
+        paths: &BootstrapPaths,
+        max_registered_tenants: u16,
+    ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
+        operation::verify_offline_integrity(paths, max_registered_tenants)
+    }
+
     pub fn claim(paths: &BootstrapPaths) -> Result<BootstrapClaim, BootstrapFailure> {
         operation::claim(paths)
     }

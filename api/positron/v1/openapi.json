@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "47e817235f3c64cfdd154a0e5b9f36d82659e5dbf66dd8f5155ed8c8580209e2"
+    "x-positron-schema-digest": "3d8e15900398e8d531096395bedbf627ea87507bedc594a40e2c7d21f4161cd0"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1367,7 +1367,7 @@
       },
       "MaintenanceStatusResponse": {
         "type": "object", "additionalProperties": false,
-        "required": ["tasks", "returned", "total", "queued", "running", "deferred", "terminal"],
+        "required": ["tasks", "returned", "total", "queued", "running", "deferred", "terminal", "integrity_findings"],
         "properties": {
           "tasks": {"type": "array", "maxItems": 32, "items": {"$ref": "#/components/schemas/MaintenanceTaskStatus"}},
           "returned": {"type": "integer", "minimum": 0, "maximum": 32},
@@ -1376,7 +1376,30 @@
           "queued": {"type": "integer", "minimum": 0},
           "running": {"type": "integer", "minimum": 0},
           "deferred": {"type": "integer", "minimum": 0},
-          "terminal": {"type": "integer", "minimum": 0}
+          "terminal": {"type": "integer", "minimum": 0},
+          "integrity_findings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/components/schemas/IntegrityQuarantineFinding"}}
+        }
+      },
+      "AuthenticatedTimeRange": {
+        "type": "object", "additionalProperties": false,
+        "required": ["provenance"],
+        "properties": {
+          "provenance": {"type": "string", "enum": ["known", "missing_source_time", "invalid_source_time", "legacy_format", "unavailable"]},
+          "earliest_unix_nanos": {"type": "integer", "format": "int64"},
+          "latest_unix_nanos": {"type": "integer", "format": "int64"}
+        }
+      },
+      "IntegrityQuarantineFinding": {
+        "type": "object", "additionalProperties": false,
+        "required": ["tenant", "signal", "shard", "segment", "base_position", "event_range", "ingest_range"],
+        "properties": {
+          "tenant": {"type": "string", "format": "uuid"},
+          "signal": {"type": "string", "enum": ["logs", "traces"]},
+          "shard": {"type": "integer", "minimum": 1},
+          "segment": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+          "base_position": {"type": "integer", "minimum": 1},
+          "event_range": {"$ref": "#/components/schemas/AuthenticatedTimeRange"},
+          "ingest_range": {"$ref": "#/components/schemas/AuthenticatedTimeRange"}
         }
       },
       "MaintenanceExplainRequest": {

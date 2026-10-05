@@ -444,3 +444,135 @@ fn generate_record(key: &BootstrapKeyCustody) -> Result<BootstrapRecord, Bootstr
         integrity_key_secret: Some(Zeroizing::new(*integrity_secret)),
     })
 }
+
+/// Opens only read-only bootstrap and Catalog inspection state for offline
+/// verification. It deliberately does not call reopen: reopen may restore
+/// active ledgers, whereas verification must neither create nor repair data.
+pub(super) fn verify_offline_integrity(
+    paths: &BootstrapPaths,
+    max_registered_tenants: u16,
+) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
+    use positron_domain::routing::SignalKind;
+    use positron_kernel::{
+        ActiveSegmentLedger, IntegrityCancellation, IntegrityScrubBudget,
+        IntegrityVerificationMode, IntegrityVerificationOutcome, TransactionId,
+    };
+
+    let (volume, access) =
+        acquire(paths).map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
+    let state = storage::classify_with(&access)
+        .map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
+    if state != BootstrapState::Initialized {
+        if state == BootstrapState::Inconsistent && access.open_key().is_err() {
+            return Err(crate::OfflineIntegrityFailure::KeyUnavailable);
+        }
+        return Err(crate::OfflineIntegrityFailure::BootstrapUnavailable);
+    }
+    let key = access
+        .open_key()
+        .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
+    let encoded = storage::read(&access, BootstrapArtifact::Initialized)
+        .map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
+    let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)
+        .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+    require_key_identity(&record, key.identity())
+        .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+    let authority = resources::establish(volume, record.tenant, max_registered_tenants)
+        .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
+    let snapshot = Catalog::read_current_snapshot(
+        &authority,
+        record.instance,
+        key.catalog_secret(record.instance)
+            .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?,
+    )
+    .map_err(|failure| match failure.code() {
+        positron_kernel::CatalogFailureCode::StorageUnavailable => {
+            crate::OfflineIntegrityFailure::StorageUnavailable
+        },
+        positron_kernel::CatalogFailureCode::ConcurrentWriter => {
+            crate::OfflineIntegrityFailure::CatalogUnavailable
+        },
+        positron_kernel::CatalogFailureCode::LimitExceeded
+        | positron_kernel::CatalogFailureCode::ResourceAdmissionRefused => {
+            crate::OfflineIntegrityFailure::CapacityUnavailable
+        },
+        _ => crate::OfflineIntegrityFailure::CorruptState,
+    })?;
+    if snapshot.number() == 0 {
+        return Err(crate::OfflineIntegrityFailure::CorruptState);
+    }
+    let findings = positron_kernel::integrity_quarantine_findings(&snapshot).map_err(
+        |failure| match failure.code() {
+            positron_kernel::IntegrityFailureCode::FindingCapacity => {
+                crate::OfflineIntegrityFailure::CapacityUnavailable
+            },
+            _ => crate::OfflineIntegrityFailure::CorruptState,
+        },
+    )?;
+    let identity =
+        Identity::open(&snapshot).map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+    let tenants = TenantAdministration::registered_tenant_ids(&snapshot)
+        .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+    let mut scopes = Vec::new();
+    for tenant in tenants {
+        for signal in [SignalKind::Logs, SignalKind::Traces] {
+            let found = snapshot
+                .reachable_ledger_scopes(tenant, signal)
+                .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+            scopes
+                .try_reserve(found.len())
+                .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+            scopes.extend(found);
+        }
+    }
+    let mut reports = Vec::new();
+    for scope in scopes {
+        let envelope = identity
+            .tenant_key_envelope(scope.tenant_id())
+            .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
+        let protection = key
+            .segment_key_from_tenant_envelope(record.instance, scope, envelope)
+            .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
+        let mut continuation = None;
+        loop {
+            let report = ActiveSegmentLedger::verify_snapshot_integrity(
+                &authority,
+                &snapshot,
+                record.instance,
+                scope,
+                protection.clone(),
+                IntegrityVerificationMode::Offline,
+                IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
+                    .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
+                &IntegrityCancellation::new(),
+                TransactionId::new([0xf1; 16])
+                    .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
+                continuation,
+            )
+            .map_err(|failure| match failure.code() {
+                positron_kernel::IntegrityFailureCode::StorageUnavailable => {
+                    crate::OfflineIntegrityFailure::StorageUnavailable
+                },
+                positron_kernel::IntegrityFailureCode::Cancelled
+                | positron_kernel::IntegrityFailureCode::InvalidInput
+                | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
+                | positron_kernel::IntegrityFailureCode::FindingCapacity => {
+                    crate::OfflineIntegrityFailure::CorruptState
+                },
+            })?;
+            continuation = report.continuation();
+            let incomplete = report.outcome() == IntegrityVerificationOutcome::Incomplete;
+            reports
+                .try_reserve(1)
+                .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+            reports.push(report);
+            if !incomplete {
+                break;
+            }
+            if continuation.is_none() {
+                return Err(crate::OfflineIntegrityFailure::CorruptState);
+            }
+        }
+    }
+    Ok(crate::OfflineIntegrityVerification::new(reports, findings))
+}

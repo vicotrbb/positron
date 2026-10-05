@@ -16,6 +16,7 @@ pub enum QueryFailureCode {
     ResourceExhausted,
     UnsupportedQuery,
     StoreUnavailable,
+    IncompleteData,
     MalformedPersistentData,
     Internal,
 }
@@ -93,6 +94,7 @@ pub(crate) fn retain_internal(current: &mut Option<QueryFailure>) {
 fn failure_rank(code: QueryFailureCode) -> u8 {
     match code {
         QueryFailureCode::Internal | QueryFailureCode::MalformedPersistentData => 4,
+        QueryFailureCode::IncompleteData => 3,
         QueryFailureCode::StoreUnavailable | QueryFailureCode::AuthorizationChanged => 3,
         QueryFailureCode::ResourceExhausted | QueryFailureCode::BudgetExhausted => 2,
         _ => 1,

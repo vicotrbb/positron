@@ -20,6 +20,7 @@ pub use fuzzing::{fuzz_log_retention_block, fuzz_log_store_block};
 use positron_domain::identity::TenantId;
 #[cfg(any(test, fuzzing))]
 use positron_domain::routing::{SignalKind, VirtualShardId};
+use positron_domain::time::{SourceTimeQuality, UnixNanoseconds};
 use positron_kernel::{LedgerSnapshot, ResourceGovernor, StoreBlockIdentity};
 #[cfg(any(test, fuzzing))]
 use positron_kernel::{
@@ -107,12 +108,15 @@ impl LogStore {
         let tenant = preparation.scope().tenant_id();
         let ingest_time = preparation.ingest_time();
         let encoded_bytes = codec::encoded_block_length(&records)?;
+        let event_range = authenticated_event_range(&records);
         let stored = records
             .into_iter()
             .map(|record| StoredLogRecord::new(record, ingest_time))
             .collect::<Vec<_>>();
         let bytes = codec::encode_block(tenant, &stored, encoded_bytes)?;
-        let block = preparation.finish(bytes).map_err(LogStoreFailure::kernel)?;
+        let block = preparation
+            .finish_with_event_range(bytes, event_range)
+            .map_err(LogStoreFailure::kernel)?;
         Ok(PreparedLogBlock::new(block))
     }
 
@@ -364,6 +368,67 @@ impl LogStore {
         execution: &crate::MaintenanceCompactionExecution<'_, 'kernel>,
     ) -> Result<LogCompactionOutcome, LogStoreFailure> {
         compaction::compact_with_maintenance(ledger, tenant, policy, execution)
+    }
+}
+
+fn authenticated_event_range(records: &[LogRecord]) -> positron_kernel::AuthenticatedEventRange {
+    let mut earliest = None;
+    let mut latest = None;
+    let mut unavailable = None;
+    for record in records {
+        observe_event_time(
+            record.event_time(),
+            &mut earliest,
+            &mut latest,
+            &mut unavailable,
+        );
+    }
+    finalize_event_range(earliest, latest, unavailable)
+}
+
+fn observe_event_time(
+    event_time: positron_domain::time::EventTime,
+    earliest: &mut Option<UnixNanoseconds>,
+    latest: &mut Option<UnixNanoseconds>,
+    unavailable: &mut Option<positron_kernel::EventRangeUnavailable>,
+) {
+    if let Some(instant) = event_time.usable_instant() {
+        *earliest = Some(earliest.map_or(instant, |current| current.min(instant)));
+        *latest = Some(latest.map_or(instant, |current| current.max(instant)));
+        return;
+    }
+    let reason = match event_time.quality() {
+        SourceTimeQuality::Missing => positron_kernel::EventRangeUnavailable::MissingSourceTime,
+        SourceTimeQuality::Usable
+        | SourceTimeQuality::Zero
+        | SourceTimeQuality::Outlier
+        | SourceTimeQuality::Contradictory => {
+            positron_kernel::EventRangeUnavailable::InvalidSourceTime
+        },
+    };
+    if reason == positron_kernel::EventRangeUnavailable::InvalidSourceTime {
+        *unavailable = Some(reason);
+    } else if unavailable.is_none() {
+        *unavailable = Some(reason);
+    }
+}
+
+fn finalize_event_range(
+    earliest: Option<UnixNanoseconds>,
+    latest: Option<UnixNanoseconds>,
+    unavailable: Option<positron_kernel::EventRangeUnavailable>,
+) -> positron_kernel::AuthenticatedEventRange {
+    match (unavailable, earliest, latest) {
+        (Some(reason), _, _) => positron_kernel::AuthenticatedEventRange::unavailable(reason),
+        (None, Some(earliest), Some(latest)) => {
+            match positron_kernel::AuthenticatedEventRange::known(earliest, latest) {
+                Ok(range) => range,
+                Err(reason) => positron_kernel::AuthenticatedEventRange::unavailable(reason),
+            }
+        },
+        _ => positron_kernel::AuthenticatedEventRange::unavailable(
+            positron_kernel::EventRangeUnavailable::MissingSourceTime,
+        ),
     }
 }
 

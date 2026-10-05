@@ -1,4 +1,5 @@
 use positron_api::maintenance::{
+    AuthenticatedTimeRangeDescriptor, IntegrityQuarantineDescriptor, MAX_INTEGRITY_FINDINGS,
     MAX_PAUSE_DURATION_SECONDS, MAX_TASKS, MAX_WINDOW_REQUEST_BYTES, MaintenanceExplainResponse,
     MaintenancePauseRequest, MaintenanceResourceReservations, MaintenanceResumeRequest,
     MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceServiceClient,
@@ -6,6 +7,48 @@ use positron_api::maintenance::{
     MaintenanceTaskStatus, MaintenanceTransport, MaintenanceWindowRequest,
     MaintenanceWindowResponse,
 };
+
+#[test]
+fn integrity_findings_preserve_provenance_and_enforce_the_catalog_bound() {
+    let finding = IntegrityQuarantineDescriptor {
+        tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+        signal: "logs".to_owned(),
+        shard: 1,
+        segment: "00000000000000000000000000000001".to_owned(),
+        base_position: 1,
+        event_range: AuthenticatedTimeRangeDescriptor {
+            provenance: "missing_source_time".to_owned(),
+            earliest_unix_nanos: None,
+            latest_unix_nanos: None,
+        },
+        ingest_range: AuthenticatedTimeRangeDescriptor {
+            provenance: "known".to_owned(),
+            earliest_unix_nanos: Some(10),
+            latest_unix_nanos: Some(10),
+        },
+    };
+    let response = |integrity_findings| MaintenanceStatusResponse {
+        tasks: Vec::new(),
+        returned: 0,
+        total: 0,
+        next_cursor: None,
+        queued: 0,
+        running: 0,
+        deferred: 0,
+        terminal: 0,
+        integrity_findings,
+    };
+    assert!(
+        response(vec![finding.clone(); MAX_INTEGRITY_FINDINGS])
+            .encode()
+            .is_ok()
+    );
+    assert!(
+        response(vec![finding; MAX_INTEGRITY_FINDINGS + 1])
+            .encode()
+            .is_err()
+    );
+}
 
 #[test]
 fn maintenance_window_contract_accepts_only_optional_classes_and_server_derived_expiry() {
@@ -350,6 +393,7 @@ fn full_valid_maintenance_registry_page_fits_the_bounded_response() {
             running: MAX_TASKS as u32,
             deferred: 0,
             terminal: 0,
+            integrity_findings: Vec::new(),
         }
         .encode()
         .is_ok(),

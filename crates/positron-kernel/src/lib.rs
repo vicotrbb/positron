@@ -100,14 +100,18 @@ pub use catalog::{GovernanceFixtureObject, GovernanceFixtureTarget};
 #[cfg(feature = "test-support")]
 pub use active_segment_ledger::publish_snapshot_lease_marker_for_test;
 pub use active_segment_ledger::{
-    ActiveSegmentLedger, AppendCancellation, CommitReceipt, CommittedBlock, CommittedLedgerReader,
-    CompactionBlock, CompactionPreparation, CompactionPublication, LedgerCompletionState,
-    LedgerFailure, LedgerFailureCode, LedgerSnapshot, MAX_SNAPSHOT_LEASE_TTL_SECONDS,
-    PreparedCompactionTask, PreparedStoreBlock, RetentionBucket, RetentionEvaluation,
-    RetentionImpactPreview, RetentionImpactTimeRange, RetentionReclamation,
+    ActiveSegmentLedger, AppendCancellation, AuthenticatedEventRange, AuthenticatedIngestRange,
+    CommitReceipt, CommittedBlock, CommittedLedgerReader, CompactionBlock, CompactionBlockTime,
+    CompactionPreparation, CompactionPublication, EventRangeUnavailable, IntegrityCancellation,
+    IntegrityFailure, IntegrityFailureCode, IntegrityFinding, IntegrityQuarantineFinding,
+    IntegrityScrubBudget, IntegrityScrubContinuation, IntegrityVerificationMode,
+    IntegrityVerificationOutcome, IntegrityVerificationReport, IntegrityVerificationScope,
+    LedgerCompletionState, LedgerFailure, LedgerFailureCode, LedgerSnapshot,
+    MAX_SNAPSHOT_LEASE_TTL_SECONDS, PreparedCompactionTask, PreparedStoreBlock, RetentionBucket,
+    RetentionEvaluation, RetentionImpactPreview, RetentionImpactTimeRange, RetentionReclamation,
     RetentionReclamationEstimate, SealedSegment, SegmentId, SegmentProtectionKey, SegmentScope,
     SnapshotLeaseAttempt, SnapshotLeaseGrant, SnapshotLeaseId, SnapshotLeaseReplacement,
-    SnapshotLeaseUsage, StoreBlockIdentity, StoreBlockPreparation,
+    SnapshotLeaseUsage, StoreBlockIdentity, StoreBlockPreparation, integrity_quarantine_findings,
 };
 
 pub use data_protection::{
@@ -191,6 +195,10 @@ pub use catalog::fuzz_catalog_stateful;
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use active_segment_ledger::{fuzz_active_segment_stateful, fuzz_retention_prepared_block};
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use active_segment_ledger::fuzz_integrity_quarantine_record;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]

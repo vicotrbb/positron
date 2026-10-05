@@ -1,34 +1,43 @@
 use super::*;
 use crate::active_segment_ledger::SegmentRetention;
 
+/// One authenticated frontier payload. Grouping the mutable frontier fields
+/// keeps publication's filesystem authority distinct from the data it seals.
+pub(in crate::active_segment_ledger) struct FrontierPublication {
+    pub(in crate::active_segment_ledger) durable_bytes: u64,
+    pub(in crate::active_segment_ledger) next_sequence: u64,
+    pub(in crate::active_segment_ledger) position: CommitPosition,
+    pub(in crate::active_segment_ledger) retention: SegmentRetention,
+    pub(in crate::active_segment_ledger) event_range:
+        crate::active_segment_ledger::AuthenticatedEventRange,
+}
+
 pub(in crate::active_segment_ledger) fn publish_frontier(
     directory: &File,
     id: SegmentId,
     key: &ObjectDataKey,
-    durable_bytes: u64,
-    next_sequence: u64,
-    position: CommitPosition,
-    segment_retention: SegmentRetention,
+    publication: FrontierPublication,
 ) -> Result<[u8; 32], LedgerFailure> {
-    let mut plaintext = Vec::with_capacity(FRONTIER_V3_PLAINTEXT_BYTES);
-    plaintext.extend_from_slice(&3_u16.to_be_bytes());
-    plaintext.extend_from_slice(&durable_bytes.to_be_bytes());
-    plaintext.extend_from_slice(&next_sequence.to_be_bytes());
-    plaintext.extend_from_slice(&position.value().to_be_bytes());
-    let (retention_tag, retention_instant) = match segment_retention {
+    let mut plaintext = Vec::with_capacity(FRONTIER_V4_PLAINTEXT_BYTES);
+    plaintext.extend_from_slice(&4_u16.to_be_bytes());
+    plaintext.extend_from_slice(&publication.durable_bytes.to_be_bytes());
+    plaintext.extend_from_slice(&publication.next_sequence.to_be_bytes());
+    plaintext.extend_from_slice(&publication.position.value().to_be_bytes());
+    let (retention_tag, retention_instant) = match publication.retention {
         SegmentRetention::Empty => (0_u8, 0_i64),
         SegmentRetention::Unavailable => (1_u8, 0_i64),
         SegmentRetention::Complete(instant) => (2_u8, instant.instant().value()),
     };
     plaintext.push(retention_tag);
     plaintext.extend_from_slice(&retention_instant.to_be_bytes());
+    encode_event_range(&mut plaintext, publication.event_range);
     let context = key
         .object
         .frame(
             SegmentFramePurpose::DurabilityFrontier,
             FrameSequence::new(
                 u64::MAX
-                    .checked_sub(next_sequence)
+                    .checked_sub(publication.next_sequence)
                     .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?,
             ),
         )
@@ -45,10 +54,15 @@ pub(in crate::active_segment_ledger) fn publish_frontier(
     let mut encoded = Vec::with_capacity(FRONTIER_PREFIX_BYTES + frame.as_bytes().len());
     encoded.extend_from_slice(FRONTIER_MAGIC);
     encoded.extend_from_slice(&1_u16.to_be_bytes());
-    encoded.extend_from_slice(&3_u16.to_be_bytes());
+    encoded.extend_from_slice(&4_u16.to_be_bytes());
     encoded.extend_from_slice(&frame_length.to_be_bytes());
     encoded.extend_from_slice(frame.as_bytes());
-    let authenticator = receipt_authenticator(key, durable_bytes, next_sequence, position)?;
+    let authenticator = receipt_authenticator(
+        key,
+        publication.durable_bytes,
+        publication.next_sequence,
+        publication.position,
+    )?;
     let temporary = frontier_temporary_name(id);
     emit_event(LedgerFileEvent::RemoveFrontierTemporary)?;
     match unix_fs::unlinkat(directory, &temporary, rustix::fs::AtFlags::empty()) {
@@ -92,4 +106,26 @@ pub(in crate::active_segment_ledger) fn publish_frontier(
         .map_err(|failure| LedgerFailure::ambiguous(failure.code()))?;
     synchronize(directory).map_err(|failure| LedgerFailure::ambiguous(failure.code()))?;
     Ok(authenticator)
+}
+
+fn encode_event_range(
+    bytes: &mut Vec<u8>,
+    range: crate::active_segment_ledger::AuthenticatedEventRange,
+) {
+    match range {
+        crate::active_segment_ledger::AuthenticatedEventRange::Known { earliest, latest } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&earliest.value().to_be_bytes());
+            bytes.extend_from_slice(&latest.value().to_be_bytes());
+        },
+        crate::active_segment_ledger::AuthenticatedEventRange::Unavailable(
+            crate::active_segment_ledger::EventRangeUnavailable::MissingSourceTime,
+        ) => bytes.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        crate::active_segment_ledger::AuthenticatedEventRange::Unavailable(
+            crate::active_segment_ledger::EventRangeUnavailable::InvalidSourceTime,
+        ) => bytes.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        crate::active_segment_ledger::AuthenticatedEventRange::Unavailable(
+            crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
+        ) => bytes.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    }
 }

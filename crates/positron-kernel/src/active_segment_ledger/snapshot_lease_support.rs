@@ -96,6 +96,7 @@ impl LeaseReservationTransaction {
 pub(crate) fn snapshot_from_record<'kernel>(
     ledger: &ActiveSegmentLedger<'kernel, '_>,
     state: &super::super::state::LedgerState<'kernel>,
+    lease_basis: &crate::CatalogSnapshot,
     record: &LeaseRecord,
 ) -> Result<LedgerSnapshot<'kernel>, LedgerFailure> {
     if record.scope != ledger.scope || record.frontier > state.frontier {
@@ -117,7 +118,19 @@ pub(crate) fn snapshot_from_record<'kernel>(
             .checked_add(bytes)
             .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))
     })?;
-    let recovery = resume_recovery_plan(ledger, state, record)?;
+    // The current Catalog generation authenticates the lease/expiry pair;
+    // every snapshot input below comes solely from the immutable generation
+    // recorded by that pair. A later Catalog publication cannot change the
+    // resumed Query Snapshot.
+    let original_basis = ledger
+        .catalog
+        .pin_historical_generation(
+            lease_basis,
+            record.catalog_identity,
+            record.catalog_generation,
+        )
+        .map_err(|failure| LedgerFailure::new(map_catalog_failure(failure.code())))?;
+    let recovery = resume_recovery_plan(ledger, state, &original_basis, record)?;
     let admitted = if recovery.segments.is_empty() {
         // Creating a lease clones only already-retained blocks. The caller's
         // admitted query task covers construction work, while this claim must
@@ -154,6 +167,13 @@ pub(crate) fn snapshot_from_record<'kernel>(
         .reserve(maximum_claim)
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
     let blocks = blocks_for_record(ledger, state, record, &recovery.segments)?;
+    let mut quarantined_holes =
+        super::super::integrity::integrity_quarantine_findings(&original_basis)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+            .into_iter()
+            .filter(|finding| finding.scope() == record.scope)
+            .collect::<Vec<_>>();
+    quarantined_holes.sort_unstable_by_key(|finding| finding.base_position());
     let bytes = blocks
         .iter()
         .try_fold(0_usize, |total, block| {
@@ -178,6 +198,7 @@ pub(crate) fn snapshot_from_record<'kernel>(
         catalog_generation: record.catalog_generation,
         catalog_identity: record.catalog_identity,
         blocks,
+        quarantined_holes,
     })
 }
 
@@ -189,6 +210,7 @@ struct ResumeRecoveryPlan {
 fn resume_recovery_plan(
     ledger: &ActiveSegmentLedger<'_, '_>,
     state: &super::super::state::LedgerState<'_>,
+    original_basis: &crate::CatalogSnapshot,
     record: &LeaseRecord,
 ) -> Result<ResumeRecoveryPlan, LedgerFailure> {
     let mut missing = BTreeSet::new();
@@ -218,11 +240,9 @@ fn resume_recovery_plan(
             encoded_bytes: 0,
         });
     }
-    ledger.catalog.refresh_state()?;
-    let basis = ledger.catalog.pin()?;
     let metadata = ledger
         .storage
-        .catalog_segments_observed(&basis, record.scope)?;
+        .catalog_segments_observed(original_basis, record.scope)?;
     let mut segments = Vec::new();
     segments
         .try_reserve_exact(missing.len())
@@ -231,11 +251,17 @@ fn resume_recovery_plan(
     for identity in missing {
         let segment = metadata
             .iter()
-            .find(|candidate| candidate.id == identity && candidate.state == SegmentState::Retired)
+            .find(|candidate| {
+                candidate.id == identity
+                    && matches!(
+                        candidate.state,
+                        SegmentState::Sealed | SegmentState::Retired
+                    )
+            })
             .copied()
             .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::SnapshotExpired))?;
         encoded_bytes = encoded_bytes
-            .checked_add(ledger.storage.retired_recovery_encoded_bytes(segment)?)
+            .checked_add(ledger.storage.snapshot_recovery_encoded_bytes(segment)?)
             .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
         segments.push(segment);
     }

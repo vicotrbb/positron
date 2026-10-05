@@ -98,6 +98,11 @@ fn metadata(
         id: SegmentId::new([seed; 16])?,
         state,
         base_position: CommitPosition::origin(),
+        sealed_frontier: (state == SegmentState::Sealed).then_some(CommitPosition::origin()),
+        event_range: crate::AuthenticatedEventRange::unavailable(
+            crate::EventRangeUnavailable::LegacyFormat,
+        ),
+        ingest_range: crate::AuthenticatedIngestRange::unavailable(),
     })
 }
 

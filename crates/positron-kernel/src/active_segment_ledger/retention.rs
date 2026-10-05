@@ -182,13 +182,17 @@ fn reclaim_retired_segments(
         .catalog_segments(&basis, ledger.scope)
         .map_err(|failure| LedgerFailure::new(failure.code()))?;
     let leased = super::snapshot_lease::active_segments(&basis, ledger.scope, now)?;
+    let quarantined = super::integrity::quarantined_segment_ids(&basis, ledger.scope)
+        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
     let registry = ledger.authority.snapshot_protection();
     let mut reclaimable = Vec::new();
     reclaimable
         .try_reserve_exact(metadata.len())
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
     for candidate in metadata.iter().copied().filter(|candidate| {
-        candidate.state == SegmentState::Retired && !leased.contains(&candidate.id)
+        candidate.state == SegmentState::Retired
+            && !leased.contains(&candidate.id)
+            && !quarantined.contains(&candidate.id)
     }) {
         if !super::snapshot_protection::SnapshotProtection::is_protected(&registry, candidate.id)? {
             reclaimable.push(candidate);

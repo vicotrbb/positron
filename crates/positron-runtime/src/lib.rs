@@ -8,6 +8,7 @@ mod configuration;
 mod configuration_catalog;
 mod health;
 mod instance_bootstrap;
+mod integrity_verification;
 mod listener;
 mod native_host;
 mod process;
@@ -29,6 +30,9 @@ pub use instance_bootstrap::GovernanceTestFixture;
 pub use instance_bootstrap::{
     BootstrapClaim, BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BootstrapState,
     InitializationPlan, InitializedInstance, InstanceBootstrap, TenantRetentionImpactPreview,
+};
+pub use integrity_verification::{
+    OfflineIntegrityFailure, OfflineIntegrityVerification, verify_offline_integrity,
 };
 pub use listener::{
     BoundEndpoint, BoundListener, ConnectionProtection, ListenerFactory, ListenerFailure,

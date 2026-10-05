@@ -161,6 +161,7 @@ pub(super) const fn classify_ledger_failure_code(code: LedgerFailureCode) -> Ser
         | LedgerFailureCode::StorageExhausted => ServiceFailure::CapacityUnavailable,
         LedgerFailureCode::StorageUnavailable => ServiceFailure::StorageUnavailable,
         LedgerFailureCode::IntegrityCorruption
+        | LedgerFailureCode::Quarantined
         | LedgerFailureCode::AuthenticationFailed
         | LedgerFailureCode::UnsupportedFormat
         | LedgerFailureCode::InvalidInput
@@ -190,6 +191,7 @@ pub(super) const fn map_query_failure_code(code: QueryFailureCode) -> ServiceFai
         | QueryFailureCode::ResourceAdmissionRefused
         | QueryFailureCode::ResourceExhausted => ServiceFailure::CapacityUnavailable,
         QueryFailureCode::Cancelled => ServiceFailure::Cancelled,
+        QueryFailureCode::IncompleteData => ServiceFailure::CorruptState,
         QueryFailureCode::MalformedPersistentData => ServiceFailure::CorruptState,
         QueryFailureCode::StoreUnavailable => ServiceFailure::StorageUnavailable,
         QueryFailureCode::Internal => ServiceFailure::Internal,

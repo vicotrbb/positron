@@ -213,6 +213,11 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         if active_count >= MAX_SNAPSHOT_LEASES {
             return Err(LedgerFailure::new(LedgerFailureCode::LimitExceeded));
         }
+        let quarantined = super::integrity::integrity_quarantine_findings(&basis)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+            .into_iter()
+            .filter(|finding| finding.scope() == self.scope)
+            .collect::<Vec<_>>();
         let identity = fresh_identity()?;
         let record = LeaseRecord {
             identity,
@@ -227,12 +232,21 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             last_resume_sequence: None,
             last_resume_prior_digest: [0; 32],
             usage: SnapshotLeaseUsage::default(),
-            blocks: state.blocks.iter().map(LeaseBlock::from).collect(),
+            blocks: state
+                .blocks
+                .iter()
+                .filter(|block| {
+                    !quarantined
+                        .iter()
+                        .any(|finding| finding.segment() == block.segment)
+                })
+                .map(LeaseBlock::from)
+                .collect(),
         };
         // Admit every capacity needed by the returned grant before publishing its
         // durable identity. Later failures then drop both reservations without
         // leaving a catalog lease that no caller can release.
-        let snapshot = snapshot_from_record(self, &state, &record)?;
+        let snapshot = snapshot_from_record(self, &state, &basis, &record)?;
         let encoded = encode(&record)?;
         let claim = WorkClaim::tenant(
             self.scope.tenant,
@@ -427,7 +441,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         identity: SnapshotLeaseId,
         now: u64,
     ) -> Result<SnapshotLeaseGrant<'kernel>, LedgerFailure> {
-        self.resume_snapshot_lease_marked(identity, now, None, None)
+        self.resume_snapshot_lease_marked(identity, now, None, None, false)
     }
 
     /// Resumes a lease while recording the immutable cursor boundary being
@@ -445,7 +459,27 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         sequence: u64,
         prior_digest: [u8; 32],
     ) -> Result<SnapshotLeaseGrant<'kernel>, LedgerFailure> {
-        self.resume_snapshot_lease_marked(identity, now, Some((sequence, prior_digest)), None)
+        self.resume_snapshot_lease_marked(
+            identity,
+            now,
+            Some((sequence, prior_digest)),
+            None,
+            false,
+        )
+    }
+
+    /// Resumes a lease created with its durable expiry task. This is the
+    /// runtime-only counterpart to paired lease publication; it requires the
+    /// exact expiry descriptor in the Catalog generation that supplied the
+    /// lease record.
+    pub fn resume_snapshot_lease_with_marker_with_expiry_task(
+        &self,
+        identity: SnapshotLeaseId,
+        now: u64,
+        sequence: u64,
+        prior_digest: [u8; 32],
+    ) -> Result<SnapshotLeaseGrant<'kernel>, LedgerFailure> {
+        self.resume_snapshot_lease_marked(identity, now, Some((sequence, prior_digest)), None, true)
     }
 
     /// Resumes a lease with a marker only when the durable Catalog still
@@ -464,6 +498,28 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             now,
             Some((sequence, prior_digest)),
             Some((expected_catalog, expected_generation)),
+            false,
+        )
+    }
+
+    /// Resumes a paired lease with the query's admitted Catalog generation.
+    /// The lease and its expiry descriptor are both authenticated from that
+    /// exact generation before the lease's original snapshot is reconstructed.
+    pub fn resume_snapshot_lease_with_marker_at_catalog_with_expiry_task(
+        &self,
+        identity: SnapshotLeaseId,
+        now: u64,
+        sequence: u64,
+        prior_digest: [u8; 32],
+        expected_catalog: CatalogGenerationId,
+        expected_generation: u64,
+    ) -> Result<SnapshotLeaseGrant<'kernel>, LedgerFailure> {
+        self.resume_snapshot_lease_marked(
+            identity,
+            now,
+            Some((sequence, prior_digest)),
+            Some((expected_catalog, expected_generation)),
+            true,
         )
     }
 
@@ -473,6 +529,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         now: u64,
         marker: Option<(u64, [u8; 32])>,
         expected_catalog: Option<(CatalogGenerationId, u64)>,
+        require_expiry_descriptor: bool,
     ) -> Result<SnapshotLeaseGrant<'kernel>, LedgerFailure> {
         let now = self.lease_operation_time(now)?;
         let mut state = self
@@ -501,6 +558,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         }
         let all_records = records(&basis)?;
         let expired = expired_in_scope(&all_records, self.scope, now);
+        let lease_basis = basis.clone();
         let mut marker_basis = basis;
         if !expired.is_empty() {
             register_all(&mut state.pending_lease_releases, expired.iter().copied())?;
@@ -537,7 +595,8 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         if record.observed_at == 0 {
             self.normalize_legacy_lease(&mut state, &mut record, now)?;
         }
-        let snapshot = snapshot_from_record(self, &state, &record)?;
+        validate_expiry_descriptor(&lease_basis, &record, require_expiry_descriptor)?;
+        let snapshot = snapshot_from_record(self, &state, &lease_basis, &record)?;
         let (resume_count, repeated_batch_count, attempt) =
             if let Some((sequence, prior_digest)) = marker {
                 let durable_marker = resume_marker_for(&record);
@@ -876,4 +935,39 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         state.pending_lease_releases.remove(identity);
         Ok(())
     }
+}
+
+fn validate_expiry_descriptor(
+    basis: &crate::CatalogSnapshot,
+    record: &LeaseRecord,
+    required: bool,
+) -> Result<(), LedgerFailure> {
+    let task = MaintenanceTaskId::new(record.identity.to_bytes())
+        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
+    let mut descriptor = None;
+    for bytes in basis.plaintext_objects() {
+        if crate::maintenance::durable_task_record_identity(bytes)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+            != Some(task)
+        {
+            continue;
+        }
+        if descriptor.replace(bytes).is_some() {
+            return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+        }
+    }
+    let bytes = match descriptor {
+        Some(bytes) => bytes,
+        None if required => return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration)),
+        None => return Ok(()),
+    };
+    crate::maintenance::validate_active_snapshot_lease_expiry_descriptor(
+        bytes,
+        record.identity,
+        record.scope,
+        immutable_binding_object_id(record)?,
+        record.catalog_generation,
+        record.expiry,
+    )
+    .map_err(|_| LedgerFailure::new(LedgerFailureCode::StaleGeneration))
 }

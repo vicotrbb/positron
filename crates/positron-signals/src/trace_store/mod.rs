@@ -48,6 +48,8 @@ pub use summary::{
 };
 pub use types::{PreparedTraceBlock, StoredSpanObservation};
 
+use positron_domain::time::{SourceTimeQuality, UnixNanoseconds};
+
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use fuzzing::fuzz_trace_store_block;
@@ -106,6 +108,7 @@ impl TraceStore {
         if observations.len() > codec::MAX_RECORDS {
             return Err(TraceStoreFailure::limit_exceeded());
         }
+        let event_range = authenticated_event_range(&observations);
         let ingest_time = preparation.ingest_time();
         let mut stored = Vec::new();
         stored
@@ -117,7 +120,7 @@ impl TraceStore {
         let bytes =
             codec::encode_block_with_profile(profile, preparation.scope().tenant_id(), &stored)?;
         let block = preparation
-            .finish(bytes)
+            .finish_with_event_range(bytes, event_range)
             .map_err(TraceStoreFailure::kernel)?;
         Ok(PreparedTraceBlock::new(block))
     }
@@ -237,5 +240,65 @@ impl TraceStore {
         )
         .map_err(TraceStoreFailure::kernel)?;
         Ok(PreparedTraceBlock::new(block))
+    }
+}
+
+fn authenticated_event_range(
+    observations: &[SpanObservation],
+) -> positron_kernel::AuthenticatedEventRange {
+    let mut earliest = None;
+    let mut latest = None;
+    let mut unavailable = None;
+    for observation in observations {
+        for event_time in [observation.start_time(), observation.end_time()] {
+            observe_event_time(event_time, &mut earliest, &mut latest, &mut unavailable);
+        }
+    }
+    finalize_event_range(earliest, latest, unavailable)
+}
+
+fn observe_event_time(
+    event_time: positron_domain::time::EventTime,
+    earliest: &mut Option<UnixNanoseconds>,
+    latest: &mut Option<UnixNanoseconds>,
+    unavailable: &mut Option<positron_kernel::EventRangeUnavailable>,
+) {
+    if let Some(instant) = event_time.usable_instant() {
+        *earliest = Some(earliest.map_or(instant, |current| current.min(instant)));
+        *latest = Some(latest.map_or(instant, |current| current.max(instant)));
+        return;
+    }
+    let reason = match event_time.quality() {
+        SourceTimeQuality::Missing => positron_kernel::EventRangeUnavailable::MissingSourceTime,
+        SourceTimeQuality::Usable
+        | SourceTimeQuality::Zero
+        | SourceTimeQuality::Outlier
+        | SourceTimeQuality::Contradictory => {
+            positron_kernel::EventRangeUnavailable::InvalidSourceTime
+        },
+    };
+    if reason == positron_kernel::EventRangeUnavailable::InvalidSourceTime {
+        *unavailable = Some(reason);
+    } else if unavailable.is_none() {
+        *unavailable = Some(reason);
+    }
+}
+
+fn finalize_event_range(
+    earliest: Option<UnixNanoseconds>,
+    latest: Option<UnixNanoseconds>,
+    unavailable: Option<positron_kernel::EventRangeUnavailable>,
+) -> positron_kernel::AuthenticatedEventRange {
+    match (unavailable, earliest, latest) {
+        (Some(reason), _, _) => positron_kernel::AuthenticatedEventRange::unavailable(reason),
+        (None, Some(earliest), Some(latest)) => {
+            match positron_kernel::AuthenticatedEventRange::known(earliest, latest) {
+                Ok(range) => range,
+                Err(reason) => positron_kernel::AuthenticatedEventRange::unavailable(reason),
+            }
+        },
+        _ => positron_kernel::AuthenticatedEventRange::unavailable(
+            positron_kernel::EventRangeUnavailable::MissingSourceTime,
+        ),
     }
 }

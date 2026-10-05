@@ -12,6 +12,7 @@ pub enum LedgerFailureCode {
     ResourceAdmissionRefused,
     StorageUnavailable,
     IntegrityCorruption,
+    Quarantined,
     AuthenticationFailed,
     ConcurrentWriter,
     UnsupportedFormat,

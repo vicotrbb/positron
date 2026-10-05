@@ -85,7 +85,12 @@ fn public_open_rejects_a_retired_continuity_marker_below_the_reconstructed_front
             id: SegmentId::new([0xe7; 16])?,
             state: SegmentState::Retired,
             base_position: CommitPosition::origin().next()?,
+            sealed_frontier: Some(CommitPosition::origin().next()?),
             scope,
+            event_range: crate::AuthenticatedEventRange::unavailable(
+                crate::EventRangeUnavailable::LegacyFormat,
+            ),
+            ingest_range: crate::AuthenticatedIngestRange::unavailable(),
         };
         publish_metadata(catalog, authority, scope, &[sealed, retired], 0xb7)?;
 
@@ -118,7 +123,12 @@ fn catalog_rejects_an_active_segment_that_overlaps_committed_sealed_bytes()
             id: SegmentId::new([0xd6; 16])?,
             state: SegmentState::Active,
             base_position: CommitPosition::origin(),
+            sealed_frontier: None,
             scope,
+            event_range: crate::AuthenticatedEventRange::unavailable(
+                crate::EventRangeUnavailable::LegacyFormat,
+            ),
+            ingest_range: crate::AuthenticatedIngestRange::unavailable(),
         };
         storage.create_active(
             overlapping_active,
@@ -154,6 +164,11 @@ fn duplicate_segment_publication_is_rejected_by_the_catalog_contract() -> Result
             id: SegmentId::new([0xc3; 16])?,
             state: SegmentState::Active,
             base_position: CommitPosition::origin(),
+            sealed_frontier: None,
+            event_range: crate::AuthenticatedEventRange::unavailable(
+                crate::EventRangeUnavailable::LegacyFormat,
+            ),
+            ingest_range: crate::AuthenticatedIngestRange::unavailable(),
         };
         let failure = publish_segments(
             catalog,

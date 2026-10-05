@@ -26,6 +26,7 @@ mod tenant_lifecycle;
 mod tenant_quotas;
 mod tenant_retention;
 mod tenant_service_cli;
+mod verify_cli;
 
 const EXIT_OK: u8 = 0;
 const EXIT_CONFIGURATION: u8 = 2;
@@ -73,6 +74,13 @@ pub fn run_native(
     {
         arguments.next();
         return policy::run(arguments);
+    }
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "verify")
+    {
+        arguments.next();
+        return verify_cli::run(arguments, environment);
     }
     if arguments
         .peek()

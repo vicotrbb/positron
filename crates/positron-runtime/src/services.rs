@@ -53,6 +53,15 @@ pub(super) fn context_tenant(
         .ok_or(ServiceFailure::Unauthorized)
 }
 
+/// Checks only the active authenticated durability frontiers before data
+/// listeners are admitted. Immutable history is deliberately left to the
+/// resumable maintenance scrub.
+pub(crate) fn verify_startup_integrity(
+    instance: &InitializedInstance,
+) -> Result<(), ServiceFailure> {
+    maintenance::verify_startup_integrity(instance)
+}
+
 pub use export_destinations::ConfiguredExportDestinationResolver;
 pub use failure::ServiceFailure;
 #[cfg(test)]
@@ -75,6 +84,7 @@ pub struct ServiceHandle {
     // cooperatively instead of racing the lease and surfacing false outages.
     catalog_operation: Arc<Mutex<()>>,
     maintenance_wake: maintenance::MaintenanceWake,
+    integrity_health: Arc<Mutex<Option<crate::HealthState>>>,
     export_destination_resolver: Option<Arc<dyn positron_query::ExportDestinationResolver>>,
     #[cfg(test)]
     receiver_test_backend: Arc<Mutex<Option<Arc<dyn ReceiverTestBackend>>>>,
@@ -169,6 +179,38 @@ impl ServiceHandle {
         self.maintenance_wake.notify();
     }
 
+    pub(crate) fn attach_health(&self, health: crate::HealthState) {
+        if let Ok(mut target) = self.integrity_health.lock() {
+            *target = Some(health);
+        }
+        // Health is reconstructed from durable Catalog evidence at every
+        // runtime start; the in-process notification only advances it sooner.
+        if let Ok(catalog) = positron_kernel::Catalog::open(
+            &self.instance._authority,
+            self.instance.instance,
+            match self.instance.key.catalog_secret(self.instance.instance) {
+                Ok(secret) => secret,
+                Err(_) => return,
+            },
+        ) {
+            if let Ok(snapshot) = catalog.pin() {
+                if positron_kernel::integrity_quarantine_findings(&snapshot)
+                    .is_ok_and(|findings| !findings.is_empty())
+                {
+                    self.mark_integrity_degraded();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn mark_integrity_degraded(&self) {
+        if let Ok(target) = self.integrity_health.lock() {
+            if let Some(health) = target.as_ref() {
+                health.degrade_integrity();
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn maintenance_wake_generation(&self) -> u64 {
         self.maintenance_wake.generation()
@@ -208,6 +250,7 @@ impl ServiceHandle {
             shutdown_schema_capacity: Arc::new(Mutex::new(None)),
             catalog_operation: Arc::new(Mutex::new(())),
             maintenance_wake: maintenance::MaintenanceWake::for_instance(instance.instance),
+            integrity_health: Arc::new(Mutex::new(None)),
             export_destination_resolver,
             #[cfg(test)]
             receiver_test_backend: Arc::new(Mutex::new(None)),

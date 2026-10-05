@@ -26,6 +26,8 @@ pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// The total number of durable tasks the coordinator may expose in one
 /// bounded registry snapshot.
 pub const MAX_TASKS: usize = 128;
+/// Quarantine findings have an independent bounded Catalog capacity.
+pub const MAX_INTEGRITY_FINDINGS: usize = 64;
 /// A status page is deliberately smaller than the coordinator registry so a
 /// complete row, including its resource reservation, always fits the HTTP
 /// response bound at the registry's maximum valid values.
@@ -533,6 +535,32 @@ pub struct MaintenanceStatusResponse {
     pub running: u32,
     pub deferred: u32,
     pub terminal: u32,
+    #[serde(default)]
+    pub integrity_findings: Vec<IntegrityQuarantineDescriptor>,
+}
+
+/// A durable quarantine record from authenticated Catalog metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrityQuarantineDescriptor {
+    pub tenant: String,
+    pub signal: String,
+    pub shard: u32,
+    pub segment: String,
+    pub base_position: u64,
+    pub event_range: AuthenticatedTimeRangeDescriptor,
+    pub ingest_range: AuthenticatedTimeRangeDescriptor,
+}
+
+/// A known range or an explicit authenticated absence provenance.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatedTimeRangeDescriptor {
+    pub provenance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_unix_nanos: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_unix_nanos: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -649,6 +677,7 @@ impl MaintenanceExplainResponse {
                 response.task.phase.as_str(),
                 "cancelled" | "succeeded" | "failed"
             )),
+            integrity_findings: Vec::new(),
         }
         .validate()?;
         Ok(response)
@@ -680,6 +709,7 @@ impl MaintenanceStatusResponse {
 
     pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
         if self.tasks.len() > MAX_STATUS_PAGE_TASKS
+            || self.integrity_findings.len() > MAX_INTEGRITY_FINDINGS
             || self.returned as usize != self.tasks.len()
             || self.total as usize > MAX_TASKS
             || self
@@ -773,6 +803,15 @@ impl MaintenanceStatusResponse {
                         })
                     || task.phase == "failed" && task.terminal_failure_class.is_none()
             })
+            || self.integrity_findings.iter().any(|finding| {
+                !identifier(&finding.tenant)
+                    || !matches!(finding.signal.as_str(), "logs" | "traces")
+                    || finding.shard == 0
+                    || !valid_task_identity(&finding.segment)
+                    || finding.base_position == 0
+                    || !valid_authenticated_range(&finding.event_range, true)
+                    || !valid_authenticated_range(&finding.ingest_range, false)
+            })
         {
             return Err(MaintenanceWireFailure);
         }
@@ -786,6 +825,22 @@ impl MaintenanceStatusResponse {
             return Err(MaintenanceWireFailure);
         }
         Ok(())
+    }
+}
+
+fn valid_authenticated_range(range: &AuthenticatedTimeRangeDescriptor, event: bool) -> bool {
+    match range.provenance.as_str() {
+        "known" => range
+            .earliest_unix_nanos
+            .zip(range.latest_unix_nanos)
+            .is_some_and(|(earliest, latest)| earliest <= latest),
+        "missing_source_time" | "invalid_source_time" | "legacy_format" if event => {
+            range.earliest_unix_nanos.is_none() && range.latest_unix_nanos.is_none()
+        },
+        "unavailable" if !event => {
+            range.earliest_unix_nanos.is_none() && range.latest_unix_nanos.is_none()
+        },
+        _ => false,
     }
 }
 

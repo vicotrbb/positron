@@ -1150,6 +1150,7 @@ version = "0.0.0"
 dependencies = [
  "positron-api",
  "positron-config",
+ "positron-domain",
  "positron-kernel",
  "positron-runtime",
  "rustls",

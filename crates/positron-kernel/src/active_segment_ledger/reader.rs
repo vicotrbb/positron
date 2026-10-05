@@ -2,6 +2,7 @@ use crate::Catalog;
 use crate::resource_governor::{StorageKernelResourceAuthority, WorkClaim, WorkKind};
 
 use super::capacity::{recovery_claim, snapshot_retained_claim};
+use super::integrity::integrity_quarantine_findings;
 use super::reconstruction::reconstruct;
 use super::recovery::RecoveryMode;
 use super::snapshot_protection::SnapshotProtection;
@@ -82,17 +83,20 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
     /// blocks. A concurrent publication causes a bounded retry, never a mixed
     /// generation result.
     pub fn snapshot(&self) -> Result<LedgerSnapshot<'kernel>, LedgerFailure> {
-        if let Some(ledger) = self.lease_authority {
-            ledger
-                .state
-                .lock()
-                .map_err(|_| LedgerFailure::new(LedgerFailureCode::ConcurrentWriter))?
-                .require_healthy()?;
-        }
+        // Immutable localized corruption is represented by the authenticated
+        // Catalog holes below. Observed reconstruction decides availability
+        // from that basis; it must not inherit a stale in-memory scope-wide
+        // condition before it can exclude the corrupt segment.
         for attempt in 0..MAX_SNAPSHOT_RETRIES {
             let barrier = SnapshotProtection::read_barrier(self.authority.snapshot_barrier())?;
             self.catalog.refresh_state()?;
             let basis = self.catalog.pin()?;
+            let mut holes = integrity_quarantine_findings(&basis)
+                .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+                .into_iter()
+                .filter(|finding| finding.scope() == self.scope)
+                .collect::<Vec<_>>();
+            holes.sort_unstable_by_key(|hole| hole.base_position());
             let reconstruction_claim = WorkClaim::tenant(
                 self.scope.tenant_id(),
                 WorkKind::InteractiveQueryTail,
@@ -104,10 +108,27 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
                 .governor()
                 .reserve(reconstruction_claim)
                 .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
-            let metadata = self.storage.catalog_segments_observed(&basis, self.scope)?;
+            let catalog_metadata = self.storage.catalog_segments_observed(&basis, self.scope)?;
+            for hole in &holes {
+                let metadata = catalog_metadata
+                    .iter()
+                    .find(|metadata| metadata.id == hole.segment())
+                    .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
+                if metadata.state != super::format::SegmentState::Sealed
+                    || metadata.base_position.value() != hole.base_position()
+                    || metadata.sealed_frontier != Some(hole.sealed_frontier())
+                {
+                    return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+                }
+            }
+            let metadata = catalog_metadata
+                .into_iter()
+                .filter(|metadata| !holes.iter().any(|hole| hole.segment() == metadata.id))
+                .collect::<Vec<_>>();
             let reconstruction = reconstruct(
                 &self.storage,
                 &metadata,
+                &holes,
                 &self.protection,
                 self.catalog.instance(),
                 RecoveryMode::Observe,
@@ -121,7 +142,10 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
             let current = self.catalog.pin()?;
             let current_metadata = self
                 .storage
-                .catalog_segments_observed(&current, self.scope)?;
+                .catalog_segments_observed(&current, self.scope)?
+                .into_iter()
+                .filter(|metadata| !holes.iter().any(|hole| hole.segment() == metadata.id))
+                .collect::<Vec<_>>();
             if basis.identity() != current.identity()
                 || basis.number() != current.number()
                 || metadata != current_metadata
@@ -153,6 +177,7 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
                 catalog_generation: basis.number(),
                 catalog_identity: basis.identity(),
                 blocks: reconstruction.blocks,
+                quarantined_holes: holes,
             });
         }
         Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration))

@@ -1250,13 +1250,18 @@ impl RegisteredTask for NativeRegisteredTask {
             let services = services.ok_or(TaskFailure::SpawnUnavailable)?;
             let wake_services = services.clone();
             let task_cancellation = cancellation.clone();
+            let maintenance_health = health.clone();
             let handle = std::thread::Builder::new()
                 .name("positron-maintenance".to_owned())
-                .spawn(move || {
-                    services
-                        .run_maintenance_worker(&task_cancellation)
-                        .map_err(|_| TaskFailure::JoinUnavailable)
-                })
+                .spawn(
+                    move || match services.run_maintenance_worker(&task_cancellation) {
+                        Ok(()) => Ok(()),
+                        Err(_) => {
+                            maintenance_health.fence();
+                            Err(TaskFailure::JoinUnavailable)
+                        },
+                    },
+                )
                 .map_err(|_| TaskFailure::SpawnUnavailable)?;
             return Ok(Box::new(NativeRunningTask {
                 cancellation,
