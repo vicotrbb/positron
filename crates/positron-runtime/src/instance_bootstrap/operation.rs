@@ -6,7 +6,7 @@ use positron_governance::{
 use positron_kernel::{
     AuditIntent, BootstrapArtifact, BootstrapArtifactAccess, BootstrapKeyCustody,
     BootstrapObjectPurpose, Catalog, CatalogObject, CatalogProposal, FormatEpoch, InstanceId,
-    OwnedPrimaryDataVolume, ResourceAmounts, RetentionTimeAuthority,
+    MaintenanceCoordinator, OwnedPrimaryDataVolume, ResourceAmounts, RetentionTimeAuthority,
     StorageKernelResourceAuthority, TransactionId,
 };
 use zeroize::Zeroizing;
@@ -229,6 +229,8 @@ fn resume(
     let identity = Identity::open(&current)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
     let audit_records = governance_audit_records(&catalog)?;
+    let maintenance = MaintenanceCoordinator::restore_from_catalog(&catalog)
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
     drop(catalog);
     outcome(
         &record,
@@ -236,6 +238,7 @@ fn resume(
         identity,
         audit_records,
         authority,
+        maintenance,
         retention_time,
         generation,
         audit,
@@ -287,6 +290,8 @@ pub(super) fn reopen(
     let identity = Identity::open(&current)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
     let audit_records = governance_audit_records(&catalog)?;
+    let maintenance = MaintenanceCoordinator::restore_from_catalog(&catalog)
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
     drop(catalog);
     outcome(
         &record,
@@ -294,6 +299,7 @@ pub(super) fn reopen(
         identity,
         audit_records,
         authority,
+        maintenance,
         retention_time,
         generation,
         audit,

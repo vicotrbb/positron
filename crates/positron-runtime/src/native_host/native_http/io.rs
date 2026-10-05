@@ -6,6 +6,7 @@ use positron_governance::CompatibilityHints;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::super::TrustedProxy;
+use crate::health::MaintenanceHealth;
 use crate::{ConfigurationObservation, HealthWarning, ProcessPhase};
 
 const MAX_HEADER_BYTES: usize = 8 * 1024;
@@ -264,11 +265,12 @@ pub(in crate::native_host) fn health_response(
 pub(in crate::native_host) fn configuration_status_response(
     phase: ProcessPhase,
     status: &ConfigurationObservation,
+    maintenance: MaintenanceHealth,
 ) -> Response {
     Response::json(
         200,
         format!(
-            "{{\"phase\":\"{}\",\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{}}}",
+            "{{\"phase\":\"{}\",\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
             process_phase_name(phase),
             status.generation(),
             hexadecimal_digest(crate::configuration_catalog::configuration_digest(
@@ -279,6 +281,31 @@ pub(in crate::native_host) fn configuration_status_response(
             )),
             drift_disposition_name(status.drift_disposition()),
             status.pending_restart().is_some(),
+            maintenance.queued(),
+            maintenance.running(),
+            maintenance.deferred(),
+            maintenance.terminal(),
+            maintenance.failed(),
+            maintenance.clock_uncertain(),
+            maintenance
+                .oldest_queued_age_seconds()
+                .map_or_else(|| "null".to_owned(), |age| age.to_string()),
+            maintenance.lower_class_queue_delay_breaches(),
+            maintenance.running_no_durable_progress_slo_breaches(),
+            maintenance.running_no_durable_progress_slo_unknown(),
+            maintenance.completed_inputs(),
+            maintenance.input_objects(),
+            maintenance.outstanding_reservations(),
+            maintenance.maximum_outstanding_reservations(),
+            maintenance.outstanding_maintenance_reservations(),
+            maintenance.durability_recovery_reservations(),
+            maintenance.security_lifecycle_reservations(),
+            maintenance.ingest_reservations(),
+            maintenance.interactive_query_tail_reservations(),
+            maintenance.ordinary_maintenance_backup_reservations(),
+            maintenance.failed_identity_mismatch(),
+            maintenance.failed_stale_generation(),
+            maintenance.failed_unclassified(),
         ),
     )
 }

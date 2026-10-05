@@ -172,6 +172,23 @@ alias bind` CLI require `--endpoint` and `--credential-stdin`; TLS also requires
 `stale_generation`, `idempotency_conflict`, `alias_already_bound`, or
 `alias_conflict` (409), and `administration_unavailable` (503).
 
+## Maintenance CLI
+
+`positron maintenance status|explain|run|pause|resume|window` requires
+`--endpoint IP:PORT` and `--credential-stdin`. TLS is the default and requires
+`--server-name NAME` plus `--trust-file PATH`; `--allow-plaintext` is the
+explicit plaintext opt-out and cannot be combined with TLS options. The command
+never accepts a bearer as an argument or environment variable.
+
+`maintenance status` follows the bounded maintenance-status continuation until
+the registry is exhausted, requesting at most four 32-task pages for the
+128-task registry. It rejects malformed response cursors, repeated cursors, and
+duplicate task identities rather than silently truncating output. Each rendered
+task reports its identity, class, scope, phase, backlog and checkpoint facts,
+reservations, foreground impact, conflict owner, blocked precondition,
+amplification estimate, terminal outcome, and safe actions. Optional facts are
+printed as `unknown`; an empty safe-action set is printed as `none`.
+
 ## Policy validation
 
 `POST /v1/policies:validate` accepts one bounded 64 KiB `policy_json` candidate

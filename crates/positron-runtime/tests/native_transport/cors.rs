@@ -70,6 +70,35 @@ fn api_cors_preflight_and_actual_responses_are_exact_origin_scoped()
             .contains("access-control-allow-credentials")
     );
 
+    for path in [
+        positron_api::maintenance::STATUS_HTTP_PATH,
+        positron_api::maintenance::EXPLAIN_HTTP_PATH,
+        positron_api::maintenance::RUN_HTTP_PATH,
+        positron_api::maintenance::PAUSE_HTTP_PATH,
+        positron_api::maintenance::RESUME_HTTP_PATH,
+        positron_api::maintenance::WINDOW_HTTP_PATH,
+    ] {
+        let response = http(
+            api,
+            "OPTIONS",
+            path,
+            &[
+                ("Origin", "https://console.example"),
+                ("Access-Control-Request-Method", "POST"),
+                (
+                    "Access-Control-Request-Headers",
+                    "Authorization, Content-Type",
+                ),
+            ],
+            &[],
+        )?;
+        assert_status(response.clone(), 204);
+        assert!(
+            response.contains("access-control-allow-origin: https://console.example\r\n"),
+            "documented maintenance route did not receive CORS permission: {path}"
+        );
+    }
+
     let authentication_error = http(
         api,
         "POST",

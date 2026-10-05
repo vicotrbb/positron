@@ -44,6 +44,17 @@ service TenantRetentionService {
   rpc Update(TenantRetentionUpdateRequest) returns (TenantRetentionUpdateResponse);
 }
 
+// Authenticated system-administration inspection of the one Storage Kernel
+// Maintenance Coordinator. Task control remains in the coordinator.
+service MaintenanceService {
+  rpc Status(MaintenanceStatusRequest) returns (MaintenanceStatusResponse);
+  rpc Explain(MaintenanceExplainRequest) returns (MaintenanceExplainResponse);
+  rpc Run(MaintenanceRunRequest) returns (MaintenanceRunResponse);
+  rpc Pause(MaintenancePauseRequest) returns (MaintenanceControlResponse);
+  rpc Resume(MaintenanceResumeRequest) returns (MaintenanceControlResponse);
+  rpc Window(MaintenanceWindowRequest) returns (MaintenanceWindowResponse);
+}
+
 // Authenticated system administration for explicit tenant registry entries.
 // Tenant identity is always explicit and is never inferred from a bearer.
 service TenantService {
@@ -351,6 +362,155 @@ message ApiKeyResponse {
 message CapabilityRequest {
   uint32 api_major = 1;
   Capability capability = 2;
+}
+
+// Status selects a bounded page from the coordinator's identity-ordered
+// registry. An omitted cursor selects the first page; an omitted limit uses
+// the published safe default. The cursor is the prior page's opaque task
+// identity and never names a Catalog object.
+message MaintenanceStatusRequest {
+  optional string cursor = 1;
+  optional uint32 limit = 2;
+}
+
+message MaintenanceTaskStatus {
+  string identity = 1;
+  string task_class = 2;
+  string scope = 3;
+  string phase = 4;
+  uint64 submitted_at_unix_seconds = 5;
+  optional uint64 checkpoint_sequence = 6;
+  optional uint64 pause_until_unix_seconds = 7;
+  bool cancellation_requested = 8;
+  optional uint64 resource_generation = 9;
+  optional MaintenanceResourceReservations reservations = 10;
+  optional string blocked_precondition = 11;
+  repeated string safe_actions = 12;
+  optional uint64 backlog_age_seconds = 13;
+  optional string conflict_owner = 14;
+  optional uint32 checkpoint_completed_inputs = 15;
+  uint32 input_object_count = 16;
+  uint32 output_object_count = 17;
+  optional uint32 estimated_output_object_amplification_milli = 18;
+  optional string terminal_outcome = 19;
+  optional MaintenanceResourceReservations expected_foreground_impact = 20;
+  optional string terminal_failure_class = 21;
+  optional uint64 maintenance_window_until_unix_seconds = 22;
+  // Unix epoch (0) is a valid trusted durable-progress instant.
+  optional uint64 last_progress_at_unix_seconds = 23;
+  optional bool no_durable_progress_slo_breached = 24;
+  optional uint64 no_durable_progress_slo_seconds = 25;
+  // Current coordinator-owned authority for this task's declared reservation:
+  // foreground_reservation or recovery_reserve.
+  optional string capacity_risk = 26;
+  // Current lifecycle safety consequence. Omitted when no such fact applies.
+  optional string retention_impact = 27;
+  optional string recovery_impact = 28;
+  // Server-owned earliest time at which every active finite deferral permits
+  // execution. This is the later expiry when a pause and window overlap.
+  optional uint64 automatic_resume_at_unix_seconds = 29;
+}
+
+// A task's coordinator-derived peak Resource Governor reservation. This is
+// redacted to bounded aggregate amounts and never contains object identities.
+message MaintenanceResourceReservations {
+  uint64 memory_bytes = 1;
+  uint64 queue_slots = 2;
+  uint64 task_slots = 3;
+  uint64 buffer_cache_bytes = 4;
+  uint64 batch_items = 5;
+  uint64 lease_slots = 6;
+  uint64 retry_slots = 7;
+  uint64 io_permits = 8;
+  uint64 cpu_work_units = 9;
+  uint64 file_descriptors = 10;
+  uint64 disk_headroom_bytes = 11;
+}
+
+message MaintenanceStatusResponse {
+  repeated MaintenanceTaskStatus tasks = 1;
+  uint32 queued = 2;
+  uint32 running = 3;
+  uint32 deferred = 4;
+  uint32 terminal = 5;
+  uint32 returned = 6;
+  uint32 total = 7;
+  optional string next_cursor = 8;
+}
+
+message MaintenanceExplainRequest {
+  string identity = 1;
+}
+
+message MaintenanceExplainResponse {
+  MaintenanceTaskStatus task = 1;
+}
+
+// An authenticated system-administration request for one explicit existing
+// scope. Release 1 accepts only compaction; the Storage Kernel selects a
+// sealed source and derives its retention bucket, inputs, preconditions, and
+// reservations from authenticated Catalog state.
+message MaintenanceRunRequest {
+  string task_class = 1;
+  string tenant = 2;
+  string signal = 3;
+  uint32 shard = 4;
+  string idempotency_key = 5;
+}
+
+// Immutable acknowledgement of one durable task descriptor. Live phase,
+// blocking, reservation and progress facts are exposed only by Status/Explain.
+message MaintenanceTaskAcknowledgement {
+  string identity = 1;
+  string task_class = 2;
+  string scope = 3;
+  uint64 submitted_at_unix_seconds = 4;
+}
+
+message MaintenanceRunResponse {
+  MaintenanceTaskAcknowledgement task = 1;
+  uint64 resource_generation = 2;
+}
+
+// Defers only one existing optional task for a bounded server-derived
+// duration. The resource generation fences the immutable task preconditions.
+message MaintenancePauseRequest {
+  string identity = 1;
+  uint64 resource_generation = 2;
+  uint64 duration_seconds = 3;
+  string idempotency_key = 4;
+}
+
+// Removes one existing durable pause. The server never accepts an expiry or
+// other scheduling input from a caller.
+message MaintenanceResumeRequest {
+  string identity = 1;
+  string idempotency_key = 2;
+}
+
+message MaintenanceControlResponse {
+  MaintenanceTaskAcknowledgement task = 1;
+  uint64 audit_position = 2;
+  string action = 3;
+  optional uint64 resource_generation = 4;
+  optional uint64 pause_until_unix_seconds = 5;
+}
+
+// Defers a closed set of optional maintenance classes until a duration derived
+// from the server Lifecycle Clock. The expected Catalog generation fences the
+// one global window against concurrent operator changes.
+message MaintenanceWindowRequest {
+  repeated string deferred_classes = 1;
+  uint64 expected_catalog_generation = 2;
+  uint64 duration_seconds = 3;
+  string idempotency_key = 4;
+}
+
+message MaintenanceWindowResponse {
+  repeated string deferred_classes = 1;
+  uint64 until_unix_seconds = 2;
+  uint64 catalog_generation = 3;
+  uint64 audit_position = 4;
 }
 
 message CapabilityResponse {

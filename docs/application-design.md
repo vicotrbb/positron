@@ -46,6 +46,9 @@ The implementation must preserve these top-level facts:
 - bounded work and queues under one Resource Governor
 - one Catalog Writer and one audited catalog publication point
 - one Maintenance Coordinator for all database background work
+- a server-owned 60-second no-durable-progress SLO for eligible Running work;
+  authenticated status and health distinguish its breaches or unknown clock
+  evaluations from lower-class queued-delay escalation
 - receiver compatibility only at Receiver Adapter seams
 - one canonical API Definition for native public calls and Generated SDKs
 - no database-domain behavior in the operator, Grafana integration, SDKs, or

@@ -681,7 +681,7 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
     assert_eq!(preview.tenant, tenant.to_canonical_text());
     let digest = preview.confirmation_digest;
     let evaluation = preview.confirmation_evaluated_at_unix_nanos;
-    let reduction = positron_api::tenant_retention::TenantRetentionUpdateRequest::new(
+    let stale_reduction = positron_api::tenant_retention::TenantRetentionUpdateRequest::new(
         tenant.to_canonical_text(),
         86_400,
         preview.retention_generation,
@@ -689,7 +689,62 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
         "ebebebeb-ebeb-ebeb-ebeb-ebebebebebeb".to_owned(),
     )
     .with_confirmation_evaluated_at_unix_nanos(evaluation);
-    let updated = client.update(&administrator_secret, &reduction)?;
+    let renamed = tls_http(
+        api,
+        &certificate,
+        "POST",
+        positron_api::tenant_service::UPDATE_DISPLAY_NAME_HTTP_PATH,
+        &[
+            ("Authorization", &format!("Bearer {}", claim.secret())),
+            ("Content-Type", "application/json"),
+        ],
+        format!(
+            r#"{{"tenant":"{}","expected_display_generation":1,"display_name":"TLS retention tenant renamed","idempotency_key":"e0e0e0e0-e0e0-e0e0-e0e0-e0e0e0e0e0e0"}}"#,
+            tenant.to_canonical_text()
+        )
+        .as_bytes(),
+    )?;
+    assert_status(renamed, 200);
+    assert_eq!(
+        client.update(&administrator_secret, &stale_reduction),
+        Err(positron_api::tenant_retention::TenantRetentionServiceClientFailure::InvalidConfirmation)
+    );
+    const MAX_FRESH_CONFIRMATION_ATTEMPTS: usize = 3;
+    let mut completed = None;
+    let mut last_catalog_generation = 0;
+    for _ in 0..MAX_FRESH_CONFIRMATION_ATTEMPTS {
+        let refreshed_preview = client.preview(
+            &administrator_secret,
+            &positron_api::tenant_retention::TenantRetentionPreviewRequest::new(
+                tenant.to_canonical_text(),
+                86_400,
+            ),
+        )?;
+        last_catalog_generation = refreshed_preview.catalog_generation;
+        let reduction = positron_api::tenant_retention::TenantRetentionUpdateRequest::new(
+            tenant.to_canonical_text(),
+            86_400,
+            refreshed_preview.retention_generation,
+            Some(refreshed_preview.confirmation_digest),
+            "e1e1e1e1-e1e1-e1e1-e1e1-e1e1e1e1e1e1".to_owned(),
+        )
+        .with_confirmation_evaluated_at_unix_nanos(
+            refreshed_preview.confirmation_evaluated_at_unix_nanos,
+        );
+        match client.update(&administrator_secret, &reduction) {
+            Ok(updated) => {
+                completed = Some((updated, reduction));
+                break;
+            }
+            Err(positron_api::tenant_retention::TenantRetentionServiceClientFailure::InvalidConfirmation) => {}
+            Err(failure) => return Err(Box::new(failure)),
+        }
+    }
+    let (updated, reduction) = completed.ok_or_else(|| {
+        std::io::Error::other(format!(
+            "fresh retention confirmation remained invalid after {MAX_FRESH_CONFIRMATION_ATTEMPTS} attempts at catalog generation {last_catalog_generation}"
+        ))
+    })?;
     assert_eq!(updated.retention_generation, 2);
     assert_eq!(client.update(&administrator_secret, &reduction)?, updated);
     let stale_confirmation = tls_http(

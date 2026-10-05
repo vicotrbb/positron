@@ -10,7 +10,7 @@ use super::super::support::{
     FailAfterArmClock, MergeWorkMeter, publish_lifecycle_at_catalog_for_test, zero_work_service,
 };
 use positron_kernel::{
-    CatalogPublicationFault, LedgerFailureCode, SnapshotLeaseId,
+    CatalogPublicationFault, LedgerFailureCode, MaintenanceCoordinator, SnapshotLeaseId,
     with_catalog_publication_fault_after, with_catalog_publication_fault_sequence_after,
     with_catalog_publication_hook_after,
 };
@@ -316,6 +316,46 @@ fn correlation_sequential_target_admission_failure_releases_the_log_lease()
             Ok(())
         },
     )
+}
+
+#[test]
+fn coupled_source_cleanup_cancels_expiry_when_target_admission_fails() -> Result<(), Box<dyn Error>>
+{
+    QueryFixture::scoped("coupled-source-cleanup-after-target-failure", |fixture| {
+        let coordinator = MaintenanceCoordinator::new();
+        let service = zero_work_service(
+            fixture.kernel.authority.governor(),
+            fixture.kernel.ledger()?,
+            1,
+        )
+        .with_trace_ledger(fixture.kernel.trace_ledger()?)
+        .with_maintenance_coordinator(&coordinator);
+        let query = service.plan_pipeline(
+            fixture.context,
+            "pipeline:v1 logs | range query_time -100 100 | correlate trace | limit 1",
+            super::budget(),
+        )?;
+        let failure = with_catalog_publication_fault_after(
+            CatalogPublicationFault::SynchronizeCommit,
+            1,
+            || service.execute(query),
+        )
+        .expect_err("target admission must fail after source pair publication");
+        assert_eq!(failure.code(), QueryFailureCode::StoreUnavailable);
+        assert!(
+            coordinator
+                .start_next_with_reservation_and_persist(
+                    fixture.kernel.catalog_for_test(),
+                    fixture.kernel.authority,
+                    1_000,
+                    false,
+                )
+                .map_err(|_| "maintenance scheduler")?
+                .is_none(),
+            "source cleanup must terminalize its coupled expiry task"
+        );
+        Ok(())
+    })
 }
 
 #[test]

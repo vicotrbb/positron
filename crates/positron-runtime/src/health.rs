@@ -1,7 +1,11 @@
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
+use positron_kernel::{
+    LifecycleClockState, MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS, MaintenancePriority,
+    MaintenanceTaskPhase, MaintenanceTerminalFailure, WorkClass,
+};
 
 use crate::{
     ConfigurationObservation, ConfigurationRuntimeFailure, InitializedInstance, ListenerRole,
@@ -33,6 +37,141 @@ pub enum Readiness {
 pub enum Liveness {
     Live,
     Dead,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConfigurationStatusFailure {
+    AuthenticationRejected,
+    Unavailable,
+}
+
+/// Bounded, aggregate maintenance facts derived from the coordinator and the
+/// Resource Governor for authenticated Operations inspection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MaintenanceHealth {
+    queued: u32,
+    running: u32,
+    deferred: u32,
+    terminal: u32,
+    failed: u32,
+    clock_uncertain: bool,
+    oldest_queued_age_seconds: Option<u64>,
+    lower_class_queue_delay_breaches: u32,
+    running_no_durable_progress_slo_breaches: u32,
+    running_no_durable_progress_slo_unknown: u32,
+    completed_inputs: u32,
+    input_objects: u32,
+    outstanding_reservations: u32,
+    maximum_outstanding_reservations: u32,
+    outstanding_maintenance_reservations: u32,
+    durability_recovery_reservations: u32,
+    security_lifecycle_reservations: u32,
+    ingest_reservations: u32,
+    interactive_query_tail_reservations: u32,
+    ordinary_maintenance_backup_reservations: u32,
+    failed_identity_mismatch: u32,
+    failed_stale_generation: u32,
+    failed_unclassified: u32,
+}
+
+impl MaintenanceHealth {
+    #[must_use]
+    pub(crate) const fn queued(self) -> u32 {
+        self.queued
+    }
+    #[must_use]
+    pub(crate) const fn running(self) -> u32 {
+        self.running
+    }
+    #[must_use]
+    pub(crate) const fn deferred(self) -> u32 {
+        self.deferred
+    }
+    #[must_use]
+    pub(crate) const fn terminal(self) -> u32 {
+        self.terminal
+    }
+    #[must_use]
+    pub(crate) const fn failed(self) -> u32 {
+        self.failed
+    }
+    #[must_use]
+    pub(crate) const fn clock_uncertain(self) -> bool {
+        self.clock_uncertain
+    }
+    #[must_use]
+    pub(crate) const fn oldest_queued_age_seconds(self) -> Option<u64> {
+        self.oldest_queued_age_seconds
+    }
+    #[must_use]
+    pub(crate) const fn lower_class_queue_delay_breaches(self) -> u32 {
+        self.lower_class_queue_delay_breaches
+    }
+    #[must_use]
+    pub(crate) const fn running_no_durable_progress_slo_breaches(self) -> u32 {
+        self.running_no_durable_progress_slo_breaches
+    }
+    #[must_use]
+    pub(crate) const fn running_no_durable_progress_slo_unknown(self) -> u32 {
+        self.running_no_durable_progress_slo_unknown
+    }
+    #[must_use]
+    pub(crate) const fn completed_inputs(self) -> u32 {
+        self.completed_inputs
+    }
+    #[must_use]
+    pub(crate) const fn input_objects(self) -> u32 {
+        self.input_objects
+    }
+    #[must_use]
+    pub(crate) const fn outstanding_reservations(self) -> u32 {
+        self.outstanding_reservations
+    }
+    #[must_use]
+    pub(crate) const fn maximum_outstanding_reservations(self) -> u32 {
+        self.maximum_outstanding_reservations
+    }
+    #[must_use]
+    pub(crate) const fn outstanding_maintenance_reservations(self) -> u32 {
+        self.outstanding_maintenance_reservations
+    }
+    #[must_use]
+    pub(crate) const fn durability_recovery_reservations(self) -> u32 {
+        self.durability_recovery_reservations
+    }
+    #[must_use]
+    pub(crate) const fn security_lifecycle_reservations(self) -> u32 {
+        self.security_lifecycle_reservations
+    }
+    #[must_use]
+    pub(crate) const fn ingest_reservations(self) -> u32 {
+        self.ingest_reservations
+    }
+    #[must_use]
+    pub(crate) const fn interactive_query_tail_reservations(self) -> u32 {
+        self.interactive_query_tail_reservations
+    }
+    #[must_use]
+    pub(crate) const fn ordinary_maintenance_backup_reservations(self) -> u32 {
+        self.ordinary_maintenance_backup_reservations
+    }
+    #[must_use]
+    pub(crate) const fn failed_identity_mismatch(self) -> u32 {
+        self.failed_identity_mismatch
+    }
+    #[must_use]
+    pub(crate) const fn failed_stale_generation(self) -> u32 {
+        self.failed_stale_generation
+    }
+    #[must_use]
+    pub(crate) const fn failed_unclassified(self) -> u32 {
+        self.failed_unclassified
+    }
+}
+
+pub(crate) struct OperationsStatus {
+    pub(crate) configuration: Option<ConfigurationObservation>,
+    pub(crate) maintenance: MaintenanceHealth,
 }
 
 /// A bounded operator-visible security condition that does not affect readiness.
@@ -67,6 +206,7 @@ pub struct HealthState {
     plaintext_listener_roles: Arc<AtomicU8>,
     configuration: Arc<OnceLock<Arc<RuntimeConfiguration>>>,
     inspection_authority: Arc<OnceLock<Weak<InitializedInstance>>>,
+    catalog_operation: Arc<OnceLock<Weak<Mutex<()>>>>,
 }
 
 impl std::fmt::Debug for HealthState {
@@ -155,6 +295,200 @@ impl HealthState {
             .map(|_| ())
             .map_err(|_| ())
     }
+
+    pub(crate) fn authorized_configuration_status(
+        &self,
+        bearer: &str,
+    ) -> Result<OperationsStatus, ConfigurationStatusFailure> {
+        let catalog_operation = self
+            .catalog_operation
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(ConfigurationStatusFailure::Unavailable)?;
+        let _catalog_operation = catalog_operation
+            .lock()
+            .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
+        self.authorize_configuration_status(bearer)
+            .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?;
+        let authority = self
+            .inspection_authority
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(ConfigurationStatusFailure::Unavailable)?;
+        let clock_uncertain =
+            authority.retention_time.status().state() == LifecycleClockState::ClockUncertain;
+        let now = if clock_uncertain {
+            None
+        } else {
+            Some(
+                authority
+                    .retention_time
+                    .governance_now_seconds()
+                    .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
+            )
+        };
+        let statuses = authority
+            .maintenance_coordinator()
+            .statuses_with_progress_slo(now, clock_uncertain)
+            .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
+        let mut maintenance = MaintenanceHealth {
+            queued: 0,
+            running: 0,
+            deferred: 0,
+            terminal: 0,
+            failed: 0,
+            clock_uncertain,
+            oldest_queued_age_seconds: None,
+            lower_class_queue_delay_breaches: 0,
+            running_no_durable_progress_slo_breaches: 0,
+            running_no_durable_progress_slo_unknown: 0,
+            completed_inputs: 0,
+            input_objects: 0,
+            outstanding_reservations: 0,
+            maximum_outstanding_reservations: 0,
+            outstanding_maintenance_reservations: 0,
+            durability_recovery_reservations: 0,
+            security_lifecycle_reservations: 0,
+            ingest_reservations: 0,
+            interactive_query_tail_reservations: 0,
+            ordinary_maintenance_backup_reservations: 0,
+            failed_identity_mismatch: 0,
+            failed_stale_generation: 0,
+            failed_unclassified: 0,
+        };
+        for status in statuses {
+            match status.phase() {
+                MaintenanceTaskPhase::Queued => {
+                    maintenance.queued = maintenance
+                        .queued
+                        .checked_add(1)
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                    if let Some(now) = now {
+                        let age = now.saturating_sub(status.submitted_at());
+                        maintenance.oldest_queued_age_seconds = Some(
+                            maintenance
+                                .oldest_queued_age_seconds
+                                .map_or(age, |oldest| oldest.max(age)),
+                        );
+                        if lower_class_queue_delay_breached(&status, now) {
+                            maintenance.lower_class_queue_delay_breaches = maintenance
+                                .lower_class_queue_delay_breaches
+                                .checked_add(1)
+                                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                        }
+                    }
+                },
+                MaintenanceTaskPhase::Running => {
+                    maintenance.running = maintenance
+                        .running
+                        .checked_add(1)
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                    match status.no_durable_progress_slo_breached() {
+                        Some(true) => {
+                            maintenance.running_no_durable_progress_slo_breaches = maintenance
+                                .running_no_durable_progress_slo_breaches
+                                .checked_add(1)
+                                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                        },
+                        Some(false) => {},
+                        None => {
+                            maintenance.running_no_durable_progress_slo_unknown = maintenance
+                                .running_no_durable_progress_slo_unknown
+                                .checked_add(1)
+                                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                        },
+                    }
+                },
+                MaintenanceTaskPhase::Deferred => {
+                    maintenance.deferred = maintenance
+                        .deferred
+                        .checked_add(1)
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?
+                },
+                MaintenanceTaskPhase::Cancelled
+                | MaintenanceTaskPhase::Succeeded
+                | MaintenanceTaskPhase::Failed => {
+                    maintenance.terminal = maintenance
+                        .terminal
+                        .checked_add(1)
+                        .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                    if status.phase() == MaintenanceTaskPhase::Failed {
+                        maintenance.failed = maintenance
+                            .failed
+                            .checked_add(1)
+                            .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                        match status.terminal_failure() {
+                            Some(MaintenanceTerminalFailure::IdentityMismatch) => {
+                                maintenance.failed_identity_mismatch = maintenance
+                                    .failed_identity_mismatch
+                                    .checked_add(1)
+                                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                            },
+                            Some(MaintenanceTerminalFailure::StaleGeneration) => {
+                                maintenance.failed_stale_generation = maintenance
+                                    .failed_stale_generation
+                                    .checked_add(1)
+                                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                            },
+                            Some(MaintenanceTerminalFailure::Unclassified) => {
+                                maintenance.failed_unclassified = maintenance
+                                    .failed_unclassified
+                                    .checked_add(1)
+                                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+                            },
+                            None => return Err(ConfigurationStatusFailure::Unavailable),
+                        }
+                    }
+                },
+            }
+            maintenance.input_objects = maintenance
+                .input_objects
+                .checked_add(
+                    u32::try_from(status.task().inputs().len())
+                        .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
+                )
+                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+            if let Some(checkpoint) = status.checkpoint() {
+                maintenance.completed_inputs = maintenance
+                    .completed_inputs
+                    .checked_add(checkpoint.completed_inputs())
+                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+            }
+        }
+        let resources = authority
+            .resource_governor()
+            .inspect()
+            .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
+        maintenance.outstanding_reservations = resources.outstanding_reservations();
+        maintenance.maximum_outstanding_reservations = resources.maximum_outstanding_reservations();
+        maintenance.outstanding_maintenance_reservations =
+            resources.outstanding_for(WorkClass::OrdinaryMaintenanceBackup);
+        maintenance.durability_recovery_reservations =
+            resources.outstanding_for(WorkClass::DurabilityRecovery);
+        maintenance.security_lifecycle_reservations =
+            resources.outstanding_for(WorkClass::SecurityLifecycle);
+        maintenance.ingest_reservations = resources.outstanding_for(WorkClass::Ingest);
+        maintenance.interactive_query_tail_reservations =
+            resources.outstanding_for(WorkClass::InteractiveQueryTail);
+        maintenance.ordinary_maintenance_backup_reservations =
+            resources.outstanding_for(WorkClass::OrdinaryMaintenanceBackup);
+        Ok(OperationsStatus {
+            configuration: self
+                .configuration_status()
+                .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
+            maintenance,
+        })
+    }
+}
+
+fn lower_class_queue_delay_breached(
+    status: &positron_kernel::MaintenanceTaskStatus,
+    now: u64,
+) -> bool {
+    matches!(
+        status.task().priority(),
+        MaintenancePriority::Ordinary | MaintenancePriority::Required
+    ) && now.saturating_sub(status.submitted_at()) >= MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS
 }
 
 pub(crate) struct ProcessState {
@@ -169,6 +503,7 @@ impl ProcessState {
                 plaintext_listener_roles: Arc::new(AtomicU8::new(0)),
                 configuration: Arc::new(OnceLock::new()),
                 inspection_authority: Arc::new(OnceLock::new()),
+                catalog_operation: Arc::new(OnceLock::new()),
             },
         }
     }
@@ -212,6 +547,16 @@ impl ProcessState {
             .set(Arc::downgrade(&authority))
             .map_err(|_| ConfigurationRuntimeFailure::Unavailable)
     }
+
+    pub(crate) fn set_catalog_operation(
+        &self,
+        catalog_operation: Arc<Mutex<()>>,
+    ) -> Result<(), ConfigurationRuntimeFailure> {
+        self.health
+            .catalog_operation
+            .set(Arc::downgrade(&catalog_operation))
+            .map_err(|_| ConfigurationRuntimeFailure::Unavailable)
+    }
 }
 
 fn plaintext_role_bit(role: ListenerRole) -> Option<u8> {
@@ -234,5 +579,42 @@ fn decode_phase(value: u8) -> ProcessPhase {
         4 => ProcessPhase::Fenced,
         5 => ProcessPhase::Stopping,
         _ => ProcessPhase::Stopped,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use positron_kernel::{
+        MaintenanceCoordinator, MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId,
+    };
+
+    use super::lower_class_queue_delay_breached;
+
+    #[test]
+    fn queue_delay_breach_counts_only_promotable_priorities() {
+        let coordinator = MaintenanceCoordinator::new();
+        let required = MaintenanceTask::new(
+            MaintenanceTaskId::new([0x71; 16]).expect("required identity"),
+            MaintenanceTaskClass::SchemaStatistics,
+        );
+        let urgent = MaintenanceTask::new(
+            MaintenanceTaskId::new([0x72; 16]).expect("urgent identity"),
+            MaintenanceTaskClass::CatalogReclamation,
+        );
+        coordinator.submit_at(required, 10).expect("required task");
+        coordinator.submit_at(urgent, 10).expect("urgent task");
+
+        assert!(lower_class_queue_delay_breached(
+            &coordinator
+                .status(MaintenanceTaskId::new([0x71; 16]).expect("required identity"))
+                .expect("required status"),
+            70,
+        ));
+        assert!(!lower_class_queue_delay_breached(
+            &coordinator
+                .status(MaintenanceTaskId::new([0x72; 16]).expect("urgent identity"))
+                .expect("urgent status"),
+            70,
+        ));
     }
 }

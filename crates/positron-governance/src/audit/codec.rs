@@ -8,6 +8,123 @@ impl GovernanceAuditEntry {
         transaction_id: [u8; 16],
         intent: &[u8],
     ) -> Result<Self, IdentityFailure> {
+        if intent.starts_with(&MAINTENANCE_WINDOW_AUDIT_MAGIC) {
+            let mut cursor = Cursor::new(intent);
+            if cursor.take_array::<8>()? != MAINTENANCE_WINDOW_AUDIT_MAGIC {
+                return Err(IdentityFailure);
+            }
+            let actor =
+                PrincipalId::from_bytes(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let idempotency_key = AdministrativeIdempotencyKey::new(cursor.take_array()?)
+                .map_err(|_| IdentityFailure)?;
+            let expected_catalog_generation = cursor.take_u64()?;
+            let count = usize::from(cursor.take_u8()?);
+            if expected_catalog_generation == 0 || !(1..=6).contains(&count) {
+                return Err(IdentityFailure);
+            }
+            let mut deferred = Vec::with_capacity(count);
+            for _ in 0..count {
+                let class =
+                    maintenance_window_class_from_code(cursor.take_u8()?).ok_or(IdentityFailure)?;
+                if deferred.last().is_some_and(|previous| *previous >= class) {
+                    return Err(IdentityFailure);
+                }
+                deferred.push(class);
+            }
+            let duration_seconds = cursor.take_u64()?;
+            let until_unix_seconds = cursor.take_u64()?;
+            if duration_seconds == 0 || until_unix_seconds == 0 || !cursor.is_empty() {
+                return Err(IdentityFailure);
+            }
+            return Ok(Self::MaintenanceWindow(MaintenanceWindowAuditEntry {
+                position,
+                actor,
+                idempotency_key,
+                expected_catalog_generation,
+                deferred,
+                duration_seconds,
+                until_unix_seconds,
+            }));
+        }
+        if intent.starts_with(&MAINTENANCE_CONTROL_AUDIT_MAGIC) {
+            let mut cursor = Cursor::new(intent);
+            if cursor.take_array::<8>()? != MAINTENANCE_CONTROL_AUDIT_MAGIC {
+                return Err(IdentityFailure);
+            }
+            let pause = match cursor.take_u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(IdentityFailure),
+            };
+            let actor =
+                PrincipalId::from_bytes(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let idempotency_key = AdministrativeIdempotencyKey::new(cursor.take_array()?)
+                .map_err(|_| IdentityFailure)?;
+            let task = MaintenanceTaskId::new(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let resource_generation = cursor.take_u64()?;
+            let duration_seconds = cursor.take_u64()?;
+            let pause_until_unix_seconds = cursor.take_u64()?;
+            if (pause
+                && (resource_generation == 0
+                    || duration_seconds == 0
+                    || pause_until_unix_seconds == 0))
+                || (!pause
+                    && (resource_generation != 0
+                        || duration_seconds != 0
+                        || pause_until_unix_seconds != 0))
+                || !cursor.is_empty()
+            {
+                return Err(IdentityFailure);
+            }
+            return Ok(Self::MaintenanceControl(MaintenanceControlAuditEntry {
+                position,
+                actor,
+                idempotency_key,
+                task,
+                pause,
+                resource_generation,
+                duration_seconds,
+                pause_until_unix_seconds,
+            }));
+        }
+        if intent.starts_with(&MAINTENANCE_RUN_AUDIT_MAGIC) {
+            let mut cursor = Cursor::new(intent);
+            if cursor.take_array::<8>()? != MAINTENANCE_RUN_AUDIT_MAGIC {
+                return Err(IdentityFailure);
+            }
+            let actor =
+                PrincipalId::from_bytes(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let idempotency_key = AdministrativeIdempotencyKey::new(cursor.take_array()?)
+                .map_err(|_| IdentityFailure)?;
+            let task = MaintenanceTaskId::new(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let tenant = TenantId::from_bytes(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let signal = match cursor.take_u8()? {
+                1 => SignalKind::Logs,
+                2 => SignalKind::Traces,
+                _ => return Err(IdentityFailure),
+            };
+            let shard = u32::from_be_bytes(cursor.take_array()?);
+            let resource_generation = cursor.take_u64()?;
+            let submitted_at_unix_seconds = cursor.take_u64()?;
+            if shard == 0
+                || resource_generation == 0
+                || submitted_at_unix_seconds == 0
+                || !cursor.is_empty()
+            {
+                return Err(IdentityFailure);
+            }
+            return Ok(Self::MaintenanceRun(MaintenanceRunAuditEntry {
+                position,
+                actor,
+                idempotency_key,
+                task,
+                tenant,
+                signal,
+                shard,
+                resource_generation,
+                submitted_at_unix_seconds,
+            }));
+        }
         if intent.starts_with(&TLS_MATERIAL_RELOAD_MAGIC) {
             return TlsMaterialReloadAuditRequest::decode(position, transaction_id, intent)
                 .map(Self::TlsMaterialReload);

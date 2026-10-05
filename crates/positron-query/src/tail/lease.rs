@@ -1,4 +1,4 @@
-use positron_kernel::{ActiveSegmentLedger, SnapshotLeaseId};
+use positron_kernel::{ActiveSegmentLedger, MaintenanceCoordinator, SnapshotLeaseId};
 
 use crate::QueryFailure;
 
@@ -7,6 +7,7 @@ use crate::QueryFailure;
 pub(super) struct TailLeaseOwner<'ledger, 'kernel, 'catalog> {
     ledger: &'ledger ActiveSegmentLedger<'kernel, 'catalog>,
     identity: SnapshotLeaseId,
+    maintenance: Option<&'ledger MaintenanceCoordinator>,
     released: bool,
     retained: bool,
 }
@@ -66,10 +67,12 @@ impl<'ledger, 'kernel, 'catalog> TailLeaseOwner<'ledger, 'kernel, 'catalog> {
     pub(super) const fn new(
         ledger: &'ledger ActiveSegmentLedger<'kernel, 'catalog>,
         identity: SnapshotLeaseId,
+        maintenance: Option<&'ledger MaintenanceCoordinator>,
     ) -> Self {
         Self {
             ledger,
             identity,
+            maintenance,
             released: false,
             retained: false,
         }
@@ -79,9 +82,13 @@ impl<'ledger, 'kernel, 'catalog> TailLeaseOwner<'ledger, 'kernel, 'catalog> {
         if self.released || self.retained {
             return Ok(());
         }
-        self.ledger
-            .release_snapshot_lease(self.identity)
-            .map_err(crate::execution_support::map_ledger_failure)?;
+        match self.maintenance {
+            Some(coordinator) => self
+                .ledger
+                .release_snapshot_lease_with_expiry_task(coordinator, self.identity),
+            None => self.ledger.release_snapshot_lease(self.identity),
+        }
+        .map_err(crate::execution_support::map_ledger_failure)?;
         self.released = true;
         Ok(())
     }
@@ -98,12 +105,16 @@ impl<'ledger, 'kernel, 'catalog> TailLeaseOwner<'ledger, 'kernel, 'catalog> {
 impl Drop for TailLeaseOwner<'_, '_, '_> {
     fn drop(&mut self) {
         if !self.released && !self.retained {
-            // The kernel reserves MAX_SNAPSHOT_LEASES + 1 pending identities:
-            // every admitted owner either already occupies one of those slots
-            // or leaves a slot for this release. `release_snapshot_lease`
-            // registers before publication, so Drop cannot lose the durable
-            // intent; the kernel capacity proof covers the ignored result.
-            let _ = self.ledger.release_snapshot_lease(self.identity);
+            match self.release() {
+                Ok(()) => {},
+                Err(_) => {
+                    // Drop cannot return the typed release failure. Keep the
+                    // paired durable lease and expiry task intact; the
+                    // maintenance coordinator recovers that authoritative
+                    // Catalog state before it runs more lifecycle work.
+                    self.retain();
+                },
+            }
         }
     }
 }
