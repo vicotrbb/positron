@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "c6ae0db1d5ebc5915945643961e263464b5bb2a1a48f19c997acb54b0a3659c4"
+    "x-positron-schema-digest": "204391aa83d0ed56d7d4ba510a2b03946ec40a75815f7c28c5357f4b770ce21c"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1506,7 +1506,7 @@
       },
       "OnlineVerificationReport": {
         "type": "object", "additionalProperties": false,
-        "required": ["report_version", "tenant", "signal", "shard", "catalog_generation", "examined_segments", "examined_bytes", "omitted_segments", "outcome", "verification_complete", "findings"],
+        "required": ["report_version", "tenant", "signal", "shard", "catalog_generation", "examined_segments", "examined_bytes", "omitted_segments", "outcome", "verification_complete", "report_checksum", "findings"],
         "properties": {
           "report_version": {"type": "integer", "const": 1},
           "tenant": {"type": "string", "format": "uuid"},
@@ -1518,6 +1518,7 @@
           "omitted_segments": {"type": "integer", "minimum": 0},
           "outcome": {"type": "string", "enum": ["verified", "incomplete", "stale", "quarantined", "fenced"]},
           "verification_complete": {"type": "boolean"},
+          "report_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$", "minLength": 64, "maxLength": 64},
           "continuation": {"type": "string", "pattern": "^[0-9a-f]{112}$", "minLength": 112, "maxLength": 112},
           "findings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/components/schemas/IntegrityQuarantineFinding"}}
         }

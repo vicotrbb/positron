@@ -120,9 +120,7 @@ pub(super) fn decode_metadata(bytes: &[u8]) -> Result<Option<SegmentMetadata>, L
     } else {
         None
     };
-    if matches!(state, SegmentState::Active) && sealed_frontier.is_some()
-        || version == 2 && matches!(state, SegmentState::Sealed) && sealed_frontier.is_none()
-    {
+    if matches!(state, SegmentState::Active) && sealed_frontier.is_some() {
         return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
     }
     Ok(Some(SegmentMetadata {

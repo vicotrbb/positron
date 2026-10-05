@@ -1,6 +1,7 @@
 //! Bounded, authenticated Maintenance Coordinator inspection wire types.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub use crate::api_keys::ApiKeyTransport as MaintenanceTransport;
 
@@ -667,6 +668,7 @@ pub struct OnlineVerificationReport {
     pub omitted_segments: u32,
     pub outcome: String,
     pub verification_complete: bool,
+    pub report_checksum: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<String>,
     #[serde(default)]
@@ -700,6 +702,7 @@ impl OnlineVerificationReport {
             && self.catalog_generation != 0
             && self.findings.len() <= MAX_INTEGRITY_FINDINGS
             && self.findings.iter().all(valid_integrity_finding)
+            && valid_report_checksum(&self.report_checksum)
             && match self.outcome.as_str() {
                 "verified" => {
                     self.verification_complete
@@ -715,10 +718,92 @@ impl OnlineVerificationReport {
                     !self.verification_complete && self.continuation.is_none()
                 },
                 _ => false,
-            })
+            }
+            && self.report_checksum == self.checksum())
         .then_some(())
         .ok_or(MaintenanceWireFailure)
     }
+
+    #[must_use]
+    pub fn checksum(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"positron/online-verification-report/v1");
+        digest.update([self.report_version]);
+        update_text(&mut digest, &self.tenant);
+        update_text(&mut digest, &self.signal);
+        digest.update(self.shard.to_be_bytes());
+        digest.update(self.catalog_generation.to_be_bytes());
+        digest.update(self.examined_segments.to_be_bytes());
+        digest.update(self.examined_bytes.to_be_bytes());
+        digest.update(self.omitted_segments.to_be_bytes());
+        update_text(&mut digest, &self.outcome);
+        digest.update([u8::from(self.verification_complete)]);
+        update_optional_text(&mut digest, self.continuation.as_deref());
+        digest.update(
+            u64::try_from(self.findings.len())
+                .map_or(u64::MAX, |value| value)
+                .to_be_bytes(),
+        );
+        for finding in &self.findings {
+            update_text(&mut digest, &finding.tenant);
+            update_text(&mut digest, &finding.signal);
+            digest.update(finding.shard.to_be_bytes());
+            update_text(&mut digest, &finding.segment);
+            digest.update(finding.base_position.to_be_bytes());
+            update_time_range(&mut digest, &finding.event_range);
+            update_time_range(&mut digest, &finding.ingest_range);
+        }
+        hex_digest(digest.finalize().as_ref())
+    }
+}
+
+fn update_text(digest: &mut Sha256, value: &str) {
+    digest.update(
+        u64::try_from(value.len())
+            .map_or(u64::MAX, |length| length)
+            .to_be_bytes(),
+    );
+    digest.update(value.as_bytes());
+}
+
+fn update_optional_text(digest: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            digest.update([1]);
+            update_text(digest, value);
+        },
+        None => digest.update([0]),
+    }
+}
+
+fn update_time_range(digest: &mut Sha256, range: &AuthenticatedTimeRangeDescriptor) {
+    update_text(digest, &range.provenance);
+    for value in [range.earliest_unix_nanos, range.latest_unix_nanos] {
+        match value {
+            Some(value) => {
+                digest.update([1]);
+                digest.update(value.to_be_bytes());
+            },
+            None => digest.update([0]),
+        }
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    text
+}
+
+fn valid_report_checksum(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

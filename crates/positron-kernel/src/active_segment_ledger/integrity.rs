@@ -4,6 +4,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use sha2::{Digest, Sha256};
+
 use super::{LedgerFailure, LedgerFailureCode, SegmentId, SegmentScope};
 
 #[path = "integrity_quarantine_codec.rs"]
@@ -42,6 +44,13 @@ impl IntegrityScrubBudget {
 #[derive(Clone, Default)]
 pub struct IntegrityCancellation(std::sync::Arc<AtomicBool>);
 
+/// Kernel-owned cancellation seam for one bounded verification pass. Runtime
+/// task lifecycles adapt their cancellation handle here without giving the
+/// storage kernel a dependency on runtime types.
+pub trait IntegrityCancellationProbe {
+    fn is_cancelled(&self) -> bool;
+}
+
 impl IntegrityCancellation {
     #[must_use]
     pub fn new() -> Self {
@@ -53,6 +62,12 @@ impl IntegrityCancellation {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+}
+
+impl IntegrityCancellationProbe for IntegrityCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
     }
 }
 
@@ -251,6 +266,76 @@ impl IntegrityVerificationReport {
     #[must_use]
     pub const fn is_success(self) -> bool {
         matches!(self.outcome, IntegrityVerificationOutcome::Verified)
+    }
+
+    /// SHA-256 over the fixed-version canonical report account. The digest
+    /// covers every terminal fact exposed by the kernel report and contains no
+    /// key, payload, or filesystem material.
+    #[must_use]
+    pub fn checksum(self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"positron/integrity-verification-report/v1");
+        digest.update([verification_mode_code(self.mode)]);
+        digest.update([verification_scope_code(self.verification_scope)]);
+        digest.update(self.scope.tenant_id().to_bytes());
+        digest.update([match self.scope.signal_kind() {
+            positron_domain::routing::SignalKind::Logs => 1,
+            positron_domain::routing::SignalKind::Traces => 2,
+        }]);
+        digest.update(self.scope.shard_id().value().to_be_bytes());
+        digest.update(self.catalog_generation.to_be_bytes());
+        digest.update(
+            u64::try_from(self.examined_segments)
+                .map_or(u64::MAX, |value| value)
+                .to_be_bytes(),
+        );
+        digest.update(self.examined_bytes.to_be_bytes());
+        digest.update(
+            u64::try_from(self.omitted_segments)
+                .map_or(u64::MAX, |value| value)
+                .to_be_bytes(),
+        );
+        digest.update([verification_outcome_code(self.outcome)]);
+        match self.quarantined_segment {
+            Some(segment) => {
+                digest.update([1]);
+                digest.update(segment.to_bytes());
+            },
+            None => digest.update([0]),
+        }
+        match self.continuation {
+            Some(continuation) => {
+                digest.update([1]);
+                digest.update(continuation.encode());
+            },
+            None => digest.update([0]),
+        }
+        digest.finalize().into()
+    }
+}
+
+const fn verification_mode_code(mode: IntegrityVerificationMode) -> u8 {
+    match mode {
+        IntegrityVerificationMode::Startup => 1,
+        IntegrityVerificationMode::Online => 2,
+        IntegrityVerificationMode::Offline => 3,
+    }
+}
+
+const fn verification_scope_code(scope: IntegrityVerificationScope) -> u8 {
+    match scope {
+        IntegrityVerificationScope::StartupFrontiers => 1,
+        IntegrityVerificationScope::ReachableImmutableSegments => 2,
+    }
+}
+
+const fn verification_outcome_code(outcome: IntegrityVerificationOutcome) -> u8 {
+    match outcome {
+        IntegrityVerificationOutcome::Verified => 1,
+        IntegrityVerificationOutcome::Incomplete => 2,
+        IntegrityVerificationOutcome::Stale => 3,
+        IntegrityVerificationOutcome::Quarantined => 4,
+        IntegrityVerificationOutcome::Fenced => 5,
     }
 }
 

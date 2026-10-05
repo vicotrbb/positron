@@ -44,10 +44,41 @@ fn online_verification_wire_requires_an_explicit_scope_and_never_marks_partial_w
         omitted_segments: 1,
         outcome: "incomplete".to_owned(),
         verification_complete: true,
+        report_checksum: "0".repeat(64),
         continuation: Some("ab".repeat(56)),
         findings: Vec::new(),
     };
     assert!(partial.encode().is_err());
+}
+
+#[test]
+fn online_verification_report_checksum_is_deterministic_and_rejects_tampering() {
+    let mut report = OnlineVerificationReport {
+        report_version: 1,
+        tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+        signal: "logs".to_owned(),
+        shard: 1,
+        catalog_generation: 7,
+        examined_segments: 1,
+        examined_bytes: 42,
+        omitted_segments: 0,
+        outcome: "verified".to_owned(),
+        verification_complete: true,
+        report_checksum: String::new(),
+        continuation: None,
+        findings: Vec::new(),
+    };
+    report.report_checksum = report.checksum();
+    let first = report.encode().expect("checksummed report encodes");
+    let second = report
+        .encode()
+        .expect("canonical checksum is deterministic");
+    assert_eq!(first, second);
+    report.examined_bytes = 43;
+    assert!(
+        report.encode().is_err(),
+        "covered report facts cannot be altered"
+    );
 }
 
 #[test]

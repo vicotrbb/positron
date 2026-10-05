@@ -166,12 +166,38 @@ pub(crate) fn snapshot_from_record<'kernel>(
         .governor()
         .reserve(maximum_claim)
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
+    // The original basis remains the sole source for the cursor identity,
+    // immutable data and recovery plan.  A current authenticated quarantine
+    // is nevertheless a safety overlay: a cursor must never resume and hand
+    // a newly quarantined leased segment to query execution.
     let mut quarantined_holes =
         super::super::integrity::integrity_quarantine_findings(&original_basis)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
             .into_iter()
             .filter(|finding| finding.scope() == record.scope)
             .collect::<Vec<_>>();
+    let leased_segments = record
+        .blocks
+        .iter()
+        .map(|block| block.segment)
+        .collect::<BTreeSet<_>>();
+    for finding in super::super::integrity::integrity_quarantine_findings(lease_basis)
+        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+        .into_iter()
+        .filter(|finding| {
+            finding.scope() == record.scope && leased_segments.contains(&finding.segment())
+        })
+    {
+        if !quarantined_holes
+            .iter()
+            .any(|existing| existing.segment() == finding.segment())
+        {
+            quarantined_holes
+                .try_reserve(1)
+                .map_err(|_| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
+            quarantined_holes.push(finding);
+        }
+    }
     quarantined_holes.sort_unstable_by_key(|finding| finding.base_position());
     let empty_frontier_is_quarantined = record.blocks.is_empty()
         && quarantined_holes

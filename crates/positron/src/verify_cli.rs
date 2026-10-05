@@ -21,18 +21,30 @@ pub(super) fn run(
     arguments: impl Iterator<Item = String>,
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
-    match execute(arguments, environment) {
+    let arguments = arguments.collect::<Vec<_>>();
+    let selected_mode = selected_mode(&arguments);
+    match execute(arguments.into_iter(), environment) {
         Ok((exit, output)) => {
             print!("{output}");
             exit
         },
         Err(failure) => {
             print!(
-                "mode=offline\nstatus={}\nverification_complete=false\n",
+                "mode={selected_mode}\nstatus={}\nverification_complete=false\n",
                 failure.status()
             );
             ExitCode::from(EXIT_CONFIGURATION)
         },
+    }
+}
+
+fn selected_mode(arguments: &[String]) -> &'static str {
+    let online = arguments.iter().any(|argument| argument == "--online");
+    let offline = arguments.iter().any(|argument| argument == "--offline");
+    match (online, offline) {
+        (true, false) => "online",
+        (false, true) => "offline",
+        (false, false) | (true, true) => "usage",
     }
 }
 
@@ -241,23 +253,25 @@ fn render_report(report: positron_kernel::IntegrityVerificationReport) -> String
         .map(|segment| hex(&segment.to_bytes()))
         .unwrap_or_else(|| "none".to_owned());
     format!(
-        "report_scope_tenant={} report_scope_signal={signal} report_scope_shard={} catalog_generation={} examined_segments={} examined_bytes={} omitted_segments={} outcome={outcome} quarantined_segment={quarantined}\n",
+        "report_scope_tenant={} report_scope_signal={signal} report_scope_shard={} catalog_generation={} examined_segments={} examined_bytes={} omitted_segments={} outcome={outcome} quarantined_segment={quarantined} report_checksum={}\n",
         scope.tenant_id(),
         scope.shard_id().value(),
         report.catalog_generation(),
         report.examined_segments(),
         report.examined_bytes(),
         report.omitted_segments(),
+        hex(&report.checksum()),
     )
 }
 
 fn render_online_report(report: &OnlineVerificationReport) -> String {
     let continuation = report.continuation.as_deref().unwrap_or("none");
     let mut output = format!(
-        "report_version={}\nmode=online\nstatus={}\nverification_complete={}\nreport_scope_tenant={} report_scope_signal={} report_scope_shard={} catalog_generation={} examined_segments={} examined_bytes={} omitted_segments={} continuation={}\n",
+        "report_version={}\nmode=online\nstatus={}\nverification_complete={}\nreport_checksum={}\nreport_scope_tenant={} report_scope_signal={} report_scope_shard={} catalog_generation={} examined_segments={} examined_bytes={} omitted_segments={} continuation={}\n",
         report.report_version,
         report.outcome,
         report.verification_complete,
+        report.report_checksum,
         report.tenant,
         report.signal,
         report.shard,
@@ -444,7 +458,18 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    use super::{VerifyFailure, VerifyOptions, online_request};
+    use super::{VerifyFailure, VerifyOptions, online_request, selected_mode};
+
+    #[test]
+    fn failure_mode_preserves_the_selected_online_path() {
+        assert_eq!(selected_mode(&["--online".to_owned()]), "online");
+        assert_eq!(selected_mode(&["--offline".to_owned()]), "offline");
+        assert_eq!(selected_mode(&[]), "usage");
+        assert_eq!(
+            selected_mode(&["--online".to_owned(), "--offline".to_owned()]),
+            "usage"
+        );
+    }
 
     #[test]
     fn offline_arguments_require_explicit_mode_and_accept_configuration_overrides() {
@@ -532,7 +557,28 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains("authorization: bearer administration-secret")
             );
-            let body = r#"{"report_version":1,"tenant":"00000000-0000-0000-0000-000000000001","signal":"logs","shard":1,"catalog_generation":7,"examined_segments":1,"examined_bytes":42,"omitted_segments":0,"outcome":"verified","verification_complete":true,"findings":[]}"#;
+            let mut report = OnlineVerificationReport {
+                report_version: 1,
+                tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+                signal: "logs".to_owned(),
+                shard: 1,
+                catalog_generation: 7,
+                examined_segments: 1,
+                examined_bytes: 42,
+                omitted_segments: 0,
+                outcome: "verified".to_owned(),
+                verification_complete: true,
+                report_checksum: String::new(),
+                continuation: None,
+                findings: Vec::new(),
+            };
+            report.report_checksum = report.checksum();
+            let body = String::from_utf8(
+                report
+                    .encode()
+                    .map_err(|_| std::io::Error::other("report"))?,
+            )
+            .map_err(std::io::Error::other)?;
             stream.write_all(
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

@@ -494,6 +494,8 @@ message OnlineVerificationReport {
   bool verification_complete = 10;
   optional string continuation = 11;
   repeated IntegrityQuarantineFinding findings = 12;
+  // SHA-256 over the versioned canonical JSON account, excluding this field.
+  string report_checksum = 13;
 }
 
 // An authenticated system-administration request for one explicit existing

@@ -1,5 +1,5 @@
 {
-  "schema_digest": "c6ae0db1d5ebc5915945643961e263464b5bb2a1a48f19c997acb54b0a3659c4",
+  "schema_digest": "204391aa83d0ed56d7d4ba510a2b03946ec40a75815f7c28c5357f4b770ce21c",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -784,7 +784,8 @@
         {"proto":"outcome","json":"outcome","type":"string","number":9,"deprecated":false},
         {"proto":"verification_complete","json":"verification_complete","type":"bool","number":10,"deprecated":false},
         {"proto":"continuation","json":"continuation","type":"string","number":11,"deprecated":false,"optional":true},
-        {"proto":"findings","json":"findings","type":"IntegrityQuarantineFinding","number":12,"deprecated":false,"repeated":true,"maximum_items":64}
+        {"proto":"findings","json":"findings","type":"IntegrityQuarantineFinding","number":12,"deprecated":false,"repeated":true,"maximum_items":64},
+        {"proto":"report_checksum","json":"report_checksum","type":"string","number":13,"deprecated":false}
       ],
       "responses":{"200":"OnlineVerificationReport","400":"invalid_request","401":"authentication_rejected","404":"source_unavailable","503":"administration_unavailable"}
     },

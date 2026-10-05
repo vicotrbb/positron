@@ -581,12 +581,17 @@ fn run_with_credential<'a>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
+    let credential_write = child
         .stdin
         .take()
         .ok_or_else(|| std::io::Error::other("stdin unavailable"))?
-        .write_all(CREDENTIAL.as_bytes())?;
-    child.wait_with_output()
+        .write_all(CREDENTIAL.as_bytes());
+    let output = child.wait_with_output()?;
+    match credential_write {
+        Ok(()) => Ok(output),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(output),
+        Err(error) => Err(error),
+    }
 }
 
 fn read_maintenance_status_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {

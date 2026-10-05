@@ -420,8 +420,9 @@ impl InitializedInstance {
     }
 
     #[must_use]
-    pub const fn catalog_generation(&self) -> u64 {
+    pub fn catalog_generation(&self) -> u64 {
         self.catalog_generation
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     #[must_use]

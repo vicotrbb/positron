@@ -8,7 +8,7 @@ use super::super::{
     ActiveSegmentLedger, LedgerStorage, SegmentId, SegmentProtectionKey, SegmentScope,
 };
 use super::{
-    IntegrityCancellation, IntegrityFailure, IntegrityFailureCode, IntegrityScrubBudget,
+    IntegrityCancellationProbe, IntegrityFailure, IntegrityFailureCode, IntegrityScrubBudget,
     IntegrityScrubContinuation, IntegrityVerificationMode, IntegrityVerificationOutcome,
     IntegrityVerificationReport, IntegrityVerificationScope, can_localize_quarantine,
     is_isolated_corruption, map_catalog_failure, map_ledger_failure, publish_quarantine,
@@ -23,7 +23,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         &self,
         mode: IntegrityVerificationMode,
         budget: IntegrityScrubBudget,
-        cancellation: &IntegrityCancellation,
+        cancellation: &dyn IntegrityCancellationProbe,
         transaction: TransactionId,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
         verify_integrity_from(
@@ -46,7 +46,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         &self,
         mode: IntegrityVerificationMode,
         budget: IntegrityScrubBudget,
-        cancellation: &IntegrityCancellation,
+        cancellation: &dyn IntegrityCancellationProbe,
         transaction: TransactionId,
         continuation: IntegrityScrubContinuation,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
@@ -74,7 +74,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         protection: SegmentProtectionKey,
         mode: IntegrityVerificationMode,
         budget: IntegrityScrubBudget,
-        cancellation: &IntegrityCancellation,
+        cancellation: &dyn IntegrityCancellationProbe,
         transaction: TransactionId,
         continuation: Option<IntegrityScrubContinuation>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
@@ -108,7 +108,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         scope: SegmentScope,
         protection: SegmentProtectionKey,
         budget: IntegrityScrubBudget,
-        cancellation: &IntegrityCancellation,
+        cancellation: &dyn IntegrityCancellationProbe,
         transaction: TransactionId,
         continuation: Option<IntegrityScrubContinuation>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
@@ -144,7 +144,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         protection: SegmentProtectionKey,
         mode: IntegrityVerificationMode,
         budget: IntegrityScrubBudget,
-        cancellation: &IntegrityCancellation,
+        cancellation: &dyn IntegrityCancellationProbe,
         transaction: TransactionId,
         continuation: Option<IntegrityScrubContinuation>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
@@ -183,7 +183,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         scope: SegmentScope,
         protection: SegmentProtectionKey,
         budget: IntegrityScrubBudget,
-        cancellation: &IntegrityCancellation,
+        cancellation: &dyn IntegrityCancellationProbe,
         transaction: TransactionId,
         continuation: Option<IntegrityScrubContinuation>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
@@ -252,7 +252,7 @@ fn verify_integrity_from(
     protection: &SegmentProtectionKey,
     mode: IntegrityVerificationMode,
     budget: IntegrityScrubBudget,
-    cancellation: &IntegrityCancellation,
+    cancellation: &dyn IntegrityCancellationProbe,
     transaction: TransactionId,
     continuation: Option<IntegrityScrubContinuation>,
 ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
@@ -284,7 +284,7 @@ fn verify_integrity_against_snapshot(
     protection: &SegmentProtectionKey,
     mode: IntegrityVerificationMode,
     budget: IntegrityScrubBudget,
-    cancellation: &IntegrityCancellation,
+    cancellation: &dyn IntegrityCancellationProbe,
     transaction: TransactionId,
     continuation: Option<IntegrityScrubContinuation>,
 ) -> Result<IntegrityVerificationReport, IntegrityFailure> {

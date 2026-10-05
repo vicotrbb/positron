@@ -58,7 +58,10 @@ pub(crate) fn recover_initial_ledgers(
         &instance.key,
         instance.instance,
         instance.tenant,
-    )
+    )?;
+    let generation = catalog.pin().map_err(catalog_failure)?.number();
+    instance.record_catalog_generation(generation);
+    Ok(())
 }
 
 fn recover_ledgers(
@@ -217,7 +220,7 @@ pub(super) fn outcome(
         tenant_slug: BootstrapRecord::tenant_slug()?,
         administrator: record.administrator,
         integrity_key_fingerprint: record.integrity_fingerprint,
-        catalog_generation: generation,
+        catalog_generation: std::sync::atomic::AtomicU64::new(generation),
         governance_audit_frontier: audit_frontier,
         claim_available,
     })

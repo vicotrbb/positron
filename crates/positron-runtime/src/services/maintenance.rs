@@ -357,6 +357,7 @@ fn complete_installed_maintenance(
             coordinator,
             execution,
             *scope,
+            cancellation,
         );
     }
     let scope = match execution {
@@ -560,6 +561,7 @@ fn complete_integrity_scrub(
     coordinator: &positron_kernel::MaintenanceCoordinator,
     execution: &MaintenanceExecution<'_>,
     scope: SegmentScope,
+    cancellation: Option<&crate::TaskCancellation>,
 ) -> Result<bool, ServiceFailure> {
     let status = coordinator
         .status(execution.task().identity())
@@ -579,6 +581,10 @@ fn complete_integrity_scrub(
     let key = super::tenant_segment_key(instance, &identity, scope)?;
     let transaction = TransactionId::new(execution.task().identity().to_bytes())
         .map_err(|_| ServiceFailure::Internal)?;
+    let uncancelled = IntegrityCancellation::new();
+    let cancellation: &dyn positron_kernel::IntegrityCancellationProbe = cancellation
+        .map(|current| current as &dyn positron_kernel::IntegrityCancellationProbe)
+        .unwrap_or(&uncancelled);
     let report = ActiveSegmentLedger::verify_catalog_integrity(
         &instance._authority,
         catalog,
@@ -587,7 +593,7 @@ fn complete_integrity_scrub(
         positron_kernel::IntegrityVerificationMode::Online,
         IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
             .map_err(|_| ServiceFailure::Internal)?,
-        &IntegrityCancellation::new(),
+        cancellation,
         transaction,
         continuation,
     )

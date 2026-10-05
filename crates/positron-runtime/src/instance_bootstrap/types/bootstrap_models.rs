@@ -361,7 +361,7 @@ pub struct InitializedInstance {
     pub(in crate::instance_bootstrap) tenant_slug: TenantSlug,
     pub(in crate::instance_bootstrap) administrator: PrincipalId,
     pub(in crate::instance_bootstrap) integrity_key_fingerprint: [u8; 32],
-    pub(in crate::instance_bootstrap) catalog_generation: u64,
+    pub(in crate::instance_bootstrap) catalog_generation: std::sync::atomic::AtomicU64,
     pub(in crate::instance_bootstrap) governance_audit_frontier: u64,
     pub(in crate::instance_bootstrap) claim_available: bool,
 }
@@ -372,13 +372,18 @@ impl std::fmt::Debug for InitializedInstance {
             .debug_struct("InitializedInstance")
             .field("instance", &self.instance)
             .field("tenant", &self.tenant)
-            .field("catalog_generation", &self.catalog_generation)
+            .field("catalog_generation", &self.catalog_generation())
             .field("claim_available", &self.claim_available)
             .finish_non_exhaustive()
     }
 }
 
 impl InitializedInstance {
+    pub(in crate::instance_bootstrap) fn record_catalog_generation(&self, generation: u64) {
+        self.catalog_generation
+            .store(generation, std::sync::atomic::Ordering::Release);
+    }
+
     #[must_use]
     pub(crate) fn maintenance_coordinator(&self) -> &positron_kernel::MaintenanceCoordinator {
         &self.maintenance

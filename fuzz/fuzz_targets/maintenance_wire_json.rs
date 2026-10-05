@@ -97,7 +97,7 @@ fuzz_target!(|data: &[u8]| {
     .encode()
     .is_err());
 
-    let report = OnlineVerificationReport {
+    let mut report = OnlineVerificationReport {
         report_version: 1,
         tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
         signal: "logs".to_owned(),
@@ -108,9 +108,11 @@ fuzz_target!(|data: &[u8]| {
         omitted_segments: 0,
         outcome: "verified".to_owned(),
         verification_complete: true,
+        report_checksum: String::new(),
         continuation: None,
         findings: Vec::new(),
     };
+    report.report_checksum = report.checksum();
     let encoded_report = report
         .encode()
         .expect("accepted verification report encodes");

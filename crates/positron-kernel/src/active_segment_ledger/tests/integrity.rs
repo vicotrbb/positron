@@ -53,6 +53,10 @@ fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
         crate::IngestTime::from_authenticated_durable(UnixNanoseconds::new(60)),
     )?)?;
     let retained_frontier = damaged.snapshot()?.frontier();
+    let lease = damaged.create_snapshot_lease(1, 2)?;
+    let lease_identity = lease.identity();
+    let leased_generation = lease.snapshot().catalog_generation();
+    drop(lease);
     fs::write(
         root.path()
             .join("segments/sealed")
@@ -120,6 +124,15 @@ fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
     assert_eq!(observed.frontier(), retained_frontier);
     assert_eq!(observed.blocks().len(), 1);
     assert_eq!(observed.blocks()[0].payload(), b"same-scope-healthy");
+    let resumed = damaged.resume_snapshot_lease(lease_identity, 1)?;
+    assert_eq!(resumed.snapshot().catalog_generation(), leased_generation);
+    assert_eq!(resumed.snapshot().quarantined_holes().len(), 1);
+    assert_eq!(
+        resumed.snapshot().quarantined_holes()[0].segment(),
+        sealed.segment_id(),
+        "a current PQUAR overlays a historical cursor without rebasing it"
+    );
+    drop(resumed);
     let lease = damaged.create_snapshot_lease(1, 2)?;
     assert_eq!(lease.snapshot().quarantined_holes().len(), 1);
     assert_eq!(lease.snapshot().blocks().len(), 1);

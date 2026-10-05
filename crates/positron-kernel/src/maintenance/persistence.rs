@@ -131,6 +131,27 @@ impl MaintenanceCoordinator {
         )
     }
 
+    /// Starts the one exact authenticated integrity task selected by an
+    /// operator request. The task still takes the coordinator's durable
+    /// admission and Resource Governor reservation before any scan begins.
+    pub fn start_integrity_scrub_task_with_reservation_and_persist<'authority>(
+        &self,
+        catalog: &Catalog<'_>,
+        authority: &'authority StorageKernelResourceAuthority,
+        now: u64,
+        clock_uncertain: bool,
+        identity: MaintenanceTaskId,
+    ) -> Result<Option<MaintenanceExecution<'authority>>, MaintenanceFailure> {
+        self.start_next_with_reservation_and_persist_matching(
+            catalog,
+            authority,
+            now,
+            clock_uncertain,
+            &[MaintenanceTaskClass::IntegrityScrub],
+            Some(identity),
+        )
+    }
+
     fn start_next_with_reservation_and_persist_matching<'authority>(
         &self,
         catalog: &Catalog<'_>,

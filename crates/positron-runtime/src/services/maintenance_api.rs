@@ -22,8 +22,9 @@ use positron_kernel::{
     ActiveSegmentLedger, AuthenticatedEventRange, AuthenticatedIngestRange, Catalog,
     IntegrityCancellation, IntegrityScrubBudget, IntegrityVerificationOutcome, LedgerFailure,
     LedgerFailureCode, LifecycleClockState, MaintenanceCoordinator, MaintenanceFailure,
-    MaintenanceReservationAuthority, MaintenanceScope, MaintenanceTaskClass, MaintenanceTaskId,
-    MaintenanceTaskPhase, NO_DURABLE_PROGRESS_SLO_SECONDS, ResourceDimension, SegmentScope,
+    MaintenancePreconditions, MaintenanceReservationAuthority, MaintenanceScope, MaintenanceTask,
+    MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger,
+    NO_DURABLE_PROGRESS_SLO_SECONDS, ResourceAmounts, ResourceDimension, SegmentScope,
     TransactionId, integrity_quarantine_findings,
 };
 
@@ -173,9 +174,6 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         )
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-        #[cfg(test)]
-        self.await_online_verification_test_hook()
-            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         if !snapshot
             .reachable_ledger_scopes(tenant, signal)
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
@@ -190,6 +188,60 @@ impl ServiceHandle {
         {
             return Ok(stale_online_report(scope, snapshot.number()));
         }
+        let task_identity = online_verification_task_identity(
+            scope,
+            snapshot.identity().to_bytes(),
+            request.continuation(),
+        )?;
+        let now = self.maintenance_status_now()?;
+        let coordinator = self.instance.maintenance_coordinator();
+        let execution = {
+            let _catalog_operation = self
+                .catalog_operation()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let catalog = self.open_maintenance_catalog()?;
+            let task = MaintenanceTask::with_contract(
+                task_identity,
+                MaintenanceTaskClass::IntegrityScrub,
+                MaintenanceScope::segment(tenant, signal, shard),
+                MaintenanceTrigger::Event,
+                MaintenancePreconditions::new(snapshot.number(), 1)
+                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+                Vec::new(),
+                Vec::new(),
+                ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+            )
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            coordinator
+                .submit_and_persist(&catalog, task, now)
+                .map_err(|_| MaintenanceServiceFailure::TaskUnavailable)?;
+            coordinator
+                .start_integrity_scrub_task_with_reservation_and_persist(
+                    &catalog,
+                    &self.instance._authority,
+                    now,
+                    self.instance.retention_time.status().state()
+                        == LifecycleClockState::ClockUncertain,
+                    task_identity,
+                )
+                .map_err(|_| MaintenanceServiceFailure::TaskUnavailable)?
+                .ok_or(MaintenanceServiceFailure::TaskUnavailable)?
+        };
+        // Capture G0 only after the coordinator has admitted the task and
+        // acquired its governor reservation. The scan itself holds neither
+        // the writer gate nor a catalog writer lease.
+        let snapshot = Catalog::read_current_snapshot(
+            &self.instance._authority,
+            self.instance.instance,
+            self.instance
+                .key
+                .catalog_secret(self.instance.instance)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+        )
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        #[cfg(test)]
+        self.await_online_verification_test_hook()
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let identity = Identity::open(&snapshot)
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let protection = super::tenant_segment_key(&self.instance, &identity, scope)
@@ -218,9 +270,16 @@ impl ServiceHandle {
         )
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         if current.identity() != snapshot.identity() || current.number() != snapshot.number() {
+            let _catalog_operation = self
+                .catalog_operation()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let catalog = self.open_maintenance_catalog()?;
+            execution
+                .complete_and_persist(coordinator, &catalog, false)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             return Ok(stale_online_report(scope, snapshot.number()));
         }
-        let findings_snapshot = if report.outcome() == IntegrityVerificationOutcome::Quarantined {
+        let findings_snapshot = {
             let _catalog_operation = self
                 .catalog_operation()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
@@ -229,25 +288,35 @@ impl ServiceHandle {
                 .pin()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             if current.identity() != snapshot.identity() || current.number() != snapshot.number() {
+                execution
+                    .complete_and_persist(coordinator, &catalog, false)
+                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
                 return Ok(stale_online_report(scope, snapshot.number()));
             }
-            ActiveSegmentLedger::publish_online_quarantine(
-                &self.instance._authority,
-                &catalog,
-                &snapshot,
-                report,
-                transaction,
-            )
-            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-            self.mark_integrity_degraded();
-            catalog
-                .pin()
-                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
-        } else {
-            if report.outcome() == IntegrityVerificationOutcome::Fenced {
-                self.mark_integrity_fenced();
-            }
-            snapshot.clone()
+            let findings_snapshot = if report.outcome() == IntegrityVerificationOutcome::Quarantined
+            {
+                ActiveSegmentLedger::publish_online_quarantine(
+                    &self.instance._authority,
+                    &catalog,
+                    &snapshot,
+                    report,
+                    transaction,
+                )
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+                self.mark_integrity_degraded();
+                catalog
+                    .pin()
+                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
+            } else {
+                if report.outcome() == IntegrityVerificationOutcome::Fenced {
+                    self.mark_integrity_fenced();
+                }
+                snapshot.clone()
+            };
+            execution
+                .complete_and_persist(coordinator, &catalog, report.is_success())
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            findings_snapshot
         };
         online_report(report, &findings_snapshot)
     }
@@ -652,7 +721,7 @@ fn online_report(
         IntegrityVerificationOutcome::Fenced => "fenced",
     };
     let findings = integrity_findings_for_scope(snapshot, report.scope())?;
-    Ok(OnlineVerificationReport {
+    let mut online = OnlineVerificationReport {
         report_version: 1,
         tenant: report.scope().tenant_id().to_canonical_text(),
         signal: match report.scope().signal_kind() {
@@ -668,15 +737,18 @@ fn online_report(
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         outcome: outcome.to_owned(),
         verification_complete: report.outcome() == IntegrityVerificationOutcome::Verified,
+        report_checksum: String::new(),
         continuation: report
             .continuation()
             .map(|cursor| hex_bytes(&cursor.encode())),
         findings,
-    })
+    };
+    online.report_checksum = online.checksum();
+    Ok(online)
 }
 
 fn stale_online_report(scope: SegmentScope, catalog_generation: u64) -> OnlineVerificationReport {
-    OnlineVerificationReport {
+    let mut online = OnlineVerificationReport {
         report_version: 1,
         tenant: scope.tenant_id().to_canonical_text(),
         signal: match scope.signal_kind() {
@@ -690,9 +762,12 @@ fn stale_online_report(scope: SegmentScope, catalog_generation: u64) -> OnlineVe
         omitted_segments: 0,
         outcome: "stale".to_owned(),
         verification_complete: false,
+        report_checksum: String::new(),
         continuation: None,
         findings: Vec::new(),
-    }
+    };
+    online.report_checksum = online.checksum();
+    online
 }
 
 fn integrity_findings_for_scope(
@@ -1226,6 +1301,36 @@ fn online_verification_transaction(
             .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?,
     )
     .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)
+}
+
+fn online_verification_task_identity(
+    scope: SegmentScope,
+    catalog_identity: [u8; 32],
+    continuation: Option<&str>,
+) -> Result<MaintenanceTaskId, MaintenanceServiceFailure> {
+    let mut digest = Sha256::new();
+    digest.update(b"positron/online-verification-task/v1");
+    digest.update(catalog_identity);
+    digest.update(scope.tenant_id().to_bytes());
+    digest.update([match scope.signal_kind() {
+        SignalKind::Logs => 1,
+        SignalKind::Traces => 2,
+    }]);
+    digest.update(scope.shard_id().value().to_be_bytes());
+    match continuation {
+        Some(value) => {
+            digest.update([1]);
+            digest.update(value.as_bytes());
+        },
+        None => digest.update([0]),
+    }
+    let bytes: [u8; 32] = digest.finalize().into();
+    let identity = bytes
+        .get(..16)
+        .and_then(|prefix| prefix.try_into().ok())
+        .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
+    MaintenanceTaskId::new(identity)
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)
 }
 
 fn decode_fixed_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
@@ -1987,7 +2092,7 @@ mod tests {
         let verified = services
             .verify_online_integrity(&administrator, &request.encode()?)
             .map_err(|failure| format!("online verification: {failure:?}"))?;
-        assert_eq!(verified.catalog_generation, generation);
+        assert_eq!(verified.catalog_generation, generation + 2);
         assert_eq!(verified.outcome, "verified");
         assert!(verified.verification_complete);
         assert!(verified.findings.is_empty());
@@ -2006,7 +2111,7 @@ mod tests {
             .map_err(|failure| format!("stale online verification: {failure:?}"))?;
         assert_eq!(stale.outcome, "stale");
         assert!(!stale.verification_complete);
-        assert_eq!(stale.catalog_generation, generation);
+        assert!(stale.catalog_generation > generation);
         Ok(())
     }
 
@@ -2077,7 +2182,7 @@ mod tests {
             .join()
             .map_err(|_| "verification thread panicked")?
             .map_err(|failure| format!("online verification: {failure:?}"))?;
-        assert_eq!(report.catalog_generation, generation);
+        assert!(report.catalog_generation > generation);
         assert_eq!(report.outcome, "stale");
         assert!(!report.verification_complete);
         Ok(())
@@ -2153,7 +2258,7 @@ mod tests {
             .join()
             .map_err(|_| "verification thread panicked")?
             .map_err(|failure| format!("online verification: {failure:?}"))?;
-        assert_eq!(report.catalog_generation, generation);
+        assert!(report.catalog_generation > generation);
         assert_eq!(report.outcome, "stale");
         assert!(!report.verification_complete);
         Ok(())
@@ -2217,7 +2322,7 @@ mod tests {
             )
             .map_err(|failure| format!("online corruption verification: {failure:?}"))?;
 
-        assert_eq!(report.catalog_generation, generation);
+        assert_eq!(report.catalog_generation, generation + 2);
         assert_eq!(report.outcome, "quarantined");
         assert!(!report.verification_complete);
         assert!(!report.findings.is_empty());
