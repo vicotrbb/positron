@@ -47,21 +47,21 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
         MaintenanceServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     match command {
         Command::Status => {
-            let (status, tasks, findings, pages) = complete_status(&client, bearer)?;
+            let completed = complete_status(&client, bearer)?;
             println!(
                 "queued={} running={} deferred={} terminal={} total={} tasks={} pages={}",
-                status.queued,
-                status.running,
-                status.deferred,
-                status.terminal,
-                status.total,
-                tasks.len(),
-                pages,
+                completed.status.queued,
+                completed.status.running,
+                completed.status.deferred,
+                completed.status.terminal,
+                completed.status.total,
+                completed.tasks.len(),
+                completed.pages,
             );
-            for task in &tasks {
+            for task in &completed.tasks {
                 print_task(task);
             }
-            for finding in &findings {
+            for finding in &completed.findings {
                 print_integrity_finding(finding);
             }
         },
@@ -99,15 +99,7 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
 fn complete_status(
     client: &MaintenanceServiceClient,
     bearer: &str,
-) -> Result<
-    (
-        MaintenanceStatus,
-        Vec<MaintenanceTaskStatus>,
-        Vec<positron_api::maintenance::IntegrityQuarantineDescriptor>,
-        usize,
-    ),
-    &'static str,
-> {
+) -> Result<CompletedStatus, &'static str> {
     let mut request = MaintenanceStatusRequest::default();
     let mut cursors = BTreeSet::new();
     let mut identities = BTreeSet::new();
@@ -148,7 +140,19 @@ fn complete_status(
             None => break status,
         }
     };
-    Ok((status, tasks, findings.unwrap_or_default(), pages))
+    Ok(CompletedStatus {
+        status,
+        tasks,
+        findings: findings.unwrap_or_default(),
+        pages,
+    })
+}
+
+struct CompletedStatus {
+    status: MaintenanceStatus,
+    tasks: Vec<MaintenanceTaskStatus>,
+    findings: Vec<positron_api::maintenance::IntegrityQuarantineDescriptor>,
+    pages: usize,
 }
 
 fn print_integrity_finding(finding: &positron_api::maintenance::IntegrityQuarantineDescriptor) {
