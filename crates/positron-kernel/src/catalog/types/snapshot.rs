@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::{Formatter, Result as FormatResult};
 use std::sync::Arc;
 
-use super::{CatalogFailure, CatalogGenerationId, CatalogObjectId, FormatEpoch};
+use super::{
+    CatalogFailure, CatalogFailureCode, CatalogGenerationId, CatalogObjectId, FormatEpoch,
+};
 
 #[derive(Clone)]
 pub struct CatalogSnapshot(pub(in crate::catalog) Arc<SnapshotData>);
@@ -40,6 +42,36 @@ impl CatalogSnapshot {
     }
     pub fn object(&self, identity: CatalogObjectId) -> Result<Option<&[u8]>, CatalogFailure> {
         Ok(self.0.objects.get(&identity).map(AsRef::as_ref))
+    }
+
+    /// Compares two authenticated catalog states while excluding one exact
+    /// maintenance task record. An online operation may advance only its own
+    /// durable coordinator record around an immutable observation; every
+    /// other object remains part of its pinned authority.
+    pub fn same_except_maintenance_task(
+        &self,
+        successor: &Self,
+        task: crate::MaintenanceTaskId,
+    ) -> Result<bool, CatalogFailure> {
+        fn retained(
+            snapshot: &CatalogSnapshot,
+            task: crate::MaintenanceTaskId,
+        ) -> Result<Vec<(CatalogObjectId, &[u8])>, CatalogFailure> {
+            let mut objects = Vec::new();
+            objects
+                .try_reserve(snapshot.0.objects.len())
+                .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+            for (identity, object) in &snapshot.0.objects {
+                let record = crate::maintenance::durable_task_record_identity(object)
+                    .map_err(|_| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
+                if record != Some(task) {
+                    objects.push((*identity, object.as_ref()));
+                }
+            }
+            Ok(objects)
+        }
+
+        Ok(retained(self, task)? == retained(successor, task)?)
     }
     pub(crate) fn plaintext_objects(&self) -> impl Iterator<Item = &[u8]> {
         self.0.objects.values().map(AsRef::as_ref)

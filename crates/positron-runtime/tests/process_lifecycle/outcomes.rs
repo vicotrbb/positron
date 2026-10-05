@@ -444,8 +444,14 @@ fn first_signal_closes_admission_joins_registered_tasks_and_releases_ownership_l
         TaskRole::Maintenance,
     ];
     assert_eq!(
-        &events[..expected.len()],
-        expected.map(TaskEvent::Registered)
+        &events[..4],
+        [
+            TaskEvent::Registered(TaskRole::Control),
+            TaskEvent::Registered(TaskRole::Operations),
+            TaskEvent::Spawned(TaskRole::Control),
+            TaskEvent::Spawned(TaskRole::Operations),
+        ],
+        "only recovery-safe Control and Operations tasks may start before data-plane registration"
     );
     assert_eq!(
         events

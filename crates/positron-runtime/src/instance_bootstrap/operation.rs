@@ -444,11 +444,15 @@ fn generate_record(key: &BootstrapKeyCustody) -> Result<BootstrapRecord, Bootstr
 pub(super) fn verify_offline_integrity(
     paths: &BootstrapPaths,
     max_registered_tenants: u16,
+    resume: Option<(
+        positron_kernel::SegmentScope,
+        positron_kernel::IntegrityScrubContinuation,
+    )>,
 ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
     use positron_domain::routing::SignalKind;
     use positron_kernel::{
         ActiveSegmentLedger, IntegrityCancellation, IntegrityScrubBudget,
-        IntegrityVerificationMode, IntegrityVerificationOutcome, TransactionId,
+        IntegrityVerificationMode, TransactionId,
     };
 
     let (volume, access) =
@@ -518,6 +522,14 @@ pub(super) fn verify_offline_integrity(
             scopes.extend(found);
         }
     }
+    let resume_scope = resume.map(|(scope, _)| scope);
+    if let Some(scope) = resume_scope {
+        if !scopes.contains(&scope) {
+            return Err(crate::OfflineIntegrityFailure::CorruptState);
+        }
+        scopes.clear();
+        scopes.push(scope);
+    }
     let mut reports = Vec::new();
     for scope in scopes {
         let envelope = identity
@@ -526,46 +538,37 @@ pub(super) fn verify_offline_integrity(
         let protection = key
             .segment_key_from_tenant_envelope(record.instance, scope, envelope)
             .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
-        let mut continuation = None;
-        loop {
-            let report = ActiveSegmentLedger::verify_snapshot_integrity(
-                &authority,
-                &snapshot,
-                record.instance,
-                scope,
-                protection.clone(),
-                IntegrityVerificationMode::Offline,
-                IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
-                    .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
-                &IntegrityCancellation::new(),
-                TransactionId::new([0xf1; 16])
-                    .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
-                continuation,
-            )
-            .map_err(|failure| match failure.code() {
-                positron_kernel::IntegrityFailureCode::StorageUnavailable => {
-                    crate::OfflineIntegrityFailure::StorageUnavailable
-                },
-                positron_kernel::IntegrityFailureCode::Cancelled
-                | positron_kernel::IntegrityFailureCode::InvalidInput
-                | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
-                | positron_kernel::IntegrityFailureCode::FindingCapacity => {
-                    crate::OfflineIntegrityFailure::CorruptState
-                },
-            })?;
-            continuation = report.continuation();
-            let incomplete = report.outcome() == IntegrityVerificationOutcome::Incomplete;
-            reports
-                .try_reserve(1)
-                .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-            reports.push(report);
-            if !incomplete {
-                break;
-            }
-            if continuation.is_none() {
-                return Err(crate::OfflineIntegrityFailure::CorruptState);
-            }
-        }
+        let report = ActiveSegmentLedger::verify_snapshot_integrity(
+            &authority,
+            &snapshot,
+            record.instance,
+            scope,
+            protection,
+            IntegrityVerificationMode::Offline,
+            IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
+                .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xf1; 16])
+                .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
+            resume.and_then(|(resume_scope, continuation)| {
+                (resume_scope == scope).then_some(continuation)
+            }),
+        )
+        .map_err(|failure| match failure.code() {
+            positron_kernel::IntegrityFailureCode::StorageUnavailable => {
+                crate::OfflineIntegrityFailure::StorageUnavailable
+            },
+            positron_kernel::IntegrityFailureCode::Cancelled
+            | positron_kernel::IntegrityFailureCode::InvalidInput
+            | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
+            | positron_kernel::IntegrityFailureCode::FindingCapacity => {
+                crate::OfflineIntegrityFailure::CorruptState
+            },
+        })?;
+        reports
+            .try_reserve(1)
+            .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+        reports.push(report);
     }
     Ok(crate::OfflineIntegrityVerification::new(reports, findings))
 }

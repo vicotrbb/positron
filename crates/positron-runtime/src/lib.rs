@@ -32,7 +32,8 @@ pub use instance_bootstrap::{
     InitializationPlan, InitializedInstance, InstanceBootstrap, TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
-    OfflineIntegrityFailure, OfflineIntegrityVerification, verify_offline_integrity,
+    OfflineIntegrityFailure, OfflineIntegrityVerification, resume_offline_integrity,
+    verify_offline_integrity,
 };
 pub use listener::{
     BoundEndpoint, BoundListener, ConnectionProtection, ListenerFactory, ListenerFailure,

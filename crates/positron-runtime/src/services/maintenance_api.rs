@@ -20,12 +20,11 @@ use positron_governance::{
 };
 use positron_kernel::{
     ActiveSegmentLedger, AuthenticatedEventRange, AuthenticatedIngestRange, Catalog,
-    IntegrityCancellation, IntegrityScrubBudget, IntegrityVerificationOutcome, LedgerFailure,
-    LedgerFailureCode, LifecycleClockState, MaintenanceCoordinator, MaintenanceFailure,
-    MaintenancePreconditions, MaintenanceReservationAuthority, MaintenanceScope, MaintenanceTask,
-    MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger,
-    NO_DURABLE_PROGRESS_SLO_SECONDS, ResourceAmounts, ResourceDimension, SegmentScope,
-    TransactionId, integrity_quarantine_findings,
+    IntegrityCancellation, IntegrityVerificationOutcome, LedgerFailure, LedgerFailureCode,
+    LifecycleClockState, MaintenanceCoordinator, MaintenanceFailure, MaintenancePreconditions,
+    MaintenanceReservationAuthority, MaintenanceScope, MaintenanceTask, MaintenanceTaskClass,
+    MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger, NO_DURABLE_PROGRESS_SLO_SECONDS,
+    ResourceAmounts, ResourceDimension, SegmentScope, TransactionId, integrity_quarantine_findings,
 };
 
 use crate::ServiceHandle;
@@ -230,31 +229,6 @@ impl ServiceHandle {
         #[cfg(test)]
         self.await_online_verification_admission_test_hook()
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-        // Capture G0 only after the coordinator has admitted the task and
-        // acquired its governor reservation. The scan itself holds neither
-        // the writer gate nor a catalog writer lease.
-        let snapshot = Catalog::read_current_snapshot(
-            &self.instance._authority,
-            self.instance.instance,
-            self.instance
-                .key
-                .catalog_secret(self.instance.instance)
-                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
-        )
-        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-        if request
-            .expected_catalog_generation()
-            .is_some_and(|expected| expected != snapshot.number())
-        {
-            let _catalog_operation = self
-                .catalog_operation()
-                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-            let catalog = self.open_maintenance_catalog()?;
-            execution
-                .complete_and_persist(coordinator, &catalog, false)
-                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-            return Ok(stale_online_report(scope, snapshot.number()));
-        }
         #[cfg(test)]
         self.await_online_verification_test_hook()
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
@@ -269,7 +243,7 @@ impl ServiceHandle {
             self.instance.instance,
             scope,
             protection,
-            IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
+            self.maintenance_integrity_scrub_budget()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
             &IntegrityCancellation::new(),
             transaction,
@@ -285,7 +259,10 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         )
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-        if current.identity() != snapshot.identity() || current.number() != snapshot.number() {
+        if !snapshot
+            .same_except_maintenance_task(&current, task_identity)
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
+        {
             let _catalog_operation = self
                 .catalog_operation()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
@@ -293,9 +270,12 @@ impl ServiceHandle {
             execution
                 .complete_and_persist(coordinator, &catalog, false)
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-            return Ok(stale_online_report(scope, snapshot.number()));
+            let terminal = catalog
+                .pin()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            return Ok(stale_online_report(scope, terminal.number()));
         }
-        let findings_snapshot = {
+        let response_snapshot = {
             let _catalog_operation = self
                 .catalog_operation()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
@@ -303,38 +283,43 @@ impl ServiceHandle {
             let current = catalog
                 .pin()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-            if current.identity() != snapshot.identity() || current.number() != snapshot.number() {
+            if !snapshot
+                .same_except_maintenance_task(&current, task_identity)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
+            {
                 execution
                     .complete_and_persist(coordinator, &catalog, false)
                     .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-                return Ok(stale_online_report(scope, snapshot.number()));
+                let terminal = catalog
+                    .pin()
+                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+                return Ok(stale_online_report(scope, terminal.number()));
             }
-            let findings_snapshot = if report.outcome() == IntegrityVerificationOutcome::Quarantined
-            {
+            if report.outcome() == IntegrityVerificationOutcome::Quarantined {
                 ActiveSegmentLedger::publish_online_quarantine(
                     &self.instance._authority,
                     &catalog,
                     &snapshot,
+                    &current,
                     report,
                     transaction,
+                    task_identity,
                 )
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
                 self.mark_integrity_degraded();
-                catalog
-                    .pin()
-                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
             } else {
                 if report.outcome() == IntegrityVerificationOutcome::Fenced {
                     self.mark_integrity_fenced();
                 }
-                snapshot.clone()
-            };
+            }
             execution
                 .complete_and_persist(coordinator, &catalog, report.is_success())
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-            findings_snapshot
+            catalog
+                .pin()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
         };
-        online_report(report, &findings_snapshot)
+        online_report(report, &response_snapshot)
     }
 
     /// Submits only the kernel-produced Compaction descriptor for one explicit
@@ -745,7 +730,11 @@ fn online_report(
             SignalKind::Traces => "traces".to_owned(),
         },
         shard: report.scope().shard_id().value(),
-        catalog_generation: report.catalog_generation(),
+        // The kernel report remains bound to the immutable input snapshot,
+        // while the continuation must name the durable generation after this
+        // request's own coordinator completion. The next request still
+        // rejects any external successor before it can scan.
+        catalog_generation: snapshot.number(),
         examined_segments: u32::try_from(report.examined_segments())
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         examined_bytes: report.examined_bytes(),
@@ -2124,7 +2113,11 @@ mod tests {
         let verified = services
             .verify_online_integrity(&administrator, &request.encode()?)
             .map_err(|failure| format!("online verification: {failure:?}"))?;
-        assert_eq!(verified.catalog_generation, generation + 2);
+        assert_eq!(
+            verified.catalog_generation,
+            generation + 3,
+            "the response names the durable successor after this request's task completion"
+        );
         assert_eq!(verified.outcome, "verified");
         assert!(verified.verification_complete);
         assert!(verified.findings.is_empty());
@@ -2144,6 +2137,98 @@ mod tests {
         assert_eq!(stale.outcome, "stale");
         assert!(!stale.verification_complete);
         assert!(stale.catalog_generation > generation);
+        Ok(())
+    }
+
+    #[test]
+    fn online_verification_continuation_survives_its_own_durable_task_publications()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        services
+            .install_integrity_scrub_budget_for_test(1)
+            .map_err(|failure| format!("install bounded test budget: {failure:?}"))?;
+        services.ingest_otlp_logs(
+            &ingest,
+            request("online-verify-continuation-1").encode_to_vec(),
+        )?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        drop(catalog);
+        for ordinal in 2_u8..=2 {
+            services.ingest_otlp_logs(
+                &ingest,
+                request(&format!("online-verify-continuation-{ordinal}")).encode_to_vec(),
+            )?;
+            let catalog = open_catalog(&initialized)?;
+            let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+                &initialized._authority,
+                &initialized.retention_time,
+                &catalog,
+                scope,
+                initialized.tenant_segment_key_for_test(scope)?,
+            )?;
+            ledger.seal()?;
+            drop(catalog);
+        }
+        let catalog = open_catalog(&initialized)?;
+        let generation = catalog.pin()?.number();
+        drop(catalog);
+
+        let first = services
+            .verify_online_integrity(
+                &administrator,
+                &OnlineVerificationRequest::new(
+                    initialized.default_tenant_id().to_canonical_text(),
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    Some(generation),
+                    None,
+                )
+                .encode()?,
+            )
+            .map_err(|failure| format!("first continuation pass: {failure:?}"))?;
+        assert_eq!(first.outcome, "incomplete");
+        assert!(!first.verification_complete);
+        assert_eq!(first.examined_segments, 1);
+
+        let mut resumed = first;
+        for _ in 0..4 {
+            if resumed.verification_complete {
+                break;
+            }
+            let continuation = resumed.continuation.clone().ok_or("resumed continuation")?;
+            resumed = services
+                .verify_online_integrity(
+                    &administrator,
+                    &OnlineVerificationRequest::new(
+                        initialized.default_tenant_id().to_canonical_text(),
+                        "logs".to_owned(),
+                        scope.shard_id().value(),
+                        Some(resumed.catalog_generation),
+                        Some(continuation),
+                    )
+                    .encode()?,
+                )
+                .map_err(|failure| format!("resumed continuation pass: {failure:?}"))?;
+        }
+        assert_eq!(resumed.outcome, "verified");
+        assert!(resumed.verification_complete);
+        assert_eq!(resumed.omitted_segments, 0);
         Ok(())
     }
 
@@ -2444,7 +2529,11 @@ mod tests {
             )
             .map_err(|failure| format!("online corruption verification: {failure:?}"))?;
 
-        assert_eq!(report.catalog_generation, generation + 2);
+        assert_eq!(
+            report.catalog_generation,
+            generation + 4,
+            "the report names the terminal durable successor after quarantine and task completion"
+        );
         assert_eq!(report.outcome, "quarantined");
         assert!(!report.verification_complete);
         assert!(!report.findings.is_empty());

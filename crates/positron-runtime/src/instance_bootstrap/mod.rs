@@ -59,8 +59,12 @@ impl InstanceBootstrap {
     pub(crate) fn verify_offline_integrity(
         paths: &BootstrapPaths,
         max_registered_tenants: u16,
+        resume: Option<(
+            positron_kernel::SegmentScope,
+            positron_kernel::IntegrityScrubContinuation,
+        )>,
     ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
-        operation::verify_offline_integrity(paths, max_registered_tenants)
+        operation::verify_offline_integrity(paths, max_registered_tenants, resume)
     }
 
     pub fn claim(paths: &BootstrapPaths) -> Result<BootstrapClaim, BootstrapFailure> {

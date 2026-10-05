@@ -208,19 +208,25 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     }
 
     /// Publishes the localized result of `verify_online_snapshot_integrity`
-    /// only if the writer still observes its exact original Catalog basis.
-    /// The caller must serialize this short compare-and-swap with other
-    /// Catalog writers; the immutable scan itself deliberately needs neither.
+    /// only when the current writer basis differs from the exact immutable
+    /// scan basis solely by this request's durable maintenance record. The
+    /// caller must serialize this short compare-and-swap with other Catalog
+    /// writers; the immutable scan itself deliberately needs neither.
     pub fn publish_online_quarantine(
         authority: &'kernel crate::StorageKernelResourceAuthority,
         catalog: &'catalog crate::Catalog<'kernel>,
-        basis: &crate::CatalogSnapshot,
+        proof: &crate::CatalogSnapshot,
+        current: &crate::CatalogSnapshot,
         report: IntegrityVerificationReport,
         transaction: TransactionId,
+        maintenance_task: crate::MaintenanceTaskId,
     ) -> Result<(), IntegrityFailure> {
         if report.outcome() != IntegrityVerificationOutcome::Quarantined
             || report.mode() != IntegrityVerificationMode::Online
-            || report.catalog_generation() != basis.number()
+            || report.catalog_generation() != proof.number()
+            || !proof
+                .same_except_maintenance_task(current, maintenance_task)
+                .map_err(map_catalog_failure)?
         {
             return Err(IntegrityFailure(IntegrityFailureCode::InvalidInput));
         }
@@ -232,14 +238,14 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
         let storage = LedgerStorage::open(volume).map_err(map_ledger_failure)?;
         let metadata = storage
-            .catalog_segments_observed(basis, report.scope())
+            .catalog_segments_observed(proof, report.scope())
             .map_err(map_ledger_failure)?;
         let metadata = metadata
             .into_iter()
             .find(|candidate| candidate.id == segment)
             .filter(|candidate| can_localize_quarantine(*candidate))
             .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?;
-        publish_quarantine(catalog, report.scope(), basis, metadata, transaction)
+        publish_quarantine(catalog, report.scope(), current, metadata, transaction)
     }
 }
 
