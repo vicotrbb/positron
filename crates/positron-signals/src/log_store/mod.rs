@@ -406,9 +406,8 @@ fn observe_event_time(
             positron_kernel::EventRangeUnavailable::InvalidSourceTime
         },
     };
-    if reason == positron_kernel::EventRangeUnavailable::InvalidSourceTime {
-        *unavailable = Some(reason);
-    } else if unavailable.is_none() {
+    if reason == positron_kernel::EventRangeUnavailable::InvalidSourceTime || unavailable.is_none()
+    {
         *unavailable = Some(reason);
     }
 }
