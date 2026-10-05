@@ -266,34 +266,53 @@ impl RecoveryAttemptHost for NativeRecovery {
 }
 
 fn wait_for_shutdown(
-    process: positron_runtime::RunningProcess,
+    mut process: positron_runtime::RunningProcess,
     mut signals: Signals,
     deadline: Duration,
     reload: &ReloadInputs,
 ) -> Result<ExitOutcome, LaunchFailure> {
-    loop {
-        let Some(signal) = signals.forever().next() else {
-            return Err(LaunchFailure::Signal);
-        };
-        if signal != SIGHUP {
-            break;
-        }
-        match reload.resolve() {
-            Ok(candidate) => {
-                let outcome = process.reload_configuration(candidate);
-                if let Some(category) = reload_rejection_category(&outcome) {
-                    eprintln!("positron: configuration reload rejected category={category}");
+    let second_termination_seen = loop {
+        // `Signals::forever` would prevent the process owner from consuming a
+        // verified integrity-fence request until a later operating-system
+        // signal. Polling remains bounded and preserves first/second signal
+        // handling below.
+        let _applied_integrity_fence = process.apply_pending_integrity_fence();
+        let mut termination_count = 0_u8;
+        for signal in signals.pending() {
+            if matches!(signal, SIGINT | SIGTERM) {
+                termination_count = termination_count.saturating_add(1);
+                continue;
+            }
+            if signal == SIGHUP {
+                match reload.resolve() {
+                    Ok(candidate) => {
+                        let outcome = process.reload_configuration(candidate);
+                        if let Some(category) = reload_rejection_category(&outcome) {
+                            eprintln!(
+                                "positron: configuration reload rejected category={category}"
+                            );
+                        }
+                    },
+                    Err(()) => {
+                        if process.record_invalid_configuration_reload().is_err() {
+                            eprintln!("positron: configuration reload audit unavailable");
+                        }
+                        eprintln!(
+                            "positron: configuration reload rejected category=source_rejected"
+                        );
+                    },
                 }
-            },
-            Err(()) => {
-                if process.record_invalid_configuration_reload().is_err() {
-                    eprintln!("positron: configuration reload audit unavailable");
-                }
-                eprintln!("positron: configuration reload rejected category=source_rejected");
-            },
+            }
         }
-    }
+        if termination_count > 0 {
+            break termination_count > 1;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
     let mut draining = process.begin_shutdown();
+    if second_termination_seen {
+        return Ok(draining.finish(ShutdownTrigger::SecondSignal));
+    }
     let deadline_at = Instant::now() + deadline;
     loop {
         if pending_termination_trigger(&mut signals).is_some() {
@@ -422,13 +441,22 @@ fn exit_code(outcome: ExitOutcome) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     use super::{
         ExitOutcome, LaunchFailure, NativeRecovery, RecoveryAttemptHost, RecoveryDecision,
-        ShutdownTrigger, exit_code, pending_termination_trigger, reload_rejection_category,
+        ReloadInputs, ShutdownTrigger, exit_code, pending_termination_trigger,
+        reload_rejection_category, wait_for_shutdown,
     };
     use positron_runtime::{
-        BootstrapFailureCode, ConfigurationReloadOutcome, ConfigurationRuntimeFailure,
-        ListenerRole, RecoveryAttempt, TaskRole,
+        ApplicationRuntime, BootstrapFailureCode, BootstrapPaths, BoundEndpoint, BoundListener,
+        ConfigurationReloadOutcome, ConfigurationRuntimeFailure, HostInputs, InitializationMode,
+        ListenerFactory, ListenerFailure, ListenerRequest, ListenerRole, RecoveryAttempt,
+        RegisteredTask, RunningTask, ServeConfiguration, TaskCancellation, TaskFailure,
+        TaskJoinOutcome, TaskRegistrar, TaskRole,
     };
     use signal_hook::iterator::Signals;
 
@@ -550,5 +578,179 @@ mod tests {
 
         assert_eq!(pending_termination_trigger(&mut signals), None);
         Ok(())
+    }
+
+    #[test]
+    fn two_pending_native_termination_signals_force_the_drain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut signals = Signals::new([
+            signal_hook::consts::signal::SIGINT,
+            signal_hook::consts::signal::SIGTERM,
+        ])?;
+        signal_hook::low_level::raise(signal_hook::consts::signal::SIGTERM)?;
+        signal_hook::low_level::raise(signal_hook::consts::signal::SIGINT)?;
+
+        assert_eq!(
+            pending_termination_trigger(&mut signals),
+            Some(ShutdownTrigger::SecondSignal)
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_loop_turns_real_first_signal_into_drain_and_second_into_forced_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "positron-owner-loop-signal-{}-{nonce}",
+            std::process::id()
+        ));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        std::fs::create_dir_all(&data)?;
+        std::fs::create_dir_all(&secrets)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700))?;
+        let draining = Arc::new(AtomicBool::new(false));
+        let host = SignalHost {
+            draining: Arc::clone(&draining),
+        };
+        let paths = BootstrapPaths::new(
+            &data,
+            &secrets,
+            positron_kernel::MountQualification::LocalHost,
+        )?;
+        let process = ApplicationRuntime::start(
+            ServeConfiguration::new(paths, InitializationMode::InitializeIfEmpty),
+            HostInputs::new(&host, &host),
+        )
+        .map_err(|failure| format!("start owner loop: {failure:?}"))?;
+        let signals = Signals::new([
+            signal_hook::consts::signal::SIGINT,
+            signal_hook::consts::signal::SIGTERM,
+        ])?;
+        let sender = std::thread::spawn(move || -> Result<(), String> {
+            std::thread::sleep(Duration::from_millis(20));
+            signal_hook::low_level::raise(signal_hook::consts::signal::SIGTERM)
+                .map_err(|error| error.to_string())?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while !draining.load(Ordering::Acquire) {
+                if std::time::Instant::now() >= deadline {
+                    return Err("first signal did not enter draining".to_owned());
+                }
+                std::thread::yield_now();
+            }
+            signal_hook::low_level::raise(signal_hook::consts::signal::SIGINT)
+                .map_err(|error| error.to_string())
+        });
+        let outcome = wait_for_shutdown(
+            process,
+            signals,
+            Duration::from_secs(1),
+            &ReloadInputs {
+                config: None,
+                environment: Vec::new(),
+                overrides: Vec::new(),
+            },
+        )
+        .map_err(|failure| format!("owner loop: {}", failure.message()))?;
+        sender
+            .join()
+            .map_err(|_| "signal sender panicked")?
+            .map_err(|error| format!("signal sender: {error}"))?;
+        assert_eq!(outcome, ExitOutcome::Forced);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    struct SignalHost {
+        draining: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl ListenerFactory for SignalHost {
+        fn bind(
+            &self,
+            request: ListenerRequest,
+        ) -> Result<Box<dyn BoundListener>, ListenerFailure> {
+            let endpoint = if request.role() == ListenerRole::Control {
+                BoundEndpoint::control(PathBuf::from("/tmp/positron-owner-loop-signal.sock"))?
+            } else {
+                BoundEndpoint::tcp(
+                    request.role(),
+                    "127.0.0.1:42498"
+                        .parse()
+                        .map_err(|_| ListenerFailure::BindUnavailable)?,
+                )?
+            };
+            Ok(Box::new(SignalListener(endpoint)))
+        }
+    }
+
+    #[cfg(unix)]
+    struct SignalListener(BoundEndpoint);
+
+    #[cfg(unix)]
+    impl BoundListener for SignalListener {
+        fn endpoint(&self) -> &BoundEndpoint {
+            &self.0
+        }
+    }
+
+    #[cfg(unix)]
+    impl TaskRegistrar for SignalHost {
+        fn register(&self, _: TaskRole) -> Result<Box<dyn RegisteredTask>, TaskFailure> {
+            Ok(Box::new(SignalRegisteredTask {
+                draining: Arc::clone(&self.draining),
+            }))
+        }
+    }
+
+    #[cfg(unix)]
+    struct SignalRegisteredTask {
+        draining: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl RegisteredTask for SignalRegisteredTask {
+        fn spawn(
+            self: Box<Self>,
+            _: TaskCancellation,
+            health: positron_runtime::HealthState,
+            _: Option<positron_runtime::ServiceHandle>,
+        ) -> Result<Box<dyn RunningTask>, TaskFailure> {
+            Ok(Box::new(SignalRunningTask {
+                health,
+                draining: self.draining,
+            }))
+        }
+    }
+
+    #[cfg(unix)]
+    struct SignalRunningTask {
+        health: positron_runtime::HealthState,
+        draining: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl RunningTask for SignalRunningTask {
+        fn poll_join(&mut self) -> Result<Option<TaskJoinOutcome>, TaskFailure> {
+            if self.health.phase() == positron_runtime::ProcessPhase::Draining {
+                self.draining.store(true, Ordering::Release);
+            }
+            Ok(None)
+        }
+
+        fn join_within(&mut self, _: Duration) -> Result<TaskJoinOutcome, TaskFailure> {
+            Ok(TaskJoinOutcome::DeadlineExpired)
+        }
+
+        fn abort(&mut self) -> Result<(), TaskFailure> {
+            Ok(())
+        }
     }
 }

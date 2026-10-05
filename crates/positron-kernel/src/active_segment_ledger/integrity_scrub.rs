@@ -37,6 +37,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             cancellation,
             transaction,
             None,
+            None,
         )
     }
 
@@ -61,6 +62,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             cancellation,
             transaction,
             Some(continuation),
+            None,
         )
     }
 
@@ -78,6 +80,36 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         transaction: TransactionId,
         continuation: Option<IntegrityScrubContinuation>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
+        Self::verify_catalog_integrity_with_audit(
+            authority,
+            catalog,
+            scope,
+            protection,
+            mode,
+            budget,
+            cancellation,
+            transaction,
+            continuation,
+            None,
+        )
+    }
+
+    /// The runtime-only trusted publication path may bind one system-derived
+    /// Governance Audit intent to a localized quarantine. Offline and startup
+    /// callers retain the audit-free observation API above.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_catalog_integrity_with_audit(
+        authority: &'kernel crate::StorageKernelResourceAuthority,
+        catalog: &'catalog crate::Catalog<'kernel>,
+        scope: SegmentScope,
+        protection: SegmentProtectionKey,
+        mode: IntegrityVerificationMode,
+        budget: IntegrityScrubBudget,
+        cancellation: &dyn IntegrityCancellationProbe,
+        transaction: TransactionId,
+        continuation: Option<IntegrityScrubContinuation>,
+        quarantine_audit: Option<crate::AuditIntent>,
+    ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
         let volume = authority
             .primary_data_volume()
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
@@ -93,6 +125,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             cancellation,
             transaction,
             continuation,
+            quarantine_audit,
         )
     }
 
@@ -129,6 +162,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             cancellation,
             transaction,
             continuation,
+            None,
         )
     }
 
@@ -168,6 +202,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             cancellation,
             transaction,
             continuation,
+            None,
         )
     }
 
@@ -204,6 +239,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             cancellation,
             transaction,
             continuation,
+            None,
         )
     }
 
@@ -212,6 +248,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     /// scan basis solely by this request's durable maintenance record. The
     /// caller must serialize this short compare-and-swap with other Catalog
     /// writers; the immutable scan itself deliberately needs neither.
+    #[allow(clippy::too_many_arguments)]
     pub fn publish_online_quarantine(
         authority: &'kernel crate::StorageKernelResourceAuthority,
         catalog: &'catalog crate::Catalog<'kernel>,
@@ -220,6 +257,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         report: IntegrityVerificationReport,
         transaction: TransactionId,
         maintenance_task: crate::MaintenanceTaskId,
+        audit: crate::AuditIntent,
     ) -> Result<(), IntegrityFailure> {
         if report.outcome() != IntegrityVerificationOutcome::Quarantined
             || report.mode() != IntegrityVerificationMode::Online
@@ -245,7 +283,14 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .find(|candidate| candidate.id == segment)
             .filter(|candidate| can_localize_quarantine(*candidate))
             .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?;
-        publish_quarantine(catalog, report.scope(), current, metadata, transaction)
+        publish_quarantine(
+            catalog,
+            report.scope(),
+            current,
+            metadata,
+            transaction,
+            Some(audit),
+        )
     }
 }
 
@@ -261,6 +306,7 @@ fn verify_integrity_from(
     cancellation: &dyn IntegrityCancellationProbe,
     transaction: TransactionId,
     continuation: Option<IntegrityScrubContinuation>,
+    quarantine_audit: Option<crate::AuditIntent>,
 ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
     let basis = catalog.pin().map_err(map_catalog_failure)?;
     verify_integrity_against_snapshot(
@@ -276,6 +322,7 @@ fn verify_integrity_from(
         cancellation,
         transaction,
         continuation,
+        quarantine_audit,
     )
 }
 
@@ -293,6 +340,7 @@ fn verify_integrity_against_snapshot(
     cancellation: &dyn IntegrityCancellationProbe,
     transaction: TransactionId,
     continuation: Option<IntegrityScrubContinuation>,
+    quarantine_audit: Option<crate::AuditIntent>,
 ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
     let metadata = storage
         .catalog_segments_observed(basis, scope)
@@ -447,7 +495,14 @@ fn verify_integrity_against_snapshot(
                         None,
                     ));
                 }
-                publish_quarantine(catalog, scope, basis, *candidate, transaction)?;
+                publish_quarantine(
+                    catalog,
+                    scope,
+                    basis,
+                    *candidate,
+                    transaction,
+                    quarantine_audit.clone(),
+                )?;
                 return Ok(report(
                     mode,
                     scope,
@@ -544,7 +599,14 @@ fn verify_integrity_against_snapshot(
                         None,
                     ));
                 }
-                publish_quarantine(catalog, scope, basis, *candidate, transaction)?;
+                publish_quarantine(
+                    catalog,
+                    scope,
+                    basis,
+                    *candidate,
+                    transaction,
+                    quarantine_audit.clone(),
+                )?;
                 return Ok(report(
                     mode,
                     scope,

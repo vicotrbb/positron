@@ -14,8 +14,9 @@ use positron_domain::{
 };
 use positron_governance::{
     AdministrativeIdempotencyKey, AuthorizedContext, CompatibilityHints, GovernanceAuditEntry,
-    Identity, MaintenanceControlAuditEntry, MaintenanceRunAuditEntry, MaintenanceRunAuditRequest,
-    PresentedCredential, RequestedIntent, maintenance_control_audit_intent,
+    Identity, IntegrityQuarantineAuditRequest, MaintenanceControlAuditEntry,
+    MaintenanceRunAuditEntry, MaintenanceRunAuditRequest, PresentedCredential, RequestedIntent,
+    integrity_quarantine_audit_intent, maintenance_control_audit_intent,
     maintenance_run_audit_intent, maintenance_window_audit_intent,
 };
 use positron_kernel::{
@@ -77,7 +78,15 @@ impl ServiceHandle {
             running: 0,
             deferred: 0,
             terminal: 0,
-            integrity_findings: integrity_findings(self)?,
+            // Findings are a complete, independently bounded Catalog view.  Return
+            // them on the first task page only: the CLI already retains that page's
+            // immutable finding set while walking task cursors.  Repeating it on
+            // every page can exceed the canonical response envelope.
+            integrity_findings: if cursor.is_none() {
+                integrity_findings(self)?
+            } else {
+                Vec::new()
+            },
         };
         for status in &statuses {
             match status.phase() {
@@ -94,18 +103,13 @@ impl ServiceHandle {
         });
         let remaining = statuses.len().saturating_sub(page_start);
         let page_len = remaining.min(request.page_limit());
-        let has_more = remaining > page_len;
         let coordinator = self.instance.maintenance_coordinator();
         for status in statuses.into_iter().skip(page_start).take(page_len) {
-            response.tasks.push(
-                task_status_for_coordinator(coordinator, status, now)
-                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
-            );
-        }
-        response.returned = u32::try_from(response.tasks.len())
-            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-        if has_more {
-            response.next_cursor = response.tasks.last().map(|task| task.identity.clone());
+            let task = task_status_for_coordinator(coordinator, status, now)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            if !append_status_task_within_response_limit(&mut response, task, remaining)? {
+                break;
+            }
         }
         response
             .validate()
@@ -296,6 +300,16 @@ impl ServiceHandle {
                 return Ok(stale_online_report(scope, terminal.number()));
             }
             if report.outcome() == IntegrityVerificationOutcome::Quarantined {
+                let segment = report
+                    .quarantined_segment()
+                    .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
+                let audit = integrity_quarantine_audit_intent(IntegrityQuarantineAuditRequest {
+                    tenant,
+                    signal,
+                    shard: shard.value(),
+                    segment: Some(segment.to_bytes()),
+                })
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
                 ActiveSegmentLedger::publish_online_quarantine(
                     &self.instance._authority,
                     &catalog,
@@ -304,6 +318,7 @@ impl ServiceHandle {
                     report,
                     transaction,
                     task_identity,
+                    audit,
                 )
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
                 self.mark_integrity_degraded();
@@ -689,6 +704,34 @@ impl ServiceHandle {
             )
             .map_err(|_| MaintenanceServiceFailure::AuthenticationRejected)
     }
+}
+
+/// Adds one task only if the actual canonical response still fits its fixed
+/// transport envelope. The task cursor always points at a returned task, so a
+/// response can never repeat an empty first page while claiming progress.
+fn append_status_task_within_response_limit(
+    response: &mut MaintenanceStatusResponse,
+    task: MaintenanceTaskStatus,
+    remaining: usize,
+) -> Result<bool, MaintenanceServiceFailure> {
+    response.tasks.push(task);
+    response.returned = u32::try_from(response.tasks.len())
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    let returned = response.tasks.len();
+    response.next_cursor = (remaining > returned)
+        .then(|| response.tasks.last().map(|task| task.identity.clone()))
+        .flatten();
+    if response.encode().is_ok() {
+        return Ok(true);
+    }
+    response.tasks.pop();
+    response.returned = u32::try_from(response.tasks.len())
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    if response.tasks.is_empty() {
+        return Err(MaintenanceServiceFailure::AdministrationUnavailable);
+    }
+    response.next_cursor = response.tasks.last().map(|task| task.identity.clone());
+    Ok(false)
 }
 
 fn integrity_findings(
@@ -1436,12 +1479,15 @@ mod tests {
     use std::time::Duration;
 
     use positron_api::maintenance::{
-        MaintenanceExplainRequest, MaintenancePauseRequest, MaintenanceResumeRequest,
-        MaintenanceRunRequest, MaintenanceStatusRequest, MaintenanceWindowRequest,
-        OnlineVerificationRequest,
+        AuthenticatedTimeRangeDescriptor, IntegrityQuarantineDescriptor, MAX_INTEGRITY_FINDINGS,
+        MAX_STATUS_PAGE_TASKS, MaintenanceExplainRequest, MaintenancePauseRequest,
+        MaintenanceResourceReservations, MaintenanceResumeRequest, MaintenanceRunRequest,
+        MaintenanceStatusRequest, MaintenanceStatusResponse, MaintenanceTaskStatus,
+        MaintenanceWindowRequest, OnlineVerificationRequest,
     };
     use positron_api::tenant_aliases::TenantAliasBindRequest;
     use positron_domain::{routing::SignalKind, time::UnixNanoseconds};
+    use positron_governance::GovernanceAuditEntry;
     use positron_kernel::{
         ActiveSegmentLedger, CatalogPublicationFault, LifecycleClockFailure, LifecycleClockPolicy,
         LifecycleClockSource, MaintenancePreconditions, MaintenanceScope, MaintenanceTask,
@@ -1495,6 +1541,108 @@ mod tests {
         }
 
         fn after_basis_capture(&self) {}
+    }
+
+    #[test]
+    fn maximal_integrity_findings_page_tasks_within_the_canonical_transport_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let finding = IntegrityQuarantineDescriptor {
+            tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+            signal: "logs".to_owned(),
+            shard: 1,
+            segment: "00000000000000000000000000000001".to_owned(),
+            base_position: u64::MAX,
+            event_range: AuthenticatedTimeRangeDescriptor {
+                provenance: "missing_source_time".to_owned(),
+                earliest_unix_nanos: None,
+                latest_unix_nanos: None,
+            },
+            ingest_range: AuthenticatedTimeRangeDescriptor {
+                provenance: "known".to_owned(),
+                earliest_unix_nanos: Some(i64::MAX),
+                latest_unix_nanos: Some(i64::MAX),
+            },
+        };
+        let mut response = MaintenanceStatusResponse {
+            tasks: Vec::with_capacity(MAX_STATUS_PAGE_TASKS),
+            returned: 0,
+            total: MAX_STATUS_PAGE_TASKS as u32,
+            next_cursor: None,
+            queued: 0,
+            running: MAX_STATUS_PAGE_TASKS as u32,
+            deferred: 0,
+            terminal: 0,
+            integrity_findings: vec![finding; MAX_INTEGRITY_FINDINGS],
+        };
+        for index in 0..MAX_STATUS_PAGE_TASKS {
+            let continued = super::append_status_task_within_response_limit(
+                &mut response,
+                maximal_status_task(index),
+                MAX_STATUS_PAGE_TASKS,
+            )
+            .map_err(|failure| format!("combined status page: {failure:?}"))?;
+            if !continued {
+                break;
+            }
+        }
+        assert!(response.returned > 0, "a full evidence page must advance");
+        assert!(response.returned < MAX_STATUS_PAGE_TASKS as u32);
+        assert!(response.next_cursor.is_some());
+        assert!(
+            response.encode().is_ok(),
+            "the served page fits the wire limit"
+        );
+        Ok(())
+    }
+
+    fn maximal_status_task(index: usize) -> MaintenanceTaskStatus {
+        MaintenanceTaskStatus {
+            identity: format!("{index:032x}"),
+            class: "catalog_reclamation".to_owned(),
+            scope: "segment:00000000-0000-0000-0000-000000000001:traces:4294967295".to_owned(),
+            phase: "running".to_owned(),
+            submitted_at_unix_seconds: u64::MAX,
+            checkpoint_sequence: Some(u64::MAX),
+            last_progress_at_unix_seconds: Some(u64::MAX),
+            no_durable_progress_slo_breached: Some(true),
+            no_durable_progress_slo_seconds: Some(u64::MAX),
+            capacity_risk: Some("foreground_reservation".to_owned()),
+            retention_impact: Some("unaffected".to_owned()),
+            recovery_impact: Some("unaffected".to_owned()),
+            automatic_resume_at_unix_seconds: Some(u64::MAX),
+            pause_until_unix_seconds: None,
+            cancellation_requested: false,
+            resource_generation: Some(u64::MAX),
+            reservations: Some(maximal_reservations()),
+            expected_foreground_impact: Some(maximal_reservations()),
+            blocked_precondition: Some("maintenance_window_active".to_owned()),
+            maintenance_window_until_unix_seconds: Some(u64::MAX),
+            safe_actions: vec!["pause".to_owned()],
+            backlog_age_seconds: Some(u64::MAX),
+            conflict_owner: Some(format!("{:032x}", (index + 1) % 128)),
+            checkpoint_completed_inputs: Some(16),
+            input_object_count: 16,
+            output_object_count: 16,
+            estimated_output_object_amplification_milli: Some(1_000),
+            terminal_outcome: None,
+            terminal_failure_class: None,
+        }
+    }
+
+    fn maximal_reservations() -> MaintenanceResourceReservations {
+        MaintenanceResourceReservations {
+            memory_bytes: u64::MAX,
+            queue_slots: u64::MAX,
+            task_slots: u64::MAX,
+            buffer_cache_bytes: u64::MAX,
+            batch_items: u64::MAX,
+            lease_slots: u64::MAX,
+            retry_slots: u64::MAX,
+            io_permits: u64::MAX,
+            cpu_work_units: u64::MAX,
+            file_descriptors: u64::MAX,
+            disk_headroom_bytes: u64::MAX,
+        }
     }
 
     #[test]
@@ -2548,6 +2696,31 @@ mod tests {
             !positron_kernel::integrity_quarantine_findings(&catalog.pin()?)?.is_empty(),
             "the authorized online result is a durable Catalog quarantine finding"
         );
+        let audits = catalog
+            .governance_audit_records()?
+            .into_iter()
+            .map(|record| GovernanceAuditEntry::decode(&record))
+            .collect::<Result<Vec<_>, _>>()?;
+        let quarantine_audit = audits
+            .iter()
+            .find_map(GovernanceAuditEntry::as_integrity_quarantine)
+            .ok_or("trusted quarantine audit")?;
+        assert_eq!(quarantine_audit.tenant(), initialized.default_tenant_id());
+        assert_eq!(quarantine_audit.signal(), SignalKind::Logs);
+        assert_eq!(quarantine_audit.shard(), scope.shard_id().value());
+        drop(catalog);
+        drop(services);
+        drop(initialized);
+        let reopened = fixture.reopen()?;
+        assert!(
+            open_catalog(&reopened)?
+                .governance_audit_records()?
+                .into_iter()
+                .map(|record| GovernanceAuditEntry::decode(&record))
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|entry| entry.as_integrity_quarantine().is_some())
+        );
         Ok(())
     }
 
@@ -2580,6 +2753,7 @@ mod tests {
         )?
         .seal()?;
         drop(catalog);
+        let audit_before = open_catalog(&initialized)?.governance_audit_records()?;
         let missing_source = fs::read_dir(fixture.sealed_segments_directory())?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
@@ -2588,7 +2762,7 @@ mod tests {
                     .is_some_and(|extension| extension == "segment")
             })
             .ok_or("sealed segment")?;
-        fs::remove_file(missing_source)?;
+        fs::remove_file(&missing_source)?;
 
         let report = services
             .verify_online_integrity(
@@ -2605,11 +2779,30 @@ mod tests {
             .map_err(|failure| format!("online fenced verification: {failure:?}"))?;
         assert_eq!(report.outcome, "fenced");
         assert!(!report.verification_complete);
-        assert_eq!(health.health().phase(), crate::health::ProcessPhase::Fenced);
+        assert_eq!(
+            health.health().phase(),
+            crate::health::ProcessPhase::Serving,
+            "verification requests a fence; the process owner performs its transition"
+        );
         assert_eq!(
             health.health().readiness(),
-            crate::health::Readiness::NotReady
+            crate::health::Readiness::NotReady,
+            "a queued process-owner fence closes admission before teardown runs"
         );
+        assert_eq!(
+            health.health().pending_integrity_fence_request(),
+            Some(crate::IntegrityFenceReason::AmbiguousIntegrity)
+        );
+        assert!(
+            !missing_source.exists(),
+            "ambiguous source evidence must never be reconstructed or repaired"
+        );
+        let catalog = open_catalog(&initialized)?;
+        assert!(
+            positron_kernel::integrity_quarantine_findings(&catalog.pin()?)?.is_empty(),
+            "an unavailable source cannot be guessed into a quarantine finding"
+        );
+        assert_eq!(catalog.governance_audit_records()?, audit_before);
         Ok(())
     }
 

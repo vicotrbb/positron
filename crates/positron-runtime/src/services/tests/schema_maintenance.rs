@@ -686,6 +686,23 @@ fn runtime_integrity_scrub_revisits_an_unchanged_scope_and_quarantines_later_bit
         !positron_kernel::integrity_quarantine_findings(&snapshot)?.is_empty(),
         "a later corruption is durably quarantined by the next due scrub"
     );
+    assert!(
+        catalog
+            .governance_audit_records()?
+            .into_iter()
+            .map(|record| GovernanceAuditEntry::decode(&record))
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|entry| {
+                entry.as_integrity_quarantine().is_some_and(|audit| {
+                    audit.tenant() == initialized.tenant
+                        && audit.signal() == SignalKind::Logs
+                        && audit.shard() == scope.shard_id().value()
+                        && audit.segment().is_none()
+                })
+            }),
+        "the periodic trusted quarantine is atomically evidenced by its scope-bound audit"
+    );
     Ok(())
 }
 

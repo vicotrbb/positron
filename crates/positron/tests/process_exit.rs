@@ -258,10 +258,11 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
     );
     let output = child.wait_with_output()?;
     assert_eq!(output.status.code(), Some(0));
-    assert!(reconciliation_stderr_is_exact(
-        restored_with_retry,
-        &String::from_utf8(output.stderr)?,
-    ));
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        reconciliation_stderr_is_exact(restored_with_retry, &stderr,),
+        "unexpected child stderr: {stderr}"
+    );
     fs::remove_dir_all(root)?;
     Ok(())
 }

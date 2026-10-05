@@ -1,7 +1,6 @@
 //! Recoverable startup dependency contract at the public runtime seam.
 
 #[path = "support/process_lifecycle.rs"]
-#[expect(dead_code, reason = "shared lifecycle support")]
 mod lifecycle;
 
 use lifecycle::{ObservingListeners, ObservingTasks, TestRoots};
@@ -15,7 +14,7 @@ use std::cell::Cell;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(unix)]
@@ -218,7 +217,7 @@ fn permanent_ambiguity_never_enters_dependency_retry() -> Result<(), Box<dyn std
 
 #[cfg(unix)]
 #[test]
-fn corrupted_startup_frontier_keeps_only_authenticated_fenced_control_and_operations()
+fn corrupted_startup_frontier_rederives_the_fence_after_restart()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("fenced-startup-frontier")?;
     let paths = roots.bootstrap_paths()?;
@@ -251,7 +250,7 @@ fn corrupted_startup_frontier_keeps_only_authenticated_fenced_control_and_operat
         loopback,
     )?);
     let process = ApplicationRuntime::start(
-        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        ServeConfiguration::new(paths.clone(), InitializationMode::ExistingOnly),
         HostInputs::new(&host, &host),
     )?;
 
@@ -288,6 +287,32 @@ fn corrupted_startup_frontier_keeps_only_authenticated_fenced_control_and_operat
         ExitOutcome::Graceful
     );
     assert!(roots.acquire_volume_again().is_ok());
+    let restarted_control = std::env::temp_dir().join(format!(
+        "positron-fenced-restarted-control-{}.sock",
+        std::process::id()
+    ));
+    let restarted_host = NativeHost::new(NativeBindings::new(
+        restarted_control,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+    )?);
+    let restarted = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&restarted_host, &restarted_host),
+    )?;
+    assert_eq!(
+        restarted.health().phase(),
+        ProcessPhase::Fenced,
+        "restart derives its restricted phase from the unchanged bad frontier"
+    );
+    assert!(restarted.services().is_none());
+    assert_eq!(
+        restarted.shutdown(ShutdownTrigger::FirstSignal),
+        ExitOutcome::Graceful
+    );
     Ok(())
 }
 
@@ -356,6 +381,132 @@ fn corrupt_catalog_fences_without_reusing_a_previously_valid_bearer()
 }
 
 #[cfg(unix)]
+#[test]
+fn online_integrity_fence_closes_native_data_routes_and_reauthenticates_control()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("online-native-integrity-fence")?;
+    let paths = roots.bootstrap_paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
+    let control = std::env::temp_dir().join(format!(
+        "positron-online-fenced-control-{}.sock",
+        std::process::id()
+    ));
+    let loopback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    let host = NativeHost::new(NativeBindings::new(
+        control.clone(),
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+    )?);
+    let mut process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let data_endpoints = process
+        .bound_endpoints()
+        .into_iter()
+        .filter_map(|endpoint| {
+            endpoint
+                .role()
+                .is_data()
+                .then(|| endpoint.socket_address())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(data_endpoints.len(), 4);
+    let api = process
+        .bound_endpoints()
+        .into_iter()
+        .find(|endpoint| endpoint.role() == ListenerRole::Api)
+        .and_then(|endpoint| endpoint.socket_address())
+        .ok_or("api endpoint missing")?;
+    let otlp_http = process
+        .bound_endpoints()
+        .into_iter()
+        .find(|endpoint| endpoint.role() == ListenerRole::OtlpHttp)
+        .and_then(|endpoint| endpoint.socket_address())
+        .ok_or("otlp http endpoint missing")?;
+    let operations = process
+        .bound_endpoints()
+        .into_iter()
+        .find(|endpoint| endpoint.role() == ListenerRole::Operations)
+        .and_then(|endpoint| endpoint.socket_address())
+        .ok_or("operations endpoint missing")?;
+    let services = process.services().ok_or("runtime services missing")?;
+    services.request_integrity_fence();
+
+    assert_eq!(process.health().phase(), ProcessPhase::Serving);
+    assert_eq!(process.health().readiness(), Readiness::NotReady);
+    assert!(
+        tcp_response(otlp_http, "POST", "/v1/logs")?.starts_with("HTTP/1.1 503"),
+        "a queued fence must refuse Data admission before listener retirement"
+    );
+    assert!(
+        tcp_response(api, "POST", positron_api::maintenance::RUN_HTTP_PATH)?
+            .starts_with("HTTP/1.1 503"),
+        "a queued fence must refuse mutation admission before listener retirement"
+    );
+    drop(services);
+    assert!(process.apply_pending_integrity_fence());
+    assert!(roots.acquire_volume_again().is_ok());
+    let response = control_response(&control, Some(&administrator), "/control/fenced/inspection")?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("\"reason\":\"ambiguous_integrity\""));
+    let response = control_response(
+        &control,
+        Some("not-a-current-administrator"),
+        "/control/fenced/inspection",
+    )?;
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+
+    let mut operations_stream = TcpStream::connect_timeout(&operations, Duration::from_secs(1))?;
+    operations_stream
+        .write_all(b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")?;
+    operations_stream.shutdown(std::net::Shutdown::Write)?;
+    let mut operations_response = String::new();
+    operations_stream.read_to_string(&mut operations_response)?;
+    assert!(
+        operations_response.starts_with("HTTP/1.1 200"),
+        "{operations_response}"
+    );
+    for endpoint in data_endpoints {
+        assert!(
+            TcpStream::connect_timeout(&endpoint, Duration::from_millis(100)).is_err(),
+            "fenced data endpoint remained reachable: {endpoint}"
+        );
+    }
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn tcp_response(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let request =
+        format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    stream.write_all(request.as_bytes())?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+#[cfg(unix)]
 fn control_response(
     control: &std::path::Path,
     bearer: Option<&str>,
@@ -371,6 +522,8 @@ fn control_response(
             Err(error) => Some(Err(error)),
         })
         .ok_or("Control socket did not become available")??;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let authorization = bearer.map_or_else(String::new, |value| {
         format!("Authorization: Bearer {value}\r\n")
     });

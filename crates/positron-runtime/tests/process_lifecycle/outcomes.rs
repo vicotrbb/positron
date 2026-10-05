@@ -413,6 +413,61 @@ fn ambiguous_bootstrap_fences_without_exposing_a_data_endpoint()
 }
 
 #[test]
+fn online_integrity_fence_retires_data_ownership_but_keeps_reauthenticated_inspection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("online-integrity-fence")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks::default();
+    let mut process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&listeners, &tasks),
+    )?;
+    let services = process.services().ok_or("runtime services missing")?;
+
+    services.request_integrity_fence();
+    drop(services);
+    assert!(process.apply_pending_integrity_fence());
+    assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+    assert_eq!(
+        process
+            .bound_endpoints()
+            .into_iter()
+            .map(|endpoint| endpoint.role())
+            .collect::<Vec<_>>(),
+        [ListenerRole::Control, ListenerRole::Operations]
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    assert_eq!(
+        tasks
+            .events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                TaskEvent::Joined(role, ProcessPhase::Fenced, false) => Some(*role),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [
+            TaskRole::Maintenance,
+            TaskRole::Api,
+            TaskRole::OtlpGrpc,
+            TaskRole::OtlpHttp,
+            TaskRole::LokiPush,
+        ]
+    );
+
+    assert!(!process.apply_pending_integrity_fence());
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+#[test]
 fn first_signal_closes_admission_joins_registered_tasks_and_releases_ownership_last()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("graceful")?;

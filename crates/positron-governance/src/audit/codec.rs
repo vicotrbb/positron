@@ -8,6 +8,37 @@ impl GovernanceAuditEntry {
         transaction_id: [u8; 16],
         intent: &[u8],
     ) -> Result<Self, IdentityFailure> {
+        if intent.starts_with(&INTEGRITY_QUARANTINE_AUDIT_MAGIC) {
+            let mut cursor = Cursor::new(intent);
+            if cursor.take_array::<8>()? != INTEGRITY_QUARANTINE_AUDIT_MAGIC {
+                return Err(IdentityFailure);
+            }
+            let tenant = TenantId::from_bytes(cursor.take_array()?).map_err(|_| IdentityFailure)?;
+            let signal = match cursor.take_u8()? {
+                1 => SignalKind::Logs,
+                2 => SignalKind::Traces,
+                _ => return Err(IdentityFailure),
+            };
+            let shard = u32::from_be_bytes(cursor.take_array()?);
+            let segment = match cursor.take_u8()? {
+                0 => None,
+                1 => Some(cursor.take_array::<16>()?),
+                _ => return Err(IdentityFailure),
+            };
+            if shard == 0
+                || segment.is_some_and(|segment| segment.iter().all(|byte| *byte == 0))
+                || !cursor.is_empty()
+            {
+                return Err(IdentityFailure);
+            }
+            return Ok(Self::IntegrityQuarantine(IntegrityQuarantineAuditEntry {
+                position,
+                tenant,
+                signal,
+                shard,
+                segment,
+            }));
+        }
         if intent.starts_with(&MAINTENANCE_WINDOW_AUDIT_MAGIC) {
             let mut cursor = Cursor::new(intent);
             if cursor.take_array::<8>()? != MAINTENANCE_WINDOW_AUDIT_MAGIC {

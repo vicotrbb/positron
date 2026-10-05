@@ -1,6 +1,6 @@
 //! Catalog publication and discovery for bounded integrity quarantine evidence.
 
-use crate::{CatalogObject, CatalogProposal, TransactionId};
+use crate::{AuditIntent, CatalogObject, CatalogProposal, TransactionId};
 
 use super::super::{SegmentId, SegmentScope};
 use super::{
@@ -14,6 +14,7 @@ pub fn publish_quarantine(
     basis: &crate::CatalogSnapshot,
     metadata: super::super::format::SegmentMetadata,
     transaction: TransactionId,
+    audit: Option<AuditIntent>,
 ) -> Result<(), IntegrityFailure> {
     let existing = quarantined_segment_ids(basis, scope)?;
     if existing.contains(&metadata.id) {
@@ -44,7 +45,7 @@ pub fn publish_quarantine(
     let proposal =
         CatalogProposal::new(transaction, epoch, objects).map_err(map_catalog_failure)?;
     catalog
-        .commit(basis.identity(), proposal, None)
+        .commit(basis.identity(), proposal, audit)
         .map_err(map_catalog_failure)?;
     Ok(())
 }

@@ -495,10 +495,15 @@ pub(super) fn route<S: Read + Write>(
                 .map_err(|_| {
                     Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
                 })?;
+            let reason = health
+                .integrity_fence_reason()
+                .map(|reason| format!(",\"reason\":\"{}\"", reason.redacted_label()))
+                .unwrap_or_default();
             Ok(Response::json(
                 200,
-                "{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"}"
-                    .to_owned(),
+                format!(
+                    "{{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"{reason}}}"
+                ),
             ))
         },
         (ListenerRole::Operations, "GET", "/health/live") => Ok(health_response(

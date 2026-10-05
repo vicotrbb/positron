@@ -42,6 +42,7 @@ pub(crate) struct ObservingTasks {
 }
 
 impl ObservingTasks {
+    #[allow(dead_code)]
     pub(crate) fn no_task_spawned(&self) -> bool {
         !self
             .events

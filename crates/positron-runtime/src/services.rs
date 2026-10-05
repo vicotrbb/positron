@@ -225,8 +225,15 @@ impl ServiceHandle {
         if let Ok(target) = self.integrity_health.lock()
             && let Some(health) = target.as_ref()
         {
-            health.fence();
+            health.request_integrity_fence(crate::IntegrityFenceReason::AmbiguousIntegrity);
         }
+    }
+
+    /// Requests process-owned retirement after trusted verification proves an
+    /// integrity ambiguity. This method never changes listeners, tasks, or
+    /// volume ownership itself.
+    pub fn request_integrity_fence(&self) {
+        self.mark_integrity_fenced();
     }
 
     #[cfg(test)]
@@ -362,6 +369,7 @@ impl ServiceHandle {
         bearer: &str,
         protobuf: Vec<u8>,
     ) -> Result<IngestRequestOutcome, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         let context = self.authorize_logs(bearer)?;
         self.revalidate_ingest_context(context)?;
         let instance = &self.instance;
@@ -379,6 +387,7 @@ impl ServiceHandle {
         bearer: &str,
         protobuf: Vec<u8>,
     ) -> Result<IngestRequestOutcome, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         let context = self.authorize_traces(bearer)?;
         self.revalidate_ingest_context(context)?;
         let request = AuthenticatedOtlpTracesRequest::otlp_grpc_protobuf(
@@ -631,6 +640,7 @@ impl ServiceHandle {
         &self,
         context: AuthorizedContext,
     ) -> Result<ReceiverAdmissionLease, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         self.revalidate_ingest_context(context)?;
         let value_limit_profile = self.instance.value_limit_profile;
         let reservation =
@@ -655,6 +665,7 @@ impl ServiceHandle {
         &self,
         context: AuthorizedContext,
     ) -> Result<ReceiverAdmissionLease, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         self.revalidate_ingest_context(context)?;
         let value_limit_profile = self.instance.value_limit_profile;
         let reservation =
@@ -679,6 +690,7 @@ impl ServiceHandle {
         &self,
         context: AuthorizedContext,
     ) -> Result<(), ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         let _catalog_operation = self.catalog_operation()?;
         let identity = self
             .instance
@@ -687,6 +699,20 @@ impl ServiceHandle {
         identity
             .validate_ingest_context(context)
             .map_err(|_| ServiceFailure::Unauthorized)
+    }
+
+    fn require_data_or_mutation_admission(&self) -> Result<(), ServiceFailure> {
+        let health = self
+            .integrity_health
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?;
+        if health
+            .as_ref()
+            .is_some_and(|health| !health.admits_data_or_mutation())
+        {
+            return Err(ServiceFailure::CapacityUnavailable);
+        }
+        Ok(())
     }
 
     /// Runs the generated capability contract without adding a second API authority.
@@ -711,6 +737,7 @@ impl ServiceHandle {
         source: &str,
         budget: QueryBudget,
     ) -> Result<Vec<String>, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         query::query_log_bodies(self, bearer, self.instance.logs_shard, source, budget)
     }
 

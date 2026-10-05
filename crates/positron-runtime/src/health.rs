@@ -8,8 +8,8 @@ use positron_kernel::{
 };
 
 use crate::{
-    ConfigurationObservation, ConfigurationRuntimeFailure, InitializedInstance, ListenerRole,
-    RuntimeConfiguration,
+    BootstrapPaths, ConfigurationObservation, ConfigurationRuntimeFailure, InitializedInstance,
+    InstanceBootstrap, ListenerRole, RuntimeConfiguration,
 };
 
 /// The one runtime phase that controls admission and shutdown behavior.
@@ -23,6 +23,30 @@ pub enum ProcessPhase {
     Fenced = 4,
     Stopping = 5,
     Stopped = 6,
+}
+
+/// The closed set of non-secret integrity conditions that can require the
+/// process owner to retire data-plane authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntegrityFenceReason {
+    AmbiguousIntegrity = 1,
+}
+
+impl IntegrityFenceReason {
+    const fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::AmbiguousIntegrity),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn redacted_label(self) -> &'static str {
+        match self {
+            Self::AmbiguousIntegrity => "ambiguous_integrity",
+        }
+    }
 }
 
 /// Whether data traffic can be admitted safely.
@@ -203,10 +227,13 @@ impl HealthWarning {
 #[derive(Clone)]
 pub struct HealthState {
     phase: Arc<AtomicU8>,
+    pending_integrity_fence: Arc<AtomicU8>,
+    integrity_fence_reason: Arc<AtomicU8>,
     integrity_degraded: Arc<AtomicBool>,
     plaintext_listener_roles: Arc<AtomicU8>,
     configuration: Arc<OnceLock<Arc<RuntimeConfiguration>>>,
     inspection_authority: Arc<OnceLock<Weak<InitializedInstance>>>,
+    fenced_inspection: Arc<OnceLock<FencedInspection>>,
     catalog_operation: Arc<OnceLock<Weak<Mutex<()>>>>,
 }
 
@@ -234,6 +261,37 @@ impl HealthState {
             .store(ProcessPhase::Fenced as u8, Ordering::Release);
     }
 
+    /// Records a bounded one-way request. The `RunningProcess` remains the
+    /// only owner that can consume it and retire runtime authority.
+    pub(crate) fn request_integrity_fence(&self, reason: IntegrityFenceReason) {
+        let _ = self.pending_integrity_fence.compare_exchange(
+            0,
+            reason as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    pub(crate) fn pending_integrity_fence_request(&self) -> Option<IntegrityFenceReason> {
+        IntegrityFenceReason::from_byte(self.pending_integrity_fence.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn record_integrity_fence(&self, reason: IntegrityFenceReason) {
+        let _ = self.integrity_fence_reason.compare_exchange(
+            0,
+            reason as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.fence();
+        self.pending_integrity_fence.store(0, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn integrity_fence_reason(&self) -> Option<IntegrityFenceReason> {
+        IntegrityFenceReason::from_byte(self.integrity_fence_reason.load(Ordering::Acquire))
+    }
+
     #[must_use]
     pub fn phase(&self) -> ProcessPhase {
         decode_phase(self.phase.load(Ordering::Acquire))
@@ -246,7 +304,7 @@ impl HealthState {
     /// can expose or alter tenant data.
     #[must_use]
     pub(crate) fn admits_data_or_mutation(&self) -> bool {
-        self.phase() == ProcessPhase::Serving
+        self.phase() == ProcessPhase::Serving && self.pending_integrity_fence_request().is_none()
     }
 
     /// Reports localized immutable-data corruption while preserving the
@@ -258,7 +316,7 @@ impl HealthState {
 
     #[must_use]
     pub fn readiness(&self) -> Readiness {
-        if self.phase() == ProcessPhase::Serving {
+        if self.admits_data_or_mutation() {
             Readiness::Ready
         } else {
             Readiness::NotReady
@@ -311,10 +369,47 @@ impl HealthState {
     /// Authorizes inspection through the immutable governance authority shared
     /// with runtime services.
     pub(crate) fn authorize_configuration_status(&self, bearer: &str) -> Result<(), ()> {
-        self.inspection_authority
-            .get()
-            .and_then(Weak::upgrade)
-            .ok_or(())?
+        if let Some(authority) = self.inspection_authority.get().and_then(Weak::upgrade) {
+            return authority
+                .attribute(
+                    PresentedCredential::parse(bearer).map_err(|_| ())?,
+                    RequestedIntent::SystemAdministration,
+                    CompatibilityHints::none(),
+                )
+                .map(|_| ())
+                .map_err(|_| ());
+        }
+        if self.phase() != ProcessPhase::Fenced {
+            return Err(());
+        }
+        self.fenced_inspection.get().ok_or(())?.authorize(bearer)
+    }
+
+    pub(crate) fn set_fenced_inspection(
+        &self,
+        paths: BootstrapPaths,
+        max_registered_tenants: u16,
+    ) -> Result<(), ConfigurationRuntimeFailure> {
+        self.fenced_inspection
+            .set(FencedInspection {
+                paths,
+                max_registered_tenants,
+            })
+            .map_err(|_| ConfigurationRuntimeFailure::Unavailable)
+    }
+
+    /// Reopens only for the duration of a restricted inspection
+    /// authorization, so Fenced keeps current durable authentication without
+    /// retaining mutable runtime ownership between requests.
+    fn authorize_fenced_inspection(
+        paths: &BootstrapPaths,
+        max_registered_tenants: u16,
+        bearer: &str,
+    ) -> Result<(), ()> {
+        let authority =
+            InstanceBootstrap::reopen_with_max_registered_tenants(paths, max_registered_tenants)
+                .map_err(|_| ())?;
+        authority
             .attribute(
                 PresentedCredential::parse(bearer).map_err(|_| ())?,
                 RequestedIntent::SystemAdministration,
@@ -528,10 +623,13 @@ impl ProcessState {
         Self {
             health: HealthState {
                 phase: Arc::new(AtomicU8::new(ProcessPhase::Starting as u8)),
+                pending_integrity_fence: Arc::new(AtomicU8::new(0)),
+                integrity_fence_reason: Arc::new(AtomicU8::new(0)),
                 integrity_degraded: Arc::new(AtomicBool::new(false)),
                 plaintext_listener_roles: Arc::new(AtomicU8::new(0)),
                 configuration: Arc::new(OnceLock::new()),
                 inspection_authority: Arc::new(OnceLock::new()),
+                fenced_inspection: Arc::new(OnceLock::new()),
                 catalog_operation: Arc::new(OnceLock::new()),
             },
         }
@@ -585,6 +683,17 @@ impl ProcessState {
             .catalog_operation
             .set(Arc::downgrade(&catalog_operation))
             .map_err(|_| ConfigurationRuntimeFailure::Unavailable)
+    }
+}
+
+struct FencedInspection {
+    paths: BootstrapPaths,
+    max_registered_tenants: u16,
+}
+
+impl FencedInspection {
+    fn authorize(&self, bearer: &str) -> Result<(), ()> {
+        HealthState::authorize_fenced_inspection(&self.paths, self.max_registered_tenants, bearer)
     }
 }
 

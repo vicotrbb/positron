@@ -24,7 +24,9 @@ pub use configuration::{
     ConfigurationReloadOutcome, ConfigurationRuntimeFailure, PendingRestart, RuntimeConfiguration,
 };
 pub use configuration_catalog::CatalogConfigurationPublication;
-pub use health::{HealthState, HealthWarning, Liveness, ProcessPhase, Readiness};
+pub use health::{
+    HealthState, HealthWarning, IntegrityFenceReason, Liveness, ProcessPhase, Readiness,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use instance_bootstrap::GovernanceTestFixture;
 pub use instance_bootstrap::{

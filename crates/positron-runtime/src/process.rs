@@ -12,9 +12,10 @@ use crate::health::ProcessState;
 use crate::{
     BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BoundEndpoint, BoundListener,
     CatalogConfigurationPublication, ConfigurationReloadOutcome, ConfigurationRuntimeFailure,
-    HealthState, InitializationPlan, InstanceBootstrap, ListenerFactory, ListenerGenerationFactory,
-    ListenerRequest, ListenerRole, ProcessPhase, RegisteredTask, RunningTask, RuntimeConfiguration,
-    ServiceHandle, TaskCancellation, TaskFailure, TaskJoinOutcome, TaskRegistrar, TaskRole,
+    HealthState, InitializationPlan, InstanceBootstrap, IntegrityFenceReason, ListenerFactory,
+    ListenerGenerationFactory, ListenerRequest, ListenerRole, ProcessPhase, RegisteredTask,
+    RunningTask, RuntimeConfiguration, ServiceHandle, TaskCancellation, TaskFailure,
+    TaskJoinOutcome, TaskRegistrar, TaskRole,
 };
 
 /// Whether serving may initialize a provably empty instance.
@@ -489,6 +490,82 @@ impl RunningProcess {
     #[must_use]
     pub fn services(&self) -> Option<ServiceHandle> {
         self.services.clone()
+    }
+
+    /// Applies one pending integrity-fence request at the sole owner of
+    /// listeners, tasks, key custody, and mutable volume authority.
+    ///
+    /// The request is intentionally one-way and idempotent: verification code
+    /// can only request fencing; it cannot partially tear down process state.
+    pub fn apply_pending_integrity_fence(&mut self) -> bool {
+        let Some(reason) = self.state.health().pending_integrity_fence_request() else {
+            return false;
+        };
+        self.apply_integrity_fence(reason);
+        true
+    }
+
+    fn apply_integrity_fence(&mut self, reason: IntegrityFenceReason) {
+        self.state.health().record_integrity_fence(reason);
+
+        let (mut retired_listeners, retained_listeners) = {
+            let listeners = self
+                .listeners
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(listeners)
+                .into_iter()
+                .partition(|listener| listener.endpoint().role().is_data())
+        };
+        *self
+            .listeners
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = retained_listeners;
+        let (mut retired_tasks, retained_tasks): (RunningTasks, RunningTasks) = self
+            .tasks
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .partition(|(role, _)| {
+                matches!(
+                    role,
+                    TaskRole::Api
+                        | TaskRole::OtlpGrpc
+                        | TaskRole::OtlpHttp
+                        | TaskRole::LokiPush
+                        | TaskRole::Maintenance
+                )
+            });
+        *self
+            .tasks
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = retained_tasks;
+
+        self.cleanup.cleanup_listeners(&mut retired_listeners);
+        let (mut retired_maintenance, mut retired_data): (RunningTasks, RunningTasks) =
+            retired_tasks
+                .drain(..)
+                .partition(|(role, _)| *role == TaskRole::Maintenance);
+        let deadline = std::time::Instant::now() + self.drain_deadline;
+        // Maintenance has no listener whose admission closure can wake it. Its
+        // task-local cancellation does not affect retained Control or
+        // Operations, so retire it before waiting for the network tasks.
+        let maintenance_failed = abort_retired_tasks(&mut retired_maintenance, deadline).is_err();
+        let data_failed = join_retired_tasks_until(&mut retired_data, deadline).is_err()
+            && abort_retired_tasks(&mut retired_data, deadline).is_err();
+        if maintenance_failed || data_failed {
+            self.cleanup.set_primary(ExitOutcome::Fenced);
+        }
+        if self
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.begin_shutdown().is_err())
+        {
+            self.cleanup.set_primary(ExitOutcome::Fenced);
+        }
+        self.services.take();
+        self.instance.take();
+        self.fenced_volume.take();
     }
 
     /// Returns the only complete Configuration generation visible to runtime

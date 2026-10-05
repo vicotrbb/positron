@@ -402,6 +402,7 @@ fn receipt_for_pruned_entry(
         | GovernanceAuditEntry::DurableOperation(_)
         | GovernanceAuditEntry::MaintenanceControl(_)
         | GovernanceAuditEntry::MaintenanceRun(_)
+        | GovernanceAuditEntry::IntegrityQuarantine(_)
         | GovernanceAuditEntry::MaintenanceWindow(_)
         | GovernanceAuditEntry::Configuration(_)
         | GovernanceAuditEntry::TlsMaterialReload(_) => return Ok(None),

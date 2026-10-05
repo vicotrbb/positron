@@ -7,6 +7,15 @@ impl ApplicationRuntime {
     ) -> Result<RunningProcess, ExitOutcome> {
         let state = ProcessState::starting();
         let drain_deadline = configuration.drain_deadline();
+        state
+            .health()
+            .set_fenced_inspection(
+                configuration.paths.clone(),
+                configuration.max_registered_tenants,
+            )
+            .map_err(|_| {
+                ExitOutcome::StartupUnavailable(BootstrapFailureCode::CatalogUnavailable)
+            })?;
         let listener_generation_factory = host.listeners.generation_factory();
         let plaintext_listener_intents =
             configuration.effective_configuration.as_ref().map_or_else(

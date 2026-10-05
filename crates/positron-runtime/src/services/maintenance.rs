@@ -610,11 +610,23 @@ fn complete_integrity_scrub(
     let key = super::tenant_segment_key(instance, &identity, scope)?;
     let transaction = TransactionId::new(execution.task().identity().to_bytes())
         .map_err(|_| ServiceFailure::Internal)?;
+    let quarantine_audit = positron_governance::integrity_quarantine_audit_intent(
+        positron_governance::IntegrityQuarantineAuditRequest {
+            tenant: scope.tenant_id(),
+            signal: scope.signal_kind(),
+            shard: scope.shard_id().value(),
+            // The kernel selects the exact localized segment only after its
+            // authenticated frame check. Periodic discovery binds the durable
+            // scope and reason without inventing a pre-scan segment identity.
+            segment: None,
+        },
+    )
+    .map_err(|_| ServiceFailure::Internal)?;
     let uncancelled = IntegrityCancellation::new();
     let cancellation: &dyn positron_kernel::IntegrityCancellationProbe = cancellation
         .map(|current| current as &dyn positron_kernel::IntegrityCancellationProbe)
         .unwrap_or(&uncancelled);
-    let report = ActiveSegmentLedger::verify_catalog_integrity(
+    let report = ActiveSegmentLedger::verify_catalog_integrity_with_audit(
         &instance._authority,
         catalog,
         scope,
@@ -624,6 +636,7 @@ fn complete_integrity_scrub(
         cancellation,
         transaction,
         continuation,
+        Some(quarantine_audit),
     )
     .map_err(|failure| match failure.code() {
         positron_kernel::IntegrityFailureCode::StorageUnavailable => {

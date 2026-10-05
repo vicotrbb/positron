@@ -1249,12 +1249,16 @@ impl RegisteredTask for NativeRegisteredTask {
         if self.role == TaskRole::Maintenance {
             let services = services.ok_or(TaskFailure::SpawnUnavailable)?;
             let wake_services = services.clone();
-            let task_cancellation = cancellation.clone();
+            // Maintenance has no listener. Give it a task-local cancellation
+            // capability so an integrity fence can retire maintenance without
+            // cancelling the retained Control and Operations tasks.
+            let task_cancellation = TaskCancellation::new();
+            let worker_cancellation = task_cancellation.clone();
             let maintenance_health = health.clone();
             let handle = std::thread::Builder::new()
                 .name("positron-maintenance".to_owned())
                 .spawn(
-                    move || match services.run_maintenance_worker(&task_cancellation) {
+                    move || match services.run_maintenance_worker(&worker_cancellation) {
                         Ok(()) => Ok(()),
                         Err(_) => {
                             maintenance_health.fence();
@@ -1264,9 +1268,9 @@ impl RegisteredTask for NativeRegisteredTask {
                 )
                 .map_err(|_| TaskFailure::SpawnUnavailable)?;
             return Ok(Box::new(NativeRunningTask {
-                cancellation,
-                force: TaskCancellation::new(),
+                force: task_cancellation,
                 maintenance_wake: Some(wake_services),
+                shutdown_cancellation: Some(cancellation),
                 handle: Some(handle),
             }));
         }
@@ -1301,9 +1305,9 @@ impl RegisteredTask for NativeRegisteredTask {
             })
             .map_err(|_| TaskFailure::SpawnUnavailable)?;
         Ok(Box::new(NativeRunningTask {
-            cancellation,
             force,
             maintenance_wake: None,
+            shutdown_cancellation: None,
             handle: Some(handle),
         }))
     }
@@ -1444,14 +1448,15 @@ fn latest_admission(
 }
 
 struct NativeRunningTask {
-    cancellation: TaskCancellation,
     force: TaskCancellation,
     maintenance_wake: Option<ServiceHandle>,
+    shutdown_cancellation: Option<TaskCancellation>,
     handle: Option<JoinHandle<Result<(), TaskFailure>>>,
 }
 
 impl RunningTask for NativeRunningTask {
     fn poll_join(&mut self) -> Result<Option<TaskJoinOutcome>, TaskFailure> {
+        self.cancel_maintenance_for_global_shutdown();
         if self.handle.as_ref().is_none_or(JoinHandle::is_finished) {
             join_thread(&mut self.handle)?;
             Ok(Some(TaskJoinOutcome::Joined))
@@ -1461,6 +1466,7 @@ impl RunningTask for NativeRunningTask {
     }
 
     fn join_within(&mut self, remaining: Duration) -> Result<TaskJoinOutcome, TaskFailure> {
+        self.cancel_maintenance_for_global_shutdown();
         if join_thread_within(&mut self.handle, remaining)? {
             Ok(TaskJoinOutcome::Joined)
         } else {
@@ -1469,7 +1475,6 @@ impl RunningTask for NativeRunningTask {
     }
 
     fn abort(&mut self) -> Result<(), TaskFailure> {
-        self.cancellation.cancel();
         if let Some(services) = self.maintenance_wake.as_ref() {
             services.notify_maintenance_worker();
         }
@@ -1478,6 +1483,21 @@ impl RunningTask for NativeRunningTask {
             Ok(())
         } else {
             Err(TaskFailure::AbortUnavailable)
+        }
+    }
+}
+
+impl NativeRunningTask {
+    fn cancel_maintenance_for_global_shutdown(&self) {
+        if self
+            .shutdown_cancellation
+            .as_ref()
+            .is_some_and(TaskCancellation::is_cancelled)
+        {
+            if let Some(services) = self.maintenance_wake.as_ref() {
+                services.notify_maintenance_worker();
+            }
+            self.force.cancel();
         }
     }
 }
