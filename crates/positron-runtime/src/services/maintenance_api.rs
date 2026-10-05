@@ -26,6 +26,17 @@ use positron_kernel::{
 
 use crate::ServiceHandle;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaintenanceServiceFailure {
+    InvalidRequest,
+    AuthenticationRejected,
+    TaskUnavailable,
+    SourceUnavailable,
+    IdempotencyConflict,
+    PreconditionFailed,
+    AdministrationUnavailable,
+}
+
 impl ServiceHandle {
     /// Authenticates a system administrator before decoding the bounded
     /// inspection request. The response is derived solely from the runtime's
@@ -34,15 +45,17 @@ impl ServiceHandle {
         &self,
         bearer: &str,
         body: &[u8],
-    ) -> Result<MaintenanceStatusResponse, (u16, &'static str)> {
+    ) -> Result<MaintenanceStatusResponse, MaintenanceServiceFailure> {
         let _catalog_operation = self
             .catalog_operation()
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         self.authorize_system_administration(bearer)?;
-        let request =
-            MaintenanceStatusRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
+        let request = MaintenanceStatusRequest::decode(body)
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
         let cursor = match request.cursor() {
-            Some(value) => Some(task_identity(value).ok_or((400, "invalid_request"))?),
+            Some(value) => {
+                Some(task_identity(value).ok_or(MaintenanceServiceFailure::InvalidRequest)?)
+            },
             None => None,
         };
         let (clock_uncertain, now) = self.maintenance_inspection_clock()?;
@@ -50,12 +63,12 @@ impl ServiceHandle {
             .instance
             .maintenance_coordinator()
             .statuses_with_progress_slo(now, clock_uncertain)
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let mut response = MaintenanceStatusResponse {
             tasks: Vec::with_capacity(request.page_limit()),
             returned: 0,
             total: u32::try_from(statuses.len())
-                .map_err(|_| (503, "administration_unavailable"))?,
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
             next_cursor: None,
             queued: 0,
             running: 0,
@@ -82,17 +95,17 @@ impl ServiceHandle {
         for status in statuses.into_iter().skip(page_start).take(page_len) {
             response.tasks.push(
                 task_status_for_coordinator(coordinator, status, now)
-                    .map_err(|_| (503, "administration_unavailable"))?,
+                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
             );
         }
-        response.returned =
-            u32::try_from(response.tasks.len()).map_err(|_| (503, "administration_unavailable"))?;
+        response.returned = u32::try_from(response.tasks.len())
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         if has_more {
             response.next_cursor = response.tasks.last().map(|task| task.identity.clone());
         }
         response
             .validate()
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         Ok(response)
     }
 
@@ -100,23 +113,24 @@ impl ServiceHandle {
         &self,
         bearer: &str,
         body: &[u8],
-    ) -> Result<MaintenanceExplainResponse, (u16, &'static str)> {
+    ) -> Result<MaintenanceExplainResponse, MaintenanceServiceFailure> {
         let _catalog_operation = self
             .catalog_operation()
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         self.authorize_system_administration(bearer)?;
-        let request =
-            MaintenanceExplainRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
-        let identity = task_identity(&request.identity).ok_or((400, "invalid_request"))?;
+        let request = MaintenanceExplainRequest::decode(body)
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let identity =
+            task_identity(&request.identity).ok_or(MaintenanceServiceFailure::InvalidRequest)?;
         let (clock_uncertain, now) = self.maintenance_inspection_clock()?;
         let status = self
             .instance
             .maintenance_coordinator()
             .status_with_progress_slo(identity, now, clock_uncertain)
-            .map_err(|_| (404, "task_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::TaskUnavailable)?;
         Ok(MaintenanceExplainResponse {
             task: task_status_for_coordinator(self.instance.maintenance_coordinator(), status, now)
-                .map_err(|_| (503, "administration_unavailable"))?,
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         })
     }
 
@@ -127,18 +141,20 @@ impl ServiceHandle {
         &self,
         bearer: &str,
         body: &[u8],
-    ) -> Result<MaintenanceRunResponse, (u16, &'static str)> {
+    ) -> Result<MaintenanceRunResponse, MaintenanceServiceFailure> {
         let _catalog_operation = self
             .catalog_operation()
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let actor = self.authorize_system_administration(bearer)?;
-        let request = MaintenanceRunRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
-        let tenant =
-            TenantId::parse_canonical(request.tenant()).map_err(|_| (400, "invalid_request"))?;
-        let signal = signal(request.signal()).ok_or((400, "invalid_request"))?;
-        let shard = VirtualShardId::new(request.shard()).map_err(|_| (400, "invalid_request"))?;
-        let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
-            .map_err(|_| (400, "invalid_request"))?;
+        let request = MaintenanceRunRequest::decode(body)
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let tenant = TenantId::parse_canonical(request.tenant())
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let signal = signal(request.signal()).ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+        let shard = VirtualShardId::new(request.shard())
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let idempotency = administrative_key(request.idempotency_key())
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
         let task_identity = maintenance_task_id(actor.principal_id(), idempotency)?;
         let now = self.maintenance_status_now()?;
         let instance = &self.instance;
@@ -148,9 +164,9 @@ impl ServiceHandle {
             instance
                 .key
                 .catalog_secret(instance.instance)
-                .map_err(|_| (503, "administration_unavailable"))?,
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         )
-        .map_err(|_| (503, "administration_unavailable"))?;
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         if let Some(response) = maintenance_run_replay(
             &catalog,
             actor.principal_id(),
@@ -164,18 +180,18 @@ impl ServiceHandle {
         }
         let snapshot = catalog
             .pin()
-            .map_err(|_| (503, "administration_unavailable"))?;
-        let identity =
-            Identity::open(&snapshot).map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        let identity = Identity::open(&snapshot)
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let scope = SegmentScope::new(tenant, signal, shard);
         let expected_scope = MaintenanceScope::segment(tenant, signal, shard);
         if !snapshot
             .reachable_ledger_scopes(tenant, signal)
-            .map_err(|_| (503, "administration_unavailable"))?
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
             .into_iter()
             .any(|candidate| candidate == scope)
         {
-            return Err((404, "source_unavailable"));
+            return Err(MaintenanceServiceFailure::SourceUnavailable);
         }
         let coordinator = instance.maintenance_coordinator();
         match coordinator.status(task_identity) {
@@ -188,12 +204,12 @@ impl ServiceHandle {
                     task: task_acknowledgement(status),
                 });
             },
-            Ok(_) => return Err((409, "idempotency_conflict")),
+            Ok(_) => return Err(MaintenanceServiceFailure::IdempotencyConflict),
             Err(positron_kernel::MaintenanceFailure::UnknownTask) => {},
-            Err(_) => return Err((503, "administration_unavailable")),
+            Err(_) => return Err(MaintenanceServiceFailure::AdministrationUnavailable),
         }
         let key = super::tenant_segment_key(instance, &identity, scope)
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
             &instance._authority,
             &instance.retention_time,
@@ -201,14 +217,14 @@ impl ServiceHandle {
             scope,
             key,
         )
-        .map_err(|_| (503, "administration_unavailable"))?;
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let bucket = ledger.sealed_compaction_bucket().map_err(source_failure)?;
         let task = ledger
             .prepare_compaction_task(bucket, task_identity)
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let audit = maintenance_run_audit_intent(MaintenanceRunAuditRequest {
             actor: actor.principal_id(),
-            idempotency_key: administrative_key(idempotency)?,
+            idempotency_key: idempotency,
             task: task_identity,
             tenant,
             signal,
@@ -216,13 +232,13 @@ impl ServiceHandle {
             resource_generation: task.task().preconditions().resource_generation(),
             submitted_at_unix_seconds: now,
         })
-        .map_err(|_| (503, "administration_unavailable"))?;
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let submitted = task
             .submit_and_persist_audited(coordinator, &catalog, now, audit)
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let status = coordinator
             .status(submitted.identity())
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         drop(ledger);
         drop(catalog);
         drop(_catalog_operation);
@@ -237,16 +253,17 @@ impl ServiceHandle {
         &self,
         bearer: &str,
         body: &[u8],
-    ) -> Result<MaintenanceControlResponse, (u16, &'static str)> {
+    ) -> Result<MaintenanceControlResponse, MaintenanceServiceFailure> {
         let _catalog_operation = self
             .catalog_operation()
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let actor = self.authorize_system_administration(bearer)?;
-        let request =
-            MaintenancePauseRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
-        let identity = task_identity(request.identity()).ok_or((400, "invalid_request"))?;
-        let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
-            .map_err(|_| (400, "invalid_request"))?;
+        let request = MaintenancePauseRequest::decode(body)
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let identity =
+            task_identity(request.identity()).ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+        let idempotency = administrative_key(request.idempotency_key())
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
         let catalog = self.open_maintenance_catalog()?;
         let now = self.maintenance_status_now()?;
         if let Some(audit) = maintenance_control_replay(
@@ -267,17 +284,17 @@ impl ServiceHandle {
         }
         let until = now
             .checked_add(request.duration_seconds())
-            .ok_or((400, "invalid_request"))?;
+            .ok_or(MaintenanceServiceFailure::InvalidRequest)?;
         let audit = maintenance_control_audit_intent(
             actor.principal_id(),
-            administrative_key(idempotency)?,
+            idempotency,
             identity,
             true,
             request.resource_generation(),
             request.duration_seconds(),
             Some(until),
         )
-        .map_err(|_| (503, "administration_unavailable"))?;
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let coordinator = self.instance.maintenance_coordinator();
         coordinator
             .pause_and_persist_audited(
@@ -299,7 +316,7 @@ impl ServiceHandle {
             request.resource_generation(),
             request.duration_seconds(),
         )?
-        .ok_or((503, "administration_unavailable"))?;
+        .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
         drop(catalog);
         drop(_catalog_operation);
         self.notify_maintenance_worker();
@@ -310,16 +327,17 @@ impl ServiceHandle {
         &self,
         bearer: &str,
         body: &[u8],
-    ) -> Result<MaintenanceControlResponse, (u16, &'static str)> {
+    ) -> Result<MaintenanceControlResponse, MaintenanceServiceFailure> {
         let _catalog_operation = self
             .catalog_operation()
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let actor = self.authorize_system_administration(bearer)?;
-        let request =
-            MaintenanceResumeRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
-        let identity = task_identity(request.identity()).ok_or((400, "invalid_request"))?;
-        let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
-            .map_err(|_| (400, "invalid_request"))?;
+        let request = MaintenanceResumeRequest::decode(body)
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let identity =
+            task_identity(request.identity()).ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+        let idempotency = administrative_key(request.idempotency_key())
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
         let catalog = self.open_maintenance_catalog()?;
         if let Some(audit) = maintenance_control_replay(
             &catalog,
@@ -339,14 +357,14 @@ impl ServiceHandle {
         }
         let audit = maintenance_control_audit_intent(
             actor.principal_id(),
-            administrative_key(idempotency)?,
+            idempotency,
             identity,
             false,
             0,
             0,
             None,
         )
-        .map_err(|_| (503, "administration_unavailable"))?;
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let coordinator = self.instance.maintenance_coordinator();
         coordinator
             .resume_and_persist_audited(&catalog, identity, audit)
@@ -361,7 +379,7 @@ impl ServiceHandle {
             0,
             0,
         )?
-        .ok_or((503, "administration_unavailable"))?;
+        .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
         drop(catalog);
         drop(_catalog_operation);
         self.notify_maintenance_worker();
@@ -375,22 +393,22 @@ impl ServiceHandle {
         &self,
         bearer: &str,
         body: &[u8],
-    ) -> Result<MaintenanceWindowResponse, (u16, &'static str)> {
+    ) -> Result<MaintenanceWindowResponse, MaintenanceServiceFailure> {
         let _catalog_operation = self
             .catalog_operation()
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let actor = self.authorize_system_administration(bearer)?;
-        let request =
-            MaintenanceWindowRequest::decode(body).map_err(|_| (400, "invalid_request"))?;
+        let request = MaintenanceWindowRequest::decode(body)
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
         let mut deferred = request
             .deferred_classes()
             .iter()
-            .map(|class| window_class(class).ok_or((400, "invalid_request")))
+            .map(|class| window_class(class).ok_or(MaintenanceServiceFailure::InvalidRequest))
             .collect::<Result<Vec<_>, _>>()?;
         deferred.sort_unstable();
         let deferred_classes = window_class_names(&deferred);
-        let idempotency = PrincipalId::parse_canonical(request.idempotency_key())
-            .map_err(|_| (400, "invalid_request"))?;
+        let idempotency = administrative_key(request.idempotency_key())
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
         let catalog = self.open_maintenance_catalog()?;
         if let Some(response) = maintenance_window_replay(
             &catalog,
@@ -405,16 +423,16 @@ impl ServiceHandle {
         let now = self.maintenance_status_now()?;
         let until = now
             .checked_add(request.duration_seconds())
-            .ok_or((400, "invalid_request"))?;
+            .ok_or(MaintenanceServiceFailure::InvalidRequest)?;
         let audit = maintenance_window_audit_intent(
             actor.principal_id(),
-            administrative_key(idempotency)?,
+            idempotency,
             request.expected_catalog_generation(),
             &deferred,
             request.duration_seconds(),
             until,
         )
-        .map_err(|_| (503, "administration_unavailable"))?;
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let catalog_generation = self
             .instance
             .maintenance_coordinator()
@@ -439,7 +457,7 @@ impl ServiceHandle {
         })
     }
 
-    fn open_maintenance_catalog(&self) -> Result<Catalog<'_>, (u16, &'static str)> {
+    fn open_maintenance_catalog(&self) -> Result<Catalog<'_>, MaintenanceServiceFailure> {
         let instance = &self.instance;
         Catalog::open(
             &instance._authority,
@@ -447,21 +465,23 @@ impl ServiceHandle {
             instance
                 .key
                 .catalog_secret(instance.instance)
-                .map_err(|_| (503, "administration_unavailable"))?,
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         )
-        .map_err(|_| (503, "administration_unavailable"))
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)
     }
 
-    fn maintenance_status_now(&self) -> Result<u64, (u16, &'static str)> {
+    fn maintenance_status_now(&self) -> Result<u64, MaintenanceServiceFailure> {
         self.instance
             .retention_time
             .governance_now_seconds()
-            .map_err(|_| (503, "administration_unavailable"))
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)
     }
 
     /// Inspection exposes exact scheduler blockers even while lifecycle time
     /// cannot safely derive an age or deadline.
-    fn maintenance_inspection_clock(&self) -> Result<(bool, Option<u64>), (u16, &'static str)> {
+    fn maintenance_inspection_clock(
+        &self,
+    ) -> Result<(bool, Option<u64>), MaintenanceServiceFailure> {
         if self.instance.retention_time.status().state() == LifecycleClockState::ClockUncertain {
             return Ok((true, None));
         }
@@ -471,14 +491,15 @@ impl ServiceHandle {
     fn authorize_system_administration(
         &self,
         bearer: &str,
-    ) -> Result<AuthorizedContext, (u16, &'static str)> {
+    ) -> Result<AuthorizedContext, MaintenanceServiceFailure> {
         self.instance
             .attribute(
-                PresentedCredential::parse(bearer).map_err(|_| (401, "authentication_rejected"))?,
+                PresentedCredential::parse(bearer)
+                    .map_err(|_| MaintenanceServiceFailure::AuthenticationRejected)?,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
             )
-            .map_err(|_| (401, "authentication_rejected"))
+            .map_err(|_| MaintenanceServiceFailure::AuthenticationRejected)
     }
 }
 
@@ -490,19 +511,19 @@ fn signal(value: &str) -> Option<SignalKind> {
     }
 }
 
-fn source_failure(failure: LedgerFailure) -> (u16, &'static str) {
+fn source_failure(failure: LedgerFailure) -> MaintenanceServiceFailure {
     match failure.code() {
         LedgerFailureCode::InvalidInput | LedgerFailureCode::PhysicalScopeMismatch => {
-            (404, "source_unavailable")
+            MaintenanceServiceFailure::SourceUnavailable
         },
-        _ => (503, "administration_unavailable"),
+        _ => MaintenanceServiceFailure::AdministrationUnavailable,
     }
 }
 
 fn maintenance_task_id(
     principal: PrincipalId,
-    idempotency: PrincipalId,
-) -> Result<MaintenanceTaskId, (u16, &'static str)> {
+    idempotency: AdministrativeIdempotencyKey,
+) -> Result<MaintenanceTaskId, MaintenanceServiceFailure> {
     let mut digest = Sha256::new();
     digest.update(b"positron-maintenance-run-v1");
     digest.update(principal.to_bytes());
@@ -512,32 +533,38 @@ fn maintenance_task_id(
     identity.copy_from_slice(
         digest
             .get(..16)
-            .ok_or((503, "administration_unavailable"))?,
+            .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?,
     );
-    MaintenanceTaskId::new(identity).map_err(|_| (503, "administration_unavailable"))
+    MaintenanceTaskId::new(identity)
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)
 }
 
+/// Decodes the wire format solely to construct the administrative key at the
+/// maintenance boundary. No principal identity crosses that boundary.
 fn administrative_key(
-    idempotency: PrincipalId,
-) -> Result<AdministrativeIdempotencyKey, (u16, &'static str)> {
-    AdministrativeIdempotencyKey::new(idempotency.to_bytes()).map_err(|_| (400, "invalid_request"))
+    value: &str,
+) -> Result<AdministrativeIdempotencyKey, MaintenanceServiceFailure> {
+    let principal = PrincipalId::parse_canonical(value)
+        .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+    AdministrativeIdempotencyKey::new(principal.to_bytes())
+        .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
 }
 
 fn maintenance_control_replay(
     catalog: &Catalog<'_>,
     actor: PrincipalId,
-    idempotency: PrincipalId,
+    idempotency: AdministrativeIdempotencyKey,
     identity: MaintenanceTaskId,
     pause: bool,
     resource_generation: u64,
     duration_seconds: u64,
-) -> Result<Option<MaintenanceControlAuditEntry>, (u16, &'static str)> {
+) -> Result<Option<MaintenanceControlAuditEntry>, MaintenanceServiceFailure> {
     let records = catalog
         .governance_audit_records()
-        .map_err(|_| (503, "administration_unavailable"))?;
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
     for record in records {
         let entry = GovernanceAuditEntry::decode(&record)
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let GovernanceAuditEntry::MaintenanceControl(candidate) = entry else {
             continue;
         };
@@ -551,7 +578,7 @@ fn maintenance_control_replay(
             || candidate.resource_generation() != resource_generation
             || candidate.duration_seconds() != duration_seconds
         {
-            return Err((409, "idempotency_conflict"));
+            return Err(MaintenanceServiceFailure::IdempotencyConflict);
         }
         return Ok(Some(candidate));
     }
@@ -561,18 +588,18 @@ fn maintenance_control_replay(
 fn maintenance_run_replay(
     catalog: &Catalog<'_>,
     actor: PrincipalId,
-    idempotency: PrincipalId,
+    idempotency: AdministrativeIdempotencyKey,
     task: MaintenanceTaskId,
     tenant: TenantId,
     signal: SignalKind,
     shard: VirtualShardId,
-) -> Result<Option<MaintenanceRunResponse>, (u16, &'static str)> {
+) -> Result<Option<MaintenanceRunResponse>, MaintenanceServiceFailure> {
     for record in catalog
         .governance_audit_records()
-        .map_err(|_| (503, "administration_unavailable"))?
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
     {
         let entry = GovernanceAuditEntry::decode(&record)
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let GovernanceAuditEntry::MaintenanceRun(candidate) = entry else {
             continue;
         };
@@ -586,7 +613,7 @@ fn maintenance_run_replay(
             || candidate.signal() != signal
             || candidate.shard() != shard.value()
         {
-            return Err((409, "idempotency_conflict"));
+            return Err(MaintenanceServiceFailure::IdempotencyConflict);
         }
         return Ok(Some(run_acknowledgement(&candidate)?));
     }
@@ -595,9 +622,9 @@ fn maintenance_run_replay(
 
 fn run_acknowledgement(
     audit: &MaintenanceRunAuditEntry,
-) -> Result<MaintenanceRunResponse, (u16, &'static str)> {
-    let shard =
-        VirtualShardId::new(audit.shard()).map_err(|_| (503, "administration_unavailable"))?;
+) -> Result<MaintenanceRunResponse, MaintenanceServiceFailure> {
+    let shard = VirtualShardId::new(audit.shard())
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
     Ok(MaintenanceRunResponse {
         resource_generation: audit.resource_generation(),
         task: MaintenanceTaskAcknowledgement {
@@ -616,17 +643,17 @@ fn run_acknowledgement(
 fn maintenance_window_replay(
     catalog: &Catalog<'_>,
     actor: PrincipalId,
-    idempotency: PrincipalId,
+    idempotency: AdministrativeIdempotencyKey,
     expected_catalog_generation: u64,
     deferred: &[MaintenanceTaskClass],
     duration_seconds: u64,
-) -> Result<Option<MaintenanceWindowResponse>, (u16, &'static str)> {
+) -> Result<Option<MaintenanceWindowResponse>, MaintenanceServiceFailure> {
     let records = catalog
         .governance_audit_records()
-        .map_err(|_| (503, "administration_unavailable"))?;
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
     for record in records {
         let entry = GovernanceAuditEntry::decode(&record)
-            .map_err(|_| (503, "administration_unavailable"))?;
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let GovernanceAuditEntry::MaintenanceWindow(candidate) = entry else {
             continue;
         };
@@ -639,14 +666,14 @@ fn maintenance_window_replay(
             || candidate.deferred() != deferred
             || candidate.duration_seconds() != duration_seconds
         {
-            return Err((409, "idempotency_conflict"));
+            return Err(MaintenanceServiceFailure::IdempotencyConflict);
         }
         return Ok(Some(MaintenanceWindowResponse {
             deferred_classes: window_class_names(deferred),
             until_unix_seconds: candidate.until_unix_seconds(),
             catalog_generation: expected_catalog_generation
                 .checked_add(1)
-                .ok_or((503, "administration_unavailable"))?,
+                .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?,
             audit_position: candidate.position(),
         }));
     }
@@ -687,23 +714,25 @@ fn window_class_names(deferred: &[MaintenanceTaskClass]) -> Vec<String> {
     names
 }
 
-fn control_failure(failure: MaintenanceFailure) -> (u16, &'static str) {
+fn control_failure(failure: MaintenanceFailure) -> MaintenanceServiceFailure {
     match failure {
-        MaintenanceFailure::UnknownTask => (404, "task_unavailable"),
+        MaintenanceFailure::UnknownTask => MaintenanceServiceFailure::TaskUnavailable,
         MaintenanceFailure::PreconditionFailed
         | MaintenanceFailure::InvalidTransition
-        | MaintenanceFailure::InvalidInput => (409, "precondition_failed"),
-        _ => (503, "administration_unavailable"),
+        | MaintenanceFailure::InvalidInput => MaintenanceServiceFailure::PreconditionFailed,
+        _ => MaintenanceServiceFailure::AdministrationUnavailable,
     }
 }
 
-fn latest_governance_audit_position(catalog: &Catalog<'_>) -> Result<u64, (u16, &'static str)> {
+fn latest_governance_audit_position(
+    catalog: &Catalog<'_>,
+) -> Result<u64, MaintenanceServiceFailure> {
     catalog
         .governance_audit_records()
-        .map_err(|_| (503, "administration_unavailable"))?
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
         .last()
         .map(positron_kernel::GovernanceAuditRecord::position)
-        .ok_or((503, "administration_unavailable"))
+        .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)
 }
 
 fn task_acknowledgement(
@@ -993,6 +1022,7 @@ mod tests {
 
     use super::super::ServiceHandle;
     use super::super::tests::schema_maintenance::{Fixture, open_catalog, request};
+    use super::MaintenanceServiceFailure;
 
     struct MutableWallClock(Arc<Mutex<UnixNanoseconds>>);
 
@@ -1562,7 +1592,7 @@ mod tests {
         .encode()?;
         assert_eq!(
             services.run_maintenance(&administrator, &conflicting),
-            Err((409, "idempotency_conflict")),
+            Err(MaintenanceServiceFailure::IdempotencyConflict),
             "a retained immutable receipt rejects a different request before source lookup"
         );
         drop(services);
@@ -1676,7 +1706,10 @@ mod tests {
             0,
             || services.run_maintenance(&administrator, &body),
         );
-        assert_eq!(rejected, Err((503, "administration_unavailable")));
+        assert_eq!(
+            rejected,
+            Err(MaintenanceServiceFailure::AdministrationUnavailable)
+        );
         assert!(
             initialized
                 .maintenance_coordinator()
@@ -1802,7 +1835,7 @@ mod tests {
         let services = ServiceHandle::new(initialized)?;
         assert_eq!(
             services.run_maintenance("not-a-credential", br#"{\"unknown\":true}"#),
-            Err((401, "authentication_rejected")),
+            Err(MaintenanceServiceFailure::AuthenticationRejected),
             "authentication precedes decoding"
         );
         Ok(())
@@ -1816,7 +1849,7 @@ mod tests {
         let services = ServiceHandle::new(Arc::clone(&initialized))?;
         assert_eq!(
             services.set_maintenance_window("not-a-credential", br#"{\"unexpected\":true}"#),
-            Err((401, "authentication_rejected")),
+            Err(MaintenanceServiceFailure::AuthenticationRejected),
             "authentication must precede untrusted window decoding"
         );
         let expected = open_catalog(&initialized)?.pin()?.number();
@@ -1847,7 +1880,7 @@ mod tests {
         );
         assert_eq!(
             services.set_maintenance_window(&administrator, &conflict.encode()?),
-            Err((409, "idempotency_conflict"))
+            Err(MaintenanceServiceFailure::IdempotencyConflict)
         );
         let stale = MaintenanceWindowRequest::new(
             vec!["compaction".to_owned()],
@@ -1857,7 +1890,7 @@ mod tests {
         );
         assert_eq!(
             services.set_maintenance_window(&administrator, &stale.encode()?),
-            Err((409, "precondition_failed")),
+            Err(MaintenanceServiceFailure::PreconditionFailed),
             "the actual committed Catalog generation fences the global window"
         );
         Ok(())
@@ -2015,7 +2048,7 @@ mod tests {
         );
         assert_eq!(
             services.pause_maintenance(&administrator, &conflicting_pause.encode()?),
-            Err((409, "idempotency_conflict"))
+            Err(MaintenanceServiceFailure::IdempotencyConflict)
         );
         let identity = super::task_identity(&task.identity).ok_or("task identity")?;
         drop(services);
@@ -2126,7 +2159,7 @@ mod tests {
         );
         assert_eq!(
             services.pause_maintenance(&administrator, &pause.encode()?),
-            Err((409, "precondition_failed")),
+            Err(MaintenanceServiceFailure::PreconditionFailed),
             "ADR-0071 forbids an authenticated expiring pause from deferring emergency work"
         );
         assert_eq!(

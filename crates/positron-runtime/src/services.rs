@@ -62,6 +62,7 @@ use failure::{
     collect_query_bodies, map_admission_group_plan_failure, map_query_failure, map_receive_failure,
     map_trace_receive_failure,
 };
+pub(crate) use maintenance_api::MaintenanceServiceFailure;
 #[cfg(test)]
 mod tests;
 

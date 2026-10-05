@@ -159,6 +159,44 @@ fn system_administrator_gets_a_truthful_unavailable_sealed_source_response()
 }
 
 #[test]
+fn maintenance_run_rejects_an_all_zero_administrative_idempotency_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = live_test_guard();
+    let roots = TestRoots::new("maintenance-run-zero-idempotency")?;
+    let paths = roots.paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        positron_runtime::InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let host = NativeHost::new(bindings(&roots, "maintenance-run-zero-idempotency")?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let response = http(
+        address(
+            &process.bound_endpoints(),
+            positron_runtime::ListenerRole::Api,
+        )?,
+        "POST",
+        positron_api::maintenance::RUN_HTTP_PATH,
+        &[
+            ("Authorization", &format!("Bearer {}", claim.secret())),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"class":"compaction","tenant":"00000000-0000-0000-0000-000000000001","signal":"logs","shard":1,"idempotency_key":"00000000-0000-0000-0000-000000000000"}"#,
+    )?;
+    assert_status(response.clone(), 400);
+    assert!(response.contains("\"code\":\"invalid_request\""));
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+#[test]
 fn maintenance_run_authenticates_before_decoding_its_body() -> Result<(), Box<dyn std::error::Error>>
 {
     let _guard = live_test_guard();

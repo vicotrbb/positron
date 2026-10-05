@@ -15,9 +15,25 @@ use super::io::{
     RequestHead, Response, capability_response, configuration_status_response, health_response,
     read_body,
 };
-use crate::{HealthState, ListenerRole, Liveness, Readiness, ServiceHandle};
+use crate::{
+    HealthState, ListenerRole, Liveness, Readiness, ServiceHandle,
+    services::MaintenanceServiceFailure,
+};
 
 use super::MAX_API_BODY_BYTES;
+
+fn maintenance_failure_response(failure: MaintenanceServiceFailure) -> Response {
+    let (status, code) = match failure {
+        MaintenanceServiceFailure::InvalidRequest => (400, "invalid_request"),
+        MaintenanceServiceFailure::AuthenticationRejected => (401, "authentication_rejected"),
+        MaintenanceServiceFailure::TaskUnavailable => (404, "task_unavailable"),
+        MaintenanceServiceFailure::SourceUnavailable => (404, "source_unavailable"),
+        MaintenanceServiceFailure::IdempotencyConflict => (409, "idempotency_conflict"),
+        MaintenanceServiceFailure::PreconditionFailed => (409, "precondition_failed"),
+        MaintenanceServiceFailure::AdministrationUnavailable => (503, "administration_unavailable"),
+    };
+    Response::json(status, format!("{{\"code\":\"{code}\"}}"))
+}
 
 pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
     if method != "POST" {
@@ -196,9 +212,7 @@ pub(super) fn route<S: Read + Write>(
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
                 }),
-                Err((status, code)) => {
-                    Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
-                },
+                Err(failure) => Ok(maintenance_failure_response(failure)),
             }
         },
         (ListenerRole::Api, "POST", positron_api::maintenance::EXPLAIN_HTTP_PATH) => {
@@ -218,9 +232,7 @@ pub(super) fn route<S: Read + Write>(
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
                 }),
-                Err((status, code)) => {
-                    Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
-                },
+                Err(failure) => Ok(maintenance_failure_response(failure)),
             }
         },
         (ListenerRole::Api, "POST", positron_api::maintenance::RUN_HTTP_PATH) => {
@@ -240,9 +252,7 @@ pub(super) fn route<S: Read + Write>(
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
                 }),
-                Err((status, code)) => {
-                    Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
-                },
+                Err(failure) => Ok(maintenance_failure_response(failure)),
             }
         },
         (ListenerRole::Api, "POST", positron_api::maintenance::PAUSE_HTTP_PATH) => {
@@ -262,9 +272,7 @@ pub(super) fn route<S: Read + Write>(
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
                 }),
-                Err((status, code)) => {
-                    Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
-                },
+                Err(failure) => Ok(maintenance_failure_response(failure)),
             }
         },
         (ListenerRole::Api, "POST", positron_api::maintenance::RESUME_HTTP_PATH) => {
@@ -284,9 +292,7 @@ pub(super) fn route<S: Read + Write>(
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
                 }),
-                Err((status, code)) => {
-                    Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
-                },
+                Err(failure) => Ok(maintenance_failure_response(failure)),
             }
         },
         (ListenerRole::Api, "POST", positron_api::maintenance::WINDOW_HTTP_PATH) => {
@@ -306,9 +312,7 @@ pub(super) fn route<S: Read + Write>(
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
                 }),
-                Err((status, code)) => {
-                    Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
-                },
+                Err(failure) => Ok(maintenance_failure_response(failure)),
             }
         },
         (ListenerRole::Api, "POST", positron_api::tenant_aliases::HTTP_PATH) => {
