@@ -45,6 +45,11 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     .map_err(|_| ())?;
                 let facts = instance.doctor_runtime_facts(actor).map_err(|_| ())?;
                 let signer = instance.support_bundle_manifest_signer(actor).map_err(|_| ())?;
+                let maintenance = health
+                    .authenticated_serving_maintenance_evidence(bearer)
+                    .map_err(|_| ())?;
+                let maintenance_inventory = instance.maintenance_bundle_evidence(facts).map_err(|_| ())?;
+                let maintenance = format!("{maintenance}{maintenance_inventory}");
                 let report = live_doctor_report(&facts);
                 let options = BundleOptions {
                     config: PathBuf::new(),
@@ -65,9 +70,15 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     facts.catalog_generation(),
                     facts.backup_repository().label(),
                 );
-                let members =
-                    live_canonical_members(effective, &report, &operational, &options, started)
-                        .map_err(|_| ())?;
+                let members = live_canonical_members(
+                    effective,
+                    &report,
+                    &operational,
+                    &maintenance,
+                    &options,
+                    started,
+                )
+                .map_err(|_| ())?;
                 let limits = BundleLimits::new(14, DEFAULT_OUTPUT_LIMIT)
                     .map_err(|_| ())?
                     .with_elapsed_limit(DEFAULT_ELAPSED_LIMIT);
@@ -240,6 +251,7 @@ fn live_canonical_members(
     effective: &positron_config::EffectiveConfiguration,
     doctor: &str,
     operational: &str,
+    maintenance: &str,
     options: &BundleOptions,
     started: Instant,
 ) -> Result<Vec<BundleMember>, ()> {
@@ -259,7 +271,7 @@ fn live_canonical_members(
                     format!("inspection_owner=serving_resource_governor\n{doctor}").into_bytes();
             },
             Some(Class::MaintenanceStatus) => {
-                member.bytes = b"inspection_owner=maintenance_runtime\ninspection_mode=online\nstatus=not_exported_by_current_diagnostics_contract\n".to_vec();
+                member.bytes = maintenance.as_bytes().to_vec();
             },
             Some(Class::ListenerStatus) => {
                 member.bytes = b"inspection_owner=listener_runtime\ninspection_mode=online\ncontrol_listener=active\n".to_vec();

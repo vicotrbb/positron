@@ -269,10 +269,22 @@ fn corrupted_startup_frontier_rederives_the_fence_after_restart()
 
     let response = control_response(&control, Some(&administrator), "/control/fenced/inspection")?;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert!(
-        response
-            .ends_with("{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"}")
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or("fenced inspection response body")?;
+    let inspection: serde_json::Value = serde_json::from_str(body)?;
+    assert_eq!(inspection["phase"], "fenced");
+    assert_eq!(inspection["liveness"], "live");
+    assert_eq!(inspection["readiness"], "not_ready");
+    assert_eq!(inspection["reason"], "none");
+    assert_eq!(inspection["doctor"]["key_custody"], "verified");
+    assert_eq!(inspection["doctor"]["catalog_bootstrap"], "verified");
+    assert_eq!(inspection["doctor"]["listener_topology"]["control"], true);
+    assert_eq!(
+        inspection["doctor"]["listener_topology"]["operations"],
+        true
     );
+    assert_eq!(inspection["doctor"]["listener_topology"]["api"], false);
     let response = control_response(&control, None, "/control/fenced/inspection")?;
     assert!(response.starts_with("HTTP/1.1 401"));
     let response = control_response(

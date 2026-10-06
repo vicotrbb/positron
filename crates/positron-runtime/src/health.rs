@@ -103,6 +103,9 @@ pub(crate) struct MaintenanceHealth {
     lower_class_queue_delay_breaches: u32,
     running_no_durable_progress_slo_breaches: u32,
     running_no_durable_progress_slo_unknown: u32,
+    checkpointed_tasks: u32,
+    paused_tasks: u32,
+    conflicted_tasks: u32,
     completed_inputs: u32,
     input_objects: u32,
     outstanding_reservations: u32,
@@ -158,6 +161,18 @@ impl MaintenanceHealth {
     #[must_use]
     pub(crate) const fn running_no_durable_progress_slo_unknown(self) -> u32 {
         self.running_no_durable_progress_slo_unknown
+    }
+    #[must_use]
+    pub(crate) const fn checkpointed_tasks(self) -> u32 {
+        self.checkpointed_tasks
+    }
+    #[must_use]
+    pub(crate) const fn paused_tasks(self) -> u32 {
+        self.paused_tasks
+    }
+    #[must_use]
+    pub(crate) const fn conflicted_tasks(self) -> u32 {
+        self.conflicted_tasks
     }
     #[must_use]
     pub(crate) const fn completed_inputs(self) -> u32 {
@@ -622,6 +637,9 @@ impl HealthState {
             lower_class_queue_delay_breaches: 0,
             running_no_durable_progress_slo_breaches: 0,
             running_no_durable_progress_slo_unknown: 0,
+            checkpointed_tasks: 0,
+            paused_tasks: 0,
+            conflicted_tasks: 0,
             completed_inputs: 0,
             input_objects: 0,
             outstanding_reservations: 0,
@@ -729,9 +747,25 @@ impl HealthState {
                 )
                 .ok_or(ConfigurationStatusFailure::Unavailable)?;
             if let Some(checkpoint) = status.checkpoint() {
+                maintenance.checkpointed_tasks = maintenance
+                    .checkpointed_tasks
+                    .checked_add(1)
+                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
                 maintenance.completed_inputs = maintenance
                     .completed_inputs
                     .checked_add(checkpoint.completed_inputs())
+                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+            }
+            if status.pause_until().is_some() {
+                maintenance.paused_tasks = maintenance
+                    .paused_tasks
+                    .checked_add(1)
+                    .ok_or(ConfigurationStatusFailure::Unavailable)?;
+            }
+            if status.conflict_owner().is_some() {
+                maintenance.conflicted_tasks = maintenance
+                    .conflicted_tasks
+                    .checked_add(1)
                     .ok_or(ConfigurationStatusFailure::Unavailable)?;
             }
         }
@@ -760,6 +794,47 @@ impl HealthState {
             doctor,
             bound_listener_roles: self.bound_listener_roles.load(Ordering::Acquire),
         })
+    }
+
+    /// Renders bounded coordinator facts from the same authenticated runtime
+    /// inspection path used by Operations status. This is an evidence adapter
+    /// for diagnostics, not a second maintenance authority.
+    pub fn authenticated_serving_maintenance_evidence(
+        &self,
+        bearer: &str,
+    ) -> Result<String, ServingDiagnosticsFailure> {
+        let status =
+            self.authorized_configuration_status(bearer)
+                .map_err(|failure| match failure {
+                    ConfigurationStatusFailure::AuthenticationRejected => {
+                        ServingDiagnosticsFailure::AuthenticationRejected
+                    },
+                    ConfigurationStatusFailure::Unavailable => {
+                        ServingDiagnosticsFailure::Unavailable
+                    },
+                })?;
+        let maintenance = status.maintenance;
+        Ok(format!(
+            "inspection_owner=maintenance_coordinator\ninspection_mode=online\nqueued={}\nrunning={}\ndeferred={}\nterminal={}\nfailed={}\nclock_uncertain={}\noldest_queued_age_seconds={}\nlower_class_queue_delay_breaches={}\nrunning_no_durable_progress_slo_breaches={}\nrunning_no_durable_progress_slo_unknown={}\ncheckpointed_tasks={}\npaused_tasks={}\nconflicted_tasks={}\ncheckpoint_completed_inputs={}\ninput_objects={}\noutstanding_reservations={}\n",
+            maintenance.queued(),
+            maintenance.running(),
+            maintenance.deferred(),
+            maintenance.terminal(),
+            maintenance.failed(),
+            maintenance.clock_uncertain(),
+            maintenance
+                .oldest_queued_age_seconds()
+                .map_or_else(|| "unavailable".to_owned(), |age| age.to_string()),
+            maintenance.lower_class_queue_delay_breaches(),
+            maintenance.running_no_durable_progress_slo_breaches(),
+            maintenance.running_no_durable_progress_slo_unknown(),
+            maintenance.checkpointed_tasks(),
+            maintenance.paused_tasks(),
+            maintenance.conflicted_tasks(),
+            maintenance.completed_inputs(),
+            maintenance.input_objects(),
+            maintenance.outstanding_reservations(),
+        ))
     }
 }
 

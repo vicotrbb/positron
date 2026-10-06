@@ -209,11 +209,20 @@ fn online_status_request(
     let maintenance = required_object(report, "maintenance")?;
     let queued = required_u64(maintenance, "queued")?;
     let reservations = required_u64(maintenance, "outstanding_reservations")?;
+    let clock_uncertain = required_bool(maintenance, "clock_uncertain")?;
+    let stalled = required_u64(maintenance, "running_no_durable_progress_slo_breaches")?;
+    let progress_unknown = required_u64(maintenance, "running_no_durable_progress_slo_unknown")?;
+    let checkpointed_tasks = required_u64(maintenance, "checkpointed_tasks")?;
+    let paused_tasks = required_u64(maintenance, "paused_tasks")?;
+    let conflicted_tasks = required_u64(maintenance, "conflicted_tasks")?;
     let doctor = required_object(report, "doctor")?;
     let key_custody = required_string(doctor, "key_custody")?;
     let catalog_bootstrap = required_string(doctor, "catalog_bootstrap")?;
     let catalog_generation = required_u64(doctor, "catalog_generation")?;
     let backup_repository = required_string(doctor, "backup_repository")?;
+    let durable_operations = required_u64(doctor, "durable_operations")?;
+    let active_durable_operations = required_u64(doctor, "active_durable_operations")?;
+    let snapshot_leases = required_u64(doctor, "snapshot_leases")?;
     let listeners = required_object(doctor, "listener_topology")?;
     let topology_active = [
         "control",
@@ -228,7 +237,7 @@ fn online_status_request(
         required_bool(listeners, role).map(|bound| active && bound)
     })?;
     let evidence = format!(
-        "evidence_scope=authenticated_operations_status\nprocess_phase={phase}\nintegrity_degraded={degraded}\nmaintenance_queued={queued}\noutstanding_reservations={reservations}\nkey_custody={key_custody}\ncatalog_bootstrap={catalog_bootstrap}\ncatalog_generation={catalog_generation}\nlistener_topology={}\nbackup_repository={backup_repository}\n",
+        "evidence_scope=authenticated_operations_status\nprocess_phase={phase}\nintegrity_degraded={degraded}\nmaintenance_queued={queued}\nmaintenance_clock_uncertain={clock_uncertain}\nmaintenance_running_no_durable_progress_slo_breaches={stalled}\nmaintenance_running_no_durable_progress_slo_unknown={progress_unknown}\nmaintenance_checkpointed_tasks={checkpointed_tasks}\nmaintenance_paused_tasks={paused_tasks}\nmaintenance_conflicted_tasks={conflicted_tasks}\ndurable_operations={durable_operations}\nactive_durable_operations={active_durable_operations}\nsnapshot_leases={snapshot_leases}\noutstanding_reservations={reservations}\nkey_custody={key_custody}\ncatalog_bootstrap={catalog_bootstrap}\ncatalog_generation={catalog_generation}\nlistener_topology={}\nbackup_repository={backup_repository}\n",
         if topology_active {
             "active"
         } else {
@@ -251,7 +260,13 @@ fn online_status_request(
             ),
         ));
     }
-    if phase == "serving" && !degraded && backup_repository == "configured" {
+    if phase == "serving"
+        && !degraded
+        && backup_repository == "configured"
+        && !clock_uncertain
+        && stalled == 0
+        && progress_unknown == 0
+    {
         return Ok((
             ExitCode::SUCCESS,
             format!(
@@ -643,7 +658,7 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains("authorization: bearer system-administrator")
             );
-            let body = "{\"phase\":\"serving\",\"integrity_degraded\":false,\"doctor\":{\"key_custody\":\"verified\",\"catalog_bootstrap\":\"verified\",\"catalog_generation\":1,\"backup_repository\":\"not_configured\",\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true,\"otlp_grpc\":true,\"otlp_http\":true,\"loki_push\":true}},\"maintenance\":{\"queued\":0,\"outstanding_reservations\":0}}";
+            let body = "{\"phase\":\"serving\",\"integrity_degraded\":false,\"doctor\":{\"key_custody\":\"verified\",\"catalog_bootstrap\":\"verified\",\"catalog_generation\":1,\"backup_repository\":\"not_configured\",\"durable_operations\":0,\"active_durable_operations\":0,\"snapshot_leases\":0,\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true,\"otlp_grpc\":true,\"otlp_http\":true,\"loki_push\":true}},\"maintenance\":{\"queued\":0,\"outstanding_reservations\":0,\"clock_uncertain\":false,\"running_no_durable_progress_slo_breaches\":0,\"running_no_durable_progress_slo_unknown\":0,\"checkpointed_tasks\":0,\"paused_tasks\":0,\"conflicted_tasks\":0}}";
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
         });
         let options = Options::parse(
@@ -668,6 +683,43 @@ mod tests {
         assert!(report.contains("catalog_bootstrap=verified"));
         assert!(report.contains("listener_topology=active"));
         assert!(!report.contains("system-administrator"));
+        server.join().map_err(|_| "server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn online_doctor_reports_clock_uncertainty_and_stalled_work_as_degraded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> Result<(), std::io::Error> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request)?;
+            let body = "{\"phase\":\"serving\",\"integrity_degraded\":false,\"doctor\":{\"key_custody\":\"verified\",\"catalog_bootstrap\":\"verified\",\"catalog_generation\":1,\"backup_repository\":\"configured\",\"durable_operations\":1,\"active_durable_operations\":1,\"snapshot_leases\":1,\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true,\"otlp_grpc\":true,\"otlp_http\":true,\"loki_push\":true}},\"maintenance\":{\"queued\":0,\"outstanding_reservations\":0,\"clock_uncertain\":true,\"running_no_durable_progress_slo_breaches\":1,\"running_no_durable_progress_slo_unknown\":0,\"checkpointed_tasks\":2,\"paused_tasks\":1,\"conflicted_tasks\":1}}";
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+        });
+        let options = Options::parse(
+            [
+                "--online",
+                "--credential-stdin",
+                "--endpoint",
+                &endpoint.to_string(),
+                "--allow-plaintext",
+            ]
+            .into_iter()
+            .map(ToOwned::to_owned),
+        )?;
+        let (exit, report) = online_status_request(&options, "system-administrator")?;
+        assert_eq!(exit, std::process::ExitCode::from(3));
+        assert!(report.contains("status=degraded"));
+        assert!(report.contains("maintenance_clock_uncertain=true"));
+        assert!(report.contains("maintenance_running_no_durable_progress_slo_breaches=1"));
+        assert!(report.contains("maintenance_checkpointed_tasks=2"));
+        assert!(report.contains("maintenance_paused_tasks=1"));
+        assert!(report.contains("maintenance_conflicted_tasks=1"));
+        assert!(report.contains("durable_operations=1"));
+        assert!(report.contains("snapshot_leases=1"));
         server.join().map_err(|_| "server panicked")??;
         Ok(())
     }

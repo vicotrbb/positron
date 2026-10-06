@@ -24,7 +24,8 @@ fn live_recipient_wire_round_trip_accepts_native_x25519_only() {
 fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtime_configuration()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::{
-        io::{Cursor, Read},
+        io::{Cursor, Read, Write},
+        net::TcpStream,
         os::unix::fs::PermissionsExt,
         sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
@@ -112,6 +113,56 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
             .with_effective_configuration(Arc::clone(&effective)),
         HostInputs::new(&host, &host),
     )?;
+    let operations = process
+        .bound_endpoints()
+        .iter()
+        .find(|endpoint| endpoint.role() == positron_runtime::ListenerRole::Operations)
+        .and_then(positron_runtime::BoundEndpoint::socket_address)
+        .ok_or("operations endpoint")?;
+    let mut status = TcpStream::connect(operations)?;
+    status.write_all(
+        format!(
+            "GET /status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+            administrator.secret()
+        )
+        .as_bytes(),
+    )?;
+    let mut status_response = String::new();
+    status.read_to_string(&mut status_response)?;
+    assert!(
+        status_response.starts_with("HTTP/1.1 200"),
+        "{status_response}"
+    );
+    let identity = age::x25519::Identity::generate();
+    let request =
+        super::super::live_control::LiveBundleRequest::encode(&[identity.to_public().to_string()])
+            .map_err(|_| "encode live bundle request")?;
+    let (head, ciphertext) = control_bundle(&control, administrator.secret(), &request)?;
+    assert!(head.starts_with(b"HTTP/1.1 200 "), "{head:?}");
+    let decryptor = Decryptor::new(Cursor::new(ciphertext))?;
+    let mut reader = decryptor.decrypt(std::iter::once(&identity as &dyn Identity))?;
+    let mut archive = Vec::new();
+    reader.read_to_end(&mut archive)?;
+    let archive = String::from_utf8_lossy(&archive);
+    assert!(archive.contains("inspection_owner=maintenance_coordinator"));
+    for required in [
+        "queued=",
+        "clock_uncertain=",
+        "running_no_durable_progress_slo_breaches=",
+        "running_no_durable_progress_slo_unknown=",
+        "checkpointed_tasks=",
+        "paused_tasks=",
+        "conflicted_tasks=",
+        "durable_operations=",
+        "active_durable_operations=",
+        "snapshot_leases=",
+    ] {
+        assert!(
+            archive.contains(required),
+            "missing {required} from {archive}"
+        );
+    }
+    assert!(!archive.contains("status=not_exported_by_current_diagnostics_contract"));
     process
         .services()
         .ok_or("services absent")?
@@ -120,10 +171,6 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
     assert_eq!(process.health().phase(), ProcessPhase::Fenced);
     assert!(process.configuration().is_none());
 
-    let identity = age::x25519::Identity::generate();
-    let request =
-        super::super::live_control::LiveBundleRequest::encode(&[identity.to_public().to_string()])
-            .map_err(|_| "encode live bundle request")?;
     let (head, ciphertext) = control_bundle(&control, administrator.secret(), &request)?;
     assert!(head.starts_with(b"HTTP/1.1 200 "), "{head:?}");
     assert!(

@@ -40,9 +40,59 @@ impl InitializedInstance {
         let backup_repository =
             BackupRepositoryInspection::from_authenticated_catalog(view.snapshot())
                 .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let mut operations = Vec::new();
+        for record in view.governance_audit_records() {
+            let entry = positron_governance::GovernanceAuditEntry::decode(record)
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+            let positron_governance::GovernanceAuditEntry::DurableOperation(operation) = entry
+            else {
+                continue;
+            };
+            if let Some((_, outcome)) = operations
+                .iter_mut()
+                .find(|(identity, _)| *identity == operation.operation_id())
+            {
+                *outcome = operation.outcome();
+            } else {
+                operations.try_reserve(1).map_err(|_| {
+                    BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable)
+                })?;
+                operations.push((operation.operation_id(), operation.outcome()));
+            }
+        }
+        let durable_operations = u32::try_from(operations.len())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let active_durable_operations = u32::try_from(
+            operations
+                .iter()
+                .filter(|(_, outcome)| !outcome.is_terminal())
+                .count(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let snapshot_leases = u32::try_from(
+            self.maintenance
+                .statuses()
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
+                .iter()
+                .filter(|status| {
+                    status.task().class()
+                        == positron_kernel::MaintenanceTaskClass::SnapshotLeaseExpiry
+                        && !matches!(
+                            status.phase(),
+                            positron_kernel::MaintenanceTaskPhase::Cancelled
+                                | positron_kernel::MaintenanceTaskPhase::Succeeded
+                                | positron_kernel::MaintenanceTaskPhase::Failed
+                        )
+                })
+                .count(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         Ok(DoctorRuntimeFacts::verified(
             view.snapshot().number(),
             backup_repository,
+            durable_operations,
+            active_durable_operations,
+            snapshot_leases,
         ))
     }
 

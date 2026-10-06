@@ -70,18 +70,27 @@ pub struct DoctorRuntimeFacts {
     catalog_bootstrap_verified: bool,
     catalog_generation: u64,
     backup_repository: BackupRepositoryInspection,
+    durable_operations: u32,
+    active_durable_operations: u32,
+    snapshot_leases: u32,
 }
 
 impl DoctorRuntimeFacts {
     pub(crate) const fn verified(
         catalog_generation: u64,
         backup_repository: BackupRepositoryInspection,
+        durable_operations: u32,
+        active_durable_operations: u32,
+        snapshot_leases: u32,
     ) -> Self {
         Self {
             key_custody_verified: true,
             catalog_bootstrap_verified: true,
             catalog_generation,
             backup_repository,
+            durable_operations,
+            active_durable_operations,
+            snapshot_leases,
         }
     }
 
@@ -103,6 +112,21 @@ impl DoctorRuntimeFacts {
     #[must_use]
     pub const fn backup_repository(self) -> BackupRepositoryInspection {
         self.backup_repository
+    }
+
+    #[must_use]
+    pub const fn durable_operations(self) -> u32 {
+        self.durable_operations
+    }
+
+    #[must_use]
+    pub const fn active_durable_operations(self) -> u32 {
+        self.active_durable_operations
+    }
+
+    #[must_use]
+    pub const fn snapshot_leases(self) -> u32 {
+        self.snapshot_leases
     }
 }
 

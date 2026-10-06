@@ -9,10 +9,10 @@ use super::support::{TemporaryRoot, establish_authority};
 use crate::active_segment_ledger::recovery::segment_name;
 use crate::{
     ActiveSegmentLedger, AuthenticatedEventRange, Catalog, CatalogSecret, CommittedLedgerReader,
-    InstanceId, IntegrityCancellation, IntegrityFinding, IntegrityScrubBudget,
-    IntegrityVerificationMode, IntegrityVerificationOutcome, IntegrityVerificationScope,
-    LedgerFailureCode, MountQualification, PreparedStoreBlock, PrimaryDataVolume,
-    SegmentProtectionKey, SegmentScope, StoreBlockIdentity, TransactionId,
+    EventRangeUnavailable, InstanceId, IntegrityCancellation, IntegrityFinding,
+    IntegrityScrubBudget, IntegrityVerificationMode, IntegrityVerificationOutcome,
+    IntegrityVerificationScope, LedgerFailureCode, MountQualification, PreparedStoreBlock,
+    PrimaryDataVolume, SegmentProtectionKey, SegmentScope, StoreBlockIdentity, TransactionId,
     integrity_quarantine_findings,
 };
 
@@ -37,9 +37,8 @@ fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
     damaged.append(PreparedStoreBlock::new_with_authenticated_ranges_for_test(
         damaged_scope,
         StoreBlockIdentity::new([0x97; 16])?,
-        b"trusted-range".to_vec(),
-        AuthenticatedEventRange::known(UnixNanoseconds::new(10), UnixNanoseconds::new(20))
-            .map_err(|_| "fixed Event Time range")?,
+        b"missing-source-time".to_vec(),
+        AuthenticatedEventRange::unavailable(EventRangeUnavailable::MissingSourceTime),
         crate::IngestTime::from_authenticated_durable(UnixNanoseconds::new(30)),
     )?)?;
     let sealed = damaged.seal()?;
@@ -91,8 +90,7 @@ fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
     assert_eq!(findings[0].sealed_frontier(), sealed.frontier());
     assert_eq!(
         findings[0].event_range(),
-        AuthenticatedEventRange::known(UnixNanoseconds::new(10), UnixNanoseconds::new(20))
-            .map_err(|_| "fixed Event Time range")?
+        AuthenticatedEventRange::unavailable(EventRangeUnavailable::MissingSourceTime)
     );
     assert_eq!(
         findings[0].ingest_range(),

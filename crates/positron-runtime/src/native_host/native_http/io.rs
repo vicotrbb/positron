@@ -276,7 +276,7 @@ pub(in crate::native_host) fn configuration_status_response(
     Response::json(
         200,
         format!(
-            "{{\"phase\":\"{}\",\"integrity_degraded\":{},\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"doctor\":{{\"key_custody\":\"{}\",\"catalog_bootstrap\":\"{}\",\"catalog_generation\":{},\"backup_repository\":\"{}\",\"listener_topology\":{{\"control\":{},\"operations\":{},\"api\":{},\"otlp_grpc\":{},\"otlp_http\":{},\"loki_push\":{}}}}},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
+            "{{\"phase\":\"{}\",\"integrity_degraded\":{},\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"doctor\":{{\"key_custody\":\"{}\",\"catalog_bootstrap\":\"{}\",\"catalog_generation\":{},\"backup_repository\":\"{}\",\"durable_operations\":{},\"active_durable_operations\":{},\"snapshot_leases\":{},\"listener_topology\":{{\"control\":{},\"operations\":{},\"api\":{},\"otlp_grpc\":{},\"otlp_http\":{},\"loki_push\":{}}}}},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"checkpointed_tasks\":{},\"paused_tasks\":{},\"conflicted_tasks\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
             process_phase_name(phase),
             integrity_degraded,
             status.generation(),
@@ -300,6 +300,9 @@ pub(in crate::native_host) fn configuration_status_response(
             },
             doctor.catalog_generation(),
             doctor.backup_repository().label(),
+            doctor.durable_operations(),
+            doctor.active_durable_operations(),
+            doctor.snapshot_leases(),
             listener_bound(bound_listener_roles, ListenerRole::Control),
             listener_bound(bound_listener_roles, ListenerRole::Operations),
             listener_bound(bound_listener_roles, ListenerRole::Api),
@@ -318,6 +321,9 @@ pub(in crate::native_host) fn configuration_status_response(
             maintenance.lower_class_queue_delay_breaches(),
             maintenance.running_no_durable_progress_slo_breaches(),
             maintenance.running_no_durable_progress_slo_unknown(),
+            maintenance.checkpointed_tasks(),
+            maintenance.paused_tasks(),
+            maintenance.conflicted_tasks(),
             maintenance.completed_inputs(),
             maintenance.input_objects(),
             maintenance.outstanding_reservations(),

@@ -393,10 +393,6 @@ pub(super) fn can_localize_quarantine(metadata: super::format::SegmentMetadata) 
         .sealed_frontier
         .is_some_and(|frontier| frontier >= metadata.base_position)
         && matches!(
-            metadata.event_range,
-            super::AuthenticatedEventRange::Known { .. }
-        )
-        && matches!(
             metadata.ingest_range,
             super::AuthenticatedIngestRange::Known { .. }
         )

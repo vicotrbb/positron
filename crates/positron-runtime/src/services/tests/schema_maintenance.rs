@@ -151,7 +151,7 @@ fn serving_updates_live_schema_without_catalog_publication() -> Result<(), Box<d
 #[test]
 fn production_query_publishes_a_durable_snapshot_lease_expiry_task() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
-    let (initialized, ingest, query) = fixture.initialized()?;
+    let (initialized, ingest, query, administrator) = fixture.initialized_with_admin()?;
     let services = ServiceHandle::new(Arc::clone(&initialized))?;
     services.ingest_otlp_logs(&ingest, request("lease-task").encode_to_vec())?;
     assert_eq!(
@@ -172,6 +172,18 @@ fn production_query_publishes_a_durable_snapshot_lease_expiry_task() -> Result<(
         1,
         "the runtime query path asks the kernel lease publisher to atomically create expiry work"
     );
+    let actor = initialized.attribute(
+        PresentedCredential::parse(&administrator)?,
+        RequestedIntent::SystemAdministration,
+        CompatibilityHints::none(),
+    )?;
+    let facts = initialized.doctor_runtime_facts(actor)?;
+    assert_eq!(
+        facts.snapshot_leases(),
+        0,
+        "a completed query must not be reported as a live Snapshot Lease"
+    );
+    assert_eq!(facts.durable_operations(), 0);
     let catalog = open_catalog(&initialized)?;
     assert!(
         initialized
@@ -193,7 +205,7 @@ fn production_query_publishes_a_durable_snapshot_lease_expiry_task() -> Result<(
 fn runtime_maintenance_worker_wake_dispatches_and_completes_a_due_snapshot_lease_expiry()
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
-    let (mut initialized, _, _) = fixture.initialized()?;
+    let (mut initialized, _, _, administrator) = fixture.initialized_with_admin()?;
     let (retention_time, elapsed) =
         RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
     Arc::get_mut(&mut initialized)
@@ -224,6 +236,17 @@ fn runtime_maintenance_worker_wake_dispatches_and_completes_a_due_snapshot_lease
     )?;
     let lease_id = lease.identity();
     let task = MaintenanceTaskId::new(lease_id.to_bytes()).expect("lease task id");
+    let actor = initialized.attribute(
+        PresentedCredential::parse(&administrator)?,
+        RequestedIntent::SystemAdministration,
+        CompatibilityHints::none(),
+    )?;
+    let facts = initialized.doctor_runtime_facts(actor)?;
+    assert_eq!(
+        facts.snapshot_leases(),
+        1,
+        "Doctor reads the paired live lease through the coordinator's durable expiry inventory"
+    );
     drop(lease);
     drop(ledger);
     drop(catalog);

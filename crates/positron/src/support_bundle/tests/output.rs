@@ -109,10 +109,16 @@ fn bundle_output_refuses_data_and_secrets_roots_through_relative_and_symlink_ali
     let secrets = root.join("secrets");
     let external = root.join("external");
     fs::create_dir_all(&data)?;
+    fs::create_dir_all(data.join("nested"))?;
     fs::create_dir_all(&secrets)?;
+    fs::create_dir_all(secrets.join("nested"))?;
     fs::create_dir_all(&external)?;
     assert!(
         super::super::output::prepare_destination(&data.join("bundle.age"), &data, &secrets)
+            .is_err()
+    );
+    assert!(
+        super::super::output::prepare_destination(&data.join("nested/bundle.age"), &data, &secrets)
             .is_err()
     );
     assert!(
