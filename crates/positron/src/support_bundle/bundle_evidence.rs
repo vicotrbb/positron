@@ -10,29 +10,6 @@ pub(super) fn offline_operational_status(report: &str) -> String {
     )
 }
 
-/// Builds every Release-1 diagnostic family from an authoritative, read-only
-/// source. The unavailable log owner is represented as an explicit typed
-/// omission, never as a synthetic log line or a scrape of process memory.
-pub(crate) fn canonical_members(
-    effective: &positron_config::EffectiveConfiguration,
-    doctor: &str,
-    operational: &str,
-    options: &BundleOptions,
-    started: Instant,
-) -> Result<Vec<BundleMember>, BundleFailure> {
-    let crash =
-        crash_record::CrashRecordStore::under_data_directory(Path::new(effective.data_directory()))
-            .map_err(|_| BundleFailure::InspectionUnavailable)?
-            .read_recent(
-                options.log_window,
-                options.source_file_limit,
-                options.output_limit / 4,
-                std::time::SystemTime::now(),
-            )
-            .map_err(|_| BundleFailure::InspectionUnavailable)?;
-    canonical_members_with_crash(effective, doctor, operational, options, started, crash)
-}
-
 /// Renders the common bundle families from a previously opened kernel-owned
 /// crash inspection capability. Serving callers must use the capability held
 /// by their initialized instance; re-acquiring offline volume ownership while

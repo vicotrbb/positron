@@ -7,6 +7,7 @@ pub(super) fn authenticated_inspection<T>(
         positron_kernel::ExportManifestSigner,
         String,
         String,
+        positron_kernel::CrashRecordStore,
     ) -> Result<T, BundleFailure>,
 ) -> Result<T, BundleFailure> {
     let input = io::stdin();
@@ -65,7 +66,10 @@ pub(super) fn authenticated_inspection<T>(
         facts.catalog_generation(),
         facts.backup_repository().label(),
     );
-    let collected = collect(signer, operational, owned_report);
+    let crash_records = instance
+        .crash_records()
+        .map_err(|_| BundleFailure::InspectionUnavailable)?;
+    let collected = collect(signer, operational, owned_report, crash_records);
     drop(reservation);
     collected
 }

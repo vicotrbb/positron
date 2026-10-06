@@ -26,6 +26,7 @@ use budget::{
     audit_checkpoint_resource_claim, audit_reclamation_resource_claim, commit_resource_claim,
     recovery_resource_claim, reserve_history, retained_artifact_bytes,
 };
+pub(crate) use budget::integrity_scrub_resource_claim;
 use codec::{
     CommitRecord, decode_commit, encode_commit, generation_identity, object_set_digest,
     prepare_audit, snapshot_from_record, transaction_digest,

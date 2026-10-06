@@ -387,7 +387,7 @@ impl MaintenanceTask {
             preconditions,
             Vec::new(),
             Vec::new(),
-            ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+            crate::catalog::integrity_scrub_resource_claim(),
             not_before,
         )?;
         task.integrity_scrub_source = Some(IntegrityScrubSourceBinding::new(source_basis)?);

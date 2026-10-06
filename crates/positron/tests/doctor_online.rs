@@ -73,6 +73,42 @@ fn online_doctor_reports_unavailable_within_the_five_second_deadline_when_a_peer
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn online_doctor_rejects_an_oversized_trust_file_before_connecting() -> Result<(), Box<dyn std::error::Error>> {
+    let path = temporary_path("oversized-trust.pem");
+    std::fs::write(&path, vec![0_u8; 65_537])?;
+
+    let output = online_doctor_with_trust_file(&path)?;
+
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "report_version=1\nmode=online\nstatus=trust_file_rejected\nfinding_code=DOCTOR_TRUST_FILE_REJECTED\nseverity=error\nevidence_scope=none\nsafe_command=provide_a_regular_bounded_trust_file\n"
+    );
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn online_doctor_rejects_a_non_regular_trust_file_without_opening_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = temporary_path("socket-trust.pem");
+    let listener = std::os::unix::net::UnixListener::bind(&path)?;
+
+    let output = online_doctor_with_trust_file(&path)?;
+
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "report_version=1\nmode=online\nstatus=trust_file_rejected\nfinding_code=DOCTOR_TRUST_FILE_REJECTED\nseverity=error\nevidence_scope=none\nsafe_command=provide_a_regular_bounded_trust_file\n"
+    );
+    drop(listener);
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
 fn spawn_status_listener(
     listener: TcpListener,
     done: Arc<AtomicBool>,
@@ -247,6 +283,41 @@ fn online_doctor(
     stdout.read_to_end(&mut output.stdout)?;
     stderr.read_to_end(&mut output.stderr)?;
     Ok(output)
+}
+
+#[cfg(unix)]
+fn online_doctor_with_trust_file(
+    trust_file: &std::path::Path,
+) -> Result<Output, Box<dyn std::error::Error>> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_positron"));
+    command
+        .args([
+            "doctor",
+            "--online",
+            "--endpoint",
+            "127.0.0.1:1",
+            "--credential-stdin",
+            "--server-name",
+            "localhost",
+            "--trust-file",
+        ])
+        .arg(trust_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut input = child.stdin.take().ok_or("doctor stdin")?;
+    input.write_all(b"system-administrator\n")?;
+    drop(input);
+    Ok(child.wait_with_output()?)
+}
+
+#[cfg(unix)]
+fn temporary_path(name: &str) -> std::path::PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time after unix epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("positron-doctor-{name}-{nonce}"))
 }
 
 fn wait_for_child(child: &mut std::process::Child) -> io::Result<std::process::ExitStatus> {

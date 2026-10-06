@@ -905,7 +905,7 @@ pub(super) fn with_offline_key_unavailable_diagnostics<T>(
     paths: &BootstrapPaths,
     max_registered_tenants: u16,
     claim: WorkClaim,
-    operation: impl FnOnce() -> T,
+    operation: impl FnOnce(positron_kernel::CrashRecordStore) -> T,
 ) -> Result<T, crate::OfflineIntegrityFailure> {
     let (volume, access) = paths.storage.acquire().map_err(|failure| match failure {
         positron_kernel::BootstrapStorageFailure::OwnershipLocked => {
@@ -924,5 +924,7 @@ pub(super) fn with_offline_key_unavailable_diagnostics<T>(
         .governor()
         .reserve(claim)
         .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-    Ok(operation())
+    let crash_records = positron_kernel::CrashRecordStore::from_authority(&authority)
+        .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
+    Ok(operation(crash_records))
 }

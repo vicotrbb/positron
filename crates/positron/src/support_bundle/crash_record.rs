@@ -1,5 +1,6 @@
 //! Binary adapter for the kernel-owned crash store.
 
+#[cfg(test)]
 use std::{
     path::Path,
     time::{Duration, SystemTime},
@@ -8,11 +9,13 @@ use std::{
 #[allow(dead_code)]
 pub(crate) type SanitizedCrashRecord = positron_kernel::CrashRecord;
 
+#[cfg(test)]
 pub(crate) struct CrashRecordStore {
     _volume: positron_kernel::OwnedPrimaryDataVolume,
     store: positron_kernel::CrashRecordStore,
 }
 
+#[cfg(test)]
 impl CrashRecordStore {
     pub(crate) fn under_data_directory(path: &Path) -> Result<Self, ()> {
         let volume = positron_kernel::PrimaryDataVolume::acquire(

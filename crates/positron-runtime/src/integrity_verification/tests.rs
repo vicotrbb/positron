@@ -504,7 +504,7 @@ fn key_unavailable_diagnostics_reserve_before_collection_and_release_after_outpu
     ]))?;
 
     let collected =
-        InstanceBootstrap::with_offline_key_unavailable_diagnostics(&paths, 2, claim, || {
+        InstanceBootstrap::with_offline_key_unavailable_diagnostics(&paths, 2, claim, |_| {
             assert!(
                 paths.retain_volume_for_test().is_err(),
                 "the diagnostics reservation must hold exclusive ownership through collection"
@@ -549,7 +549,7 @@ fn key_unavailable_diagnostics_refuse_before_collection_without_mutation()
             1,
             0,
         ]))?,
-        || entered.set(true),
+        |_| entered.set(true),
     );
     assert_eq!(refusal, Err(OfflineIntegrityFailure::CapacityUnavailable));
     assert!(!entered.get(), "refused admission must precede collection");

@@ -59,6 +59,21 @@ pub(super) fn audit_checkpoint_resource_claim() -> ResourceAmounts {
         .maximum(maximum_catalog_commit_resource_claim())
 }
 
+/// Bounded task reservation for one authenticated integrity scrub.
+///
+/// The scrub observes one sealed segment at a time. Its encoded frame,
+/// decrypted plaintext, and retained payload stay within the active-ledger
+/// repair claim; the 128-segment / 16 MiB scrub budget is cumulative work,
+/// not simultaneous allocation. That peak is below catalog recovery's fixed
+/// 70 MiB working bound. A localized failure may subsequently build and
+/// publish one complete replacement Catalog generation, whose durable bytes,
+/// object slots, and file descriptors are bounded by the Catalog format.
+/// The scan and publication are sequential, so their vector peak is the
+/// per-dimension maximum rather than a product of independent maxima.
+pub(crate) fn integrity_scrub_resource_claim() -> ResourceAmounts {
+    recovery_resource_claim().maximum(maximum_catalog_commit_resource_claim())
+}
+
 /// Bounded peak for one receipt-authorized audit-frame reclamation.
 ///
 /// `read_exact_file` owns the complete encrypted artifact while

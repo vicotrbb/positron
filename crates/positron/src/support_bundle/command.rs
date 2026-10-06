@@ -19,7 +19,7 @@ use super::live_control;
 use super::privacy::IdentifierRetention;
 use super::{
     AgeRecipients, BundleLimits, BundleMember, EXIT_FAILURE, ManifestAuthentication, SupportBundle,
-    crash_record, output, privacy,
+    output, privacy,
 };
 use super::{BundleFailure, BundleOptions};
 
@@ -34,8 +34,8 @@ mod publication;
 pub(crate) use evidence::COMPATIBILITY_INPUTS;
 use evidence::owned_bundle_doctor_report;
 pub(crate) use evidence::{
-    canonical_members, canonical_members_with_crash, compatibility_manifest_evidence,
-    diagnostics_claim, product_identity_evidence,
+    canonical_members_with_crash, compatibility_manifest_evidence, diagnostics_claim,
+    product_identity_evidence,
 };
 use evidence::{key_unavailable_doctor_report, offline_operational_status};
 use inspection::authenticated_inspection;
@@ -111,11 +111,25 @@ fn execute(
             &paths,
             effective.max_registered_tenants(),
             diagnostics_claim(options.output_limit)?,
-            || {
+            |crash_records| {
                 let report = key_unavailable_doctor_report();
                 let operational = offline_operational_status(report);
-                let members =
-                    canonical_members(&effective, report, &operational, &options, started)?;
+                let crash = crash_records
+                    .read_recent(
+                        options.log_window,
+                        options.source_file_limit,
+                        options.output_limit / 4,
+                        std::time::SystemTime::now(),
+                    )
+                    .map_err(|_| BundleFailure::InspectionUnavailable)?;
+                let members = canonical_members_with_crash(
+                    &effective,
+                    report,
+                    &operational,
+                    &options,
+                    started,
+                    crash,
+                )?;
                 let bundle = if options.plaintext_warning {
                     SupportBundle::build_authenticated_for_explicit_plaintext_with_retention(
                         members,
@@ -141,9 +155,23 @@ fn execute(
         authenticated_inspection(
             &paths,
             options.output_limit,
-            |signer, operational, report| {
-                let members =
-                    canonical_members(&effective, &report, &operational, &options, started)?;
+            |signer, operational, report, crash_records| {
+                let crash = crash_records
+                    .read_recent(
+                        options.log_window,
+                        options.source_file_limit,
+                        options.output_limit / 4,
+                        std::time::SystemTime::now(),
+                    )
+                    .map_err(|_| BundleFailure::InspectionUnavailable)?;
+                let members = canonical_members_with_crash(
+                    &effective,
+                    &report,
+                    &operational,
+                    &options,
+                    started,
+                    crash,
+                )?;
                 let bundle = if options.plaintext_warning {
                     SupportBundle::build_authenticated_for_explicit_plaintext_with_retention(
                         members,

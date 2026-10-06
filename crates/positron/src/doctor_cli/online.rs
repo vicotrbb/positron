@@ -1,5 +1,7 @@
 use super::*;
 
+const MAX_TRUST_FILE_BYTES: u64 = 65_536;
+
 pub(super) fn execute(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {
     let input = std::io::stdin();
     if input.is_terminal() {
@@ -276,13 +278,12 @@ fn operations_status(options: &Options, bearer: &str) -> Result<serde_json::Valu
             .server_name
             .as_deref()
             .ok_or(DoctorFailure::Arguments)?;
-        let pem = std::fs::read(
+        let pem = read_trust_file(
             options
                 .trust_file
                 .as_deref()
                 .ok_or(DoctorFailure::Arguments)?,
-        )
-        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+        )?;
         builder = builder
             .add_root_certificate(
                 reqwest::Certificate::from_pem(&pem).map_err(|_| DoctorFailure::Arguments)?,
@@ -312,6 +313,36 @@ fn operations_status(options: &Options, bearer: &str) -> Result<serde_json::Valu
         return Err(DoctorFailure::EndpointUnavailable);
     }
     serde_json::from_slice(&bytes).map_err(|_| DoctorFailure::EndpointUnavailable)
+}
+
+fn read_trust_file(path: &std::path::Path) -> Result<Vec<u8>, DoctorFailure> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| DoctorFailure::TrustFileRejected)?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_TRUST_FILE_BYTES {
+        return Err(DoctorFailure::TrustFileRejected);
+    }
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| DoctorFailure::TrustFileRejected)?;
+    let file = std::fs::File::from(descriptor);
+    let opened = file.metadata().map_err(|_| DoctorFailure::TrustFileRejected)?;
+    if !opened.file_type().is_file() || opened.len() > MAX_TRUST_FILE_BYTES {
+        return Err(DoctorFailure::TrustFileRejected);
+    }
+    let capacity = usize::try_from(opened.len()).map_err(|_| DoctorFailure::TrustFileRejected)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_TRUST_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DoctorFailure::TrustFileRejected)?;
+    if bytes.len() > MAX_TRUST_FILE_BYTES as usize {
+        return Err(DoctorFailure::TrustFileRejected);
+    }
+    Ok(bytes)
 }
 
 fn fenced_control_report(

@@ -109,6 +109,7 @@ impl Options {
 pub(super) enum DoctorFailure {
     Arguments,
     AuthenticationRejected,
+    TrustFileRejected,
     EndpointUnavailable,
 }
 impl std::fmt::Display for DoctorFailure {
@@ -121,7 +122,9 @@ impl DoctorFailure {
     pub(super) const fn exit_code(self) -> u8 {
         match self {
             Self::Arguments => EXIT_USAGE,
-            Self::AuthenticationRejected | Self::EndpointUnavailable => EXIT_DIAGNOSTIC_FAILURE,
+            Self::AuthenticationRejected | Self::TrustFileRejected | Self::EndpointUnavailable => {
+                EXIT_DIAGNOSTIC_FAILURE
+            },
         }
     }
     pub(super) const fn render(self) -> &'static str {
@@ -131,6 +134,9 @@ impl DoctorFailure {
             },
             Self::AuthenticationRejected => {
                 "report_version=1\nmode=online\nstatus=authentication_rejected\nfinding_code=DOCTOR_AUTHENTICATION_REJECTED\nseverity=error\nevidence_scope=none\nsafe_command=use_system_administrator_credential\n"
+            },
+            Self::TrustFileRejected => {
+                "report_version=1\nmode=online\nstatus=trust_file_rejected\nfinding_code=DOCTOR_TRUST_FILE_REJECTED\nseverity=error\nevidence_scope=none\nsafe_command=provide_a_regular_bounded_trust_file\n"
             },
             Self::EndpointUnavailable => {
                 "report_version=1\nmode=online\nstatus=inspection_unavailable\nfinding_code=DOCTOR_ONLINE_INSPECTION_UNAVAILABLE\nseverity=error\nevidence_scope=none\nsafe_command=inspect_runtime_connectivity\n"

@@ -179,3 +179,76 @@ fn clock_uncertain_does_not_pause_a_due_integrity_scrub() {
         "integrity authentication remains eligible while destructive lifecycle work is paused"
     );
 }
+
+#[test]
+fn integrity_scrub_declares_the_bounded_scan_and_quarantine_peak_before_dispatch() {
+    let scrub = integrity_scrub_task(0x74, 1);
+
+    assert_eq!(
+        scrub.reservations(),
+        ResourceAmounts::new([
+            70_000_000, 1, 1, 70_000_000, 65_540, 0, 1, 1, 1, 8, 17_302_528,
+        ])
+    );
+}
+
+#[test]
+fn integrity_scrub_admission_holds_the_bounded_repair_peak_without_clock_uncertain_starvation() {
+    let tenant = TenantId::from_bytes([0x75; 16]).expect("tenant");
+    let authority = integrity_scrub_authority(tenant);
+    let coordinator = MaintenanceCoordinator::new();
+    let first = integrity_scrub_task_for_tenant(0x76, tenant, 1);
+    let second = integrity_scrub_task_for_tenant(0x77, tenant, 2);
+    let second_id = second.identity();
+    coordinator.submit_at(first.clone(), 1).expect("first submit");
+    coordinator.submit_at(second, 1).expect("second submit");
+
+    let running = coordinator
+        .start_next_with_reservation(&authority, 1, true)
+        .expect("ClockUncertain must admit a due scrub when repair capacity is available")
+        .expect("first scrub admitted");
+    assert_eq!(running.task(), &first);
+    assert!(matches!(
+        coordinator.start_next_with_reservation(&authority, 1, true),
+        Err(MaintenanceFailure::ResourceAdmissionRefused)
+    ));
+    assert_eq!(
+        coordinator.status(second_id).expect("queued scrub status").phase(),
+        MaintenanceTaskPhase::Queued
+    );
+
+    running.complete(&coordinator, true).expect("release first scrub");
+    let admitted = coordinator
+        .start_next_with_reservation(&authority, 2, true)
+        .expect("released repair capacity admits the queued scrub")
+        .expect("second scrub admitted");
+    assert_eq!(admitted.task().identity(), second_id);
+}
+
+fn integrity_scrub_task(identity: u8, shard: u32) -> MaintenanceTask {
+    integrity_scrub_task_for_tenant(
+        identity,
+        TenantId::from_bytes([0x75; 16]).expect("tenant"),
+        shard,
+    )
+}
+
+fn integrity_scrub_task_for_tenant(
+    identity: u8,
+    tenant: TenantId,
+    shard: u32,
+) -> MaintenanceTask {
+    MaintenanceTask::integrity_scrub(
+        MaintenanceTaskId::new([identity; 16]).expect("task"),
+        MaintenanceScope::segment(
+            tenant,
+            positron_domain::routing::SignalKind::Logs,
+            positron_domain::routing::VirtualShardId::new(shard).expect("shard"),
+        ),
+        MaintenanceTrigger::Scheduled,
+        MaintenancePreconditions::new(1, 1).expect("preconditions"),
+        [identity; 32],
+        1,
+    )
+    .expect("integrity scrub")
+}

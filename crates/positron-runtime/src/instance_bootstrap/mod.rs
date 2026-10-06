@@ -115,7 +115,7 @@ impl InstanceBootstrap {
         paths: &BootstrapPaths,
         max_registered_tenants: u16,
         claim: positron_kernel::WorkClaim,
-        operation: impl FnOnce() -> T,
+        operation: impl FnOnce(positron_kernel::CrashRecordStore) -> T,
     ) -> Result<T, crate::OfflineIntegrityFailure> {
         operation::with_offline_key_unavailable_diagnostics(
             paths,
