@@ -280,7 +280,10 @@ impl MaintenanceExecution<'_> {
         coordinator: &MaintenanceCoordinator,
         catalog: &Catalog<'_>,
     ) -> Result<(), MaintenanceFailure> {
-        if self.task.class != MaintenanceTaskClass::GovernanceAuditCheckpoint {
+        if !matches!(
+            self.task.class,
+            MaintenanceTaskClass::GovernanceAuditCheckpoint | MaintenanceTaskClass::IntegrityScrub
+        ) {
             return Err(MaintenanceFailure::InvalidInput);
         }
         coordinator.requeue_admitted_dispatch(catalog, self.dispatch, self)
@@ -292,7 +295,10 @@ impl MaintenanceExecution<'_> {
         &self,
         coordinator: &MaintenanceCoordinator,
     ) -> Result<(), MaintenanceFailure> {
-        if self.task.class != MaintenanceTaskClass::GovernanceAuditCheckpoint {
+        if !matches!(
+            self.task.class,
+            MaintenanceTaskClass::GovernanceAuditCheckpoint | MaintenanceTaskClass::IntegrityScrub
+        ) {
             return Err(MaintenanceFailure::InvalidInput);
         }
         coordinator.release_admitted_dispatch_for_recovery(self.dispatch)

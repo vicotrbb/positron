@@ -391,8 +391,10 @@ impl MaintenanceCoordinator {
             .tasks
             .get_mut(&dispatch.identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        if task.task.class != MaintenanceTaskClass::GovernanceAuditCheckpoint
-            || task.phase != MaintenanceTaskPhase::Running
+        if !matches!(
+            task.task.class,
+            MaintenanceTaskClass::GovernanceAuditCheckpoint | MaintenanceTaskClass::IntegrityScrub
+        ) || task.phase != MaintenanceTaskPhase::Running
             || task.active_dispatch != Some(dispatch)
             || task.cancellation_requested
         {
@@ -421,8 +423,10 @@ impl MaintenanceCoordinator {
             .tasks
             .get_mut(&dispatch.identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        if task.task.class != MaintenanceTaskClass::GovernanceAuditCheckpoint
-            || task.phase != MaintenanceTaskPhase::Running
+        if !matches!(
+            task.task.class,
+            MaintenanceTaskClass::GovernanceAuditCheckpoint | MaintenanceTaskClass::IntegrityScrub
+        ) || task.phase != MaintenanceTaskPhase::Running
             || task.active_dispatch != Some(dispatch)
         {
             return Err(MaintenanceFailure::InvalidTransition);

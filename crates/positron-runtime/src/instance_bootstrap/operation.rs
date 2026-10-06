@@ -483,6 +483,10 @@ pub(super) fn verify_offline_integrity(
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     let authority = resources::establish(volume, record.tenant, max_registered_tenants)
         .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
+    let resource_snapshot = authority
+        .governor()
+        .inspect()
+        .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
     let snapshot = Catalog::read_current_snapshot(
         &authority,
         record.instance,
@@ -513,15 +517,35 @@ pub(super) fn verify_offline_integrity(
             _ => crate::OfflineIntegrityFailure::CorruptState,
         },
     )?;
+    let backup_repository =
+        crate::BackupRepositoryInspection::from_authenticated_catalog(&snapshot)
+            .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     let identity =
         Identity::open(&snapshot).map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     let tenants = TenantAdministration::registered_tenant_ids(&snapshot)
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+    let mut verified_envelope_count = 0_usize;
+    for tenant in &tenants {
+        let envelope = identity
+            .tenant_key_envelope(*tenant)
+            .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
+        // This custody check derives an opaque key from each persisted tenant
+        // envelope. Every ledger-specific binding is verified below.
+        let shard = positron_domain::routing::VirtualShardId::new(1)
+            .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+        let scope = positron_kernel::SegmentScope::new(*tenant, SignalKind::Logs, shard);
+        let _ = key
+            .segment_key_from_tenant_envelope(record.instance, scope, envelope)
+            .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
+        verified_envelope_count = verified_envelope_count
+            .checked_add(1)
+            .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+    }
     let mut scopes = Vec::new();
-    for tenant in tenants {
+    for tenant in &tenants {
         for signal in [SignalKind::Logs, SignalKind::Traces] {
             let found = snapshot
-                .reachable_ledger_scopes(tenant, signal)
+                .reachable_ledger_scopes(*tenant, signal)
                 .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
             scopes
                 .try_reserve(found.len())
@@ -577,7 +601,51 @@ pub(super) fn verify_offline_integrity(
             .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
         reports.push(report);
     }
-    Ok(crate::OfflineIntegrityVerification::new(reports, findings))
+    let mut verified_scope_count = 0_usize;
+    let mut fenced_scope_count = 0_usize;
+    let mut incomplete_scope_count = 0_usize;
+    for report in &reports {
+        match report.outcome() {
+            positron_kernel::IntegrityVerificationOutcome::Verified => {
+                verified_scope_count = verified_scope_count
+                    .checked_add(1)
+                    .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+            },
+            positron_kernel::IntegrityVerificationOutcome::Fenced => {
+                fenced_scope_count = fenced_scope_count
+                    .checked_add(1)
+                    .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+            },
+            positron_kernel::IntegrityVerificationOutcome::Incomplete => {
+                incomplete_scope_count = incomplete_scope_count
+                    .checked_add(1)
+                    .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+            },
+            positron_kernel::IntegrityVerificationOutcome::Stale
+            | positron_kernel::IntegrityVerificationOutcome::Quarantined => {},
+        }
+    }
+    let disk_pressure = match resource_snapshot.disk_pressure() {
+        positron_kernel::DiskPressureState::Healthy => crate::OfflineDiskPressure::Healthy,
+        positron_kernel::DiskPressureState::SoftPressure => crate::OfflineDiskPressure::Soft,
+        positron_kernel::DiskPressureState::HardPressure => crate::OfflineDiskPressure::Hard,
+    };
+    let facts = crate::OfflineInspectionFacts::new(
+        snapshot.number(),
+        tenants.len(),
+        reports.len(),
+        verified_envelope_count,
+        findings.len(),
+        verified_scope_count,
+        fenced_scope_count,
+        incomplete_scope_count,
+        resource_snapshot.usable_disk_bytes(),
+        disk_pressure,
+        backup_repository,
+    );
+    Ok(crate::OfflineIntegrityVerification::new(
+        reports, findings, facts,
+    ))
 }
 
 /// Holds exclusive offline ownership and a system diagnostics reservation for

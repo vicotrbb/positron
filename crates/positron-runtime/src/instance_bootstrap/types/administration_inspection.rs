@@ -37,7 +37,13 @@ impl InitializedInstance {
                 BootstrapFailureCode::IdentityMismatch,
             ));
         }
-        Ok(DoctorRuntimeFacts::verified(view.snapshot().number()))
+        let backup_repository =
+            BackupRepositoryInspection::from_authenticated_catalog(view.snapshot())
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        Ok(DoctorRuntimeFacts::verified(
+            view.snapshot().number(),
+            backup_repository,
+        ))
     }
 
     /// Opens the existing Instance Integrity Key only as an opaque signer for

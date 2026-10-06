@@ -13,17 +13,17 @@ impl Pseudonymizer {
         Self(key)
     }
 
-    pub(super) fn pseudonymize(&self, value: &str) -> String {
+    pub(super) fn pseudonymize(&self, value: &str) -> Result<String, ()> {
         let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(&self.0) else {
-            return "id-unavailable".to_owned();
+            return Err(());
         };
         mac.update(value.as_bytes());
         let mut output = String::with_capacity(67);
         output.push_str("id-");
         for byte in mac.finalize().into_bytes() {
             use std::fmt::Write as _;
-            let _ignored = write!(&mut output, "{byte:02x}");
+            write!(&mut output, "{byte:02x}").map_err(|_| ())?;
         }
-        output
+        Ok(output)
     }
 }

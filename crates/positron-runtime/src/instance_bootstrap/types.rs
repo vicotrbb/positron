@@ -46,6 +46,16 @@ pub enum BackupRepositoryInspection {
 }
 
 impl BackupRepositoryInspection {
+    /// Derives the Release-1 backup owner state from an authenticated Catalog
+    /// snapshot. Release 1 has no Backup Repository binding object; opening
+    /// the Governance owner proves that this is the persisted no-binding
+    /// state rather than a guessed endpoint.
+    pub(crate) fn from_authenticated_catalog(
+        snapshot: &positron_kernel::CatalogSnapshot,
+    ) -> Result<Self, ()> {
+        snapshot.governance_object().map_err(|_| ())?;
+        Ok(Self::NotConfigured)
+    }
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -63,12 +73,15 @@ pub struct DoctorRuntimeFacts {
 }
 
 impl DoctorRuntimeFacts {
-    pub(crate) const fn verified(catalog_generation: u64) -> Self {
+    pub(crate) const fn verified(
+        catalog_generation: u64,
+        backup_repository: BackupRepositoryInspection,
+    ) -> Self {
         Self {
             key_custody_verified: true,
             catalog_bootstrap_verified: true,
             catalog_generation,
-            backup_repository: BackupRepositoryInspection::NotConfigured,
+            backup_repository,
         }
     }
 

@@ -35,8 +35,8 @@ pub use instance_bootstrap::{
     InstanceBootstrap, TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
-    OfflineIntegrityFailure, OfflineIntegrityVerification, resume_offline_integrity,
-    verify_offline_integrity,
+    OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityFailure,
+    OfflineIntegrityVerification, resume_offline_integrity, verify_offline_integrity,
 };
 pub use listener::{
     BoundEndpoint, BoundListener, ConnectionProtection, ListenerFactory, ListenerFailure,

@@ -9,14 +9,120 @@ use crate::{BootstrapPaths, InstanceBootstrap};
 pub struct OfflineIntegrityVerification {
     reports: Vec<IntegrityVerificationReport>,
     findings: Vec<IntegrityQuarantineFinding>,
+    facts: OfflineInspectionFacts,
+}
+
+/// Facts captured while the caller holds the Primary Data Volume ownership
+/// lock. They describe only authorities opened by the offline pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OfflineInspectionFacts {
+    catalog_generation: u64,
+    registered_tenant_count: usize,
+    reachable_scope_count: usize,
+    verified_envelope_count: usize,
+    quarantine_finding_count: usize,
+    verified_scope_count: usize,
+    fenced_scope_count: usize,
+    incomplete_scope_count: usize,
+    usable_disk_bytes: u64,
+    disk_pressure: OfflineDiskPressure,
+    backup_repository: crate::BackupRepositoryInspection,
+}
+
+/// Primary Data Volume pressure observed by the temporary offline governor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineDiskPressure {
+    Healthy,
+    Soft,
+    Hard,
+}
+
+impl OfflineInspectionFacts {
+    #[allow(clippy::too_many_arguments, reason = "one closed inspection snapshot")]
+    pub(crate) const fn new(
+        catalog_generation: u64,
+        registered_tenant_count: usize,
+        reachable_scope_count: usize,
+        verified_envelope_count: usize,
+        quarantine_finding_count: usize,
+        verified_scope_count: usize,
+        fenced_scope_count: usize,
+        incomplete_scope_count: usize,
+        usable_disk_bytes: u64,
+        disk_pressure: OfflineDiskPressure,
+        backup_repository: crate::BackupRepositoryInspection,
+    ) -> Self {
+        Self {
+            catalog_generation,
+            registered_tenant_count,
+            reachable_scope_count,
+            verified_envelope_count,
+            quarantine_finding_count,
+            verified_scope_count,
+            fenced_scope_count,
+            incomplete_scope_count,
+            usable_disk_bytes,
+            disk_pressure,
+            backup_repository,
+        }
+    }
+    #[must_use]
+    pub const fn catalog_generation(self) -> u64 {
+        self.catalog_generation
+    }
+    #[must_use]
+    pub const fn registered_tenant_count(self) -> usize {
+        self.registered_tenant_count
+    }
+    #[must_use]
+    pub const fn reachable_scope_count(self) -> usize {
+        self.reachable_scope_count
+    }
+    #[must_use]
+    pub const fn verified_envelope_count(self) -> usize {
+        self.verified_envelope_count
+    }
+    #[must_use]
+    pub const fn quarantine_finding_count(self) -> usize {
+        self.quarantine_finding_count
+    }
+    #[must_use]
+    pub const fn verified_scope_count(self) -> usize {
+        self.verified_scope_count
+    }
+    #[must_use]
+    pub const fn fenced_scope_count(self) -> usize {
+        self.fenced_scope_count
+    }
+    #[must_use]
+    pub const fn incomplete_scope_count(self) -> usize {
+        self.incomplete_scope_count
+    }
+    #[must_use]
+    pub const fn usable_disk_bytes(self) -> u64 {
+        self.usable_disk_bytes
+    }
+    #[must_use]
+    pub const fn disk_pressure(self) -> OfflineDiskPressure {
+        self.disk_pressure
+    }
+    #[must_use]
+    pub const fn backup_repository(self) -> crate::BackupRepositoryInspection {
+        self.backup_repository
+    }
 }
 
 impl OfflineIntegrityVerification {
     pub(crate) fn new(
         reports: Vec<IntegrityVerificationReport>,
         findings: Vec<IntegrityQuarantineFinding>,
+        facts: OfflineInspectionFacts,
     ) -> Self {
-        Self { reports, findings }
+        Self {
+            reports,
+            findings,
+            facts,
+        }
     }
 
     #[must_use]
@@ -28,6 +134,11 @@ impl OfflineIntegrityVerification {
     #[must_use]
     pub fn findings(&self) -> &[IntegrityQuarantineFinding] {
         &self.findings
+    }
+
+    #[must_use]
+    pub const fn facts(&self) -> OfflineInspectionFacts {
+        self.facts
     }
 
     /// An offline invocation is complete only when every registered sealed
@@ -117,6 +228,14 @@ mod tests {
 
         assert!(report.is_complete());
         assert!(report.is_verified());
+        let facts = report.facts();
+        assert!(facts.catalog_generation() > 0);
+        assert_eq!(facts.registered_tenant_count(), 1);
+        assert_eq!(facts.verified_envelope_count(), 1);
+        assert_eq!(facts.reachable_scope_count(), report.reports().len());
+        assert_eq!(facts.verified_scope_count(), report.reports().len());
+        assert_eq!(facts.fenced_scope_count(), 0);
+        assert_eq!(facts.incomplete_scope_count(), 0);
         assert_eq!(
             after, before,
             "offline verification must not create, repair, or publish"

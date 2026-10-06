@@ -8,10 +8,10 @@ use std::{
 
 use positron_config::{ConfigurationInputs, resolve};
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
-use positron_kernel::{MountQualification, ResourceAmounts, WorkClaim};
-use positron_runtime::{
-    BootstrapPaths, InstanceBootstrap, OfflineIntegrityFailure, verify_offline_integrity,
+use positron_kernel::{
+    DiskPressureState, MountQualification, ResourceAmounts, ResourceSnapshot, WorkClaim,
 };
+use positron_runtime::{BootstrapPaths, DoctorRuntimeFacts, InstanceBootstrap};
 use zeroize::Zeroizing;
 
 mod crash_record;
@@ -95,8 +95,15 @@ fn execute(
         MountQualification::LocalHost,
     )
     .map_err(|_| BundleFailure::InspectionUnavailable)?;
-    let limits =
-        BundleLimits::new(14, options.output_limit).map_err(|_| BundleFailure::Arguments)?;
+    let output_destination = output::prepare_destination(
+        &options.output,
+        Path::new(effective.data_directory()),
+        Path::new(effective.secrets_directory()),
+    )
+    .map_err(|_| BundleFailure::Arguments)?;
+    let limits = BundleLimits::new(14, options.output_limit)
+        .map_err(|_| BundleFailure::Arguments)?
+        .with_elapsed_limit(options.elapsed_limit);
     let started = Instant::now();
     let bundle = if options.offline_key_unavailable {
         InstanceBootstrap::with_offline_key_unavailable_diagnostics(
@@ -122,32 +129,36 @@ fn execute(
                     )
                 }
                 .map_err(|_| BundleFailure::OutputUnavailable)?;
-                write_bundle(&bundle, &options, started)?;
+                write_bundle(&bundle, &options, &output_destination, started)?;
                 Ok(bundle)
             },
         )
         .map_err(|_| BundleFailure::InspectionUnavailable)??
     } else {
-        authenticated_inspection(&paths, options.output_limit, |signer, operational| {
-            let report = offline_doctor_report(&paths, effective.max_registered_tenants());
-            let members = canonical_members(&effective, &report, &operational, &options, started)?;
-            let bundle = if options.plaintext_warning {
-                SupportBundle::build_authenticated_for_explicit_plaintext(
-                    members,
-                    limits,
-                    ManifestAuthentication::Signed(&signer),
-                )
-            } else {
-                SupportBundle::build_authenticated(
-                    members,
-                    limits,
-                    ManifestAuthentication::Signed(&signer),
-                )
-            }
-            .map_err(|_| BundleFailure::OutputUnavailable)?;
-            write_bundle(&bundle, &options, started)?;
-            Ok(bundle)
-        })?
+        authenticated_inspection(
+            &paths,
+            options.output_limit,
+            |signer, operational, report| {
+                let members =
+                    canonical_members(&effective, &report, &operational, &options, started)?;
+                let bundle = if options.plaintext_warning {
+                    SupportBundle::build_authenticated_for_explicit_plaintext(
+                        members,
+                        limits,
+                        ManifestAuthentication::Signed(&signer),
+                    )
+                } else {
+                    SupportBundle::build_authenticated(
+                        members,
+                        limits,
+                        ManifestAuthentication::Signed(&signer),
+                    )
+                }
+                .map_err(|_| BundleFailure::OutputUnavailable)?;
+                write_bundle(&bundle, &options, &output_destination, started)?;
+                Ok(bundle)
+            },
+        )?
     };
     let redaction = bundle.redaction_report();
     Ok(format!(
@@ -172,14 +183,45 @@ fn execute(
 fn write_bundle(
     bundle: &SupportBundle,
     options: &BundleOptions,
+    output_destination: &output::OutputDestination,
     started: Instant,
+) -> Result<(), BundleFailure> {
+    write_bundle_after_publication(bundle, options, output_destination, started, || {})
+}
+
+#[cfg(test)]
+fn write_bundle_with_after_publication_hook(
+    bundle: &SupportBundle,
+    options: &BundleOptions,
+    output_destination: &output::OutputDestination,
+    started: Instant,
+    after_publication: impl FnOnce(),
+) -> Result<(), BundleFailure> {
+    write_bundle_after_publication(
+        bundle,
+        options,
+        output_destination,
+        started,
+        after_publication,
+    )
+}
+
+fn write_bundle_after_publication(
+    bundle: &SupportBundle,
+    options: &BundleOptions,
+    output_destination: &output::OutputDestination,
+    started: Instant,
+    after_publication: impl FnOnce(),
 ) -> Result<(), BundleFailure> {
     if options.deadline_exceeded(started) {
         return Err(BundleFailure::DeadlineExceeded);
     }
     if options.plaintext_warning {
+        if options.deadline_exceeded(started) {
+            return Err(BundleFailure::DeadlineExceeded);
+        }
         bundle
-            .write_plaintext_explicitly(&options.output)
+            .write_plaintext_explicitly(output_destination)
             .map_err(|_| BundleFailure::OutputUnavailable)?;
     } else {
         let recipients = AgeRecipients::parse(options.recipients.clone())
@@ -191,12 +233,10 @@ fn write_bundle(
             return Err(BundleFailure::DeadlineExceeded);
         }
         bundle
-            .write_encrypted(&options.output, &ciphertext)
+            .write_encrypted(output_destination, &ciphertext)
             .map_err(|_| BundleFailure::OutputUnavailable)?;
     }
-    if options.deadline_exceeded(started) {
-        return Err(BundleFailure::DeadlineExceeded);
-    }
+    after_publication();
     Ok(())
 }
 
@@ -206,7 +246,7 @@ fn offline_operational_status(report: &str) -> String {
         .find_map(|line| line.strip_prefix("finding_code="))
         .map_or("DOCTOR_OFFLINE_INSPECTION_UNAVAILABLE", |finding| finding);
     format!(
-        "inspection_mode=offline\noperations=offline_not_running\nintegrity_finding={finding}\n"
+        "inspection_mode=offline\noperations_runtime_state=not_observable_offline\nevidence_scope=exclusive_primary_data_volume_ownership\nintegrity_finding={finding}\n"
     )
 }
 
@@ -224,8 +264,12 @@ fn canonical_members(
         return Err(BundleFailure::DeadlineExceeded);
     }
     let pseudonyms = privacy::Pseudonymizer::new();
-    let data_directory = pseudonyms.pseudonymize(effective.data_directory());
-    let secrets_directory = pseudonyms.pseudonymize(effective.secrets_directory());
+    let data_directory = pseudonyms
+        .pseudonymize(effective.data_directory())
+        .map_err(|_| BundleFailure::OutputUnavailable)?;
+    let secrets_directory = pseudonyms
+        .pseudonymize(effective.secrets_directory())
+        .map_err(|_| BundleFailure::OutputUnavailable)?;
     let configuration = effective
         .redacted_effective()
         .replace(effective.data_directory(), &data_directory)
@@ -243,24 +287,108 @@ fn canonical_members(
         return Err(BundleFailure::DeadlineExceeded);
     }
     let metadata = std::fs::metadata(effective.data_directory()).ok();
-    let bytes = metadata.map_or(0, |value| value.len());
-    let config_digest = hex(configuration.as_bytes());
+    let data_directory_metadata_bytes = metadata.map_or(0, |value| value.len());
+    let config_digest =
+        hex(configuration.as_bytes()).map_err(|_| BundleFailure::OutputUnavailable)?;
+    let health = format!(
+        "inspection_owner=offline_doctor\nhealth_runtime_state=not_observable_offline\nlatest_finding={}\n",
+        finding_code(doctor),
+    );
+    let catalog =
+        format!("inspection_owner=offline_doctor\nconfiguration_digest={config_digest}\n{doctor}");
+    let resource = format!("inspection_owner=offline_doctor\n{doctor}");
+    let maintenance = "inspection_owner=maintenance_runtime\navailability=not_observable_offline\nevidence_scope=exclusive_primary_data_volume_ownership\nsafe_command=start_positron_for_maintenance_status\n";
+    let listeners = "inspection_owner=listener_runtime\navailability=not_observable_offline\nevidence_scope=exclusive_primary_data_volume_ownership\nsafe_command=start_positron_for_listener_status\n";
+    let backup = report_field(doctor, "backup_repository").map_or_else(
+        || "inspection_owner=authenticated_catalog_backup_binding\navailability=not_observable_offline\nevidence_scope=exclusive_primary_data_volume_ownership\nsafe_command=inspect_backup_configuration_when_available\n".to_owned(),
+        |value| format!("inspection_owner=authenticated_catalog_backup_binding\nbackup_repository={value}\nevidence_scope=authenticated_catalog_snapshot\nsafe_command=configure_backup_repository\n"),
+    );
     Ok(vec![
         BundleMember::effective_configuration(configuration.as_bytes()),
-        BundleMember::compatibility_manifest(b"schema_version=1\ncompatibility_manifest=unavailable\n"),
-        BundleMember::product_identity(format!("product=positron\nversion={}\napi_identity=unavailable\nformat_epoch=unavailable\n", env!("CARGO_PKG_VERSION")).as_bytes()),
-        BundleMember::health_state(format!("doctor_finding={}\n", finding_code(doctor)).as_bytes()),
+        BundleMember::compatibility_manifest(
+            compatibility_manifest_evidence()
+                .map_err(|_| BundleFailure::OutputUnavailable)?
+                .as_bytes(),
+        ),
+        BundleMember::product_identity(
+            product_identity_evidence()
+                .map_err(|_| BundleFailure::OutputUnavailable)?
+                .as_bytes(),
+        ),
+        BundleMember::health_state(health.as_bytes()),
         BundleMember::operational_telemetry(operational.as_bytes()),
-        BundleMember::operational_logs_with_omission(b"availability=not_persisted\n", "operational_log_owner_unavailable"),
-        BundleMember::catalog_summary(format!("configuration_digest={config_digest}\ninspection_source=doctor\n").as_bytes()),
-        BundleMember::resource_status(operational.as_bytes()),
-        BundleMember::maintenance_status(operational.as_bytes()),
-        BundleMember::listener_status(operational.as_bytes()),
-        BundleMember::backup_repository_status(operational.as_bytes()),
-        BundleMember::environment(format!("os={}\narch={}\ndata_directory_identity={}\ndata_directory_metadata_bytes={bytes}\n", std::env::consts::OS, std::env::consts::ARCH, data_directory).as_bytes()),
+        BundleMember::operational_logs_with_omission(b"inspection_owner=operational_log_runtime\navailability=not_persisted\n", "operational_log_owner_unavailable"),
+        BundleMember::catalog_summary(catalog.as_bytes()),
+        BundleMember::resource_status(resource.as_bytes()),
+        BundleMember::maintenance_status(maintenance.as_bytes()),
+        BundleMember::listener_status(listeners.as_bytes()),
+        BundleMember::backup_repository_status(backup.as_bytes()),
+        BundleMember::environment(format!("os={}\narch={}\ndata_directory_identity={}\ndata_directory_metadata_bytes={data_directory_metadata_bytes}\n", std::env::consts::OS, std::env::consts::ARCH, data_directory).as_bytes()),
         BundleMember::doctor_report(doctor.as_bytes()),
         BundleMember::sanitized_crash_records_with_omissions(crash.render().as_bytes(), crash.omissions()),
     ])
+}
+
+const COMPATIBILITY_INPUTS_SCOPE: &str = "Cargo.lock,Cargo.toml,crates/positron/Cargo.toml,api/positron/v1/positron.proto,api/positron/v1/http.json,configuration/schema.json";
+const COMPATIBILITY_INPUTS: [(&str, &[u8]); 6] = [
+    ("Cargo.lock", include_bytes!("../../../Cargo.lock")),
+    ("Cargo.toml", include_bytes!("../../../Cargo.toml")),
+    (
+        "crates/positron/Cargo.toml",
+        include_bytes!("../Cargo.toml"),
+    ),
+    (
+        "api/positron/v1/positron.proto",
+        include_bytes!("../../../api/positron/v1/positron.proto"),
+    ),
+    (
+        "api/positron/v1/http.json",
+        include_bytes!("../../../api/positron/v1/http.json"),
+    ),
+    (
+        "configuration/schema.json",
+        include_bytes!("../../../configuration/schema.json"),
+    ),
+];
+
+/// Locally reproducible compatibility evidence for exactly the declared six
+/// inputs. It is not a complete source-tree or release-build identity.
+fn compatibility_manifest_evidence() -> Result<String, ()> {
+    let schema_digest = positron_api::generated::SchemaDigest::canonical().as_str();
+    let configuration_schema_digest = hex(include_bytes!("../../../configuration/schema.json"))?;
+    let compatibility_inputs_sha256 = compatibility_inputs_sha256()?;
+    Ok(format!(
+        "compatibility_manifest_version=1\nproduct=positron\nproduct_version={}\napi_package=positron.v1\napi_schema_digest={schema_digest}\nconfiguration_schema_digest={configuration_schema_digest}\nstorage_catalog_readable_format_epochs={},{}\nstorage_catalog_writable_format_epochs={},{}\nquery_contract=not_shipped\nreceiver_contract=not_shipped\ncrd_contract=not_shipped\noperator_contract=not_shipped\nbackup_contract=not_shipped\nmigration_graph=not_shipped\ncompatibility_inputs_sha256={compatibility_inputs_sha256}\ncompatibility_inputs_scope={COMPATIBILITY_INPUTS_SCOPE}\nsource_build_state=not_captured\nsource_build_evidence_scope=unavailable\nsource_build_evidence_owner=release_pipeline\n",
+        env!("CARGO_PKG_VERSION"),
+        positron_kernel::FormatEpoch::CATALOG_V1.value(),
+        positron_kernel::FormatEpoch::CATALOG_V2.value(),
+        positron_kernel::FormatEpoch::CATALOG_V1.value(),
+        positron_kernel::FormatEpoch::CATALOG_V2.value(),
+    ))
+}
+
+/// Product identity states the unavailable source-build provenance owner
+/// instead of inferring it from compatibility inputs.
+fn product_identity_evidence() -> Result<String, ()> {
+    let compatibility_inputs_sha256 = compatibility_inputs_sha256()?;
+    Ok(format!(
+        "product=positron\nproduct_version={}\nproduct_identity_source=workspace_package\napi_package=positron.v1\nschema_digest={}\ncatalog_writable_format_epochs={},{}\ncompatibility_inputs_sha256={compatibility_inputs_sha256}\ncompatibility_inputs_scope={COMPATIBILITY_INPUTS_SCOPE}\nsource_build_state=not_captured\nsource_build_evidence_scope=unavailable\nsource_build_evidence_owner=release_pipeline\n",
+        env!("CARGO_PKG_VERSION"),
+        positron_api::generated::SchemaDigest::canonical().as_str(),
+        positron_kernel::FormatEpoch::CATALOG_V1.value(),
+        positron_kernel::FormatEpoch::CATALOG_V2.value(),
+    ))
+}
+
+fn compatibility_inputs_sha256() -> Result<String, ()> {
+    let mut digest = Sha256::new();
+    for (scope, bytes) in COMPATIBILITY_INPUTS {
+        digest.update(scope.as_bytes());
+        digest.update([0]);
+        digest.update(u64::try_from(bytes.len()).map_err(|_| ())?.to_be_bytes());
+        digest.update(bytes);
+    }
+    encode_bytes(&digest.finalize())
 }
 
 fn finding_code(report: &str) -> &str {
@@ -270,34 +398,76 @@ fn finding_code(report: &str) -> &str {
         .unwrap_or("DOCTOR_REPORT_UNAVAILABLE")
 }
 
-fn offline_doctor_report(paths: &BootstrapPaths, maximum_tenants: u16) -> String {
-    match verify_offline_integrity(paths, maximum_tenants) {
-        Ok(report) if report.is_verified() => {
-            "report_version=1\nmode=offline\nstatus=healthy\nfinding_code=DOCTOR_INTEGRITY_VERIFIED\nseverity=info\nevidence_scope=primary_data_volume\n".to_owned()
+fn report_field<'a>(report: &'a str, key: &str) -> Option<&'a str> {
+    report.lines().find_map(|line| {
+        line.strip_prefix(key)
+            .and_then(|value| value.strip_prefix('='))
+    })
+}
+
+/// A signed bundle already holds the sole Storage Kernel authority through
+/// `InstanceBootstrap::reopen`. Re-acquiring it for the CLI's standalone
+/// offline verifier would manufacture a storage-lock failure, so this report
+/// uses only the already-opened authenticated bootstrap, Catalog, and
+/// governor authorities.
+fn owned_bundle_doctor_report(facts: DoctorRuntimeFacts, resources: ResourceSnapshot) -> String {
+    let pressure = match resources.disk_pressure() {
+        DiskPressureState::Healthy => "healthy",
+        DiskPressureState::SoftPressure => "soft",
+        DiskPressureState::HardPressure => "hard",
+    };
+    let verified = facts.key_custody_verified() && facts.catalog_bootstrap_verified();
+    let mut report = format!(
+        "report_version=1\nmode=offline_owned_bundle\nstatus=inspection_partial\nfinding_code=DOCTOR_BUNDLE_OWNER_VERIFIED\nseverity={}\nevidence_scope=exclusive_primary_data_volume_ownership\nkey_custody={}\ncatalog_bootstrap={}\ncatalog_generation={}\nsafe_command={}\n",
+        if verified { "info" } else { "error" },
+        if facts.key_custody_verified() {
+            "verified"
+        } else {
+            "unavailable"
         },
-        Ok(_) => "report_version=1\nmode=offline\nstatus=fenced\nfinding_code=DOCTOR_INTEGRITY_FENCED\nseverity=error\nevidence_scope=primary_data_volume\n".to_owned(),
-        Err(failure) => format!(
-            "report_version=1\nmode=offline\nstatus={}\nfinding_code={}\nseverity=error\nevidence_scope=primary_data_volume\n",
-            match failure {
-                OfflineIntegrityFailure::OwnershipLocked => "storage_locked",
-                OfflineIntegrityFailure::BootstrapUnavailable => "bootstrap_unavailable",
-                OfflineIntegrityFailure::KeyUnavailable => "key_unavailable",
-                OfflineIntegrityFailure::CatalogUnavailable => "catalog_busy",
-                OfflineIntegrityFailure::CorruptState => "fenced",
-                OfflineIntegrityFailure::CapacityUnavailable => "capacity_unavailable",
-                OfflineIntegrityFailure::StorageUnavailable => "storage_unavailable",
-            },
-            match failure {
-                OfflineIntegrityFailure::OwnershipLocked => "DOCTOR_STORAGE_LOCKED",
-                OfflineIntegrityFailure::BootstrapUnavailable => "DOCTOR_BOOTSTRAP_UNAVAILABLE",
-                OfflineIntegrityFailure::KeyUnavailable => "DOCTOR_KEY_UNAVAILABLE",
-                OfflineIntegrityFailure::CatalogUnavailable => "DOCTOR_CATALOG_BUSY",
-                OfflineIntegrityFailure::CorruptState => "DOCTOR_INTEGRITY_FENCED",
-                OfflineIntegrityFailure::CapacityUnavailable => "DOCTOR_CAPACITY_UNAVAILABLE",
-                OfflineIntegrityFailure::StorageUnavailable => "DOCTOR_STORAGE_UNAVAILABLE",
-            },
+        if facts.catalog_bootstrap_verified() {
+            "verified"
+        } else {
+            "unavailable"
+        },
+        facts.catalog_generation(),
+        if verified {
+            "none"
+        } else {
+            "inspect_storage_without_mutation"
+        },
+    );
+    report.push_str("finding_code=DOCTOR_CONFIGURATION_RESOLVED\nseverity=info\nevidence_scope=effective_configuration\nsafe_command=none\n");
+    report.push_str("finding_code=DOCTOR_INTEGRITY_FRONTIERS_UNAVAILABLE_OWNED_BUNDLE\nseverity=info\nevidence_scope=offline_integrity_verifier\ninspection_state=not_run_while_bundle_ownership_is_held\nsafe_command=positron_doctor_offline_after_bundle\n");
+    report.push_str(&format!("finding_code=DOCTOR_STORAGE_CAPACITY_OBSERVED\nseverity=info\nevidence_scope=temporary_offline_resource_authority\nusable_disk_bytes={}\ndisk_pressure={pressure}\nsafe_command=none\n", resources.usable_disk_bytes()));
+    report.push_str("finding_code=DOCTOR_GOVERNOR_RUNTIME_UNAVAILABLE_OFFLINE\nseverity=info\nevidence_scope=runtime_resource_governor\nruntime_state=not_observable_offline\nsafe_command=start_positron_for_live_governor_status\n");
+    for (code, owner, command) in [
+        (
+            "DOCTOR_MAINTENANCE_RUNTIME_UNAVAILABLE_OFFLINE",
+            "maintenance_runtime",
+            "start_positron_for_maintenance_status",
         ),
+        (
+            "DOCTOR_OPERATIONS_LEASES_UNAVAILABLE_OFFLINE",
+            "durable_operation_runtime",
+            "start_positron_for_operations_status",
+        ),
+        (
+            "DOCTOR_LISTENERS_UNAVAILABLE_OFFLINE",
+            "listener_runtime",
+            "start_positron_for_listener_status",
+        ),
+        (
+            "DOCTOR_HEALTH_UNAVAILABLE_OFFLINE",
+            "process_health_runtime",
+            "start_positron_for_process_health",
+        ),
+    ] {
+        report.push_str(&format!("finding_code={code}\nseverity=info\nevidence_scope={owner}\nruntime_state=not_observable_offline\nsafe_command={command}\n"));
     }
+    let backup = facts.backup_repository().label();
+    report.push_str(&format!("finding_code=DOCTOR_BACKUP_REPOSITORY_NOT_CONFIGURED\nseverity=warning\nevidence_scope=authenticated_catalog_backup_binding\nbackup_repository={backup}\nsafe_command=configure_backup_repository\n"));
+    report
 }
 
 const fn key_unavailable_doctor_report() -> &'static str {
@@ -328,7 +498,11 @@ fn diagnostics_claim(output_limit: usize) -> Result<WorkClaim, BundleFailure> {
 fn authenticated_inspection<T>(
     paths: &BootstrapPaths,
     output_limit: usize,
-    collect: impl FnOnce(positron_kernel::ExportManifestSigner, String) -> Result<T, BundleFailure>,
+    collect: impl FnOnce(
+        positron_kernel::ExportManifestSigner,
+        String,
+        String,
+    ) -> Result<T, BundleFailure>,
 ) -> Result<T, BundleFailure> {
     let input = io::stdin();
     if input.is_terminal() {
@@ -361,6 +535,13 @@ fn authenticated_inspection<T>(
     let facts = instance
         .doctor_runtime_facts(actor)
         .map_err(|_| BundleFailure::InspectionUnavailable)?;
+    let owned_report = owned_bundle_doctor_report(
+        facts,
+        instance
+            .resource_governor()
+            .inspect()
+            .map_err(|_| BundleFailure::InspectionUnavailable)?,
+    );
     let signer = instance
         .support_bundle_manifest_signer(actor)
         .map_err(|_| BundleFailure::InspectionUnavailable)?;
@@ -379,7 +560,7 @@ fn authenticated_inspection<T>(
         facts.catalog_generation(),
         facts.backup_repository().label(),
     );
-    let collected = collect(signer, operational);
+    let collected = collect(signer, operational, owned_report);
     drop(reservation);
     collected
 }
@@ -556,6 +737,23 @@ enum Class {
     CrashRecords,
 }
 impl Class {
+    #[cfg(test)]
+    const ALL: [Self; 14] = [
+        Self::EffectiveConfiguration,
+        Self::CompatibilityManifest,
+        Self::ProductIdentity,
+        Self::HealthState,
+        Self::OperationalTelemetry,
+        Self::OperationalLogs,
+        Self::CatalogSummary,
+        Self::ResourceStatus,
+        Self::MaintenanceStatus,
+        Self::ListenerStatus,
+        Self::BackupRepositoryStatus,
+        Self::Environment,
+        Self::Doctor,
+        Self::CrashRecords,
+    ];
     const fn path(self) -> &'static str {
         match self {
             Self::EffectiveConfiguration => "effective-configuration.txt",
@@ -572,6 +770,24 @@ impl Class {
             Self::Environment => "environment.txt",
             Self::Doctor => "doctor-report.txt",
             Self::CrashRecords => "sanitized-crash-records.txt",
+        }
+    }
+    const fn report_name(self) -> &'static str {
+        match self {
+            Self::EffectiveConfiguration => "effective_configuration",
+            Self::CompatibilityManifest => "compatibility_manifest",
+            Self::ProductIdentity => "product_identity",
+            Self::HealthState => "health_state",
+            Self::OperationalTelemetry => "operational_telemetry",
+            Self::OperationalLogs => "operational_logs",
+            Self::CatalogSummary => "catalog_summary",
+            Self::ResourceStatus => "resource_status",
+            Self::MaintenanceStatus => "maintenance_status",
+            Self::ListenerStatus => "listener_status",
+            Self::BackupRepositoryStatus => "backup_repository_status",
+            Self::Environment => "environment",
+            Self::Doctor => "doctor",
+            Self::CrashRecords => "sanitized_crash_records",
         }
     }
 }
@@ -660,6 +876,7 @@ impl BundleMember {
 pub(crate) struct BundleLimits {
     count: usize,
     bytes: usize,
+    elapsed_limit: Duration,
 }
 
 /// Only native age v1 X25519 recipients are admitted. The bounded typed set
@@ -696,8 +913,16 @@ impl AgeRecipients {
 impl BundleLimits {
     pub(crate) fn new(count: usize, bytes: usize) -> Result<Self, ()> {
         (count > 0 && bytes >= TAR_RECORD)
-            .then_some(Self { count, bytes })
+            .then_some(Self {
+                count,
+                bytes,
+                elapsed_limit: DEFAULT_ELAPSED_LIMIT,
+            })
             .ok_or(())
+    }
+    const fn with_elapsed_limit(mut self, elapsed_limit: Duration) -> Self {
+        self.elapsed_limit = elapsed_limit;
+        self
     }
 }
 
@@ -738,14 +963,14 @@ impl SupportBundle {
         input: impl IntoIterator<Item = BundleMember>,
         limits: BundleLimits,
     ) -> Result<Self, ()> {
-        Self::build_with_plaintext_policy(input, limits, false, "not_applied")
+        Self::build_with_export_policy(input, limits, false, "not_applied", "not_applied")
     }
     #[cfg(test)]
     pub(crate) fn build_for_explicit_plaintext(
         input: impl IntoIterator<Item = BundleMember>,
         limits: BundleLimits,
     ) -> Result<Self, ()> {
-        Self::build_with_plaintext_policy(input, limits, true, "not_applied")
+        Self::build_with_export_policy(input, limits, true, "plaintext_explicit", "not_applied")
     }
     pub(crate) fn build_authenticated(
         input: impl IntoIterator<Item = BundleMember>,
@@ -754,7 +979,8 @@ impl SupportBundle {
     ) -> Result<Self, ()> {
         match authentication {
             ManifestAuthentication::Signed(signer) => {
-                let bundle = Self::build_with_plaintext_policy(input, limits, false, "signed")?;
+                let bundle =
+                    Self::build_with_export_policy(input, limits, false, "age_x25519", "signed")?;
                 // The signature is over the canonical manifest bytes retained
                 // in the standard tar archive; opaque signer custody remains
                 // wholly in Runtime/Kernel.
@@ -763,10 +989,11 @@ impl SupportBundle {
                 bundle.attach_signature(signature)
             },
             ManifestAuthentication::UnsignedKeyUnavailableOffline => {
-                Self::build_with_plaintext_policy(
+                Self::build_with_export_policy(
                     input,
                     limits,
                     false,
+                    "age_x25519",
                     "unsigned_key_unavailable_offline",
                 )
             },
@@ -779,24 +1006,32 @@ impl SupportBundle {
     ) -> Result<Self, ()> {
         match authentication {
             ManifestAuthentication::Signed(signer) => {
-                let bundle = Self::build_with_plaintext_policy(input, limits, true, "signed")?;
+                let bundle = Self::build_with_export_policy(
+                    input,
+                    limits,
+                    true,
+                    "plaintext_explicit",
+                    "signed",
+                )?;
                 let signature = signer.sign(&bundle.manifest_bytes()?).map_err(|_| ())?;
                 bundle.attach_signature(signature)
             },
             ManifestAuthentication::UnsignedKeyUnavailableOffline => {
-                Self::build_with_plaintext_policy(
+                Self::build_with_export_policy(
                     input,
                     limits,
                     true,
+                    "plaintext_explicit",
                     "unsigned_key_unavailable_offline",
                 )
             },
         }
     }
-    fn build_with_plaintext_policy(
+    fn build_with_export_policy(
         input: impl IntoIterator<Item = BundleMember>,
         limits: BundleLimits,
         plaintext_warning: bool,
+        encryption_state: &'static str,
         signature_state: &'static str,
     ) -> Result<Self, ()> {
         let mut selected = Vec::new();
@@ -829,20 +1064,23 @@ impl SupportBundle {
         if unknown != 0 {
             once(&mut omissions, "unknown_member_class");
         }
+        let included_classes = selected
+            .iter()
+            .map(|(class, _)| class.report_name())
+            .collect::<Vec<_>>()
+            .join(",");
         let report = RedactionReport {
             unknown,
             omissions,
             plaintext_warning,
         };
         let redaction = format!(
-            "policy_version={POLICY}\nexcluded_unknown_members={}\nomissions={}\nencryption={}\nplaintext_export_warning={}\nsignature={signature_state}\n",
+            "policy_version={POLICY}\nincluded_classes={included_classes}\nidentifier_pseudonymization=ephemeral_per_bundle\nmember_count_limit={}\narchive_byte_limit={}\nelapsed_time_limit_seconds={}\nexcluded_unknown_members={}\nomissions={}\nencryption={encryption_state}\nplaintext_export_warning={}\nsignature={signature_state}\n",
+            limits.count,
+            limits.bytes,
+            limits.elapsed_limit.as_secs(),
             report.unknown,
             report.omissions.join(","),
-            if plaintext_warning {
-                "plaintext_explicit"
-            } else {
-                "not_applied"
-            },
             plaintext_warning
         );
         let mut manifest = format!(
@@ -854,12 +1092,12 @@ impl SupportBundle {
                 "member={} bytes={} sha256={}\n",
                 class.path(),
                 bytes.len(),
-                hex(bytes)
+                hex(bytes)?
             ));
         }
         manifest.push_str(&format!(
             "redaction_report_sha256={}\n",
-            hex(redaction.as_bytes())
+            hex(redaction.as_bytes())?
         ));
         let meta = (BLOCK + blocks(manifest.len())).saturating_add(BLOCK + blocks(redaction.len()));
         if projected.saturating_add(meta) > limits.bytes {
@@ -960,7 +1198,7 @@ impl SupportBundle {
             .ok_or(())?
             .strip_prefix("signature=")
             .ok_or(())?;
-        if fields.next().is_some() || key != encode_bytes(&expected.public_key()) {
+        if fields.next().is_some() || key != encode_bytes(&expected.public_key())? {
             return Err(());
         }
         let signature = positron_kernel::ExportManifestSignature::new(expected, decode_64(bytes)?)
@@ -989,7 +1227,7 @@ impl SupportBundle {
                 .iter()
                 .find(|(actual, _)| actual == path)
                 .ok_or(())?;
-            if actual.1.len() != count || digest != hex(&actual.1) {
+            if actual.1.len() != count || digest != hex(&actual.1)? {
                 return Err(());
             }
         }
@@ -1004,8 +1242,8 @@ impl SupportBundle {
     ) -> Result<Self, ()> {
         let evidence = format!(
             "integrity_identity={}\nsignature={}\n",
-            encode_bytes(&signature.integrity_identity().public_key()),
-            encode_bytes(&signature.bytes())
+            encode_bytes(&signature.integrity_identity().public_key())?,
+            encode_bytes(&signature.bytes())?
         );
         let mut rebuilt = Vec::new();
         let mut source = tar::Archive::new(self.archive.as_slice());
@@ -1030,15 +1268,26 @@ impl SupportBundle {
         Ok(self)
     }
 
-    pub(crate) fn write_plaintext_explicitly(&self, path: &std::path::Path) -> Result<(), ()> {
-        output::write_new_owner_only(path, &self.archive)
-    }
-    pub(crate) fn write_encrypted(
+    fn write_plaintext_explicitly(
         &self,
-        path: &std::path::Path,
+        destination: &output::OutputDestination,
+    ) -> Result<(), ()> {
+        output::write_new_owner_only(destination, &self.archive)
+    }
+    #[cfg(test)]
+    fn write_plaintext_explicitly_with_after_close_hook(
+        &self,
+        destination: &output::OutputDestination,
+        after_close: impl FnOnce(),
+    ) -> Result<(), ()> {
+        output::write_new_owner_only_with_after_close_hook(destination, &self.archive, after_close)
+    }
+    fn write_encrypted(
+        &self,
+        destination: &output::OutputDestination,
         ciphertext: &[u8],
     ) -> Result<(), ()> {
-        output::write_new_owner_only(path, ciphertext)
+        output::write_new_owner_only(destination, ciphertext)
     }
 }
 fn append(tar: &mut tar::Builder<&mut Vec<u8>>, path: &str, bytes: &[u8]) -> io::Result<()> {
@@ -1059,22 +1308,22 @@ fn once(v: &mut Vec<&'static str>, value: &'static str) {
         v.push(value);
     }
 }
-fn hex(bytes: &[u8]) -> String {
+fn hex(bytes: &[u8]) -> Result<String, ()> {
     let mut s = String::with_capacity(64);
     for b in Sha256::digest(bytes) {
         use std::fmt::Write as _;
-        let _ignored = write!(&mut s, "{b:02x}");
+        write!(&mut s, "{b:02x}").map_err(|_| ())?;
     }
-    s
+    Ok(s)
 }
 
-fn encode_bytes(bytes: &[u8]) -> String {
+fn encode_bytes(bytes: &[u8]) -> Result<String, ()> {
     let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
         use std::fmt::Write as _;
-        let _ignored = write!(&mut encoded, "{byte:02x}");
+        write!(&mut encoded, "{byte:02x}").map_err(|_| ())?;
     }
-    encoded
+    Ok(encoded)
 }
 
 #[cfg(test)]
@@ -1100,7 +1349,8 @@ const fn hex_digit(value: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgeRecipients, BundleLimits, BundleMember, BundleOptions, SupportBundle};
+    use super::{AgeRecipients, BundleLimits, BundleMember, BundleOptions, SupportBundle, output};
+    use sha2::{Digest, Sha256};
     use std::io::Read;
     use std::{
         fs,
@@ -1120,6 +1370,65 @@ mod tests {
         let rendered = String::from_utf8_lossy(bundle.archive());
         assert!(rendered.contains("effective-configuration.txt"));
         assert!(rendered.contains("sanitized-crash-records.txt"));
+    }
+
+    #[test]
+    fn compatibility_and_product_evidence_describe_their_limited_build_inputs() {
+        let manifest = super::compatibility_manifest_evidence().expect("compatibility evidence");
+        let identity = super::product_identity_evidence().expect("product identity");
+        let expected_digest = {
+            let mut digest = Sha256::new();
+            for (scope, bytes) in super::COMPATIBILITY_INPUTS {
+                digest.update(scope.as_bytes());
+                digest.update([0]);
+                digest.update(
+                    u64::try_from(bytes.len())
+                        .expect("input length")
+                        .to_be_bytes(),
+                );
+                digest.update(bytes);
+            }
+            format!("{:x}", digest.finalize())
+        };
+        assert!(manifest.contains("compatibility_manifest_version=1"));
+        for evidence in [&manifest, &identity] {
+            assert!(evidence.contains(&format!("compatibility_inputs_sha256={expected_digest}")));
+            assert!(evidence.contains(
+                "compatibility_inputs_scope=Cargo.lock,Cargo.toml,crates/positron/Cargo.toml,api/positron/v1/positron.proto,api/positron/v1/http.json,configuration/schema.json"
+            ));
+            assert!(evidence.contains("source_build_state=not_captured"));
+            assert!(evidence.contains("source_build_evidence_scope=unavailable"));
+            assert!(evidence.contains("source_build_evidence_owner=release_pipeline"));
+            assert!(!evidence.contains("source_build_identity="));
+        }
+    }
+
+    #[test]
+    fn canonical_release_identity_marks_unshipped_facets_as_not_shipped() {
+        let manifest = super::compatibility_manifest_evidence().expect("compatibility evidence");
+        for claim in [
+            "query_contract=not_shipped",
+            "receiver_contract=not_shipped",
+            "crd_contract=not_shipped",
+            "operator_contract=not_shipped",
+            "backup_contract=not_shipped",
+            "migration_graph=not_shipped",
+        ] {
+            assert!(manifest.contains(claim), "missing {claim}");
+        }
+    }
+
+    #[test]
+    fn canonical_member_inventory_has_exactly_fourteen_closed_product_families() {
+        let paths = super::Class::ALL.map(|class| class.path());
+        assert_eq!(paths.len(), 14);
+        assert_eq!(paths[0], "effective-configuration.txt");
+        assert_eq!(paths[1], "compatibility-manifest.txt");
+        assert_eq!(paths[2], "product-identity.txt");
+        assert_eq!(paths[13], "sanitized-crash-records.txt");
+        for path in paths {
+            assert!(!path.contains("unavailable"));
+        }
     }
 
     #[test]
@@ -1154,7 +1463,7 @@ mod tests {
                 BundleMember::unclassified(b"tenant-telemetry-canary"),
                 BundleMember::unclassified(b"api-key-secret-canary"),
             ],
-            BundleLimits::new(2, 12_000).expect("limits"),
+            BundleLimits::new(2, 20_000).expect("limits"),
         )
         .expect("bundle");
         assert_eq!(bundle.included_member_count(), 2);
@@ -1217,6 +1526,41 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_signed_bundle_report_declares_classes_pseudonymization_and_real_export_state() {
+        let bundle = SupportBundle::build_authenticated(
+            [
+                BundleMember::doctor_report(b"finding=verified"),
+                BundleMember::health_state(b"health=ready"),
+            ],
+            BundleLimits::new(2, 20_000).expect("limits"),
+            super::ManifestAuthentication::UnsignedKeyUnavailableOffline,
+        )
+        .expect("bundle");
+        let archive = bundle.archive();
+        for expected in [
+            b"included_classes=doctor,health_state".as_slice(),
+            b"identifier_pseudonymization=ephemeral_per_bundle".as_slice(),
+            b"archive_byte_limit=20000".as_slice(),
+            b"elapsed_time_limit_seconds=30".as_slice(),
+            b"encryption=age_x25519".as_slice(),
+            b"signature=unsigned_key_unavailable_offline".as_slice(),
+        ] {
+            assert!(
+                archive
+                    .windows(expected.len())
+                    .any(|window| window == expected),
+                "missing {}",
+                String::from_utf8_lossy(expected)
+            );
+        }
+        assert!(
+            !archive
+                .windows(b"encryption=not_applied".len())
+                .any(|window| window == b"encryption=not_applied")
+        );
+    }
+
+    #[test]
     fn native_age_recipient_parser_rejects_malformed_and_empty_recipient_sets() {
         assert!(AgeRecipients::parse(std::iter::empty::<&str>()).is_err());
         assert!(AgeRecipients::parse(["not-an-age-recipient"]).is_err());
@@ -1240,6 +1584,64 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_signed_bundle_decrypts_to_a_report_bound_by_its_manifest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
+        use positron_kernel::MountQualification;
+        use positron_runtime::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-support-encrypted-signed-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        fs::create_dir(&root)?;
+        fs::create_dir(&data)?;
+        fs::create_dir(&secrets)?;
+        #[cfg(unix)]
+        fs::set_permissions(
+            &secrets,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
+        let paths = BootstrapPaths::new(&data, &secrets, MountQualification::LocalHost)?;
+        drop(InstanceBootstrap::initialize(
+            &paths,
+            InitializationPlan::non_interactive(),
+        )?);
+        let claim = InstanceBootstrap::claim(&paths)?;
+        let instance = InstanceBootstrap::reopen(&paths)?;
+        let actor = instance.attribute(
+            PresentedCredential::parse(claim.secret())?,
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )?;
+        let signer = instance.support_bundle_manifest_signer(actor)?;
+        let bundle = SupportBundle::build_authenticated(
+            [BundleMember::doctor_report(b"finding=verified")],
+            BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
+            super::ManifestAuthentication::Signed(&signer),
+        )
+        .map_err(|_| "bundle")?;
+        let recipient = age::x25519::Identity::generate();
+        let ciphertext = AgeRecipients::parse([recipient.to_public().to_string()])
+            .map_err(|_| "recipient")?
+            .encrypt(bundle.archive())
+            .map_err(|_| "encrypt")?;
+        let decryptor = age::Decryptor::new(&ciphertext[..])?;
+        let mut reader = decryptor.decrypt(std::iter::once(&recipient as &dyn age::Identity))?;
+        let mut archive = Vec::new();
+        reader.read_to_end(&mut archive)?;
+        SupportBundle::verify_signed_archive(&archive, signer.identity()).map_err(|_| "binding")?;
+        assert!(
+            archive
+                .windows(b"encryption=age_x25519".len())
+                .any(|window| window == b"encryption=age_x25519")
+        );
+        drop(instance);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn ciphertext_budget_rejects_age_header_and_payload_overflow() {
         let identity = age::x25519::Identity::generate();
         let recipients =
@@ -1253,14 +1655,23 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("positron-support-{nonce}.tar"));
+        let root = std::env::temp_dir().join(format!("positron-support-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        let external = root.join("external");
+        fs::create_dir_all(&data).expect("data root");
+        fs::create_dir_all(&secrets).expect("secrets root");
+        fs::create_dir_all(&external).expect("external root");
+        let path = external.join("bundle.tar");
+        let destination =
+            output::prepare_destination(&path, &data, &secrets).expect("validated destination");
         let bundle = SupportBundle::build_for_explicit_plaintext(
             [BundleMember::doctor_report(b"safe")],
             BundleLimits::new(1, 12_000).expect("limits"),
         )
         .expect("bundle");
         bundle
-            .write_plaintext_explicitly(&path)
+            .write_plaintext_explicitly(&destination)
             .expect("new owner-only output");
         assert!(bundle.redaction_report().plaintext_warning());
         assert!(
@@ -1270,7 +1681,7 @@ mod tests {
                 .any(|entry| entry == b"plaintext_export_warning=true")
         );
         assert_eq!(fs::read(&path).expect("archive"), bundle.archive());
-        assert!(bundle.write_plaintext_explicitly(&path).is_err());
+        assert!(bundle.write_plaintext_explicitly(&destination).is_err());
         #[cfg(unix)]
         assert_eq!(
             std::os::unix::fs::PermissionsExt::mode(
@@ -1278,7 +1689,208 @@ mod tests {
             ) & 0o777,
             0o600
         );
-        fs::remove_file(path).expect("cleanup");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn encrypted_external_export_is_owner_only_and_never_overwrites()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-support-encrypted-output-{nonce}"));
+        let output_root = root.join("external");
+        fs::create_dir_all(&output_root)?;
+        let output = output_root.join("bundle.age");
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        let destination =
+            output::prepare_destination(&output, &data, &secrets).map_err(|_| "destination")?;
+        let bundle = SupportBundle::build_authenticated(
+            [BundleMember::doctor_report(b"safe")],
+            BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
+            super::ManifestAuthentication::UnsignedKeyUnavailableOffline,
+        )
+        .map_err(|_| "bundle")?;
+        let identity = age::x25519::Identity::generate();
+        let ciphertext = AgeRecipients::parse([identity.to_public().to_string()])
+            .map_err(|_| "recipient")?
+            .encrypt(bundle.archive())
+            .map_err(|_| "encrypt")?;
+        bundle
+            .write_encrypted(&destination, &ciphertext)
+            .map_err(|_| "write")?;
+        assert_eq!(fs::read(&output)?, ciphertext);
+        assert!(bundle.write_encrypted(&destination, &ciphertext).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_output_refuses_data_and_secrets_roots_through_relative_and_symlink_aliases()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-support-output-root-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        let external = root.join("external");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        fs::create_dir_all(&external)?;
+        assert!(output::prepare_destination(&data.join("bundle.age"), &data, &secrets).is_err());
+        assert!(
+            output::prepare_destination(&secrets.join("nested/bundle.age"), &data, &secrets)
+                .is_err()
+        );
+        #[cfg(unix)]
+        {
+            let alias = root.join("data-alias");
+            std::os::unix::fs::symlink(&data, &alias)?;
+            assert!(
+                output::prepare_destination(&alias.join("bundle.age"), &data, &secrets).is_err()
+            );
+        }
+        assert!(output::prepare_destination(&external.join("bundle.age"), &data, &secrets).is_ok());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_destination_cannot_be_redirected_into_a_managed_root_by_parent_swap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-support-race-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        let external = root.join("external");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        fs::create_dir_all(&external)?;
+        let output = external.join("bundle.tar");
+        let destination =
+            output::prepare_destination(&output, &data, &secrets).map_err(|_| "destination")?;
+        let original_external = root.join("external-before-swap");
+        fs::rename(&external, &original_external)?;
+        std::os::unix::fs::symlink(&data, &external)?;
+
+        let bundle = SupportBundle::build_for_explicit_plaintext(
+            [BundleMember::doctor_report(b"safe")],
+            BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
+        )
+        .map_err(|_| "bundle")?;
+        bundle
+            .write_plaintext_explicitly(&destination)
+            .map_err(|_| "write through held directory")?;
+
+        assert_eq!(
+            fs::read(original_external.join("bundle.tar"))?,
+            bundle.archive()
+        );
+        assert!(fs::symlink_metadata(data.join("bundle.tar")).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn output_preflight_rejects_a_directory_replaced_by_the_bound_data_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-support-rename-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        let external = root.join("external");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        fs::create_dir_all(&external)?;
+        let output = external.join("bundle.tar");
+        let parked_data = root.join("data-before-replace");
+        let parked_external = root.join("external-before-replace");
+        assert!(
+            output::prepare_destination_with_after_managed_root_hook(
+                &output,
+                &data,
+                &secrets,
+                || {
+                    fs::rename(&data, &parked_data).expect("park data");
+                    fs::rename(&external, &parked_external).expect("park external");
+                    fs::rename(&parked_data, &external).expect("replace external with data");
+                    fs::create_dir(&data).expect("replacement data path");
+                }
+            )
+            .is_err()
+        );
+        assert!(fs::symlink_metadata(external.join("bundle.tar")).is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_publication_removes_the_plaintext_temporary_archive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-support-cleanup-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        let external = root.join("external");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        fs::create_dir_all(&external)?;
+        let output = external.join("bundle.tar");
+        let destination =
+            output::prepare_destination(&output, &data, &secrets).map_err(|_| "destination")?;
+        fs::write(&output, b"existing")?;
+        let bundle = SupportBundle::build_for_explicit_plaintext(
+            [BundleMember::doctor_report(b"safe")],
+            BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
+        )
+        .map_err(|_| "bundle")?;
+        assert!(bundle.write_plaintext_explicitly(&destination).is_err());
+        assert!(fs::symlink_metadata(external.join(".bundle.tar.positron-new")).is_err());
+        assert_eq!(fs::read(&output)?, b"existing");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn public_plaintext_export_does_not_publish_a_post_close_temporary_symlink()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-support-swap-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        let external = root.join("external");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        fs::create_dir_all(&external)?;
+        let output = external.join("bundle.tar");
+        let destination =
+            output::prepare_destination(&output, &data, &secrets).map_err(|_| "destination")?;
+        let attacker = external.join("attacker.tar");
+        fs::write(&attacker, b"attacker-controlled")?;
+        let bundle = SupportBundle::build_for_explicit_plaintext(
+            [BundleMember::doctor_report(b"safe")],
+            BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
+        )
+        .map_err(|_| "bundle")?;
+
+        bundle
+            .write_plaintext_explicitly_with_after_close_hook(&destination, || {
+                std::os::unix::fs::symlink(&attacker, external.join(".bundle.tar.positron-new"))
+                    .expect("install former public temporary name after close");
+            })
+            .map_err(|_| "public export")?;
+
+        assert_eq!(fs::read(&output)?, bundle.archive());
+        assert!(!fs::symlink_metadata(&output)?.file_type().is_symlink());
+        assert!(
+            fs::symlink_metadata(external.join(".bundle.tar.positron-new"))?
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&attacker)?, b"attacker-controlled");
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -1286,16 +1898,16 @@ mod tests {
         let first = super::privacy::Pseudonymizer::new();
         let second = super::privacy::Pseudonymizer::new();
         assert_eq!(
-            first.pseudonymize("tenant-a"),
-            first.pseudonymize("tenant-a")
+            first.pseudonymize("tenant-a").expect("pseudonym"),
+            first.pseudonymize("tenant-a").expect("pseudonym")
         );
         assert_ne!(
-            first.pseudonymize("tenant-a"),
-            first.pseudonymize("tenant-b")
+            first.pseudonymize("tenant-a").expect("pseudonym"),
+            first.pseudonymize("tenant-b").expect("pseudonym")
         );
         assert_ne!(
-            first.pseudonymize("tenant-a"),
-            second.pseudonymize("tenant-a")
+            first.pseudonymize("tenant-a").expect("pseudonym"),
+            second.pseudonymize("tenant-a").expect("pseudonym")
         );
     }
 
@@ -1463,7 +2075,16 @@ mod tests {
     fn elapsed_deadline_prevents_plaintext_output_creation()
     -> Result<(), Box<dyn std::error::Error>> {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let output = std::env::temp_dir().join(format!("positron-support-deadline-{nonce}.tar"));
+        let root = std::env::temp_dir().join(format!("positron-support-deadline-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        let external = root.join("external");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        fs::create_dir_all(&external)?;
+        let output = external.join("bundle.tar");
+        let destination =
+            output::prepare_destination(&output, &data, &secrets).map_err(|_| "destination")?;
         let bundle = SupportBundle::build_for_explicit_plaintext(
             [BundleMember::doctor_report(b"safe")],
             BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
@@ -1484,10 +2105,60 @@ mod tests {
             .checked_sub(std::time::Duration::from_secs(2))
             .ok_or("clock")?;
         assert!(matches!(
-            super::write_bundle(&bundle, &options, started),
+            super::write_bundle(&bundle, &options, &destination, started),
             Err(super::BundleFailure::DeadlineExceeded)
         ));
         assert!(!output.exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn deadline_crossing_after_publication_succeeds_without_removing_a_replacement_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-support-cleanup-race-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        let external = root.join("external");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        fs::create_dir_all(&external)?;
+        let output = external.join("bundle.tar");
+        let destination =
+            output::prepare_destination(&output, &data, &secrets).map_err(|_| "destination")?;
+        let bundle = SupportBundle::build_for_explicit_plaintext(
+            [BundleMember::doctor_report(b"safe")],
+            BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
+        )
+        .map_err(|_| "bundle")?;
+
+        let options = super::BundleOptions {
+            config: std::path::PathBuf::from("unused"),
+            output: output.clone(),
+            recipients: Vec::new(),
+            plaintext_warning: true,
+            offline_key_unavailable: true,
+            output_limit: 12_000,
+            elapsed_limit: std::time::Duration::from_secs(1),
+            log_window: std::time::Duration::from_secs(1),
+            source_file_limit: 1,
+        };
+        super::write_bundle_with_after_publication_hook(
+            &bundle,
+            &options,
+            &destination,
+            std::time::Instant::now(),
+            || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                fs::remove_file(&output).expect("replace published output");
+                fs::write(&output, b"attacker replacement").expect("write replacement");
+            },
+        )
+        .map_err(|_| "post-publication deadline must not revoke successful publication")?;
+
+        assert_eq!(fs::read(&output)?, b"attacker replacement");
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 

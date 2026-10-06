@@ -1591,6 +1591,7 @@ dependencies = [
  "positron-runtime",
  "rand 0.8.8",
  "reqwest",
+ "rustix",
  "rustls",
  "serde_json",
  "sha2 0.10.9",

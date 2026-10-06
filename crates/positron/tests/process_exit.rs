@@ -90,6 +90,23 @@ fn offline_doctor_inspects_an_initialized_volume_without_changing_its_listing_or
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains("report_version=1\nmode=offline\nstatus=healthy\n"));
     assert!(stdout.contains("finding_code=DOCTOR_INTEGRITY_VERIFIED\nseverity=info\n"));
+    for finding in [
+        "DOCTOR_CONFIGURATION_RESOLVED",
+        "DOCTOR_STORAGE_CAPACITY_OBSERVED",
+        "DOCTOR_KEY_ENVELOPES_VERIFIED",
+        "DOCTOR_CATALOG_FRONTIERS_VERIFIED",
+        "DOCTOR_GOVERNOR_RUNTIME_UNAVAILABLE_OFFLINE",
+        "DOCTOR_MAINTENANCE_RUNTIME_UNAVAILABLE_OFFLINE",
+        "DOCTOR_OPERATIONS_LEASES_UNAVAILABLE_OFFLINE",
+        "DOCTOR_LISTENERS_UNAVAILABLE_OFFLINE",
+        "DOCTOR_BACKUP_REPOSITORY_NOT_CONFIGURED",
+        "DOCTOR_HEALTH_UNAVAILABLE_OFFLINE",
+    ] {
+        assert!(
+            stdout.contains(finding),
+            "missing offline doctor finding {finding}"
+        );
+    }
     assert!(!stdout.contains("pos_"));
     assert_eq!(before, volume_bytes(&roots.data)?);
     fs::remove_dir_all(root)?;
@@ -288,6 +305,44 @@ fn encrypted_support_bundle_is_signed_decryptable_collision_safe_and_read_only()
         !archive
             .windows(claim.secret().len())
             .any(|entry| entry == claim.secret().as_bytes())
+    );
+    assert!(
+        archive
+            .windows(b"finding_code=DOCTOR_BUNDLE_OWNER_VERIFIED".len())
+            .any(|entry| entry == b"finding_code=DOCTOR_BUNDLE_OWNER_VERIFIED"),
+        "the signed export must use the already-owned bootstrap inspection"
+    );
+    for fact in [
+        b"key_custody=verified".as_slice(),
+        b"catalog_bootstrap=verified".as_slice(),
+        b"catalog_generation=".as_slice(),
+        b"usable_disk_bytes=".as_slice(),
+        b"disk_pressure=".as_slice(),
+    ] {
+        assert!(
+            archive.windows(fact.len()).any(|entry| entry == fact),
+            "missing truthful signed Doctor fact: {:?}",
+            String::from_utf8_lossy(fact),
+        );
+    }
+    for finding in [
+        b"DOCTOR_CONFIGURATION_RESOLVED".as_slice(),
+        b"DOCTOR_STORAGE_CAPACITY_OBSERVED".as_slice(),
+        b"DOCTOR_GOVERNOR_RUNTIME_UNAVAILABLE_OFFLINE".as_slice(),
+        b"DOCTOR_MAINTENANCE_RUNTIME_UNAVAILABLE_OFFLINE".as_slice(),
+        b"DOCTOR_OPERATIONS_LEASES_UNAVAILABLE_OFFLINE".as_slice(),
+        b"DOCTOR_LISTENERS_UNAVAILABLE_OFFLINE".as_slice(),
+        b"DOCTOR_HEALTH_UNAVAILABLE_OFFLINE".as_slice(),
+        b"DOCTOR_BACKUP_REPOSITORY_NOT_CONFIGURED".as_slice(),
+        b"backup_repository=not_configured".as_slice(),
+    ] {
+        assert!(archive.windows(finding.len()).any(|entry| entry == finding));
+    }
+    assert!(
+        !archive
+            .windows(b"DOCTOR_STORAGE_LOCKED".len())
+            .any(|entry| entry == b"DOCTOR_STORAGE_LOCKED"),
+        "the bundle must not diagnose its own retained ownership as a lock"
     );
     assert_eq!(before_data, volume_bytes(&roots.data)?);
     assert_eq!(before_secrets, volume_bytes(&roots.secrets)?);

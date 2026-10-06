@@ -9,7 +9,10 @@ use std::{
 
 use positron_config::{ConfigurationInputs, resolve};
 use positron_kernel::MountQualification;
-use positron_runtime::{BootstrapPaths, OfflineIntegrityFailure, verify_offline_integrity};
+use positron_runtime::{
+    BootstrapPaths, OfflineDiskPressure, OfflineIntegrityFailure, OfflineIntegrityVerification,
+    verify_offline_integrity,
+};
 use zeroize::Zeroizing;
 
 const EXIT_USAGE: u8 = 2;
@@ -69,18 +72,7 @@ fn execute_offline(
                 } else {
                     ExitCode::from(EXIT_DIAGNOSTIC_FAILURE)
                 },
-                format!(
-                    "report_version=1\nmode=offline\nstatus={}\nfinding_code=DOCTOR_INTEGRITY_{}\nseverity={}\nevidence_scope=primary_data_volume\nsafe_command={}\nreport_count={}\n",
-                    if verified { "healthy" } else { "fenced" },
-                    if verified { "VERIFIED" } else { "FENCED" },
-                    if verified { "info" } else { "error" },
-                    if verified {
-                        "none"
-                    } else {
-                        "positron verify --offline"
-                    },
-                    report.reports().len(),
-                ),
+                offline_success_report(verified, &report),
             ))
         },
         Err(failure) => Ok((
@@ -88,6 +80,89 @@ fn execute_offline(
             offline_failure_report(failure),
         )),
     }
+}
+
+/// Renders only facts established by the exclusive offline inspection path.
+/// Storage ownership proves no Positron process currently owns this volume;
+/// runtime-only families are therefore explicitly unavailable, never inferred
+/// from stale files or placeholder values.
+pub(crate) fn offline_success_report(
+    verified: bool,
+    inspection: &OfflineIntegrityVerification,
+) -> String {
+    let facts = inspection.facts();
+    let pressure = match facts.disk_pressure() {
+        OfflineDiskPressure::Healthy => "healthy",
+        OfflineDiskPressure::Soft => "soft",
+        OfflineDiskPressure::Hard => "hard",
+    };
+    let mut report = format!(
+        "report_version=1\nmode=offline\nstatus={}\nfinding_code=DOCTOR_INTEGRITY_{}\nseverity={}\nevidence_scope=offline_integrity_reports\nsafe_command={}\nreport_count={}\nverified_scope_count={}\nfenced_scope_count={}\nincomplete_scope_count={}\n",
+        if verified { "healthy" } else { "fenced" },
+        if verified { "VERIFIED" } else { "FENCED" },
+        if verified { "info" } else { "error" },
+        if verified {
+            "none"
+        } else {
+            "positron verify --offline"
+        },
+        inspection.reports().len(),
+        facts.verified_scope_count(),
+        facts.fenced_scope_count(),
+        facts.incomplete_scope_count(),
+    );
+    report.push_str(
+        "finding_code=DOCTOR_CONFIGURATION_RESOLVED\nseverity=info\nevidence_scope=effective_configuration\nsafe_command=none\n",
+    );
+    report.push_str(&format!(
+        "finding_code=DOCTOR_STORAGE_CAPACITY_OBSERVED\nseverity=info\nevidence_scope=primary_data_volume\nusable_disk_bytes={}\ndisk_pressure={pressure}\nsafe_command=none\n",
+        facts.usable_disk_bytes(),
+    ));
+    report.push_str(&format!(
+        "finding_code=DOCTOR_KEY_ENVELOPES_VERIFIED\nseverity={}\nevidence_scope=authenticated_tenant_envelopes\nverified_envelope_count={}\nsafe_command={}\n",
+        if verified { "info" } else { "error" },
+        facts.verified_envelope_count(),
+        if verified { "none" } else { "positron verify --offline" },
+    ));
+    report.push_str(&format!(
+        "finding_code=DOCTOR_CATALOG_FRONTIERS_VERIFIED\nseverity={}\nevidence_scope=authenticated_catalog_snapshot\ncatalog_generation={}\nregistered_tenant_count={}\nreachable_scope_count={}\nquarantine_finding_count={}\nsafe_command={}\n",
+        if verified { "info" } else { "error" },
+        facts.catalog_generation(),
+        facts.registered_tenant_count(),
+        facts.reachable_scope_count(),
+        facts.quarantine_finding_count(),
+        if verified { "none" } else { "positron verify --offline" },
+    ));
+    let backup = facts.backup_repository().label();
+    report.push_str(&format!(
+        "finding_code=DOCTOR_BACKUP_REPOSITORY_NOT_CONFIGURED\nseverity=warning\nevidence_scope=authenticated_catalog_backup_binding\nbackup_repository={backup}\nsafe_command=configure_backup_repository\n"
+    ));
+    report.push_str(
+        "finding_code=DOCTOR_GOVERNOR_RUNTIME_UNAVAILABLE_OFFLINE\nseverity=info\nevidence_scope=runtime_resource_governor\nruntime_state=not_observable_offline\nsafe_command=start_positron_for_live_governor_status\n",
+    );
+    for (code, command) in [
+        (
+            "DOCTOR_MAINTENANCE_RUNTIME_UNAVAILABLE_OFFLINE",
+            "start_positron_for_maintenance_status",
+        ),
+        (
+            "DOCTOR_OPERATIONS_LEASES_UNAVAILABLE_OFFLINE",
+            "start_positron_for_operations_status",
+        ),
+        (
+            "DOCTOR_LISTENERS_UNAVAILABLE_OFFLINE",
+            "start_positron_for_listener_status",
+        ),
+        (
+            "DOCTOR_HEALTH_UNAVAILABLE_OFFLINE",
+            "start_positron_for_process_health",
+        ),
+    ] {
+        report.push_str(&format!(
+            "finding_code={code}\nseverity=info\nevidence_scope=exclusive_primary_data_volume_ownership\nruntime_state=not_observable_offline\nsafe_command={command}\n"
+        ));
+    }
+    report
 }
 
 fn execute_online(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {

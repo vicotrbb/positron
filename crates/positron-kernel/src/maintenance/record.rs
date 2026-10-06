@@ -698,7 +698,7 @@ mod tests {
         };
         let mut legacy = encode_record(&state).expect("v5 encoding").0;
         legacy.drain(171..180);
-        legacy[..RECORD_MAGIC.len()].copy_from_slice(OLDEST_RECORD_MAGIC);
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(ANCIENT_RECORD_MAGIC);
         // Magic, identity, class, system scope, trigger, emergency, priority,
         // then the two precondition generations precede the v3 due-time field.
         legacy.drain(45..53);
@@ -745,7 +745,7 @@ mod tests {
         );
         let mut legacy = current;
         legacy.drain(171..180);
-        legacy[..RECORD_MAGIC.len()].copy_from_slice(LEGACY_RECORD_MAGIC);
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(OLDEST_RECORD_MAGIC);
         // PMTC0003 used the same layout as PMTC0004 except it had no byte
         // after the phase for the terminal cause.
         legacy.drain(144..145);
@@ -755,6 +755,39 @@ mod tests {
             decoded.terminal_failure,
             Some(MaintenanceTerminalFailure::Unclassified)
         );
+    }
+
+    #[test]
+    fn schema_promotion_replay_keeps_its_catalog_input_and_never_invents_a_scrub_source_binding() {
+        let source = MaintenanceObjectId::new([0x55; 32]).expect("catalog input");
+        let state = TaskState {
+            task: MaintenanceTask::with_contract_not_before(
+                MaintenanceTaskId::new([0x56; 16]).expect("identity"),
+                MaintenanceTaskClass::SchemaPromotion,
+                MaintenanceScope::system(),
+                MaintenanceTrigger::Scheduled,
+                MaintenancePreconditions::new(3, 1).expect("preconditions"),
+                vec![source],
+                Vec::new(),
+                ResourceAmounts::new([1; 11]),
+                99,
+            )
+            .expect("schema promotion task"),
+            phase: MaintenanceTaskPhase::Queued,
+            terminal_failure: None,
+            submitted_at: 7,
+            checkpoint: None,
+            last_progress_at: None,
+            pause_until: None,
+            cancellation_requested: false,
+            dispatches: 0,
+            terminal_order: None,
+            active_dispatch: None,
+        };
+        let decoded = decode_record(&encode_record(&state).expect("record").0)
+            .expect("schema promotion replay");
+        assert_eq!(decoded.task.inputs(), [source]);
+        assert_eq!(decoded.task.source_binding(), None);
     }
 
     #[test]
