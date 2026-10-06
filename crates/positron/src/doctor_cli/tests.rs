@@ -43,7 +43,7 @@ fn online_doctor_uses_authenticated_operations_status() -> Result<(), Box<dyn st
                 .to_ascii_lowercase()
                 .contains("authorization: bearer system-administrator")
         );
-        let body = "{\"phase\":\"serving\",\"integrity_degraded\":false,\"effective_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"desired_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drift_disposition\":\"none\",\"pending_restart\":false,\"doctor\":{\"key_custody\":\"verified\",\"catalog_bootstrap\":\"verified\",\"catalog_generation\":1,\"backup_repository\":\"not_configured\",\"durable_operations\":0,\"active_durable_operations\":0,\"snapshot_leases\":0,\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true,\"otlp_grpc\":true,\"otlp_http\":true,\"loki_push\":true}},\"maintenance\":{\"queued\":0,\"outstanding_reservations\":0,\"clock_uncertain\":false,\"running_no_durable_progress_slo_breaches\":0,\"running_no_durable_progress_slo_unknown\":0,\"checkpointed_tasks\":0,\"paused_tasks\":0,\"conflicted_tasks\":0}}";
+        let body = "{\"phase\":\"serving\",\"integrity_degraded\":false,\"effective_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"desired_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drift_disposition\":\"none\",\"pending_restart\":false,\"doctor\":{\"key_custody\":\"verified\",\"catalog_bootstrap\":\"verified\",\"catalog_generation\":1,\"backup_repository\":\"not_configured\",\"durable_operations\":0,\"active_durable_operations\":0,\"snapshot_leases\":0,\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true,\"otlp_grpc\":true,\"otlp_http\":true,\"loki_push\":true},\"required_families\":{\"catalog_integrity\":{\"disposition\":\"observed\",\"audit_chain\":\"verified\",\"frontier\":1,\"manifest_objects\":7,\"reachable_ledger_scopes\":2,\"quarantine_findings\":0,\"scrub\":\"not_running\",\"scrub_tasks\":3,\"scrub_checkpoints\":1},\"resource_governor\":{\"disposition\":\"observed\",\"queues\":\"observed\",\"fairness\":\"within_bound\",\"recovery_reserve\":\"available\"},\"listener_security\":{\"disposition\":\"observed\",\"profiles\":\"active\",\"certificates\":\"loaded\",\"proxy_trust\":\"configured\",\"drain\":\"accepting\"},\"backup_verification\":{\"disposition\":\"not_shipped\",\"manifest_verification\":\"not_shipped\",\"purge_compatibility\":\"not_shipped\"},\"health_state\":{\"disposition\":\"observed\",\"derivation\":\"serving_ready_live\"},\"configuration\":{\"disposition\":\"observed\",\"contract\":\"valid\",\"effective_sources\":\"redacted\",\"key_custody\":\"verified\"}}},\"maintenance\":{\"queued\":0,\"outstanding_reservations\":0,\"clock_uncertain\":false,\"running_no_durable_progress_slo_breaches\":0,\"running_no_durable_progress_slo_unknown\":0,\"checkpointed_tasks\":0,\"paused_tasks\":0,\"conflicted_tasks\":0}}";
         stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
     });
     let options = Options::parse(
@@ -60,12 +60,23 @@ fn online_doctor_uses_authenticated_operations_status() -> Result<(), Box<dyn st
     let (exit, report) = online_status_request(&options, "system-administrator")?;
     assert_eq!(exit, std::process::ExitCode::from(3));
     assert!(
-        report.contains("status=degraded\nfinding_code=DOCTOR_BACKUP_REPOSITORY_NOT_CONFIGURED")
+        report
+            .contains("status=inspection_incomplete\nfinding_code=DOCTOR_RUNTIME_FACTS_INCOMPLETE")
     );
     assert!(report.contains("evidence_scope=authenticated_operations_status"));
     assert!(report.contains("key_custody=verified"));
     assert!(report.contains("catalog_bootstrap=verified"));
     assert!(report.contains("listener_topology=active"));
+    assert!(report.contains("catalog_audit_chain=verified"));
+    assert!(report.contains("catalog_frontier=1"));
+    assert!(report.contains("catalog_reachable_ledger_scopes=2"));
+    assert!(report.contains("catalog_scrub_tasks=3"));
+    assert!(report.contains("catalog_scrub_checkpoints=1"));
+    assert!(report.contains("resource_governor_recovery_reserve=available"));
+    assert!(report.contains("listener_certificates=loaded"));
+    assert!(report.contains("backup_manifest_verification=not_shipped"));
+    assert!(report.contains("health_derivation=serving_ready_live"));
+    assert!(report.contains("configuration_effective_sources=redacted"));
     assert!(report.contains("effective_configuration_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     assert!(report.contains("desired_configuration_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     assert!(report.contains("configuration_drift_disposition=none"));
@@ -100,7 +111,7 @@ fn online_doctor_reports_clock_uncertainty_and_stalled_work_as_degraded()
     )?;
     let (exit, report) = online_status_request(&options, "system-administrator")?;
     assert_eq!(exit, std::process::ExitCode::from(3));
-    assert!(report.contains("status=degraded"));
+    assert!(report.contains("status=inspection_incomplete"));
     assert!(report.contains("maintenance_clock_uncertain=true"));
     assert!(report.contains("maintenance_running_no_durable_progress_slo_breaches=1"));
     assert!(report.contains("maintenance_checkpointed_tasks=2"));
@@ -169,7 +180,10 @@ fn online_doctor_reports_pending_configuration_restart_as_degraded()
     let (exit, report) = online_status_request(&options, "system-administrator")?;
 
     assert_eq!(exit, std::process::ExitCode::from(3));
-    assert!(report.contains("status=degraded\nfinding_code=DOCTOR_CONFIGURATION_DEGRADED"));
+    assert!(
+        report
+            .contains("status=inspection_incomplete\nfinding_code=DOCTOR_RUNTIME_FACTS_INCOMPLETE")
+    );
     assert!(report.contains("effective_configuration_digest=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     assert!(report.contains("desired_configuration_digest=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
     assert!(report.contains("configuration_drift_disposition=reconcile"));

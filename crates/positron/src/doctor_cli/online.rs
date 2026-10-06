@@ -58,6 +58,25 @@ pub(super) fn online_status_request(
     let active_durable_operations = required_u64(doctor, "active_durable_operations")?;
     let snapshot_leases = required_u64(doctor, "snapshot_leases")?;
     let listeners = required_object(doctor, "listener_topology")?;
+    let required_families = doctor
+        .get("required_families")
+        .and_then(serde_json::Value::as_object);
+    let catalog = family(required_families, "catalog_integrity");
+    let governor = family(required_families, "resource_governor");
+    let listener_security = family(required_families, "listener_security");
+    let backup = family(required_families, "backup_verification");
+    let health_state = family(required_families, "health_state");
+    let configuration = family(required_families, "configuration");
+    let required_family_complete = [
+        catalog,
+        governor,
+        listener_security,
+        backup,
+        health_state,
+        configuration,
+    ]
+    .into_iter()
+    .all(|family| family_disposition(family) == "observed");
     let topology_active = [
         "control",
         "operations",
@@ -71,14 +90,45 @@ pub(super) fn online_status_request(
         required_bool(listeners, role).map(|bound| active && bound)
     })?;
     let evidence = format!(
-        "evidence_scope=authenticated_operations_status\nprocess_phase={phase}\nintegrity_degraded={degraded}\neffective_configuration_digest={effective_configuration_digest}\ndesired_configuration_digest={desired_configuration_digest}\nconfiguration_drift_disposition={configuration_drift_disposition}\nconfiguration_pending_restart={configuration_pending_restart}\nmaintenance_queued={queued}\nmaintenance_clock_uncertain={clock_uncertain}\nmaintenance_running_no_durable_progress_slo_breaches={stalled}\nmaintenance_running_no_durable_progress_slo_unknown={progress_unknown}\nmaintenance_checkpointed_tasks={checkpointed_tasks}\nmaintenance_paused_tasks={paused_tasks}\nmaintenance_conflicted_tasks={conflicted_tasks}\ndurable_operations={durable_operations}\nactive_durable_operations={active_durable_operations}\nsnapshot_leases={snapshot_leases}\noutstanding_reservations={reservations}\nkey_custody={key_custody}\ncatalog_bootstrap={catalog_bootstrap}\ncatalog_generation={catalog_generation}\nlistener_topology={}\nbackup_repository={backup_repository}\n",
+        "evidence_scope=authenticated_operations_status\nprocess_phase={phase}\nintegrity_degraded={degraded}\neffective_configuration_digest={effective_configuration_digest}\ndesired_configuration_digest={desired_configuration_digest}\nconfiguration_drift_disposition={configuration_drift_disposition}\nconfiguration_pending_restart={configuration_pending_restart}\nmaintenance_queued={queued}\nmaintenance_clock_uncertain={clock_uncertain}\nmaintenance_running_no_durable_progress_slo_breaches={stalled}\nmaintenance_running_no_durable_progress_slo_unknown={progress_unknown}\nmaintenance_checkpointed_tasks={checkpointed_tasks}\nmaintenance_paused_tasks={paused_tasks}\nmaintenance_conflicted_tasks={conflicted_tasks}\ndurable_operations={durable_operations}\nactive_durable_operations={active_durable_operations}\nsnapshot_leases={snapshot_leases}\noutstanding_reservations={reservations}\nkey_custody={key_custody}\ncatalog_bootstrap={catalog_bootstrap}\ncatalog_generation={catalog_generation}\nlistener_topology={}\nbackup_repository={backup_repository}\ncatalog_integrity_disposition={}\ncatalog_audit_chain={}\ncatalog_frontier={}\ncatalog_manifest_objects={}\ncatalog_reachable_ledger_scopes={}\ncatalog_quarantine_findings={}\ncatalog_scrub={}\ncatalog_scrub_tasks={}\ncatalog_scrub_checkpoints={}\nresource_governor_disposition={}\nresource_governor_queues={}\nresource_governor_fairness={}\nresource_governor_recovery_reserve={}\nlistener_security_disposition={}\nlistener_profiles={}\nlistener_certificates={}\nlistener_proxy_trust={}\nlistener_drain={}\nbackup_verification_disposition={}\nbackup_manifest_verification={}\nbackup_purge_compatibility={}\nhealth_state_disposition={}\nhealth_derivation={}\nconfiguration_disposition={}\nconfiguration_contract={}\nconfiguration_effective_sources={}\nconfiguration_key_custody={}\nrequired_diagnostic_families_complete={required_family_complete}\n",
         if topology_active {
             "active"
         } else {
             "incomplete"
         },
+        family_disposition(catalog),
+        family_value(catalog, "audit_chain"),
+        family_value(catalog, "frontier"),
+        family_value(catalog, "manifest_objects"),
+        family_value(catalog, "reachable_ledger_scopes"),
+        family_value(catalog, "quarantine_findings"),
+        family_value(catalog, "scrub"),
+        family_value(catalog, "scrub_tasks"),
+        family_value(catalog, "scrub_checkpoints"),
+        family_disposition(governor),
+        family_value(governor, "queues"),
+        family_value(governor, "fairness"),
+        family_value(governor, "recovery_reserve"),
+        family_disposition(listener_security),
+        family_value(listener_security, "profiles"),
+        family_value(listener_security, "certificates"),
+        family_value(listener_security, "proxy_trust"),
+        family_value(listener_security, "drain"),
+        family_disposition(backup),
+        family_value(backup, "manifest_verification"),
+        family_value(backup, "purge_compatibility"),
+        family_disposition(health_state),
+        family_value(health_state, "derivation"),
+        family_disposition(configuration),
+        family_value(configuration, "contract"),
+        family_value(configuration, "effective_sources"),
+        family_value(configuration, "key_custody"),
     );
-    if key_custody != "verified" || catalog_bootstrap != "verified" || !topology_active {
+    if key_custody != "verified"
+        || catalog_bootstrap != "verified"
+        || !topology_active
+        || !required_family_complete
+    {
         return Ok((
             ExitCode::from(EXIT_DIAGNOSTIC_FAILURE),
             format!(
@@ -125,6 +175,43 @@ pub(super) fn online_status_request(
             "report_version=1\nmode=online\nstatus=degraded\nfinding_code=DOCTOR_RUNTIME_DEGRADED\nseverity=error\n{evidence}safe_command=inspect_runtime_state\n"
         ),
     ))
+}
+
+fn family<'a>(
+    families: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    name: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    families
+        .and_then(|families| families.get(name))
+        .and_then(serde_json::Value::as_object)
+}
+
+fn family_disposition(family: Option<&serde_json::Map<String, serde_json::Value>>) -> &str {
+    family
+        .and_then(|family| family.get("disposition"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| {
+            matches!(
+                *value,
+                "observed" | "partial" | "degraded" | "unavailable" | "not_shipped"
+            )
+        })
+        .unwrap_or("missing")
+}
+
+fn family_value(family: Option<&serde_json::Map<String, serde_json::Value>>, key: &str) -> String {
+    match family.and_then(|family| family.get(key)) {
+        Some(serde_json::Value::String(value))
+            if value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) =>
+        {
+            value.clone()
+        },
+        Some(serde_json::Value::Number(value)) if value.is_u64() => value.to_string(),
+        Some(serde_json::Value::Bool(value)) => value.to_string(),
+        _ => "missing".to_owned(),
+    }
 }
 
 fn required_object<'a>(

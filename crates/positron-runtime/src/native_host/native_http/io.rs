@@ -273,10 +273,18 @@ pub(in crate::native_host) fn configuration_status_response(
     doctor: DoctorRuntimeFacts,
     bound_listener_roles: u8,
 ) -> Response {
+    let required_families = required_families_json(
+        phase,
+        integrity_degraded,
+        status,
+        maintenance,
+        doctor,
+        bound_listener_roles,
+    );
     Response::json(
         200,
         format!(
-            "{{\"phase\":\"{}\",\"integrity_degraded\":{},\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"doctor\":{{\"key_custody\":\"{}\",\"catalog_bootstrap\":\"{}\",\"catalog_generation\":{},\"backup_repository\":\"{}\",\"durable_operations\":{},\"active_durable_operations\":{},\"snapshot_leases\":{},\"listener_topology\":{{\"control\":{},\"operations\":{},\"api\":{},\"otlp_grpc\":{},\"otlp_http\":{},\"loki_push\":{}}}}},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"checkpointed_tasks\":{},\"paused_tasks\":{},\"conflicted_tasks\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
+            "{{\"phase\":\"{}\",\"integrity_degraded\":{},\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"doctor\":{{\"key_custody\":\"{}\",\"catalog_bootstrap\":\"{}\",\"catalog_generation\":{},\"backup_repository\":\"{}\",\"durable_operations\":{},\"active_durable_operations\":{},\"snapshot_leases\":{},\"listener_topology\":{{\"control\":{},\"operations\":{},\"api\":{},\"otlp_grpc\":{},\"otlp_http\":{},\"loki_push\":{}}},\"required_families\":{required_families}}},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"checkpointed_tasks\":{},\"paused_tasks\":{},\"conflicted_tasks\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
             process_phase_name(phase),
             integrity_degraded,
             status.generation(),
@@ -375,6 +383,96 @@ pub(in crate::native_host) fn fenced_doctor_response(
 
 fn listener_bound(roles: u8, role: ListenerRole) -> bool {
     roles & crate::health::listener_role_bit(role) != 0
+}
+
+fn required_families_json(
+    phase: ProcessPhase,
+    integrity_degraded: bool,
+    status: &ConfigurationObservation,
+    maintenance: MaintenanceHealth,
+    doctor: DoctorRuntimeFacts,
+    bound_listener_roles: u8,
+) -> String {
+    use positron_config::NetworkListenerRole;
+
+    let network_roles = [
+        (ListenerRole::Operations, NetworkListenerRole::Operations),
+        (ListenerRole::Api, NetworkListenerRole::Api),
+        (ListenerRole::OtlpGrpc, NetworkListenerRole::OtlpGrpc),
+        (ListenerRole::OtlpHttp, NetworkListenerRole::OtlpHttp),
+        (ListenerRole::LokiPush, NetworkListenerRole::LokiPush),
+    ];
+    let effective = status.effective();
+    let all_network_bound = network_roles
+        .iter()
+        .all(|(runtime_role, _)| listener_bound(bound_listener_roles, *runtime_role));
+    let all_tls_certificates_loaded = network_roles.iter().all(|(runtime_role, config_role)| {
+        effective
+            .network_listener_profile(*config_role)
+            .is_some_and(|profile| {
+                profile.transport() == positron_config::NetworkTransport::PlaintextOptOut
+                    || listener_bound(bound_listener_roles, *runtime_role)
+            })
+    });
+    let proxy_trust_configured = network_roles.iter().any(|(_, config_role)| {
+        effective
+            .network_listener_profile(*config_role)
+            .is_some_and(|profile| !profile.trusted_proxy_cidrs().is_empty())
+    });
+    let fairness = if maintenance.lower_class_queue_delay_breaches() == 0 {
+        "within_bound"
+    } else {
+        "breached"
+    };
+    let listener_profiles = if all_network_bound {
+        "active"
+    } else {
+        "incomplete"
+    };
+    let listener_certificates = if all_tls_certificates_loaded {
+        "loaded_or_not_required"
+    } else {
+        "not_loaded"
+    };
+    let proxy_trust = if proxy_trust_configured {
+        "configured"
+    } else {
+        "not_configured"
+    };
+    let drain = match phase {
+        ProcessPhase::Serving => "accepting",
+        ProcessPhase::Draining => "draining",
+        _ => "not_serving",
+    };
+    let health_derivation = match (phase, integrity_degraded) {
+        (ProcessPhase::Serving, false) => "serving_ready_live",
+        (ProcessPhase::Serving, true) => "serving_integrity_degraded",
+        (ProcessPhase::Fenced, _) => "fenced_not_ready_live",
+        _ => "not_ready_live",
+    };
+    let configuration_sources = if effective
+        .source_for("runtime.max_registered_tenants")
+        .is_some()
+    {
+        "redacted"
+    } else {
+        "unavailable"
+    };
+    format!(
+        "{{\"catalog_integrity\":{{\"disposition\":\"observed\",\"audit_chain\":\"verified\",\"frontier\":{},\"manifest_objects\":{},\"reachable_ledger_scopes\":{},\"quarantine_findings\":{},\"scrub\":\"observed\",\"scrub_tasks\":{},\"scrub_checkpoints\":{}}},\"resource_governor\":{{\"disposition\":\"observed\",\"queues\":\"observed\",\"fairness\":\"{fairness}\",\"recovery_reserve\":\"configured\",\"recovery_reserve_memory_bytes\":{}}},\"listener_security\":{{\"disposition\":\"observed\",\"profiles\":\"{listener_profiles}\",\"certificates\":\"{listener_certificates}\",\"proxy_trust\":\"{proxy_trust}\",\"drain\":\"{drain}\"}},\"backup_verification\":{{\"disposition\":\"not_shipped\",\"manifest_verification\":\"not_shipped\",\"purge_compatibility\":\"not_shipped\"}},\"health_state\":{{\"disposition\":\"observed\",\"derivation\":\"{health_derivation}\"}},\"configuration\":{{\"disposition\":\"observed\",\"contract\":\"valid\",\"effective_sources\":\"{configuration_sources}\",\"key_custody\":\"{}\"}}}}",
+        doctor.catalog_audit_frontier(),
+        doctor.catalog_manifest_objects(),
+        doctor.catalog_reachable_ledger_scopes(),
+        doctor.catalog_quarantine_findings(),
+        doctor.integrity_scrub_tasks(),
+        doctor.integrity_scrub_checkpoints(),
+        maintenance.recovery_reserve_memory_bytes(),
+        if doctor.key_custody_verified() {
+            "verified"
+        } else {
+            "unavailable"
+        },
+    )
 }
 
 fn process_phase_name(phase: ProcessPhase) -> &'static str {

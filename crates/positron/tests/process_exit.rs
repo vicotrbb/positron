@@ -570,6 +570,21 @@ fn live_control_support_bundle_is_signed_encrypted_and_reports_serving_facts()
             .any(|bytes| bytes == b"process_phase=serving")
     );
     assert!(
+        archive
+            .windows(b"inspection_owner=process_lifecycle".len())
+            .any(|bytes| bytes == b"inspection_owner=process_lifecycle")
+    );
+    assert!(
+        archive
+            .windows(b"process_serving".len())
+            .any(|bytes| bytes == b"process_serving")
+    );
+    assert!(
+        !archive
+            .windows(b"availability=not_persisted".len())
+            .any(|bytes| bytes == b"availability=not_persisted")
+    );
+    assert!(
         !archive
             .windows(claim.secret().len())
             .any(|bytes| bytes == claim.secret().as_bytes())

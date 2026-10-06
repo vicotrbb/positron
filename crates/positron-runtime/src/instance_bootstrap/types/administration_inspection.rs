@@ -1,6 +1,13 @@
 use super::*;
 
 impl InitializedInstance {
+    /// Opens the kernel-owned sanitized crash-record boundary while this
+    /// initialized instance still retains Primary Data Volume ownership.
+    pub fn crash_records(&self) -> Result<positron_kernel::CrashRecordStore, BootstrapFailure> {
+        positron_kernel::CrashRecordStore::from_authority(&self._authority)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
+    }
+
     /// Verifies the current authenticated bootstrap, Catalog, and opaque key
     /// custody binding for Doctor. This inspection never publishes Catalog
     /// state, creates a key, or exports key material.
@@ -40,6 +47,37 @@ impl InitializedInstance {
         let backup_repository =
             BackupRepositoryInspection::from_authenticated_catalog(view.snapshot())
                 .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        view.verify_audit_chain(governance.integrity_public_key(), None)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let catalog_manifest_objects = u32::try_from(view.snapshot().object_count())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let mut catalog_reachable_ledger_scopes = 0_u32;
+        for tenant in
+            positron_governance::TenantAdministration::registered_tenant_ids(view.snapshot())
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
+        {
+            for signal in [
+                positron_domain::routing::SignalKind::Logs,
+                positron_domain::routing::SignalKind::Traces,
+            ] {
+                let scopes = view
+                    .snapshot()
+                    .reachable_ledger_scopes(tenant, signal)
+                    .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+                let count = u32::try_from(scopes.len())
+                    .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+                catalog_reachable_ledger_scopes =
+                    catalog_reachable_ledger_scopes.checked_add(count).ok_or(
+                        BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable),
+                    )?;
+            }
+        }
+        let catalog_quarantine_findings = u32::try_from(
+            positron_kernel::integrity_quarantine_findings(view.snapshot())
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
+                .len(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         let mut operations = Vec::new();
         for record in view.governance_audit_records() {
             let entry = positron_governance::GovernanceAuditEntry::decode(record)
@@ -69,10 +107,12 @@ impl InitializedInstance {
                 .count(),
         )
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let maintenance_statuses = self
+            .maintenance
+            .statuses()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         let snapshot_leases = u32::try_from(
-            self.maintenance
-                .statuses()
-                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
+            maintenance_statuses
                 .iter()
                 .filter(|status| {
                     status.task().class()
@@ -87,13 +127,38 @@ impl InitializedInstance {
                 .count(),
         )
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
-        Ok(DoctorRuntimeFacts::verified(
-            view.snapshot().number(),
+        let integrity_scrub_tasks = u32::try_from(
+            maintenance_statuses
+                .iter()
+                .filter(|status| {
+                    status.task().class() == positron_kernel::MaintenanceTaskClass::IntegrityScrub
+                })
+                .count(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let integrity_scrub_checkpoints = u32::try_from(
+            maintenance_statuses
+                .iter()
+                .filter(|status| {
+                    status.task().class() == positron_kernel::MaintenanceTaskClass::IntegrityScrub
+                        && status.checkpoint().is_some()
+                })
+                .count(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        Ok(DoctorRuntimeFacts::verified(VerifiedDoctorFacts {
+            catalog_generation: view.snapshot().number(),
+            catalog_audit_frontier: view.snapshot().governance_audit_frontier(),
+            catalog_manifest_objects,
+            catalog_reachable_ledger_scopes,
+            catalog_quarantine_findings,
+            integrity_scrub_tasks,
+            integrity_scrub_checkpoints,
             backup_repository,
             durable_operations,
             active_durable_operations,
             snapshot_leases,
-        ))
+        }))
     }
 
     /// Opens the existing Instance Integrity Key only as an opaque signer for

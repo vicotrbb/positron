@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use super::{
     AgeRecipients, BundleFailure, BundleLimits, BundleMember, BundleOptions, Class,
     DEFAULT_ELAPSED_LIMIT, DEFAULT_LOG_WINDOW, DEFAULT_OUTPUT_LIMIT, DEFAULT_SOURCE_FILES,
-    ManifestAuthentication, SupportBundle, canonical_members, diagnostics_claim,
+    ManifestAuthentication, SupportBundle, canonical_members_with_crash, diagnostics_claim,
     privacy::{IdentifierRetention, IdentifierRetentionPolicy},
 };
 
@@ -51,6 +51,17 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     .map_err(|_| ())?;
                 let maintenance_inventory = instance.maintenance_bundle_evidence(facts).map_err(|_| ())?;
                 let maintenance = format!("{maintenance}{maintenance_inventory}");
+                let operational_logs = health.operational_log_snapshot().map_err(|_| ())?;
+                let crash = instance
+                    .crash_records()
+                    .map_err(|_| ())?
+                    .read_recent(
+                        DEFAULT_LOG_WINDOW,
+                        DEFAULT_SOURCE_FILES,
+                        DEFAULT_OUTPUT_LIMIT / 4,
+                        std::time::SystemTime::now(),
+                    )
+                    .map_err(|_| ())?;
                 let report = live_doctor_report(&facts);
                 let options = BundleOptions {
                     config: PathBuf::new(),
@@ -74,9 +85,13 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                 );
                 let members = live_canonical_members(
                     effective,
-                    &report,
-                    &operational,
-                    &maintenance,
+                    LiveBundleEvidence {
+                        doctor: &report,
+                        operational: &operational,
+                        maintenance: &maintenance,
+                        operational_logs: &operational_logs,
+                        crash,
+                    },
                     &options,
                     started,
                 )
@@ -114,7 +129,8 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                         .map_err(|_| ())?;
                     let signer = instance.support_bundle_manifest_signer(actor).map_err(|_| ())?;
                     let report = fenced_doctor_report(&facts);
-                    let members = fenced_canonical_members(&facts, &report, started)?;
+                    let operational_logs = health.operational_log_snapshot().map_err(|_| ())?;
+                    let members = fenced_canonical_members(&facts, &report, &operational_logs, started)?;
                     let limits = BundleLimits::new(14, DEFAULT_OUTPUT_LIMIT)
                         .map_err(|_| ())?
                         .with_elapsed_limit(DEFAULT_ELAPSED_LIMIT);
@@ -190,6 +206,7 @@ fn fenced_doctor_report(facts: &DoctorRuntimeFacts) -> String {
 fn fenced_canonical_members(
     facts: &DoctorRuntimeFacts,
     doctor: &str,
+    operational_logs: &str,
     started: Instant,
 ) -> Result<Vec<BundleMember>, ()> {
     if started.elapsed() > DEFAULT_ELAPSED_LIMIT {
@@ -224,10 +241,7 @@ fn fenced_canonical_members(
         BundleMember::operational_telemetry(
             b"inspection_owner=operational_telemetry_runtime\navailability=unavailable\nreason=retired_after_fence\n",
         ),
-        BundleMember::operational_logs_with_omission(
-            b"inspection_owner=operational_log_runtime\navailability=unavailable\nreason=not_persisted\n",
-            "operational_log_owner_unavailable",
-        ),
+        BundleMember::operational_logs(operational_logs.as_bytes()),
         BundleMember::catalog_summary(
             format!("inspection_owner=authenticated_fenced_catalog\n{current}").as_bytes(),
         ),
@@ -259,31 +273,53 @@ fn fenced_canonical_members(
     ])
 }
 
+struct LiveBundleEvidence<'a> {
+    doctor: &'a str,
+    operational: &'a str,
+    maintenance: &'a str,
+    operational_logs: &'a str,
+    crash: positron_kernel::CrashReadout,
+}
+
 fn live_canonical_members(
     effective: &positron_config::EffectiveConfiguration,
-    doctor: &str,
-    operational: &str,
-    maintenance: &str,
+    evidence: LiveBundleEvidence<'_>,
     options: &BundleOptions,
     started: Instant,
 ) -> Result<Vec<BundleMember>, ()> {
-    let mut members =
-        canonical_members(effective, doctor, operational, options, started).map_err(|_| ())?;
+    let mut members = canonical_members_with_crash(
+        effective,
+        evidence.doctor,
+        evidence.operational,
+        options,
+        started,
+        evidence.crash,
+    )
+    .map_err(|_| ())?;
     for member in &mut members {
         match member.class {
+            Some(Class::OperationalLogs) => {
+                member.bytes = evidence.operational_logs.as_bytes().to_vec();
+            },
             Some(Class::HealthState) => {
                 member.bytes = b"inspection_owner=serving_health_state\nprocess_phase=serving\ninspection_mode=online\n".to_vec();
             },
             Some(Class::CatalogSummary) => {
-                member.bytes = format!("inspection_owner=authenticated_serving_catalog\n{doctor}")
-                    .into_bytes();
+                member.bytes = format!(
+                    "inspection_owner=authenticated_serving_catalog\n{}",
+                    evidence.doctor
+                )
+                .into_bytes();
             },
             Some(Class::ResourceStatus) => {
-                member.bytes =
-                    format!("inspection_owner=serving_resource_governor\n{doctor}").into_bytes();
+                member.bytes = format!(
+                    "inspection_owner=serving_resource_governor\n{}",
+                    evidence.doctor
+                )
+                .into_bytes();
             },
             Some(Class::MaintenanceStatus) => {
-                member.bytes = maintenance.as_bytes().to_vec();
+                member.bytes = evidence.maintenance.as_bytes().to_vec();
             },
             Some(Class::ListenerStatus) => {
                 member.bytes = b"inspection_owner=listener_runtime\ninspection_mode=online\ncontrol_listener=active\n".to_vec();

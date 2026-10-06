@@ -20,6 +20,31 @@ pub(crate) fn canonical_members(
     options: &BundleOptions,
     started: Instant,
 ) -> Result<Vec<BundleMember>, BundleFailure> {
+    let crash =
+        crash_record::CrashRecordStore::under_data_directory(Path::new(effective.data_directory()))
+            .map_err(|_| BundleFailure::InspectionUnavailable)?
+            .read_recent(
+                options.log_window,
+                options.source_file_limit,
+                options.output_limit / 4,
+                std::time::SystemTime::now(),
+            )
+            .map_err(|_| BundleFailure::InspectionUnavailable)?;
+    canonical_members_with_crash(effective, doctor, operational, options, started, crash)
+}
+
+/// Renders the common bundle families from a previously opened kernel-owned
+/// crash inspection capability. Serving callers must use the capability held
+/// by their initialized instance; re-acquiring offline volume ownership while
+/// the process is serving is intentionally rejected.
+pub(crate) fn canonical_members_with_crash(
+    effective: &positron_config::EffectiveConfiguration,
+    doctor: &str,
+    operational: &str,
+    options: &BundleOptions,
+    started: Instant,
+    crash: positron_kernel::CrashReadout,
+) -> Result<Vec<BundleMember>, BundleFailure> {
     if options.deadline_exceeded(started) {
         return Err(BundleFailure::DeadlineExceeded);
     }
@@ -37,15 +62,6 @@ pub(crate) fn canonical_members(
         .redacted_effective()
         .replace(effective.data_directory(), &data_directory)
         .replace(effective.secrets_directory(), &secrets_directory);
-    let crash =
-        crash_record::CrashRecordStore::under_data_directory(Path::new(effective.data_directory()))
-            .read_recent(
-                options.log_window,
-                options.source_file_limit,
-                options.output_limit / 4,
-                std::time::SystemTime::now(),
-            )
-            .map_err(|_| BundleFailure::InspectionUnavailable)?;
     if options.deadline_exceeded(started) {
         return Err(BundleFailure::DeadlineExceeded);
     }

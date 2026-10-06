@@ -67,6 +67,7 @@ fn persisted_crash_record_reopens_as_bounded_sanitized_support_input()
     super::capture_process_failure(&root, "starting", "runtime_startup_failed", "runtime")
         .map_err(|_| "capture failed")?;
     let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+        .map_err(|_| "store")?
         .read_recent(
             std::time::Duration::from_secs(60),
             1,
@@ -112,6 +113,7 @@ fn joined_task_panic_capture_reopens_only_owned_safe_identity()
     )
     .map_err(|_| "capture failed")?;
     let rendered = super::crash_record::CrashRecordStore::under_data_directory(&root)
+        .map_err(|_| "store")?
         .read_recent(
             std::time::Duration::from_secs(60),
             1,
@@ -141,6 +143,7 @@ fn crash_readout_declares_file_count_truncation_without_exporting_unread_records
     super::capture_process_failure(&root, "starting", "second_failure", "runtime")
         .map_err(|_| "second capture")?;
     let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+        .map_err(|_| "store")?
         .read_recent(
             std::time::Duration::from_secs(60),
             1,
@@ -167,10 +170,95 @@ fn crash_readout_declares_records_outside_the_log_window() -> Result<(), Box<dyn
         .checked_add(std::time::Duration::from_secs(60))
         .ok_or("clock")?;
     let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+        .map_err(|_| "store")?
         .read_recent(std::time::Duration::from_secs(1), 4, 512, later)
         .map_err(|_| "readout")?;
     assert_eq!(readout.render(), "record_count=0\n");
     assert!(readout.omissions().contains(&"crash_record_log_window"));
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn crash_readout_bounds_invalid_directory_entries_and_declares_unknown_omissions()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-crash-invalid-bound-{nonce}"));
+    let records = root.join("diagnostics/crash-records");
+    fs::create_dir_all(&records)?;
+    for index in 0..65 {
+        fs::write(
+            records.join(format!("invalid-{index:03}")),
+            b"not a crash record",
+        )?;
+    }
+
+    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+        .map_err(|_| "store")?
+        .read_recent(
+            std::time::Duration::from_secs(60),
+            32,
+            12_288,
+            SystemTime::now(),
+        )
+        .map_err(|_| "bounded readout")?;
+
+    assert_eq!(readout.render(), "record_count=0\n");
+    assert_eq!(
+        readout.omissions(),
+        [
+            "unknown_crash_record_file",
+            "crash_record_enumeration_limit"
+        ]
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn controlled_process_restart_preserves_each_crash_record() -> Result<(), Box<dyn std::error::Error>>
+{
+    const PHASE: &str = "POSITRON_CRASH_RESTART_PHASE";
+    const ROOT: &str = "POSITRON_CRASH_RESTART_ROOT";
+    const NAME: &str = "support_bundle::tests::diagnostics::controlled_process_restart_preserves_each_crash_record";
+    if let Ok(phase) = std::env::var(PHASE) {
+        let root = std::path::PathBuf::from(std::env::var(ROOT)?);
+        fs::create_dir_all(&root)?;
+        let finding = if phase == "first" {
+            "first_failure"
+        } else {
+            "second_failure"
+        };
+        return super::capture_process_failure(&root, "starting", finding, "runtime")
+            .map_err(|_| "crash record capture failed".into());
+    }
+
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-crash-restart-{nonce}"));
+    let binary = std::env::current_exe()?;
+    for phase in ["first", "second"] {
+        let status = std::process::Command::new(&binary)
+            .args(["--exact", NAME])
+            .env(PHASE, phase)
+            .env(ROOT, &root)
+            .status()?;
+        if !status.success() {
+            let _ = fs::remove_dir_all(&root);
+            return Err(format!("{phase} process failed to capture its crash record").into());
+        }
+    }
+    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+        .map_err(|_| "store")?
+        .read_recent(
+            std::time::Duration::from_secs(60),
+            2,
+            768,
+            SystemTime::now(),
+        )
+        .map_err(|_| "readout")?;
+    let rendered = readout.render();
+    assert!(rendered.contains("first_failure"));
+    assert!(rendered.contains("second_failure"));
     fs::remove_dir_all(root)?;
     Ok(())
 }

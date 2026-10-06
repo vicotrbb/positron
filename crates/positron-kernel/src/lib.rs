@@ -71,6 +71,7 @@ mod active_segment_ledger;
 mod catalog;
 #[allow(dead_code)]
 mod data_protection;
+mod diagnostics;
 mod export_output;
 mod instance_bootstrap_storage;
 mod lifecycle_clock;
@@ -121,6 +122,7 @@ pub use data_protection::{
     ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
     QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest,
 };
+pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{
     ExportBatchReceipt, ExportOutput, ExportOutputBatchReservation, ExportOutputBinding,
     ExportOutputCheckpoint, ExportOutputFailure, ExportOutputFailureCode, ExportOutputRequest,
@@ -205,6 +207,10 @@ pub use active_segment_ledger::fuzz_integrity_quarantine_record;
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub use export_output::fuzz_export_output_record;
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use diagnostics::fuzz_crash_record_decoder;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]
@@ -294,6 +300,7 @@ const PRIMARY_DATA_VOLUME_BOOTSTRAP_BOUNDS: PrimaryDataVolumeBootstrapBounds =
 /// A process-lifetime ownership claim over one Primary Data Volume.
 pub struct OwnedPrimaryDataVolume {
     _root: File,
+    root_path: std::path::PathBuf,
     _ownership_lock: File,
     _root_identity: VolumeRootIdentity,
     qualification: MountQualification,
@@ -822,6 +829,7 @@ impl PrimaryDataVolume {
 
         Ok(OwnedPrimaryDataVolume {
             _root: root_file,
+            root_path: root.to_path_buf(),
             _ownership_lock: ownership_lock,
             _root_identity: handle_identity,
             qualification,

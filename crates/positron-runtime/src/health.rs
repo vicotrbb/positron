@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
 use positron_kernel::{
     LifecycleClockState, MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS, MaintenancePriority,
-    MaintenanceTaskPhase, MaintenanceTerminalFailure, WorkClass,
+    MaintenanceTaskPhase, MaintenanceTerminalFailure, ResourceDimension, WorkClass,
 };
 
 use crate::{
@@ -89,6 +89,13 @@ pub enum FencedDiagnosticsFailure {
     Unavailable,
 }
 
+/// The process-owned operational-event ring could not be read. Its contents
+/// are intentionally unavailable rather than recovered from another source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationalLogFailure {
+    Unavailable,
+}
+
 /// Bounded, aggregate maintenance facts derived from the coordinator and the
 /// Resource Governor for authenticated Operations inspection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +123,7 @@ pub(crate) struct MaintenanceHealth {
     ingest_reservations: u32,
     interactive_query_tail_reservations: u32,
     ordinary_maintenance_backup_reservations: u32,
+    recovery_reserve_memory_bytes: u64,
     failed_identity_mismatch: u32,
     failed_stale_generation: u32,
     failed_unclassified: u32,
@@ -215,6 +223,10 @@ impl MaintenanceHealth {
         self.ordinary_maintenance_backup_reservations
     }
     #[must_use]
+    pub(crate) const fn recovery_reserve_memory_bytes(self) -> u64 {
+        self.recovery_reserve_memory_bytes
+    }
+    #[must_use]
     pub(crate) const fn failed_identity_mismatch(self) -> u32 {
         self.failed_identity_mismatch
     }
@@ -279,6 +291,7 @@ pub struct HealthState {
     inspection_authority: Arc<OnceLock<Weak<InitializedInstance>>>,
     fenced_inspection: Arc<OnceLock<FencedInspection>>,
     catalog_operation: Arc<OnceLock<Weak<Mutex<()>>>>,
+    operational_events: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl std::fmt::Debug for HealthState {
@@ -295,6 +308,32 @@ impl std::fmt::Debug for HealthState {
 }
 
 impl HealthState {
+    /// Returns the bounded, allowlisted operational event snapshot owned by
+    /// the process lifecycle. Event values are closed vocabulary only.
+    pub fn operational_log_snapshot(&self) -> Result<String, OperationalLogFailure> {
+        let events = self
+            .operational_events
+            .lock()
+            .map_err(|_| OperationalLogFailure::Unavailable)?;
+        let mut rendered = format!(
+            "inspection_owner=process_lifecycle\nrecord_count={}\n",
+            events.len()
+        );
+        for (index, event) in events.iter().enumerate() {
+            rendered.push_str(&format!("record_{index}_event={event}\n"));
+        }
+        Ok(rendered)
+    }
+
+    fn record_operational_event(&self, event: &'static str) {
+        if let Ok(mut events) = self.operational_events.lock() {
+            if events.len() == 32 {
+                events.remove(0);
+            }
+            events.push(event);
+        }
+    }
+
     /// Runs one bounded diagnostic collection against the current serving
     /// owner.  Callers receive neither key material nor an authorization
     /// cache: the bearer is attributed against the live instance immediately
@@ -398,6 +437,7 @@ impl HealthState {
     pub(crate) fn fence(&self) {
         self.phase
             .store(ProcessPhase::Fenced as u8, Ordering::Release);
+        self.record_operational_event("process_fenced");
     }
 
     /// Records a bounded one-way request. The `RunningProcess` remains the
@@ -650,6 +690,7 @@ impl HealthState {
             ingest_reservations: 0,
             interactive_query_tail_reservations: 0,
             ordinary_maintenance_backup_reservations: 0,
+            recovery_reserve_memory_bytes: 0,
             failed_identity_mismatch: 0,
             failed_stale_generation: 0,
             failed_unclassified: 0,
@@ -786,6 +827,8 @@ impl HealthState {
             resources.outstanding_for(WorkClass::InteractiveQueryTail);
         maintenance.ordinary_maintenance_backup_reservations =
             resources.outstanding_for(WorkClass::OrdinaryMaintenanceBackup);
+        maintenance.recovery_reserve_memory_bytes =
+            resources.recovery_reserve_capacity(ResourceDimension::MemoryBytes);
         Ok(OperationsStatus {
             configuration: self
                 .configuration_status()
@@ -866,6 +909,7 @@ impl ProcessState {
                 inspection_authority: Arc::new(OnceLock::new()),
                 fenced_inspection: Arc::new(OnceLock::new()),
                 catalog_operation: Arc::new(OnceLock::new()),
+                operational_events: Arc::new(Mutex::new(Vec::new())),
             },
         }
     }
@@ -876,6 +920,15 @@ impl ProcessState {
 
     pub(crate) fn transition(&self, phase: ProcessPhase) {
         self.health.phase.store(phase as u8, Ordering::Release);
+        self.health.record_operational_event(match phase {
+            ProcessPhase::Starting => "process_starting",
+            ProcessPhase::Recovering => "process_recovering",
+            ProcessPhase::Serving => "process_serving",
+            ProcessPhase::Draining => "process_draining",
+            ProcessPhase::Fenced => "process_fenced",
+            ProcessPhase::Stopping => "process_stopping",
+            ProcessPhase::Stopped => "process_stopped",
+        });
     }
 
     pub(crate) fn set_plaintext_listener_warnings(
@@ -993,6 +1046,26 @@ mod tests {
         state.transition(ProcessPhase::Serving);
         state.health().fence();
         assert_eq!(state.health().phase(), ProcessPhase::Fenced);
+    }
+
+    #[test]
+    fn operational_events_are_allowlisted_and_bounded_at_thirty_two_records() {
+        let state = ProcessState::starting();
+        for _ in 0..11 {
+            state.transition(ProcessPhase::Starting);
+            state.transition(ProcessPhase::Recovering);
+            state.transition(ProcessPhase::Serving);
+        }
+
+        let snapshot = state
+            .health()
+            .operational_log_snapshot()
+            .expect("process-owned event ring");
+        assert!(snapshot.contains("inspection_owner=process_lifecycle"));
+        assert!(snapshot.contains("record_count=32"));
+        assert!(snapshot.contains("record_0_event=process_recovering"));
+        assert!(snapshot.contains("record_31_event=process_serving"));
+        assert!(!snapshot.contains("record_32_event="));
     }
 
     #[test]

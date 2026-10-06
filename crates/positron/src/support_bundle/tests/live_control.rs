@@ -169,6 +169,9 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
     reader.read_to_end(&mut archive)?;
     let archive = String::from_utf8_lossy(&archive);
     assert!(archive.contains("inspection_owner=maintenance_coordinator"));
+    assert!(archive.contains("inspection_owner=process_lifecycle"));
+    assert!(archive.contains("process_serving"));
+    assert!(!archive.contains("availability=not_persisted"));
     assert!(archive.contains(data.to_string_lossy().as_ref()));
     assert!(!archive.contains(secrets.to_string_lossy().as_ref()));
     assert!(archive.contains("retained_identifier_classes=data_directory"));
@@ -214,6 +217,8 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
         .map_err(|_| "fenced manifest signature")?;
     let archive = String::from_utf8_lossy(&archive);
     assert!(archive.contains("process_phase=fenced"));
+    assert!(archive.contains("inspection_owner=process_lifecycle"));
+    assert!(archive.contains("process_fenced"));
     assert!(archive.contains("DOCTOR_FENCED_OWNER_VERIFIED"));
     assert!(archive.contains("configuration_runtime=unavailable_retired_after_fence"));
     assert!(archive.contains("manifest-signature.txt"));

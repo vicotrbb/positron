@@ -1,4 +1,6 @@
-use std::{path::Path, time::Duration};
+#[cfg(test)]
+use std::path::Path;
+use std::time::Duration;
 
 mod archive;
 mod command;
@@ -14,7 +16,7 @@ pub(crate) use archive::{
     AgeRecipients, BundleLimits, BundleMember, ManifestAuthentication, SupportBundle,
 };
 pub(crate) use command::run;
-pub(crate) use command::{canonical_members, diagnostics_claim};
+pub(crate) use command::{canonical_members_with_crash, diagnostics_claim};
 #[cfg(test)]
 use command::{
     write_bundle, write_bundle_with_after_publication_hook,
@@ -41,16 +43,20 @@ const EXIT_FAILURE: u8 = 3;
 /// inspection. Callers pass only fixed product vocabulary, never an error
 /// message, address, request, or backtrace.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn capture_process_failure(
     data_directory: &Path,
     phase: &'static str,
     finding_code: &'static str,
     component: &'static str,
 ) -> Result<(), ()> {
-    let record = crash_record::SanitizedCrashRecord::new(phase, finding_code, component)?;
-    crash_record::CrashRecordStore::under_data_directory(data_directory).persist(&record)
+    let record =
+        crash_record::SanitizedCrashRecord::new(phase, finding_code, component).map_err(|_| ())?;
+    crash_record::CrashRecordStore::under_data_directory(data_directory)?.persist(&record)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn capture_process_failure_with_catalog_generation(
     data_directory: &Path,
     phase: &'static str,
@@ -58,13 +64,14 @@ pub(crate) fn capture_process_failure_with_catalog_generation(
     component: &'static str,
     catalog_generation: Option<u64>,
 ) -> Result<(), ()> {
-    let record = crash_record::SanitizedCrashRecord::new(phase, finding_code, component)?;
+    let record =
+        crash_record::SanitizedCrashRecord::new(phase, finding_code, component).map_err(|_| ())?;
     let record = match catalog_generation {
         Some(value) => record.with_catalog_generation(value),
         None => record,
     }
     .with_backtrace(&std::backtrace::Backtrace::capture());
-    crash_record::CrashRecordStore::under_data_directory(data_directory).persist(&record)
+    crash_record::CrashRecordStore::under_data_directory(data_directory)?.persist(&record)
 }
 
 /// Bounded public fuzz seam for the unauthenticated Control request body.

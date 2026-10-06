@@ -10,9 +10,9 @@ use std::{path::PathBuf, sync::Arc};
 use positron_config::{ConfigurationInputs, NetworkListenerRole, NetworkTransport, resolve};
 use positron_kernel::MountQualification;
 use positron_runtime::{
-    ApplicationRuntime, BootstrapPaths, CrashInspection, ExitOutcome, HostInputs,
-    InitializationMode, NativeBindings, NativeHost, PublicPlaintextApiStartupIntent,
-    RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision, ServeConfiguration, ShutdownTrigger,
+    ApplicationRuntime, BootstrapPaths, ExitOutcome, HostInputs, InitializationMode,
+    NativeBindings, NativeHost, PublicPlaintextApiStartupIntent, RecoveryAttempt,
+    RecoveryAttemptHost, RecoveryDecision, ServeConfiguration, ShutdownTrigger,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -296,7 +296,7 @@ fn wait_for_shutdown(
     mut signals: Signals,
     deadline: Duration,
     reload: &ReloadInputs,
-    crash_data_directory: PathBuf,
+    _crash_data_directory: PathBuf,
 ) -> Result<ExitOutcome, LaunchFailure> {
     let second_termination_seen = loop {
         // `Signals::forever` would prevent the process owner from consuming a
@@ -338,12 +338,7 @@ fn wait_for_shutdown(
             Ok(termination_count) if termination_count > 0 => break termination_count > 1,
             Ok(_) => std::thread::sleep(Duration::from_millis(5)),
             Err(_) => {
-                capture_runtime_failure(
-                    &crash_data_directory,
-                    "serving",
-                    "runtime_serving_loop_panicked",
-                    process.crash_inspection(),
-                );
+                capture_runtime_failure(&process, "serving", "runtime_serving_loop_panicked");
                 return Ok(process.shutdown(ShutdownTrigger::DeadlineExpired));
             },
         }
@@ -362,12 +357,7 @@ fn wait_for_shutdown(
         }
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draining.poll())) {
             Err(_) => {
-                capture_runtime_failure(
-                    &crash_data_directory,
-                    "draining",
-                    "runtime_poll_panicked",
-                    draining.crash_inspection(),
-                );
+                capture_draining_runtime_failure(&draining, "draining", "runtime_poll_panicked");
                 return Ok(draining.finish(ShutdownTrigger::DeadlineExpired));
             },
             Ok(Ok(true)) => return Ok(draining.finish(ShutdownTrigger::FirstSignal)),
@@ -378,12 +368,7 @@ fn wait_for_shutdown(
                 } else {
                     "runtime_drain_failed"
                 };
-                capture_runtime_failure(
-                    &crash_data_directory,
-                    "draining",
-                    finding_code,
-                    draining.crash_inspection(),
-                );
+                capture_draining_runtime_failure(&draining, "draining", finding_code);
                 return Ok(draining.finish(ShutdownTrigger::DeadlineExpired));
             },
         }
@@ -391,19 +376,26 @@ fn wait_for_shutdown(
 }
 
 fn capture_runtime_failure(
-    data_directory: &Path,
+    process: &positron_runtime::RunningProcess,
     phase: &'static str,
     finding_code: &'static str,
-    inspection: CrashInspection,
 ) {
-    if support_bundle::capture_process_failure_with_catalog_generation(
-        data_directory,
-        phase,
-        finding_code,
-        "runtime",
-        inspection.catalog_generation(),
-    )
-    .is_err()
+    if process
+        .persist_crash_record(phase, finding_code, "runtime")
+        .is_err()
+    {
+        eprintln!("positron: unable to persist sanitized runtime crash record");
+    }
+}
+
+fn capture_draining_runtime_failure(
+    process: &positron_runtime::DrainingProcess,
+    phase: &'static str,
+    finding_code: &'static str,
+) {
+    if process
+        .persist_crash_record(phase, finding_code, "runtime")
+        .is_err()
     {
         eprintln!("positron: unable to persist sanitized runtime crash record");
     }

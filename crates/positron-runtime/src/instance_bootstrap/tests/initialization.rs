@@ -121,6 +121,12 @@ fn system_administrator_reads_current_doctor_facts_without_exporting_key_materia
 
     assert!(facts.key_custody_verified());
     assert!(facts.catalog_bootstrap_verified());
+    assert!(facts.catalog_audit_frontier() > 0);
+    assert!(facts.catalog_manifest_objects() > 0);
+    assert_eq!(facts.catalog_reachable_ledger_scopes(), 2);
+    assert_eq!(facts.catalog_quarantine_findings(), 0);
+    assert_eq!(facts.integrity_scrub_tasks(), 0);
+    assert_eq!(facts.integrity_scrub_checkpoints(), 0);
     assert_eq!(facts.backup_repository().label(), "not_configured");
     assert!(!format!("{facts:?}").contains(claim.secret()));
     Ok(())

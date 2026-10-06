@@ -25,6 +25,25 @@ pub enum InitializationMode {
     InitializeIfEmpty,
 }
 
+/// A sanitized crash record could not be created through the current kernel
+/// authority. The error deliberately contains no storage path or crash data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CrashRecordPersistenceFailure {
+    Unavailable,
+    Full,
+    Invalid,
+}
+
+impl From<positron_kernel::CrashRecordFailure> for CrashRecordPersistenceFailure {
+    fn from(value: positron_kernel::CrashRecordFailure) -> Self {
+        match value {
+            positron_kernel::CrashRecordFailure::Unavailable => Self::Unavailable,
+            positron_kernel::CrashRecordFailure::Full => Self::Full,
+            positron_kernel::CrashRecordFailure::Invalid => Self::Invalid,
+        }
+    }
+}
+
 /// A configuration-file-only plaintext API selection carried from the
 /// composition root into startup. It is deliberately separate from public
 /// administration and has no actor or credential.
@@ -505,6 +524,32 @@ impl RunningProcess {
                 .as_ref()
                 .map(|instance| instance.catalog_generation()),
         }
+    }
+
+    /// Persists only closed, sanitized crash evidence through the Storage
+    /// Kernel while this process still owns its initialized instance.
+    pub fn persist_crash_record(
+        &self,
+        phase: &'static str,
+        finding_code: &'static str,
+        component: &'static str,
+    ) -> Result<(), CrashRecordPersistenceFailure> {
+        let instance = self
+            .instance
+            .as_ref()
+            .ok_or(CrashRecordPersistenceFailure::Unavailable)?;
+        let record = positron_kernel::CrashRecord::new(phase, finding_code, component)
+            .map_err(CrashRecordPersistenceFailure::from)?
+            .with_backtrace(&std::backtrace::Backtrace::capture());
+        let record = match self.crash_inspection().catalog_generation() {
+            Some(generation) => record.with_catalog_generation(generation),
+            None => record,
+        };
+        instance
+            .crash_records()
+            .map_err(|_| CrashRecordPersistenceFailure::Unavailable)?
+            .persist(&record)
+            .map_err(CrashRecordPersistenceFailure::from)
     }
 
     #[must_use]
@@ -1050,6 +1095,14 @@ impl DrainingProcess {
     #[must_use]
     pub fn crash_inspection(&self) -> CrashInspection {
         self.0.crash_inspection()
+    }
+    pub fn persist_crash_record(
+        &self,
+        phase: &'static str,
+        finding_code: &'static str,
+        component: &'static str,
+    ) -> Result<(), CrashRecordPersistenceFailure> {
+        self.0.persist_crash_record(phase, finding_code, component)
     }
     #[must_use]
     pub fn health(&self) -> HealthState {

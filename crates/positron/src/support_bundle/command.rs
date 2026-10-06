@@ -34,8 +34,8 @@ mod publication;
 pub(crate) use evidence::COMPATIBILITY_INPUTS;
 use evidence::owned_bundle_doctor_report;
 pub(crate) use evidence::{
-    canonical_members, compatibility_manifest_evidence, diagnostics_claim,
-    product_identity_evidence,
+    canonical_members, canonical_members_with_crash, compatibility_manifest_evidence,
+    diagnostics_claim, product_identity_evidence,
 };
 use evidence::{key_unavailable_doctor_report, offline_operational_status};
 use inspection::authenticated_inspection;

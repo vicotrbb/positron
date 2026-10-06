@@ -69,28 +69,51 @@ pub struct DoctorRuntimeFacts {
     key_custody_verified: bool,
     catalog_bootstrap_verified: bool,
     catalog_generation: u64,
+    catalog_audit_frontier: u64,
+    catalog_manifest_objects: u32,
+    catalog_reachable_ledger_scopes: u32,
+    catalog_quarantine_findings: u32,
+    integrity_scrub_tasks: u32,
+    integrity_scrub_checkpoints: u32,
     backup_repository: BackupRepositoryInspection,
     durable_operations: u32,
     active_durable_operations: u32,
     snapshot_leases: u32,
 }
 
+/// One authenticated snapshot of the public, non-secret facts Doctor reports.
+/// Grouping these fields makes the inspection boundary explicit and prevents
+/// positional argument mix-ups as the report grows.
+pub(crate) struct VerifiedDoctorFacts {
+    pub(crate) catalog_generation: u64,
+    pub(crate) catalog_audit_frontier: u64,
+    pub(crate) catalog_manifest_objects: u32,
+    pub(crate) catalog_reachable_ledger_scopes: u32,
+    pub(crate) catalog_quarantine_findings: u32,
+    pub(crate) integrity_scrub_tasks: u32,
+    pub(crate) integrity_scrub_checkpoints: u32,
+    pub(crate) backup_repository: BackupRepositoryInspection,
+    pub(crate) durable_operations: u32,
+    pub(crate) active_durable_operations: u32,
+    pub(crate) snapshot_leases: u32,
+}
+
 impl DoctorRuntimeFacts {
-    pub(crate) const fn verified(
-        catalog_generation: u64,
-        backup_repository: BackupRepositoryInspection,
-        durable_operations: u32,
-        active_durable_operations: u32,
-        snapshot_leases: u32,
-    ) -> Self {
+    pub(crate) const fn verified(facts: VerifiedDoctorFacts) -> Self {
         Self {
             key_custody_verified: true,
             catalog_bootstrap_verified: true,
-            catalog_generation,
-            backup_repository,
-            durable_operations,
-            active_durable_operations,
-            snapshot_leases,
+            catalog_generation: facts.catalog_generation,
+            catalog_audit_frontier: facts.catalog_audit_frontier,
+            catalog_manifest_objects: facts.catalog_manifest_objects,
+            catalog_reachable_ledger_scopes: facts.catalog_reachable_ledger_scopes,
+            catalog_quarantine_findings: facts.catalog_quarantine_findings,
+            integrity_scrub_tasks: facts.integrity_scrub_tasks,
+            integrity_scrub_checkpoints: facts.integrity_scrub_checkpoints,
+            backup_repository: facts.backup_repository,
+            durable_operations: facts.durable_operations,
+            active_durable_operations: facts.active_durable_operations,
+            snapshot_leases: facts.snapshot_leases,
         }
     }
 
@@ -107,6 +130,45 @@ impl DoctorRuntimeFacts {
     #[must_use]
     pub const fn catalog_generation(self) -> u64 {
         self.catalog_generation
+    }
+
+    /// The authenticated position of the retained Governance Audit chain.
+    #[must_use]
+    pub const fn catalog_audit_frontier(self) -> u64 {
+        self.catalog_audit_frontier
+    }
+
+    /// The bounded number of immutable objects in the authenticated Catalog
+    /// generation. Object identities and contents never cross this boundary.
+    #[must_use]
+    pub const fn catalog_manifest_objects(self) -> u32 {
+        self.catalog_manifest_objects
+    }
+
+    /// The number of durable ledger scopes reachable from the authenticated
+    /// Catalog manifests. Scope identifiers remain inside the Kernel.
+    #[must_use]
+    pub const fn catalog_reachable_ledger_scopes(self) -> u32 {
+        self.catalog_reachable_ledger_scopes
+    }
+
+    /// The count of durable quarantine findings in the same authenticated
+    /// Catalog view. Segment identities stay inside the Kernel.
+    #[must_use]
+    pub const fn catalog_quarantine_findings(self) -> u32 {
+        self.catalog_quarantine_findings
+    }
+
+    /// The current durable inventory of bounded Integrity Scrub work.
+    #[must_use]
+    pub const fn integrity_scrub_tasks(self) -> u32 {
+        self.integrity_scrub_tasks
+    }
+
+    /// The number of scrubs retaining a durable continuation checkpoint.
+    #[must_use]
+    pub const fn integrity_scrub_checkpoints(self) -> u32 {
+        self.integrity_scrub_checkpoints
     }
 
     #[must_use]

@@ -1,8 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::io;
 
-#[cfg(test)]
-use super::crash_record;
 use super::privacy::{IdentifierRetention, IdentifierRetentionPolicy};
 use super::{BLOCK, FOOTER, POLICY, output};
 

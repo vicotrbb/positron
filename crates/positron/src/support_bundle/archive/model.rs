@@ -1,8 +1,6 @@
 use std::time::Duration;
 
 use super::super::{DEFAULT_ELAPSED_LIMIT, TAR_RECORD, crypto};
-#[cfg(test)]
-use super::crash_record;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Class {
@@ -147,7 +145,9 @@ impl BundleMember {
         member
     }
     #[cfg(test)]
-    pub(crate) fn sanitized_crash_record(record: crash_record::SanitizedCrashRecord) -> Self {
+    pub(crate) fn sanitized_crash_record(
+        record: super::super::crash_record::SanitizedCrashRecord,
+    ) -> Self {
         Self::sanitized_crash_records(record.render().as_bytes())
     }
     #[cfg(test)]
