@@ -20,6 +20,11 @@ pub(super) struct OutputDestination {
     _secrets_root: File,
 }
 
+pub(super) enum PublicationFailure {
+    Unavailable,
+    DeadlineExceeded,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct DirectoryIdentity {
     device: u64,
@@ -75,11 +80,25 @@ fn prepare_destination_after_managed_roots(
     })
 }
 
+#[cfg(test)]
 pub(super) fn write_new_owner_only(
     destination: &OutputDestination,
     bytes: &[u8],
 ) -> Result<(), ()> {
-    write_new_owner_only_after_close(destination, bytes, || {})
+    write_new_owner_only_before_publication(destination, bytes, || true).map_err(|_| ())
+}
+
+pub(super) fn write_new_owner_only_before_publication(
+    destination: &OutputDestination,
+    bytes: &[u8],
+    publication_permitted: impl FnOnce() -> bool,
+) -> Result<(), PublicationFailure> {
+    write_new_owner_only_after_close_with_publication(
+        destination,
+        bytes,
+        || {},
+        publication_permitted,
+    )
 }
 
 #[cfg(test)]
@@ -88,15 +107,33 @@ pub(super) fn write_new_owner_only_with_after_close_hook(
     bytes: &[u8],
     after_close: impl FnOnce(),
 ) -> Result<(), ()> {
-    write_new_owner_only_after_close(destination, bytes, after_close)
+    write_new_owner_only_after_close_with_publication(destination, bytes, after_close, || true)
+        .map_err(|_| ())
 }
 
-fn write_new_owner_only_after_close(
+#[cfg(test)]
+pub(super) fn write_new_owner_only_with_after_close_deadline_hook(
     destination: &OutputDestination,
     bytes: &[u8],
     after_close: impl FnOnce(),
-) -> Result<(), ()> {
-    let temporary = create_private_temporary_directory(&destination.directory)?;
+    publication_permitted: impl FnOnce() -> bool,
+) -> Result<(), PublicationFailure> {
+    write_new_owner_only_after_close_with_publication(
+        destination,
+        bytes,
+        after_close,
+        publication_permitted,
+    )
+}
+
+fn write_new_owner_only_after_close_with_publication(
+    destination: &OutputDestination,
+    bytes: &[u8],
+    after_close: impl FnOnce(),
+    publication_permitted: impl FnOnce() -> bool,
+) -> Result<(), PublicationFailure> {
+    let temporary = create_private_temporary_directory(&destination.directory)
+        .map_err(|_| PublicationFailure::Unavailable)?;
     let mut file = match unix_fs::openat(
         &temporary.directory,
         "archive",
@@ -105,17 +142,27 @@ fn write_new_owner_only_after_close(
     ) {
         Ok(file) => File::from(file),
         Err(_) => {
-            remove_empty_private_temporary_directory(&destination.directory, temporary)?;
-            return Err(());
+            remove_empty_private_temporary_directory(&destination.directory, temporary)
+                .map_err(|_| PublicationFailure::Unavailable)?;
+            return Err(PublicationFailure::Unavailable);
         },
     };
     let write_result = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     if write_result.is_err() {
-        remove_private_temporary_directory(&destination.directory, temporary)?;
-        return Err(());
+        remove_private_temporary_directory(&destination.directory, temporary)
+            .map_err(|_| PublicationFailure::Unavailable)?;
+        return Err(PublicationFailure::Unavailable);
     }
     after_close();
+    // Filesystem calls are not safely cancellable here. Check the monotonic
+    // deadline immediately before the link, the irreversible publication
+    // boundary, and never unlink a name after that boundary.
+    if !publication_permitted() {
+        remove_private_temporary_directory(&destination.directory, temporary)
+            .map_err(|_| PublicationFailure::Unavailable)?;
+        return Err(PublicationFailure::DeadlineExceeded);
+    }
     if unix_fs::linkat(
         &temporary.directory,
         "archive",
@@ -125,10 +172,12 @@ fn write_new_owner_only_after_close(
     )
     .is_err()
     {
-        remove_private_temporary_directory(&destination.directory, temporary)?;
-        return Err(());
+        remove_private_temporary_directory(&destination.directory, temporary)
+            .map_err(|_| PublicationFailure::Unavailable)?;
+        return Err(PublicationFailure::Unavailable);
     }
-    remove_private_temporary_directory(&destination.directory, temporary)?;
+    remove_private_temporary_directory(&destination.directory, temporary)
+        .map_err(|_| PublicationFailure::Unavailable)?;
     Ok(())
 }
 

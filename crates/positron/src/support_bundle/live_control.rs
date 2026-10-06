@@ -367,6 +367,7 @@ impl LiveBundleRequest {
 pub(super) fn request_live_bundle(
     path: &Path,
     options: &BundleOptions,
+    started: std::time::Instant,
 ) -> Result<Vec<u8>, BundleFailure> {
     let body = LiveBundleRequest::encode_with_retention(
         &options.recipients,
@@ -376,13 +377,19 @@ pub(super) fn request_live_bundle(
     #[cfg(unix)]
     {
         use std::os::unix::net::UnixStream;
+        let _ = options
+            .remaining_time(started)
+            .ok_or(BundleFailure::DeadlineExceeded)?;
         let mut stream =
             UnixStream::connect(path).map_err(|_| BundleFailure::InspectionUnavailable)?;
+        let remaining = options
+            .remaining_time(started)
+            .ok_or(BundleFailure::DeadlineExceeded)?;
         stream
-            .set_read_timeout(Some(options.elapsed_limit))
+            .set_read_timeout(Some(remaining))
             .map_err(|_| BundleFailure::InspectionUnavailable)?;
         stream
-            .set_write_timeout(Some(options.elapsed_limit))
+            .set_write_timeout(Some(remaining))
             .map_err(|_| BundleFailure::InspectionUnavailable)?;
         let request = format!(
             "POST /control/support-bundle HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -392,9 +399,15 @@ pub(super) fn request_live_bundle(
         stream
             .write_all(request.as_bytes())
             .map_err(|_| BundleFailure::InspectionUnavailable)?;
+        if options.remaining_time(started).is_none() {
+            return Err(BundleFailure::DeadlineExceeded);
+        }
         stream
             .write_all(&body)
             .map_err(|_| BundleFailure::InspectionUnavailable)?;
+        if options.remaining_time(started).is_none() {
+            return Err(BundleFailure::DeadlineExceeded);
+        }
         let mut response = Vec::with_capacity(options.output_limit.saturating_add(512));
         stream
             .take(
@@ -403,11 +416,14 @@ pub(super) fn request_live_bundle(
             )
             .read_to_end(&mut response)
             .map_err(|_| BundleFailure::InspectionUnavailable)?;
+        if options.remaining_time(started).is_none() {
+            return Err(BundleFailure::DeadlineExceeded);
+        }
         parse_live_response(&response, options.output_limit)
     }
     #[cfg(not(unix))]
     {
-        let _ = (path, body, bearer);
+        let _ = (path, body, bearer, started);
         Err(BundleFailure::InspectionUnavailable)
     }
 }

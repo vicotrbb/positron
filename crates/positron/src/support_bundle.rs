@@ -16,7 +16,10 @@ pub(crate) use command::run;
 use command::{BundleFailure, BundleOptions};
 pub(crate) use command::{canonical_members, diagnostics_claim};
 #[cfg(test)]
-use command::{write_bundle, write_bundle_with_after_publication_hook};
+use command::{
+    write_bundle, write_bundle_with_after_publication_hook,
+    write_plaintext_bundle_with_after_close_hook,
+};
 pub(crate) use live_control::LiveSupportBundleCollector;
 
 const POLICY: u16 = 1;

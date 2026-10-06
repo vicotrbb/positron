@@ -600,11 +600,23 @@ impl SupportBundle {
         Ok(self)
     }
 
+    #[cfg(test)]
     pub(super) fn write_plaintext_explicitly(
         &self,
         destination: &output::OutputDestination,
     ) -> Result<(), ()> {
         output::write_new_owner_only(destination, &self.archive)
+    }
+    pub(super) fn write_plaintext_explicitly_before_publication(
+        &self,
+        destination: &output::OutputDestination,
+        publication_permitted: impl FnOnce() -> bool,
+    ) -> Result<(), output::PublicationFailure> {
+        output::write_new_owner_only_before_publication(
+            destination,
+            &self.archive,
+            publication_permitted,
+        )
     }
     #[cfg(test)]
     pub(super) fn write_plaintext_explicitly_with_after_close_hook(
@@ -614,12 +626,39 @@ impl SupportBundle {
     ) -> Result<(), ()> {
         output::write_new_owner_only_with_after_close_hook(destination, &self.archive, after_close)
     }
+    #[cfg(test)]
+    pub(super) fn write_plaintext_explicitly_with_after_close_deadline_hook(
+        &self,
+        destination: &output::OutputDestination,
+        after_close: impl FnOnce(),
+        publication_permitted: impl FnOnce() -> bool,
+    ) -> Result<(), output::PublicationFailure> {
+        output::write_new_owner_only_with_after_close_deadline_hook(
+            destination,
+            &self.archive,
+            after_close,
+            publication_permitted,
+        )
+    }
+    #[cfg(test)]
     pub(super) fn write_encrypted(
         &self,
         destination: &output::OutputDestination,
         ciphertext: &[u8],
     ) -> Result<(), ()> {
         output::write_new_owner_only(destination, ciphertext)
+    }
+    pub(super) fn write_encrypted_before_publication(
+        &self,
+        destination: &output::OutputDestination,
+        ciphertext: &[u8],
+        publication_permitted: impl FnOnce() -> bool,
+    ) -> Result<(), output::PublicationFailure> {
+        output::write_new_owner_only_before_publication(
+            destination,
+            ciphertext,
+            publication_permitted,
+        )
     }
 }
 fn append(tar: &mut tar::Builder<&mut Vec<u8>>, path: &str, bytes: &[u8]) -> io::Result<()> {

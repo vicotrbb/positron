@@ -396,6 +396,54 @@ fn elapsed_deadline_prevents_plaintext_output_creation() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn elapsed_deadline_before_irreversible_publication_leaves_no_output()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-support-publication-deadline-{nonce}"));
+    let data = root.join("data");
+    let secrets = root.join("secrets");
+    let external = root.join("external");
+    fs::create_dir_all(&data)?;
+    fs::create_dir_all(&secrets)?;
+    fs::create_dir_all(&external)?;
+    let output = external.join("bundle.tar");
+    let destination = super::super::output::prepare_destination(&output, &data, &secrets)
+        .map_err(|_| "destination")?;
+    let bundle = SupportBundle::build_for_explicit_plaintext(
+        [BundleMember::doctor_report(b"safe")],
+        BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
+    )
+    .map_err(|_| "bundle")?;
+    let options = super::BundleOptions {
+        config: std::path::PathBuf::from("unused"),
+        output: output.clone(),
+        recipients: Vec::new(),
+        plaintext_warning: true,
+        offline_key_unavailable: true,
+        output_limit: 12_000,
+        elapsed_limit: std::time::Duration::from_secs(1),
+        log_window: std::time::Duration::from_secs(1),
+        source_file_limit: 1,
+        control_path: None,
+        identifier_retention: super::super::privacy::IdentifierRetention::Ephemeral,
+    };
+
+    assert!(matches!(
+        super::write_plaintext_bundle_with_after_close_hook(
+            &bundle,
+            &options,
+            &destination,
+            std::time::Instant::now(),
+            || std::thread::sleep(std::time::Duration::from_secs(2)),
+        ),
+        Err(super::BundleFailure::DeadlineExceeded)
+    ));
+    assert!(!output.exists());
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn deadline_crossing_after_publication_succeeds_without_removing_a_replacement_output()
 -> Result<(), Box<dyn std::error::Error>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();

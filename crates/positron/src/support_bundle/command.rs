@@ -49,6 +49,7 @@ fn execute(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> Result<String, BundleFailure> {
     let options = BundleOptions::parse(arguments)?;
+    let started = Instant::now();
     let inputs = ConfigurationInputs::try_from_sources(
         Some(options.config.as_path()),
         environment,
@@ -72,11 +73,12 @@ fn execute(
     let limits = BundleLimits::new(14, options.output_limit)
         .map_err(|_| BundleFailure::Arguments)?
         .with_elapsed_limit(options.elapsed_limit);
-    let started = Instant::now();
     if let Some(control_path) = options.control_path.as_deref() {
-        let ciphertext = live_control::request_live_bundle(control_path, &options)?;
-        output::write_new_owner_only(&output_destination, &ciphertext)
-            .map_err(|_| BundleFailure::OutputUnavailable)?;
+        let ciphertext = live_control::request_live_bundle(control_path, &options, started)?;
+        output::write_new_owner_only_before_publication(&output_destination, &ciphertext, || {
+            !options.deadline_exceeded(started)
+        })
+        .map_err(publication_failure)?;
         return Ok(
             "report_version=1\nstatus=created\nformat=positron-support-bundle-tar-v1\nmode=online\nencryption=age_x25519\nsignature=signed\nplaintext_export_warning=false\n".to_owned(),
         );
@@ -186,6 +188,26 @@ pub(crate) fn write_bundle_with_after_publication_hook(
     )
 }
 
+#[cfg(test)]
+pub(super) fn write_plaintext_bundle_with_after_close_hook(
+    bundle: &SupportBundle,
+    options: &BundleOptions,
+    output_destination: &output::OutputDestination,
+    started: Instant,
+    after_close: impl FnOnce(),
+) -> Result<(), BundleFailure> {
+    if options.deadline_exceeded(started) {
+        return Err(BundleFailure::DeadlineExceeded);
+    }
+    bundle
+        .write_plaintext_explicitly_with_after_close_deadline_hook(
+            output_destination,
+            after_close,
+            || !options.deadline_exceeded(started),
+        )
+        .map_err(publication_failure)
+}
+
 fn write_bundle_after_publication(
     bundle: &SupportBundle,
     options: &BundleOptions,
@@ -201,8 +223,10 @@ fn write_bundle_after_publication(
             return Err(BundleFailure::DeadlineExceeded);
         }
         bundle
-            .write_plaintext_explicitly(output_destination)
-            .map_err(|_| BundleFailure::OutputUnavailable)?;
+            .write_plaintext_explicitly_before_publication(output_destination, || {
+                !options.deadline_exceeded(started)
+            })
+            .map_err(publication_failure)?;
     } else {
         let recipients = AgeRecipients::parse(options.recipients.clone())
             .map_err(|_| BundleFailure::Arguments)?;
@@ -213,11 +237,20 @@ fn write_bundle_after_publication(
             return Err(BundleFailure::DeadlineExceeded);
         }
         bundle
-            .write_encrypted(output_destination, &ciphertext)
-            .map_err(|_| BundleFailure::OutputUnavailable)?;
+            .write_encrypted_before_publication(output_destination, &ciphertext, || {
+                !options.deadline_exceeded(started)
+            })
+            .map_err(publication_failure)?;
     }
     after_publication();
     Ok(())
+}
+
+fn publication_failure(failure: output::PublicationFailure) -> BundleFailure {
+    match failure {
+        output::PublicationFailure::Unavailable => BundleFailure::OutputUnavailable,
+        output::PublicationFailure::DeadlineExceeded => BundleFailure::DeadlineExceeded,
+    }
 }
 
 fn offline_operational_status(report: &str) -> String {
@@ -678,6 +711,13 @@ impl BundleOptions {
 
     fn deadline_exceeded(&self, started: Instant) -> bool {
         self.elapsed_limit.is_zero() || started.elapsed() > self.elapsed_limit
+    }
+
+    pub(super) fn remaining_time(&self, started: Instant) -> Option<Duration> {
+        (!self.deadline_exceeded(started))
+            .then(|| self.elapsed_limit.checked_sub(started.elapsed()))
+            .flatten()
+            .filter(|remaining| !remaining.is_zero())
     }
 }
 
