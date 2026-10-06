@@ -1,5 +1,6 @@
 use std::error::Error;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -19,11 +20,11 @@ use positron_governance::{
 use positron_ingest::load_schema_checkpoint;
 use positron_kernel::{
     ActiveSegmentLedger, AuditIntent, Catalog, CatalogObject, CatalogProposal,
-    CatalogPublicationFault, FormatEpoch, MaintenancePreconditions, MaintenanceTask,
-    MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger,
-    MountQualification, ResourceAmounts, ResourceDimension, RetentionTimeAuthority, SegmentScope,
-    StoreBlockIdentity, TransactionId, WorkClaim, WorkClass, WorkKind,
-    with_catalog_publication_fault_after,
+    CatalogPublicationFault, FormatEpoch, MaintenancePreconditions, MaintenanceScope,
+    MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase,
+    MaintenanceTrigger, MountQualification, ResourceAmounts, ResourceDimension,
+    RetentionTimeAuthority, SegmentScope, StoreBlockIdentity, TransactionId, WorkClaim, WorkClass,
+    WorkKind, with_catalog_publication_fault_after,
 };
 use positron_policy::{
     IngestPolicy, LogMetadata, NativeLogCandidate, PolicyEvaluation, PolicyReceiver,
@@ -700,6 +701,20 @@ fn scheduled_integrity_scrub_persists_its_jittered_lifecycle_due_instant_across_
         due,
         "reopen preserves the descriptor's original lifecycle-clock due instant"
     );
+    let services = ServiceHandle::new(Arc::clone(&reopened))?;
+    assert!(
+        services.wake_maintenance_worker()?,
+        "a restart after the persisted calendar due instant admits the original descriptor"
+    );
+    assert_eq!(
+        reopened
+            .maintenance_coordinator()
+            .status(identity)
+            .map_err(|_| "late reopened task")?
+            .phase(),
+        MaintenanceTaskPhase::Succeeded,
+        "late restart dispatch completes the durable descriptor without resampling its jitter"
+    );
     Ok(())
 }
 
@@ -766,10 +781,66 @@ fn runtime_integrity_scrub_revisits_an_unchanged_scope_and_quarantines_later_bit
     let damaged_segment = fs::read_dir(&sealed_directory)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| !before_seal.contains(path))
+        .find(|path| {
+            !before_seal.contains(path)
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "segment")
+        })
         .ok_or("newly sealed block-bearing segment")?;
 
-    while services.wake_maintenance_worker()? {}
+    assert!(
+        services.wake_maintenance_worker()?,
+        "the first maintenance turn persists the initial scrub descriptors"
+    );
+    let initial_log_scrub = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|failure| format!("first integrity status: {failure:?}"))?
+        .into_iter()
+        .find(|status| {
+            status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                && status.task().scope()
+                    == MaintenanceScope::segment(
+                        scope.tenant_id(),
+                        scope.signal_kind(),
+                        scope.shard_id(),
+                    )
+                && status.phase() == MaintenanceTaskPhase::Queued
+        })
+        .ok_or("queued initial logs scrub")?
+        .task()
+        .clone();
+    let initial_due = initial_log_scrub.not_before();
+    let current_seconds = 10_u64;
+    assert!(
+        initial_due > current_seconds,
+        "the initial logs scrub remains ineligible until its persisted lifecycle due instant"
+    );
+    elapsed.advance(
+        initial_due
+            .checked_sub(current_seconds)
+            .ok_or("checked initial logs scrub due delta")?
+            .checked_mul(1_000_000_000)
+            .ok_or("checked initial logs scrub due nanoseconds")?,
+    )?;
+    let mut first_log_scrub_succeeded = false;
+    for _ in 0..4 {
+        let _ = services.wake_maintenance_worker()?;
+        first_log_scrub_succeeded = initialized
+            .maintenance_coordinator()
+            .status(initial_log_scrub.identity())
+            .map_err(|failure| format!("initial logs scrub status: {failure:?}"))?
+            .phase()
+            == MaintenanceTaskPhase::Succeeded;
+        if first_log_scrub_succeeded {
+            break;
+        }
+    }
+    assert!(
+        first_log_scrub_succeeded,
+        "the initial logs scrub completes before retention can reclaim its sealed source"
+    );
     let first_passes = initialized
         .maintenance_coordinator()
         .statuses()
@@ -782,8 +853,56 @@ fn runtime_integrity_scrub_revisits_an_unchanged_scope_and_quarantines_later_bit
         .count();
     assert!(first_passes > 0, "the first due pass is durably recorded");
 
-    fs::write(&damaged_segment, b"corrupt after a successful scrub")?;
     elapsed.advance(86_400_000_000_000)?;
+    let mut next_log_due = None;
+    for _ in 0..4 {
+        let _ = services.wake_maintenance_worker()?;
+        next_log_due = initialized
+            .maintenance_coordinator()
+            .statuses()
+            .map_err(|failure| format!("next integrity status: {failure:?}"))?
+            .into_iter()
+            .find(|status| {
+                status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                    && status.task().scope()
+                        == MaintenanceScope::segment(
+                            scope.tenant_id(),
+                            scope.signal_kind(),
+                            scope.shard_id(),
+                        )
+                    && status.phase() == MaintenanceTaskPhase::Queued
+                    && status.task().identity() != initial_log_scrub.identity()
+            })
+            .map(|status| status.task().not_before());
+        if next_log_due.is_some() {
+            break;
+        }
+    }
+    let current_seconds = initialized
+        .retention_time
+        .governance_now_seconds()
+        .map_err(|failure| format!("current lifecycle clock: {failure:?}"))?;
+    let next_due = next_log_due.ok_or("fresh queued logs integrity scrub")?;
+    assert!(
+        damaged_segment.is_file(),
+        "catalog-bound sealed segment exists"
+    );
+    let mut corrupted_segment = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&damaged_segment)?;
+    corrupted_segment.write_all(b"corrupt after a successful scrub")?;
+    corrupted_segment.sync_all()?;
+    drop(corrupted_segment);
+    if next_due > current_seconds {
+        elapsed.advance(
+            next_due
+                .checked_sub(current_seconds)
+                .ok_or("next scrub due delta")?
+                .checked_mul(1_000_000_000)
+                .ok_or("next scrub due nanoseconds")?,
+        )?;
+    }
     for _ in 0..8 {
         let _ = services
             .wake_maintenance_worker()
@@ -953,15 +1072,81 @@ fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_rete
         services.wake_maintenance_worker()?,
         "the sole runtime worker discovers and begins due retention work"
     );
-    for _ in 0..3 {
-        assert!(services.wake_maintenance_worker()?);
+    for _ in 0..8 {
+        if !services.wake_maintenance_worker()? {
+            break;
+        }
     }
-    // Retention changes each affected scope's sealed source once. The worker
-    // therefore reauthenticates each resulting immutable basis before it can
-    // become idle again. Two scopes complete that finite follow-up in four
-    // bounded worker turns (one discovery/dispatch and one completion each).
-    for _ in 0..4 {
-        assert!(services.wake_maintenance_worker()?);
+    let scheduled_scrubs = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|_| "scheduled integrity scrub statuses")?
+        .into_iter()
+        .filter(|status| {
+            status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                && status.phase() == MaintenanceTaskPhase::Queued
+        })
+        .map(|status| status.task().not_before())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scheduled_scrubs.len(),
+        scopes.len(),
+        "each retention publication schedules one persisted scrub"
+    );
+    let current_seconds = 12_u64;
+    assert!(
+        scheduled_scrubs
+            .iter()
+            .all(|due| *due > current_seconds && *due < 900),
+        "each initial queued scrub remains in the first lifecycle epoch"
+    );
+    assert!(
+        !services.wake_maintenance_worker()?,
+        "the worker remains idle before every queued scrub's persisted due instant"
+    );
+    let latest_due = *scheduled_scrubs
+        .iter()
+        .max()
+        .ok_or("latest queued jittered integrity scrub")?;
+    elapsed.advance(
+        latest_due
+            .checked_sub(current_seconds)
+            .ok_or("checked latest scrub due delta")?
+            .checked_mul(1_000_000_000)
+            .ok_or("checked latest scrub due nanoseconds")?,
+    )?;
+    let mut drained_turns = 0_usize;
+    for _ in 0..16 {
+        if !services.wake_maintenance_worker()? {
+            break;
+        }
+        drained_turns += 1;
+    }
+    assert!(
+        drained_turns < 16,
+        "the finite maintenance drain reaches an idle state"
+    );
+    let statuses = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|_| "completed retention and scrub statuses")?;
+    for scope in &scopes {
+        let maintenance_scope =
+            MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id());
+        for class in [
+            MaintenanceTaskClass::RetentionPublication,
+            MaintenanceTaskClass::RetentionReclamation,
+            MaintenanceTaskClass::IntegrityScrub,
+        ] {
+            assert!(
+                statuses.iter().any(|status| {
+                    status.task().class() == class
+                        && status.task().scope() == maintenance_scope
+                        && status.phase() == MaintenanceTaskPhase::Succeeded
+                }),
+                "the {class:?} task for each expired scope completes before the worker is idle"
+            );
+        }
     }
     let catalog = open_catalog(&initialized)?;
     let idle_generation = catalog.pin()?.number();
@@ -1013,6 +1198,207 @@ fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_rete
             positron_kernel::LedgerFailureCode::InvalidInput
         );
     }
+    Ok(())
+}
+
+#[test]
+fn pending_integrity_scrub_blocks_retention_only_for_its_own_scope() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (mut initialized, ingest, _, administrator_secret) = fixture.initialized_with_admin()?;
+    let (retention_time, elapsed) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
+    Arc::get_mut(&mut initialized)
+        .ok_or("sole initialized instance")?
+        .install_retention_time_for_test(retention_time)?;
+    let tenant = initialized.default_tenant_id();
+    let system = initialized.attribute(
+        PresentedCredential::parse(&administrator_secret)?,
+        RequestedIntent::SystemAdministration,
+        CompatibilityHints::none(),
+    )?;
+    let retention = std::num::NonZeroU64::new(1).ok_or("one second retention")?;
+    let preview = initialized.inspect_tenant_retention_impact(system, tenant, retention)?;
+    initialized.update_tenant_retention(
+        system,
+        tenant,
+        retention,
+        ResourceGeneration::new(1)?,
+        Some(&preview),
+        AdministrativeIdempotencyKey::new([0x84; 16])?,
+    )?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    assert_eq!(
+        services
+            .ingest_otlp_logs(&ingest, request("scrub-blocked-log").encode_to_vec())?
+            .accepted_records(),
+        1
+    );
+    assert_eq!(
+        services
+            .ingest_otlp_traces(
+                &ingest,
+                ExportTraceServiceRequest {
+                    resource_spans: vec![ResourceSpans {
+                        scope_spans: vec![ScopeSpans {
+                            spans: vec![Span {
+                                trace_id: vec![0x85; 16],
+                                span_id: vec![0x86; 8],
+                                name: "scrub-healthy-trace".to_owned(),
+                                start_time_unix_nano: 41,
+                                end_time_unix_nano: 42,
+                                ..Span::default()
+                            }],
+                            ..ScopeSpans::default()
+                        }],
+                        ..ResourceSpans::default()
+                    }],
+                }
+                .encode_to_vec(),
+            )?
+            .accepted_records(),
+        1
+    );
+
+    let catalog = open_catalog(&initialized)?;
+    let snapshot = catalog.pin()?;
+    let scopes = [SignalKind::Logs, SignalKind::Traces]
+        .into_iter()
+        .map(|signal| snapshot.reachable_ledger_scopes(tenant, signal))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let logs_scope = *scopes
+        .iter()
+        .find(|scope| scope.signal_kind() == SignalKind::Logs)
+        .ok_or("canonical logs scope")?;
+    let traces_scope = *scopes
+        .iter()
+        .find(|scope| scope.signal_kind() == SignalKind::Traces)
+        .ok_or("canonical traces scope")?;
+    drop(snapshot);
+    for scope in &scopes {
+        let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+        let protection = super::super::tenant_segment_key(&initialized, &identity, *scope)?;
+        ActiveSegmentLedger::open_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            *scope,
+            protection,
+        )?
+        .seal()?;
+    }
+    let snapshot = catalog.pin()?;
+    let pending_scrub = MaintenanceTask::integrity_scrub(
+        MaintenanceTaskId::new([0x87; 16]).map_err(|_| "pending scrub identity")?,
+        MaintenanceScope::segment(
+            logs_scope.tenant_id(),
+            logs_scope.signal_kind(),
+            logs_scope.shard_id(),
+        ),
+        MaintenanceTrigger::Scheduled,
+        MaintenancePreconditions::new(snapshot.number(), 1).map_err(|_| "pending preconditions")?,
+        snapshot.integrity_scope_source_identity(logs_scope)?,
+        86_400,
+    )
+    .map_err(|_| "pending source-bound scrub")?;
+    let pending_scrub_id = pending_scrub.identity();
+    initialized
+        .maintenance_coordinator()
+        .submit_and_persist(&catalog, pending_scrub, 10)
+        .map_err(|_| "persist pending scrub")?;
+    drop(catalog);
+    elapsed.advance(2_000_000_000)?;
+
+    let traces_maintenance_scope = MaintenanceScope::segment(
+        traces_scope.tenant_id(),
+        traces_scope.signal_kind(),
+        traces_scope.shard_id(),
+    );
+    assert!(
+        services.wake_maintenance_worker()?,
+        "the healthy scope receives its own persisted integrity descriptor"
+    );
+    let trace_scrub_due = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|_| "healthy scrub status")?
+        .into_iter()
+        .find(|status| {
+            status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                && status.task().scope() == traces_maintenance_scope
+                && status.phase() == MaintenanceTaskPhase::Queued
+        })
+        .ok_or("queued healthy scrub")?
+        .task()
+        .not_before();
+    assert!(
+        (12..900).contains(&trace_scrub_due),
+        "the healthy scope's persisted scrub is eligible in the current lifecycle epoch"
+    );
+    elapsed.advance(
+        trace_scrub_due
+            .checked_sub(12)
+            .ok_or("healthy scrub due delta")?
+            .checked_mul(1_000_000_000)
+            .ok_or("healthy scrub due nanoseconds")?,
+    )?;
+    let mut healthy_scope_completed = false;
+    for _ in 0..8 {
+        let _ = services.wake_maintenance_worker()?;
+        let statuses = initialized
+            .maintenance_coordinator()
+            .statuses()
+            .map_err(|_| "maintenance statuses")?;
+        healthy_scope_completed = [
+            MaintenanceTaskClass::RetentionPublication,
+            MaintenanceTaskClass::RetentionReclamation,
+        ]
+        .into_iter()
+        .all(|class| {
+            statuses.iter().any(|status| {
+                status.task().class() == class
+                    && status.task().scope() == traces_maintenance_scope
+                    && status.phase() == MaintenanceTaskPhase::Succeeded
+            })
+        });
+        if healthy_scope_completed {
+            break;
+        }
+    }
+    assert!(
+        healthy_scope_completed,
+        "a pending scrub for logs does not strand the independently healthy traces retention scope"
+    );
+    let statuses = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|_| "final maintenance statuses")?;
+    assert_eq!(
+        initialized
+            .maintenance_coordinator()
+            .status(pending_scrub_id)
+            .map_err(|_| "pending scrub status")?
+            .phase(),
+        MaintenanceTaskPhase::Queued,
+        "the blocked scope remains behind its persisted scrub due instant"
+    );
+    let logs_maintenance_scope = MaintenanceScope::segment(
+        logs_scope.tenant_id(),
+        logs_scope.signal_kind(),
+        logs_scope.shard_id(),
+    );
+    assert!(
+        !statuses.iter().any(|status| {
+            matches!(
+                status.task().class(),
+                MaintenanceTaskClass::RetentionPublication
+                    | MaintenanceTaskClass::RetentionReclamation
+            ) && status.task().scope() == logs_maintenance_scope
+        }),
+        "the maintenance guard blocks retention only for the scrub's exact scope"
+    );
     Ok(())
 }
 

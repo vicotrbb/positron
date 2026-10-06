@@ -647,6 +647,46 @@ pub struct NativeHost {
     bindings: NativeBindings,
     admissions: AdmissionRegistry,
     staged_admissions: Option<StagedAdmissions>,
+    control_diagnostics: Option<Arc<dyn ControlDiagnosticsHandler>>,
+}
+
+/// The composition root may provide the single binary's support-bundle
+/// collector to the owner-only Control listener.  NativeHost owns transport;
+/// the handler must obtain current authority from `HealthState` itself.
+pub trait ControlDiagnosticsHandler: Send + Sync {
+    fn collect(
+        &self,
+        bearer: &str,
+        request: &[u8],
+        health: &HealthState,
+    ) -> Result<ControlDiagnosticsResponse, ControlDiagnosticsFailure>;
+}
+
+/// Bounded diagnostic bytes plus the governor reservation that remains owned
+/// until the Control listener has written the response or abandoned it.
+pub struct ControlDiagnosticsResponse {
+    body: Vec<u8>,
+    reservation: positron_kernel::TransferredResourceReservation,
+}
+
+impl ControlDiagnosticsResponse {
+    #[must_use]
+    pub fn new(
+        body: Vec<u8>,
+        reservation: positron_kernel::TransferredResourceReservation,
+    ) -> Self {
+        Self { body, reservation }
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<u8>, positron_kernel::TransferredResourceReservation) {
+        (self.body, self.reservation)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlDiagnosticsFailure {
+    AuthenticationRejected,
+    Unavailable,
 }
 
 impl Clone for NativeHost {
@@ -655,6 +695,7 @@ impl Clone for NativeHost {
             bindings: self.bindings.clone(),
             admissions: Arc::clone(&self.admissions),
             staged_admissions: self.staged_admissions.as_ref().map(Arc::clone),
+            control_diagnostics: self.control_diagnostics.as_ref().map(Arc::clone),
         }
     }
 }
@@ -708,7 +749,14 @@ impl NativeHost {
             bindings,
             admissions: Arc::new(Mutex::new(Vec::with_capacity(6))),
             staged_admissions: None,
+            control_diagnostics: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_control_diagnostics(mut self, handler: Arc<dyn ControlDiagnosticsHandler>) -> Self {
+        self.control_diagnostics = Some(handler);
+        self
     }
 }
 
@@ -746,6 +794,7 @@ struct Admission {
     connection_protection: Option<ConnectionProtection>,
     http2_profile: Option<Http2Profile>,
     cors_allowed_origins: Vec<String>,
+    control_diagnostics: Option<Arc<dyn ControlDiagnosticsHandler>>,
 }
 
 type AdmissionRegistry = Arc<Mutex<Vec<(ListenerRole, Arc<Admission>)>>>;
@@ -1065,6 +1114,7 @@ impl ListenerFactory for NativeHost {
             connection_protection,
             http2_profile: self.bindings.http2_profile(role),
             cors_allowed_origins: self.bindings.cors_allowed_origins(role),
+            control_diagnostics: self.control_diagnostics.as_ref().map(Arc::clone),
         });
         self.admissions
             .lock()
@@ -1126,6 +1176,7 @@ impl ListenerGenerationFactory for NativeHost {
             bindings,
             admissions: Arc::clone(&self.admissions),
             staged_admissions: Some(Arc::clone(&staged_admissions)),
+            control_diagnostics: self.control_diagnostics.as_ref().map(Arc::clone),
         };
         let profiles = ListenerRole::all().map(|role| {
             self.staged_profile(&configured, role)
@@ -1695,6 +1746,7 @@ mod listener_generation_tests {
             connection_protection: None,
             http2_profile: None,
             cors_allowed_origins: Vec::new(),
+            control_diagnostics: None,
         });
         let gate = Arc::new(ActivationGate::new());
         let cancellation = crate::TaskCancellation::new();
@@ -1731,6 +1783,7 @@ mod listener_generation_tests {
             connection_protection: None,
             http2_profile: None,
             cors_allowed_origins: Vec::new(),
+            control_diagnostics: None,
         };
         let cancellation = crate::TaskCancellation::new();
         admission.stop();
@@ -1887,6 +1940,9 @@ fn serve_http(
             #[cfg(unix)]
             NativeListener::Unix(listener) => match listener.accept() {
                 Ok((mut stream, _)) => {
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
                     if !can_serve_accepted_connection(&admission, &cancellation) {
                         continue;
                     }
@@ -1900,7 +1956,10 @@ fn serve_http(
                         SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
                         None,
                         &health,
-                        services.as_ref(),
+                        native_http::RouteDependencies::new(
+                            services.as_ref(),
+                            admission.control_diagnostics.as_deref(),
+                        ),
                         admission.connection_protection(),
                     );
                     continue;
@@ -1938,6 +1997,8 @@ fn serve_http(
                 let trusted_proxy = admission.trusted_proxy.clone();
                 let connection_health = health.clone();
                 let connection_services = services.clone();
+                let connection_control_diagnostics =
+                    admission.control_diagnostics.as_ref().map(Arc::clone);
                 let connection_admission = Arc::clone(&admission);
                 let connection_cancellation = cancellation.clone();
                 let Ok(interrupt) = stream.try_clone() else {
@@ -1992,7 +2053,10 @@ fn serve_http(
                                             peer,
                                             trusted_proxy,
                                             &connection_health,
-                                            connection_services.as_ref(),
+                                            native_http::RouteDependencies::new(
+                                                connection_services.as_ref(),
+                                                connection_control_diagnostics.as_deref(),
+                                            ),
                                             connection_protection,
                                         );
                                     }
@@ -2004,7 +2068,10 @@ fn serve_http(
                                     peer,
                                     trusted_proxy,
                                     &connection_health,
-                                    connection_services.as_ref(),
+                                    native_http::RouteDependencies::new(
+                                        connection_services.as_ref(),
+                                        connection_control_diagnostics.as_deref(),
+                                    ),
                                     connection_protection,
                                 );
                             }
@@ -2015,7 +2082,10 @@ fn serve_http(
                                 peer,
                                 trusted_proxy,
                                 &connection_health,
-                                connection_services.as_ref(),
+                                native_http::RouteDependencies::new(
+                                    connection_services.as_ref(),
+                                    connection_control_diagnostics.as_deref(),
+                                ),
                                 connection_protection,
                             );
                         }

@@ -791,6 +791,7 @@ mod admission_tests {
             connection_protection: None,
             http2_profile: None,
             cors_allowed_origins: Vec::new(),
+            control_diagnostics: None,
         });
         let cancellation = TaskCancellation::new();
         admission.stop();

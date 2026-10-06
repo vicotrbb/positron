@@ -23,15 +23,20 @@ pub(super) fn run(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
     match execute(arguments, environment) {
-        Ok((exit, report)) => {
-            print!("{report}");
-            exit
-        },
-        Err(failure) => {
-            print!("{}", failure.render());
-            ExitCode::from(failure.exit_code())
-        },
+        Ok((exit, report)) => write_report(&report)
+            .map_or_else(|()| ExitCode::from(EXIT_DIAGNOSTIC_FAILURE), |_| exit),
+        Err(failure) => write_report(failure.render()).map_or_else(
+            |()| ExitCode::from(EXIT_DIAGNOSTIC_FAILURE),
+            |_| ExitCode::from(failure.exit_code()),
+        ),
     }
+}
+
+fn write_report(report: &str) -> Result<(), ()> {
+    let stdout = std::io::stdout();
+    let mut locked = stdout.lock();
+    locked.write_all(report.as_bytes()).map_err(|_| ())?;
+    locked.flush().map_err(|_| ())
 }
 
 fn execute(

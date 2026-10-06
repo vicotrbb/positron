@@ -16,11 +16,15 @@ use super::io::{
     fenced_doctor_response, health_response, read_body,
 };
 use crate::{
-    HealthState, ListenerRole, Liveness, ProcessPhase, Readiness, ServiceHandle,
+    HealthState, ListenerRole, Liveness, ProcessPhase, Readiness,
     services::MaintenanceServiceFailure,
 };
 
+use super::super::ControlDiagnosticsFailure;
+
 use super::MAX_API_BODY_BYTES;
+
+const MAX_CONTROL_SUPPORT_BUNDLE_REQUEST_BYTES: usize = 8 * 1024;
 
 fn maintenance_failure_response(failure: MaintenanceServiceFailure) -> Response {
     let (status, code) = match failure {
@@ -125,8 +129,10 @@ pub(super) fn route<S: Read + Write>(
     trusted_proxy: Option<TrustedProxy>,
     mut head: RequestHead,
     health: &HealthState,
-    services: Option<&ServiceHandle>,
+    dependencies: super::RouteDependencies<'_>,
 ) -> Result<Response, Response> {
+    let services = dependencies.services;
+    let control_diagnostics = dependencies.control_diagnostics;
     if matches!(
         role,
         ListenerRole::Api | ListenerRole::OtlpHttp | ListenerRole::LokiPush
@@ -153,6 +159,7 @@ pub(super) fn route<S: Read + Write>(
                         content_type: "application/json",
                         body,
                         retry_after_seconds: None,
+                        diagnostics_reservation: None,
                     })
                 },
                 Err((status, code)) => {
@@ -224,6 +231,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -244,6 +252,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -264,6 +273,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -284,6 +294,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -304,6 +315,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -324,6 +336,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -344,6 +357,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -501,6 +515,34 @@ pub(super) fn route<S: Read + Write>(
                 status.reason,
             ))
         },
+        (ListenerRole::Control, "POST", "/control/support-bundle") => {
+            let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
+                Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+            })?);
+            let body = read_body(
+                stream,
+                head.content_length,
+                MAX_CONTROL_SUPPORT_BUNDLE_REQUEST_BYTES,
+            )?;
+            let handler = control_diagnostics.ok_or_else(|| Response::empty(503))?;
+            match handler.collect(&bearer, &body, health) {
+                Ok(response) => {
+                    let (body, reservation) = response.into_parts();
+                    Ok(Response {
+                        status: 200,
+                        content_type: "application/octet-stream",
+                        body,
+                        retry_after_seconds: None,
+                        diagnostics_reservation: Some(Box::new(reservation)),
+                    })
+                },
+                Err(ControlDiagnosticsFailure::AuthenticationRejected) => Ok(Response::json(
+                    401,
+                    "{\"code\":\"authentication_rejected\"}".to_owned(),
+                )),
+                Err(ControlDiagnosticsFailure::Unavailable) => Ok(Response::empty(503)),
+            }
+        },
         (ListenerRole::Operations, "GET", "/health/live") => Ok(health_response(
             health.liveness() == Liveness::Live,
             "live",
@@ -640,7 +682,7 @@ mod tests {
                 None,
                 head,
                 &request_health,
-                None,
+                super::super::RouteDependencies::new(None, None),
             ) {
                 Ok(response) | Err(response) => response.status(),
             };
@@ -682,6 +724,7 @@ mod tests {
         let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
         let instance = Arc::new(InstanceBootstrap::reopen(&paths)?);
         let state = ProcessState::starting();
+        state.health().set_fenced_inspection(paths.clone(), 2)?;
         state.set_inspection_authority(Arc::clone(&instance))?;
         state.transition(crate::ProcessPhase::Fenced);
 
@@ -726,6 +769,50 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn control_support_bundle_accepts_its_bounded_request_before_handler_and_rejects_larger_body() {
+        let health = ProcessState::starting().health();
+
+        assert_eq!(
+            control_support_bundle_response(&health, 8 * 1024).status(),
+            503,
+            "a protocol-sized request must reach the configured control handler"
+        );
+        assert_eq!(
+            control_support_bundle_response(&health, 8 * 1024 + 1).status(),
+            413,
+            "the control transport must reject a request beyond its bounded protocol maximum"
+        );
+    }
+
+    fn control_support_bundle_response(
+        health: &crate::HealthState,
+        body_length: usize,
+    ) -> super::Response {
+        let mut stream = Cursor::new(vec![b'x'; body_length]);
+        match route(
+            &mut stream,
+            ListenerRole::Control,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            None,
+            RequestHead {
+                method: "POST".to_owned(),
+                path: "/control/support-bundle".to_owned(),
+                content_length: body_length,
+                bearer: Some("syntactic-test-bearer".to_owned()),
+                content_type: None,
+                content_encoding: None,
+                tenant_hint: None,
+                forwarded_for: None,
+                forwarded_actor: None,
+            },
+            health,
+            super::super::RouteDependencies::new(None, None),
+        ) {
+            Ok(response) | Err(response) => response,
+        }
+    }
+
     fn control_request(
         health: &crate::HealthState,
         bearer: Option<String>,
@@ -768,7 +855,7 @@ mod tests {
                 forwarded_actor: None,
             },
             health,
-            None,
+            super::super::RouteDependencies::new(None, None),
         ) {
             Ok(response) | Err(response) => response,
         }

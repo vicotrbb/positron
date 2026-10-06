@@ -25,7 +25,8 @@ pub use configuration::{
 };
 pub use configuration_catalog::CatalogConfigurationPublication;
 pub use health::{
-    HealthState, HealthWarning, IntegrityFenceReason, Liveness, ProcessPhase, Readiness,
+    FencedDiagnosticsFailure, HealthState, HealthWarning, IntegrityFenceReason, Liveness,
+    ProcessPhase, Readiness, ServingDiagnosticsFailure,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use instance_bootstrap::GovernanceTestFixture;
@@ -44,7 +45,8 @@ pub use listener::{
     ListenerRequest, ListenerRole, ListenerTransport, ValidatedListenerSet,
 };
 pub use native_host::{
-    ApiTransportProfile, NativeBindings, NativeHost, NativeHostFailure, ProxyTrustFailure,
+    ApiTransportProfile, ControlDiagnosticsFailure, ControlDiagnosticsHandler,
+    ControlDiagnosticsResponse, NativeBindings, NativeHost, NativeHostFailure, ProxyTrustFailure,
     TlsFailure, TlsIdentity, TlsProfile, TlsTrust, TransportProfile, TrustedCidr, TrustedProxy,
     TrustedProxyPolicy,
 };

@@ -69,6 +69,26 @@ pub(crate) enum ConfigurationStatusFailure {
     Unavailable,
 }
 
+/// The only externally relevant failures while collecting an authenticated
+/// serving diagnostic. Authentication is distinct from a serving authority or
+/// runtime inspection failure so Control endpoints can preserve their stable
+/// HTTP status contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServingDiagnosticsFailure {
+    AuthenticationRejected,
+    Unavailable,
+}
+
+/// The only externally relevant failures while collecting a Fenced
+/// diagnostic. The caller must distinguish a rejected bearer from the
+/// unavailable durable inspection authority; neither outcome permits an
+/// online key-unavailable fallback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FencedDiagnosticsFailure {
+    AuthenticationRejected,
+    Unavailable,
+}
+
 /// Bounded, aggregate maintenance facts derived from the coordinator and the
 /// Resource Governor for authenticated Operations inspection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -260,6 +280,101 @@ impl std::fmt::Debug for HealthState {
 }
 
 impl HealthState {
+    /// Runs one bounded diagnostic collection against the current serving
+    /// owner.  Callers receive neither key material nor an authorization
+    /// cache: the bearer is attributed against the live instance immediately
+    /// before collection and the opaque signer remains kernel-owned.
+    pub fn with_authenticated_serving_diagnostics<T>(
+        &self,
+        bearer: &str,
+        collect: impl FnOnce(
+            &InitializedInstance,
+            positron_governance::AuthorizedContext,
+            Arc<RuntimeConfiguration>,
+        ) -> Result<T, ()>,
+    ) -> Result<T, ServingDiagnosticsFailure> {
+        if self.phase() != ProcessPhase::Serving {
+            return Err(ServingDiagnosticsFailure::Unavailable);
+        }
+        let authority = self
+            .inspection_authority
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
+        let configuration = self
+            .configuration
+            .get()
+            .cloned()
+            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
+        let credential = PresentedCredential::parse(bearer)
+            .map_err(|_| ServingDiagnosticsFailure::AuthenticationRejected)?;
+        let actor = authority
+            .attribute(
+                credential,
+                RequestedIntent::SystemAdministration,
+                CompatibilityHints::none(),
+            )
+            .map_err(|_| ServingDiagnosticsFailure::AuthenticationRejected)?;
+        collect(&authority, actor, configuration)
+            .map_err(|_| ServingDiagnosticsFailure::Unavailable)
+    }
+
+    /// Runs a bounded diagnostic collection through the Fenced inspection
+    /// authority. The bearer is attributed for this request against either
+    /// the still-current restricted owner or a newly reopened durable view;
+    /// no serving configuration or previous authorization is retained.
+    pub fn with_authenticated_fenced_diagnostics<T>(
+        &self,
+        bearer: &str,
+        collect: impl FnOnce(
+            &InitializedInstance,
+            positron_governance::AuthorizedContext,
+            DoctorRuntimeFacts,
+        ) -> Result<T, ()>,
+    ) -> Result<T, FencedDiagnosticsFailure> {
+        if self.phase() != ProcessPhase::Fenced {
+            return Err(FencedDiagnosticsFailure::Unavailable);
+        }
+        let inspection = self
+            .fenced_inspection
+            .get()
+            .ok_or(FencedDiagnosticsFailure::Unavailable)?;
+        if let Some(authority) = self.inspection_authority.get().and_then(Weak::upgrade) {
+            let credential = PresentedCredential::parse(bearer)
+                .map_err(|_| FencedDiagnosticsFailure::AuthenticationRejected)?;
+            let actor = authority
+                .attribute(
+                    credential,
+                    RequestedIntent::SystemAdministration,
+                    CompatibilityHints::none(),
+                )
+                .map_err(|_| FencedDiagnosticsFailure::AuthenticationRejected)?;
+            let facts = authority
+                .doctor_runtime_facts(actor)
+                .map_err(|_| FencedDiagnosticsFailure::Unavailable)?;
+            return collect(&authority, actor, facts)
+                .map_err(|_| FencedDiagnosticsFailure::Unavailable);
+        }
+        let authority = InstanceBootstrap::reopen_with_max_registered_tenants(
+            &inspection.paths,
+            inspection.max_registered_tenants,
+        )
+        .map_err(|_| FencedDiagnosticsFailure::Unavailable)?;
+        let credential = PresentedCredential::parse(bearer)
+            .map_err(|_| FencedDiagnosticsFailure::AuthenticationRejected)?;
+        let actor = authority
+            .attribute(
+                credential,
+                RequestedIntent::SystemAdministration,
+                CompatibilityHints::none(),
+            )
+            .map_err(|_| FencedDiagnosticsFailure::AuthenticationRejected)?;
+        let facts = authority
+            .doctor_runtime_facts(actor)
+            .map_err(|_| FencedDiagnosticsFailure::Unavailable)?;
+        collect(&authority, actor, facts).map_err(|_| FencedDiagnosticsFailure::Unavailable)
+    }
+
     pub(crate) fn degrade_integrity(&self) {
         self.integrity_degraded.store(true, Ordering::Release);
     }
@@ -428,24 +543,6 @@ impl HealthState {
             .map_err(|_| ())
     }
 
-    fn inspect_fenced_doctor(
-        paths: &BootstrapPaths,
-        max_registered_tenants: u16,
-        bearer: &str,
-    ) -> Result<DoctorRuntimeFacts, ()> {
-        let authority =
-            InstanceBootstrap::reopen_with_max_registered_tenants(paths, max_registered_tenants)
-                .map_err(|_| ())?;
-        let actor = authority
-            .attribute(
-                PresentedCredential::parse(bearer).map_err(|_| ())?,
-                RequestedIntent::SystemAdministration,
-                CompatibilityHints::none(),
-            )
-            .map_err(|_| ())?;
-        authority.doctor_runtime_facts(actor).map_err(|_| ())
-    }
-
     pub(crate) fn authorized_fenced_doctor_status(
         &self,
         bearer: &str,
@@ -453,39 +550,14 @@ impl HealthState {
         if self.phase() != ProcessPhase::Fenced {
             return Err(ConfigurationStatusFailure::Unavailable);
         }
-        let inspection = self
-            .fenced_inspection
-            .get()
-            .ok_or(ConfigurationStatusFailure::Unavailable)?;
-        let retained = self
-            .inspection_authority
-            .get()
-            .and_then(Weak::upgrade)
-            .and_then(|authority| {
-                let credential = PresentedCredential::parse(bearer).ok()?;
-                let actor = authority
-                    .attribute(
-                        credential,
-                        RequestedIntent::SystemAdministration,
-                        CompatibilityHints::none(),
-                    )
-                    .ok()?;
-                authority.doctor_runtime_facts(actor).ok()
-            });
-        // A running process fence releases its mutable instance. A concurrent
-        // holder of its former `Arc` can keep the weak reference upgradeable,
-        // but its authority has already been shut down. Reopen only to
-        // reattribute this same bearer against the current durable catalog;
-        // never use an old successful authorization as a fallback.
-        let doctor = match retained {
-            Some(doctor) => doctor,
-            None => Self::inspect_fenced_doctor(
-                &inspection.paths,
-                inspection.max_registered_tenants,
-                bearer,
-            )
-            .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?,
-        };
+        let doctor = self
+            .with_authenticated_fenced_diagnostics(bearer, |_, _, doctor| Ok(doctor))
+            .map_err(|failure| match failure {
+                FencedDiagnosticsFailure::AuthenticationRejected => {
+                    ConfigurationStatusFailure::AuthenticationRejected
+                },
+                FencedDiagnosticsFailure::Unavailable => ConfigurationStatusFailure::Unavailable,
+            })?;
         Ok(FencedDoctorStatus {
             doctor,
             bound_listener_roles: self.bound_listener_roles.load(Ordering::Acquire),

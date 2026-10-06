@@ -511,13 +511,21 @@ fn unavailable_or_mismatched_segment_key_fences_without_quarantine() -> Result<(
         SignalKind::Logs,
         VirtualShardId::new(5)?,
     );
-    ActiveSegmentLedger::open(
+    let ledger = ActiveSegmentLedger::open(
         &authority,
         &catalog,
         scope,
         SegmentProtectionKey::from_owned(Box::new([0xd4; 32])),
-    )?
-    .seal()?;
+    )?;
+    ledger.append(PreparedStoreBlock::new_with_authenticated_ranges_for_test(
+        scope,
+        StoreBlockIdentity::new([0xd7; 16])?,
+        b"known-range key custody boundary".to_vec(),
+        AuthenticatedEventRange::known(UnixNanoseconds::new(10), UnixNanoseconds::new(20))
+            .map_err(|_| "fixed Event Time range")?,
+        crate::IngestTime::from_authenticated_durable(UnixNanoseconds::new(30)),
+    )?)?;
+    ledger.seal()?;
     let report = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,

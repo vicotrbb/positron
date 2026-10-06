@@ -18,6 +18,7 @@ macro_rules! bounded_json_response {
                 content_type: "application/json",
                 body,
                 retry_after_seconds: None,
+                diagnostics_reservation: None,
             })
         }
     }};
@@ -78,6 +79,7 @@ pub(in crate::native_host::native_http) fn policy_activate_response(
             content_type: "application/json",
             body: serde_json::to_vec(&response).map_err(|_| Response::empty(500))?,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }),
         Err(crate::services::policy::PolicyActivateHttpFailure::Code(status, code)) => {
             Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))

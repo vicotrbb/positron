@@ -1,5 +1,5 @@
 use std::{
-    io::{IsTerminal, Read},
+    io::{IsTerminal, Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -31,17 +31,26 @@ pub(super) fn run(
     let selected_mode = selected_mode(&arguments);
     match execute(arguments.into_iter(), environment) {
         Ok((exit, output)) => {
-            print!("{output}");
-            exit
+            write_report(&output).map_or_else(|()| ExitCode::from(EXIT_INTEGRITY), |_| exit)
         },
         Err(failure) => {
-            print!(
+            let report = format!(
                 "mode={selected_mode}\nstatus={}\nverification_complete=false\n",
                 failure.status()
             );
-            ExitCode::from(EXIT_CONFIGURATION)
+            write_report(&report).map_or_else(
+                |()| ExitCode::from(EXIT_INTEGRITY),
+                |_| ExitCode::from(EXIT_CONFIGURATION),
+            )
         },
     }
+}
+
+fn write_report(report: &str) -> Result<(), ()> {
+    let stdout = std::io::stdout();
+    let mut locked = stdout.lock();
+    locked.write_all(report.as_bytes()).map_err(|_| ())?;
+    locked.flush().map_err(|_| ())
 }
 
 fn selected_mode(arguments: &[String]) -> &'static str {

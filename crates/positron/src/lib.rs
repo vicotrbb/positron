@@ -139,7 +139,8 @@ fn run(
     .map_err(|_| LaunchFailure::Configuration)?;
     let bindings =
         NativeBindings::from_effective(&effective).map_err(|_| LaunchFailure::Configuration)?;
-    let host = NativeHost::new(bindings);
+    let host = NativeHost::new(bindings)
+        .with_control_diagnostics(Arc::new(support_bundle::LiveSupportBundleCollector));
     let recovery = NativeRecovery::new(
         Signals::new([SIGHUP, SIGINT, SIGTERM]).map_err(|_| LaunchFailure::Signal)?,
     );

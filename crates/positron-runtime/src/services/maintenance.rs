@@ -803,6 +803,15 @@ fn discover_retention_publications(
         let maintenance_scope =
             MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id());
         if coordinator
+            .has_nonterminal_task_for_scope(MaintenanceTaskClass::IntegrityScrub, maintenance_scope)
+            .map_err(map_failure)?
+        {
+            // A persisted scrub describes this exact immutable source. Wait
+            // for its due instant and authentication outcome before retention
+            // opens the same scope; other scopes remain independently eligible.
+            continue;
+        }
+        if coordinator
             .has_nonterminal_retention_task_for_scope(maintenance_scope)
             .map_err(map_failure)?
         {

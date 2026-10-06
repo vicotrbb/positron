@@ -14,6 +14,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::{io::BufRead, io::BufReader, io::Read, io::Write, net::TcpStream};
+#[cfg(unix)]
+use std::{os::fd::OwnedFd, os::unix::net::UnixStream};
 
 #[cfg(unix)]
 static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -53,6 +55,49 @@ fn unknown_command_has_the_usage_exit() -> Result<(), Box<dyn std::error::Error>
         "positron: invalid command line\n"
     );
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_verify_and_bundle_report_stdout_failure_without_panicking()
+-> Result<(), Box<dyn std::error::Error>> {
+    for arguments in [
+        vec!["doctor", "--offline"],
+        vec!["verify", "--offline"],
+        vec!["support", "bundle"],
+    ] {
+        let output = command_with_closed_stdout(&arguments)?;
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{} reports the failed locked stdout write as an explicit failure",
+            arguments.join(" "),
+        );
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(
+            !stderr.contains("panicked"),
+            "{} must not panic when stdout is unavailable: {stderr}",
+            arguments.join(" "),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn command_with_closed_stdout(
+    arguments: &[&str],
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    let (writer, reader) = UnixStream::pair()?;
+    drop(reader);
+    // The peer is closed before spawn. Ownership transfers exactly one socket
+    // descriptor to the child so its fallible locked stdout write sees EPIPE.
+    let descriptor: OwnedFd = writer.into();
+    let stdout = Stdio::from(descriptor);
+    Ok(Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(arguments)
+        .stdout(stdout)
+        .stderr(Stdio::piped())
+        .output()?)
 }
 
 #[cfg(unix)]
@@ -361,6 +406,119 @@ fn encrypted_support_bundle_is_signed_decryptable_collision_safe_and_read_only()
     assert!(String::from_utf8(collision.stdout)?.contains("SUPPORT_BUNDLE_OUTPUT_UNAVAILABLE"));
     assert_eq!(before_data, volume_bytes(&roots.data)?);
     assert_eq!(before_secrets, volume_bytes(&roots.secrets)?);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn live_control_support_bundle_is_signed_encrypted_and_reports_serving_facts()
+-> Result<(), Box<dyn std::error::Error>> {
+    use age::{Decryptor, Identity};
+
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-live-support-{nonce}"));
+    let roots = ChildRoots::new(&root)?;
+    let paths = BootstrapPaths::new(&roots.data, &roots.secrets, MountQualification::LocalHost)?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let ports = available_ports()?;
+    let config = root.join("positron.toml");
+    fs::write(
+        &config,
+        process_configuration(&root, &roots.data, &roots.secrets, ports),
+    )?;
+    let control = std::path::Path::new("/tmp")
+        .join(root.file_name().ok_or("live support root name")?)
+        .with_extension("sock");
+    let server = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["serve", "--config"])
+        .arg(&config)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    wait_for_ready(ports[0])?;
+
+    let mut status = TcpStream::connect(("127.0.0.1", ports[0]))?;
+    status.write_all(
+        format!(
+            "GET /status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+            claim.secret(),
+        )
+        .as_bytes(),
+    )?;
+    let mut status_response = Vec::new();
+    status.read_to_end(&mut status_response)?;
+    assert!(
+        status_response.starts_with(b"HTTP/1.1 200 "),
+        "serving status must accept the current system administrator: {}",
+        String::from_utf8_lossy(&status_response),
+    );
+
+    let identity = age::x25519::Identity::generate();
+    let output = root.join("live-support.age");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["support", "bundle", "create", "--config"])
+        .arg(&config)
+        .arg("--control-path")
+        .arg(&control)
+        .arg("--output")
+        .arg(&output)
+        .arg("--recipient")
+        .arg(identity.to_public().to_string())
+        .arg("--credential-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut input = command.stdin.take().ok_or("live bundle stdin")?;
+    input.write_all(claim.secret().as_bytes())?;
+    input.write_all(b"\n")?;
+    drop(input);
+    let result = command.wait_with_output()?;
+
+    let _ = Command::new("/bin/kill")
+        .args(["-TERM", &server.id().to_string()])
+        .status()?;
+    let server_output = server.wait_with_output()?;
+
+    assert!(
+        result.status.success(),
+        "live support command failed: {}; server stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&server_output.stderr),
+    );
+    assert!(String::from_utf8(result.stdout)?.contains("signature=signed"));
+    let encrypted = fs::read(&output)?;
+    let decryptor = Decryptor::new(&encrypted[..])?;
+    let mut reader = decryptor.decrypt(std::iter::once(&identity as &dyn Identity))?;
+    let mut archive = Vec::new();
+    reader.read_to_end(&mut archive)?;
+    assert!(
+        archive
+            .windows(b"manifest-signature.txt".len())
+            .any(|bytes| bytes == b"manifest-signature.txt")
+    );
+    assert!(
+        archive
+            .windows(b"inspection_mode=online".len())
+            .any(|bytes| bytes == b"inspection_mode=online")
+    );
+    assert!(
+        archive
+            .windows(b"process_phase=serving".len())
+            .any(|bytes| bytes == b"process_phase=serving")
+    );
+    assert!(
+        !archive
+            .windows(claim.secret().len())
+            .any(|bytes| bytes == claim.secret().as_bytes())
+    );
     fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -10,6 +10,7 @@ use crate::health::MaintenanceHealth;
 use crate::{
     ConfigurationObservation, DoctorRuntimeFacts, HealthWarning, ListenerRole, ProcessPhase,
 };
+use positron_kernel::TransferredResourceReservation;
 
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 
@@ -442,6 +443,7 @@ pub(in crate::native_host) struct Response {
     pub(in crate::native_host) content_type: &'static str,
     pub(in crate::native_host) body: Vec<u8>,
     pub(in crate::native_host) retry_after_seconds: Option<u32>,
+    pub(in crate::native_host) diagnostics_reservation: Option<Box<TransferredResourceReservation>>,
 }
 
 impl Drop for Response {
@@ -457,6 +459,7 @@ impl Response {
             content_type: "application/json",
             body: Vec::new(),
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }
     }
 
@@ -466,6 +469,7 @@ impl Response {
             content_type: "application/json",
             body: body.into_bytes(),
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }
     }
 
@@ -475,6 +479,7 @@ impl Response {
             content_type: "application/x-protobuf",
             body,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }
     }
 
@@ -506,7 +511,7 @@ impl Response {
 
 pub(in crate::native_host) fn write_response<S: Write>(
     stream: &mut S,
-    response: Response,
+    mut response: Response,
 ) -> Result<(), std::io::Error> {
     let reason = match response.status {
         200 => "OK",
@@ -535,7 +540,9 @@ pub(in crate::native_host) fn write_response<S: Write>(
         retry_after
     );
     stream.write_all(header.as_bytes())?;
-    stream.write_all(&response.body)
+    let outcome = stream.write_all(&response.body);
+    drop(response.diagnostics_reservation.take());
+    outcome
 }
 
 #[cfg(test)]
@@ -600,7 +607,7 @@ mod tests {
                     "127.0.0.1:1".parse().expect("loopback peer"),
                     None,
                     &health,
-                    None,
+                    super::super::RouteDependencies::new(None, None),
                     crate::ConnectionProtection::new(
                         std::num::NonZeroU16::MIN,
                         std::time::Duration::from_secs(1),
