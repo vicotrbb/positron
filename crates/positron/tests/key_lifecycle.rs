@@ -1,3 +1,4 @@
+use positron_config::{CommandLineOverrides, ConfigurationInputs, EnvironmentOverrides, resolve};
 use positron_runtime::{
     ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, InitializationPlan,
     InstanceBootstrap, NativeBindings, NativeHost, ServeConfiguration, ShutdownTrigger,
@@ -150,6 +151,257 @@ fn cli_manages_keys_through_authenticated_running_api_without_redisplay()
         positron_runtime::ExitOutcome::Graceful
     );
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn native_operations_status_authenticates_and_reports_current_doctor_facts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from("/tmp").join(format!(
+        "p-doctor-status-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let data = root.join("data");
+    let secrets = root.join("secrets");
+    std::fs::create_dir_all(&data)?;
+    std::fs::create_dir_all(&secrets)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700))?;
+    let control = root.join("control.sock");
+    let local_key = secrets.join("local-root-key.v1");
+    let configuration = format!(
+        "schema_version = 1\n[listener]\ncontrol_path = \"{}\"\noperations_bind_address = \"127.0.0.1:0\"\napi_bind_address = \"127.0.0.1:0\"\notlp_grpc_bind_address = \"127.0.0.1:0\"\notlp_http_bind_address = \"127.0.0.1:0\"\nloki_push_bind_address = \"127.0.0.1:0\"\noperations_transport = \"plaintext\"\napi_transport = \"plaintext\"\notlp_grpc_transport = \"plaintext\"\notlp_http_transport = \"plaintext\"\nloki_push_transport = \"plaintext\"\n[storage]\ndata_directory = \"{}\"\nsecrets_directory = \"{}\"\n[security]\nlocal_key_file = \"{}\"\n",
+        control.display(),
+        data.display(),
+        secrets.display(),
+        local_key.display(),
+    );
+    let effective = std::sync::Arc::new(resolve(ConfigurationInputs::try_new(
+        Some(&configuration),
+        EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+        CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+    )?)?);
+    let paths = BootstrapPaths::with_local_key(
+        &data,
+        &secrets,
+        effective.local_key_file().as_path(),
+        positron_kernel::MountQualification::LocalHost,
+    )?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let host = NativeHost::new(NativeBindings::from_effective(&effective)?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::ExistingOnly)
+            .with_effective_configuration(std::sync::Arc::clone(&effective)),
+        HostInputs::new(&host, &host),
+    )?;
+    let endpoint = process
+        .bound_endpoints()
+        .into_iter()
+        .find(|endpoint| endpoint.role() == positron_runtime::ListenerRole::Operations)
+        .and_then(|endpoint| endpoint.socket_address())
+        .ok_or("operations listener absent")?;
+
+    let unauthorized = doctor_status(endpoint, "forged-credential")?;
+    assert!(unauthorized.starts_with("HTTP/1.1 401"));
+    let sources_before = source_listing(&data, &secrets)?;
+    let response = doctor_status(endpoint, claim.secret())?;
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.contains("\"key_custody\":\"verified\""));
+    assert!(response.contains("\"catalog_bootstrap\":\"verified\""));
+    assert!(response.contains("\"backup_repository\":\"not_configured\""));
+    assert!(
+        response
+            .contains("\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true")
+    );
+    assert!(!response.contains(claim.secret()));
+    assert_eq!(source_listing(&data, &secrets)?, sources_before);
+
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn compiled_doctor_reads_fenced_owner_control_facts_without_mutating_sources()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from("/tmp").join(format!(
+        "p-fenced-doctor-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let data = root.join("data");
+    let secrets = root.join("secrets");
+    std::fs::create_dir_all(&data)?;
+    std::fs::create_dir_all(&secrets)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700))?;
+    let control = root.join("control.sock");
+    let local_key = secrets.join("local-root-key.v1");
+    let configuration = format!(
+        "schema_version = 1\n[listener]\ncontrol_path = \"{}\"\noperations_bind_address = \"127.0.0.1:0\"\napi_bind_address = \"127.0.0.1:0\"\notlp_grpc_bind_address = \"127.0.0.1:0\"\notlp_http_bind_address = \"127.0.0.1:0\"\nloki_push_bind_address = \"127.0.0.1:0\"\noperations_transport = \"plaintext\"\napi_transport = \"plaintext\"\notlp_grpc_transport = \"plaintext\"\notlp_http_transport = \"plaintext\"\nloki_push_transport = \"plaintext\"\n[storage]\ndata_directory = \"{}\"\nsecrets_directory = \"{}\"\n[security]\nlocal_key_file = \"{}\"\n",
+        control.display(),
+        data.display(),
+        secrets.display(),
+        local_key.display(),
+    );
+    let effective = std::sync::Arc::new(resolve(ConfigurationInputs::try_new(
+        Some(&configuration),
+        EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+        CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+    )?)?);
+    let paths = BootstrapPaths::with_local_key(
+        &data,
+        &secrets,
+        effective.local_key_file().as_path(),
+        positron_kernel::MountQualification::LocalHost,
+    )?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let host = NativeHost::new(NativeBindings::from_effective(&effective)?);
+    let mut process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::ExistingOnly)
+            .with_effective_configuration(std::sync::Arc::clone(&effective)),
+        HostInputs::new(&host, &host),
+    )?;
+    process
+        .services()
+        .ok_or("services absent")?
+        .request_integrity_fence();
+    assert!(process.apply_pending_integrity_fence());
+    assert_eq!(
+        process.health().phase(),
+        positron_runtime::ProcessPhase::Fenced
+    );
+    assert!(
+        process.configuration().is_none(),
+        "a fence must retire the published configuration with its mutable authority"
+    );
+    assert!(process.bound_endpoints().iter().all(|endpoint| matches!(
+        endpoint.role(),
+        positron_runtime::ListenerRole::Control | positron_runtime::ListenerRole::Operations
+    )));
+    assert!(control_status(control.as_path(), "forged-credential")?.starts_with("HTTP/1.1 401"));
+    let authorized_control = control_status(control.as_path(), claim.secret())?;
+    assert!(
+        authorized_control.starts_with("HTTP/1.1 200"),
+        "current SystemAdministrator credential must authorize fenced inspection: {authorized_control}"
+    );
+    let sources_before = source_listing(&data, &secrets)?;
+    let output = invoke_doctor_control(control.as_path(), claim.secret())?;
+    assert_eq!(output.status.code(), Some(3));
+    let report = String::from_utf8(output.stdout)?;
+    assert!(
+        report.contains("status=fenced\nfinding_code=DOCTOR_RUNTIME_FENCED"),
+        "unexpected Doctor report: {report}"
+    );
+    assert!(report.contains("evidence_scope=owner_local_control"));
+    assert!(report.contains("key_custody=verified"));
+    assert!(report.contains("data_listeners_retired=true"));
+    assert!(!report.contains(claim.secret()));
+    assert_eq!(source_listing(&data, &secrets)?, sources_before);
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn invoke_doctor_control(
+    control: &std::path::Path,
+    credential: &str,
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["doctor", "--online", "--control-path"])
+        .arg(control)
+        .arg("--credential-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().ok_or("doctor stdin absent")?;
+    stdin.write_all(credential.as_bytes())?;
+    stdin.write_all(b"\n")?;
+    drop(stdin);
+    Ok(child.wait_with_output()?)
+}
+
+#[cfg(unix)]
+fn control_status(
+    control: &std::path::Path,
+    credential: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(control)?;
+    stream.write_all(format!("GET /control/fenced/inspection HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+#[cfg(unix)]
+fn doctor_status(
+    endpoint: std::net::SocketAddr,
+    credential: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut stream = std::net::TcpStream::connect(endpoint)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    stream.write_all(
+        format!(
+            "GET /status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .as_bytes(),
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+#[cfg(unix)]
+fn source_listing(
+    data: &std::path::Path,
+    secrets: &std::path::Path,
+) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, std::io::Error> {
+    let mut listing = Vec::new();
+    collect_regular_files(data, &mut listing)?;
+    collect_regular_files(secrets, &mut listing)?;
+    listing.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(listing)
+}
+
+#[cfg(unix)]
+fn collect_regular_files(
+    root: &std::path::Path,
+    listing: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+) -> Result<(), std::io::Error> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_regular_files(&path, listing)?;
+        } else if file_type.is_file() {
+            listing.push((path, std::fs::read(entry.path())?));
+        }
+    }
     Ok(())
 }
 

@@ -54,6 +54,7 @@ impl OfflineIntegrityVerification {
 /// decrypted-record detail because it is rendered by an operator report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OfflineIntegrityFailure {
+    OwnershipLocked,
     BootstrapUnavailable,
     KeyUnavailable,
     CatalogUnavailable,
@@ -97,7 +98,7 @@ mod tests {
 
     use super::{OfflineIntegrityFailure, resume_offline_integrity, verify_offline_integrity};
     use crate::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
-    use positron_kernel::MountQualification;
+    use positron_kernel::{MountQualification, ResourceAmounts, WorkClaim};
 
     #[test]
     fn offline_verification_reads_healthy_instance_without_changing_any_file()
@@ -251,6 +252,77 @@ mod tests {
             verify_offline_integrity(&paths, 2),
             Err(OfflineIntegrityFailure::KeyUnavailable)
         );
+        assert_eq!(file_tree(&root)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn key_unavailable_diagnostics_reserve_before_collection_and_release_after_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        fs::remove_file(root.join("secrets/local-root-key.v1"))?;
+        let before = file_tree(&root)?;
+        let claim = WorkClaim::system_diagnostics(ResourceAmounts::new([
+            24_576, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0,
+        ]))?;
+
+        let collected =
+            InstanceBootstrap::with_offline_key_unavailable_diagnostics(&paths, 2, claim, || {
+                assert!(
+                    paths.retain_volume_for_test().is_err(),
+                    "the diagnostics reservation must hold exclusive ownership through collection"
+                );
+                file_tree(&root)
+            })
+            .map_err(|failure| format!("offline diagnostics failed: {failure:?}"))?;
+        assert_eq!(collected?, before);
+        let retained = paths.retain_volume_for_test()?;
+        drop(retained);
+        assert_eq!(file_tree(&root)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn key_unavailable_diagnostics_refuse_before_collection_without_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        fs::remove_file(root.join("secrets/local-root-key.v1"))?;
+        let before = file_tree(&root)?;
+        let entered = std::cell::Cell::new(false);
+        let refusal = InstanceBootstrap::with_offline_key_unavailable_diagnostics(
+            &paths,
+            2,
+            WorkClaim::system_diagnostics(ResourceAmounts::new([
+                u64::MAX,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                1,
+                0,
+            ]))?,
+            || entered.set(true),
+        );
+        assert_eq!(refusal, Err(OfflineIntegrityFailure::CapacityUnavailable));
+        assert!(!entered.get(), "refused admission must precede collection");
         assert_eq!(file_tree(&root)?, before);
         fs::remove_dir_all(root)?;
         Ok(())

@@ -12,8 +12,8 @@ use super::adapters::tenant::{
     tenant_retention_preview_response, tenant_retention_update_response, tenant_service_response,
 };
 use super::io::{
-    RequestHead, Response, capability_response, configuration_status_response, health_response,
-    read_body,
+    RequestHead, Response, capability_response, configuration_status_response,
+    fenced_doctor_response, health_response, read_body,
 };
 use crate::{
     HealthState, ListenerRole, Liveness, ProcessPhase, Readiness, ServiceHandle,
@@ -490,20 +490,15 @@ pub(super) fn route<S: Read + Write>(
             let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
                 Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
             })?);
-            health
-                .authorize_configuration_status(&bearer)
+            let status = health
+                .authorized_fenced_doctor_status(&bearer)
                 .map_err(|_| {
                     Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
                 })?;
-            let reason = health
-                .integrity_fence_reason()
-                .map(|reason| format!(",\"reason\":\"{}\"", reason.redacted_label()))
-                .unwrap_or_default();
-            Ok(Response::json(
-                200,
-                format!(
-                    "{{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"{reason}}}"
-                ),
+            Ok(fenced_doctor_response(
+                status.doctor,
+                status.bound_listener_roles,
+                status.reason,
             ))
         },
         (ListenerRole::Operations, "GET", "/health/live") => Ok(health_response(
@@ -536,6 +531,8 @@ pub(super) fn route<S: Read + Write>(
                         health.integrity_degraded(),
                         configuration,
                         status.maintenance,
+                        status.doctor,
+                        status.bound_listener_roles,
                     ))
                 },
             )
@@ -693,14 +690,16 @@ mod tests {
 
         let response = control_request(
             &state.health(),
-            Some(administrator),
+            Some(administrator.clone()),
             "/control/fenced/inspection",
         );
         assert_eq!(response.status(), 200);
-        assert_eq!(
-            response.body(),
-            b"{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\"}"
-        );
+        let body = std::str::from_utf8(response.body())?;
+        assert!(body.contains("\"phase\":\"fenced\""));
+        assert!(body.contains("\"key_custody\":\"verified\""));
+        assert!(body.contains("\"catalog_bootstrap\":\"verified\""));
+        assert!(body.contains("\"listener_topology\":{\"control\":false"));
+        assert!(!body.contains(&administrator));
 
         for (role, path) in [
             (ListenerRole::Api, "/v1/capabilities:negotiate"),

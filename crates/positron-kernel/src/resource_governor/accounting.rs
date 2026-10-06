@@ -81,6 +81,7 @@ pub(super) struct GovernorSetupInput {
     pub(super) ordinary_ceiling: ResourceAmounts,
     pub(super) principal_quota: Option<PrincipalQuota>,
     pub(super) tenant_quotas: Box<[TenantQuota]>,
+    pub(super) system_only: bool,
     pub(super) maximum_outstanding: u32,
     pub(super) pool_capacities: PoolCapacities,
     pub(super) recovery_pool_capacities: RecoveryPoolCapacities,

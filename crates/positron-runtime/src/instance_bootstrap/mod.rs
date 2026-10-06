@@ -18,8 +18,9 @@ pub(crate) use operation::recover_initial_ledgers;
 pub use test_support::GovernanceTestFixture;
 pub(crate) use types::TenantRetentionPreviewConfirmation;
 pub use types::{
-    BootstrapClaim, BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BootstrapState,
-    InitializationPlan, InitializedInstance, TenantRetentionImpactPreview,
+    BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
+    BootstrapPaths, BootstrapState, DoctorRuntimeFacts, InitializationPlan, InitializedInstance,
+    TenantRetentionImpactPreview,
 };
 
 /// The sole Application Runtime authority for classifying and initializing an instance.
@@ -65,6 +66,23 @@ impl InstanceBootstrap {
         )>,
     ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
         operation::verify_offline_integrity(paths, max_registered_tenants, resume)
+    }
+
+    /// Runs one caller-supplied, bounded diagnostic operation under the
+    /// exclusive storage and system-only resource authority available when
+    /// the local bootstrap key cannot be opened.
+    pub fn with_offline_key_unavailable_diagnostics<T>(
+        paths: &BootstrapPaths,
+        max_registered_tenants: u16,
+        claim: positron_kernel::WorkClaim,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, crate::OfflineIntegrityFailure> {
+        operation::with_offline_key_unavailable_diagnostics(
+            paths,
+            max_registered_tenants,
+            claim,
+            operation,
+        )
     }
 
     pub fn claim(paths: &BootstrapPaths) -> Result<BootstrapClaim, BootstrapFailure> {

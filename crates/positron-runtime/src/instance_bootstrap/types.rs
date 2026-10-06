@@ -35,6 +35,64 @@ use positron_governance::{
 };
 use positron_query::QueryCancellation;
 
+/// Read-only diagnostic facts verified from the current bootstrap and Catalog
+/// authorities. The values deliberately contain no key material, identifiers,
+/// or repository coordinates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupRepositoryInspection {
+    /// The current persisted Catalog has no Backup Repository binding owner.
+    /// This is an explicit Release 1 state, never a guessed repository.
+    NotConfigured,
+}
+
+impl BackupRepositoryInspection {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DoctorRuntimeFacts {
+    key_custody_verified: bool,
+    catalog_bootstrap_verified: bool,
+    catalog_generation: u64,
+    backup_repository: BackupRepositoryInspection,
+}
+
+impl DoctorRuntimeFacts {
+    pub(crate) const fn verified(catalog_generation: u64) -> Self {
+        Self {
+            key_custody_verified: true,
+            catalog_bootstrap_verified: true,
+            catalog_generation,
+            backup_repository: BackupRepositoryInspection::NotConfigured,
+        }
+    }
+
+    #[must_use]
+    pub const fn key_custody_verified(self) -> bool {
+        self.key_custody_verified
+    }
+
+    #[must_use]
+    pub const fn catalog_bootstrap_verified(self) -> bool {
+        self.catalog_bootstrap_verified
+    }
+
+    #[must_use]
+    pub const fn catalog_generation(self) -> u64 {
+        self.catalog_generation
+    }
+
+    #[must_use]
+    pub const fn backup_repository(self) -> BackupRepositoryInspection {
+        self.backup_repository
+    }
+}
+
 /// A bounded, authorization-filtered Governance Audit history. When an audit
 /// retention anchor is present, records before that signed position are no
 /// longer claimed to be available by this response.

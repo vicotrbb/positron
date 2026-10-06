@@ -64,6 +64,60 @@ fn conflicting_copy_on_write_work_waits_for_the_running_owner_across_scopes() {
 }
 
 #[test]
+fn same_scope_integrity_scrub_waits_for_source_mutation() {
+    let coordinator = MaintenanceCoordinator::new();
+    let tenant = TenantId::from_bytes([8; 16]).expect("tenant identity");
+    let scope = MaintenanceScope::segment(
+        tenant,
+        positron_domain::routing::SignalKind::Logs,
+        positron_domain::routing::VirtualShardId::new(1).expect("shard"),
+    );
+    let scrub = MaintenanceTask::integrity_scrub(
+        MaintenanceTaskId::new([8; 16]).expect("task identity"),
+        scope,
+        MaintenanceTrigger::Scheduled,
+        MaintenancePreconditions::new(1, 1).expect("preconditions"),
+        [9; 32],
+        1,
+    )
+    .expect("source-bound scrub");
+    assert!(
+        scrub.inputs().is_empty(),
+        "a scope-manifest digest is a source precondition, never a physical object conflict"
+    );
+    assert_eq!(
+        scrub.source_binding().map(|binding| binding.to_bytes()),
+        Some([9; 32])
+    );
+    let mut compaction = task(
+        9,
+        MaintenanceTaskClass::Compaction,
+        MaintenanceTrigger::Event,
+        MaintenancePriority::Required,
+        vec![MaintenanceObjectId::new([10; 32]).expect("compaction input")],
+    );
+    compaction.scope = scope;
+    coordinator
+        .submit_at(scrub.clone(), 1)
+        .expect("scrub accepted");
+    coordinator
+        .submit_at(compaction.clone(), 2)
+        .expect("compaction accepted");
+
+    assert_eq!(
+        coordinator.start_next(3, false).expect("scrub starts"),
+        Some(scrub),
+    );
+    assert_eq!(
+        coordinator
+            .start_next(4, false)
+            .expect("same-scope conflict is evaluated"),
+        None,
+        "a compaction cannot replace the immutable source while its scrub is running"
+    );
+}
+
+#[test]
 fn clock_uncertain_inspection_reports_the_same_destructive_schedule_blocker_as_dispatch() {
     let coordinator = MaintenanceCoordinator::new();
     let task = task(
@@ -95,5 +149,33 @@ fn clock_uncertain_inspection_reports_the_same_destructive_schedule_blocker_as_d
             .status_with_clock_uncertainty(identity, false)
             .expect("certain status")
             .clock_uncertain_blocked()
+    );
+}
+
+#[test]
+fn clock_uncertain_does_not_pause_a_due_integrity_scrub() {
+    let coordinator = MaintenanceCoordinator::new();
+    let scope = MaintenanceScope::segment(
+        TenantId::from_bytes([0x71; 16]).expect("tenant"),
+        positron_domain::routing::SignalKind::Logs,
+        positron_domain::routing::VirtualShardId::new(1).expect("shard"),
+    );
+    let scrub = MaintenanceTask::integrity_scrub(
+        MaintenanceTaskId::new([0x72; 16]).expect("task"),
+        scope,
+        MaintenanceTrigger::Scheduled,
+        MaintenancePreconditions::new(1, 1).expect("preconditions"),
+        [0x73; 32],
+        1,
+    )
+    .expect("integrity scrub");
+    coordinator.submit_at(scrub.clone(), 1).expect("submit");
+
+    assert_eq!(
+        coordinator
+            .start_next(1, true)
+            .expect("ClockUncertain scheduling"),
+        Some(scrub),
+        "integrity authentication remains eligible while destructive lifecycle work is paused"
     );
 }

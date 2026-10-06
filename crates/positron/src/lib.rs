@@ -10,17 +10,19 @@ use std::{path::PathBuf, sync::Arc};
 use positron_config::{ConfigurationInputs, NetworkListenerRole, NetworkTransport, resolve};
 use positron_kernel::MountQualification;
 use positron_runtime::{
-    ApplicationRuntime, BootstrapPaths, ExitOutcome, HostInputs, InitializationMode,
-    NativeBindings, NativeHost, PublicPlaintextApiStartupIntent, RecoveryAttempt,
-    RecoveryAttemptHost, RecoveryDecision, ServeConfiguration, ShutdownTrigger,
+    ApplicationRuntime, BootstrapPaths, CrashInspection, ExitOutcome, HostInputs,
+    InitializationMode, NativeBindings, NativeHost, PublicPlaintextApiStartupIntent,
+    RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision, ServeConfiguration, ShutdownTrigger,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 mod config_cli;
+mod doctor_cli;
 mod keys;
 mod maintenance_cli;
 mod policy;
+mod support_bundle;
 mod tenant_alias_cli;
 mod tenant_lifecycle;
 mod tenant_quotas;
@@ -67,6 +69,20 @@ pub fn run_native(
     {
         arguments.next();
         return maintenance_cli::run(arguments);
+    }
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "doctor")
+    {
+        arguments.next();
+        return doctor_cli::run(arguments, environment);
+    }
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "support")
+    {
+        arguments.next();
+        return support_bundle::run(arguments, environment);
     }
     if arguments
         .peek()
@@ -179,7 +195,13 @@ fn run(
         environment,
         overrides: arguments.overrides,
     };
-    wait_for_shutdown(process, signals, deadline, &reload)
+    wait_for_shutdown(
+        process,
+        signals,
+        deadline,
+        &reload,
+        PathBuf::from(effective.data_directory()),
+    )
 }
 
 struct ReloadInputs {
@@ -270,44 +292,57 @@ fn wait_for_shutdown(
     mut signals: Signals,
     deadline: Duration,
     reload: &ReloadInputs,
+    crash_data_directory: PathBuf,
 ) -> Result<ExitOutcome, LaunchFailure> {
     let second_termination_seen = loop {
         // `Signals::forever` would prevent the process owner from consuming a
         // verified integrity-fence request until a later operating-system
         // signal. Polling remains bounded and preserves first/second signal
         // handling below.
-        let _applied_integrity_fence = process.apply_pending_integrity_fence();
-        let mut termination_count = 0_u8;
-        for signal in signals.pending() {
-            if matches!(signal, SIGINT | SIGTERM) {
-                termination_count = termination_count.saturating_add(1);
-                continue;
-            }
-            if signal == SIGHUP {
-                match reload.resolve() {
-                    Ok(candidate) => {
-                        let outcome = process.reload_configuration(candidate);
-                        if let Some(category) = reload_rejection_category(&outcome) {
+        let iteration = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _applied_integrity_fence = process.apply_pending_integrity_fence();
+            let mut termination_count = 0_u8;
+            for signal in signals.pending() {
+                if matches!(signal, SIGINT | SIGTERM) {
+                    termination_count = termination_count.saturating_add(1);
+                    continue;
+                }
+                if signal == SIGHUP {
+                    match reload.resolve() {
+                        Ok(candidate) => {
+                            let outcome = process.reload_configuration(candidate);
+                            if let Some(category) = reload_rejection_category(&outcome) {
+                                eprintln!(
+                                    "positron: configuration reload rejected category={category}"
+                                );
+                            }
+                        },
+                        Err(()) => {
+                            if process.record_invalid_configuration_reload().is_err() {
+                                eprintln!("positron: configuration reload audit unavailable");
+                            }
                             eprintln!(
-                                "positron: configuration reload rejected category={category}"
+                                "positron: configuration reload rejected category=source_rejected"
                             );
-                        }
-                    },
-                    Err(()) => {
-                        if process.record_invalid_configuration_reload().is_err() {
-                            eprintln!("positron: configuration reload audit unavailable");
-                        }
-                        eprintln!(
-                            "positron: configuration reload rejected category=source_rejected"
-                        );
-                    },
+                        },
+                    }
                 }
             }
+            termination_count
+        }));
+        match iteration {
+            Ok(termination_count) if termination_count > 0 => break termination_count > 1,
+            Ok(_) => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => {
+                capture_runtime_failure(
+                    &crash_data_directory,
+                    "serving",
+                    "runtime_serving_loop_panicked",
+                    process.crash_inspection(),
+                );
+                return Ok(process.shutdown(ShutdownTrigger::DeadlineExpired));
+            },
         }
-        if termination_count > 0 {
-            break termination_count > 1;
-        }
-        std::thread::sleep(Duration::from_millis(5));
     };
     let mut draining = process.begin_shutdown();
     if second_termination_seen {
@@ -321,11 +356,52 @@ fn wait_for_shutdown(
         if Instant::now() >= deadline_at {
             return Ok(draining.finish(ShutdownTrigger::DeadlineExpired));
         }
-        match draining.poll() {
-            Ok(true) => return Ok(draining.finish(ShutdownTrigger::FirstSignal)),
-            Ok(false) => std::thread::yield_now(),
-            Err(_) => return Ok(draining.finish(ShutdownTrigger::DeadlineExpired)),
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draining.poll())) {
+            Err(_) => {
+                capture_runtime_failure(
+                    &crash_data_directory,
+                    "draining",
+                    "runtime_poll_panicked",
+                    draining.crash_inspection(),
+                );
+                return Ok(draining.finish(ShutdownTrigger::DeadlineExpired));
+            },
+            Ok(Ok(true)) => return Ok(draining.finish(ShutdownTrigger::FirstSignal)),
+            Ok(Ok(false)) => std::thread::yield_now(),
+            Ok(Err(failure)) => {
+                let finding_code = if failure == positron_runtime::TaskFailure::JoinPanicked {
+                    "joined_task_panicked"
+                } else {
+                    "runtime_drain_failed"
+                };
+                capture_runtime_failure(
+                    &crash_data_directory,
+                    "draining",
+                    finding_code,
+                    draining.crash_inspection(),
+                );
+                return Ok(draining.finish(ShutdownTrigger::DeadlineExpired));
+            },
         }
+    }
+}
+
+fn capture_runtime_failure(
+    data_directory: &Path,
+    phase: &'static str,
+    finding_code: &'static str,
+    inspection: CrashInspection,
+) {
+    if support_bundle::capture_process_failure_with_catalog_generation(
+        data_directory,
+        phase,
+        finding_code,
+        "runtime",
+        inspection.catalog_generation(),
+    )
+    .is_err()
+    {
+        eprintln!("positron: unable to persist sanitized runtime crash record");
     }
 }
 
@@ -655,6 +731,7 @@ mod tests {
                 environment: Vec::new(),
                 overrides: Vec::new(),
             },
+            data.clone(),
         )
         .map_err(|failure| format!("owner loop: {}", failure.message()))?;
         sender
@@ -667,8 +744,321 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn owner_loop_persists_a_joined_task_panic_without_its_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "positron-owner-joined-panic-{}-{nonce}",
+            std::process::id()
+        ));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        std::fs::create_dir_all(&data)?;
+        std::fs::create_dir_all(&secrets)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700))?;
+        let host = JoinedPanicHost;
+        let paths = BootstrapPaths::new(
+            &data,
+            &secrets,
+            positron_kernel::MountQualification::LocalHost,
+        )?;
+        let process = ApplicationRuntime::start(
+            ServeConfiguration::new(paths, InitializationMode::InitializeIfEmpty),
+            HostInputs::new(&host, &host),
+        )
+        .map_err(|failure| format!("start owner loop: {failure:?}"))?;
+        let signals = Signals::new([signal_hook::consts::signal::SIGTERM])?;
+        signal_hook::low_level::raise(signal_hook::consts::signal::SIGTERM)?;
+        let outcome = wait_for_shutdown(
+            process,
+            signals,
+            Duration::from_secs(1),
+            &ReloadInputs {
+                config: None,
+                environment: Vec::new(),
+                overrides: Vec::new(),
+            },
+            data.clone(),
+        )
+        .map_err(|failure| format!("owner loop: {}", failure.message()))?;
+        assert_ne!(outcome, ExitOutcome::Graceful);
+        let records = std::fs::read_dir(data.join("diagnostics/crash-records"))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let record = records.first().ok_or("joined panic record missing")?;
+        let rendered = std::fs::read_to_string(record.path())?;
+        assert!(rendered.contains("phase=draining"));
+        assert!(rendered.contains("finding_code=joined_task_panicked"));
+        let catalog_generation = rendered
+            .lines()
+            .find_map(|line| line.strip_prefix("catalog_generation="))
+            .ok_or("catalog generation missing")?
+            .parse::<u64>()?;
+        assert!(
+            catalog_generation > 0,
+            "owner must capture its live catalog generation"
+        );
+        assert!(rendered.contains("backtrace_identity="));
+        assert!(!rendered.contains("owner-loop-private-panic-canary"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serving_owner_persists_a_sanitized_panic_only_after_it_owns_the_catalog()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "positron-serving-owner-panic-{}-{nonce}",
+            std::process::id()
+        ));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        std::fs::create_dir_all(&data)?;
+        std::fs::create_dir_all(&secrets)?;
+        std::fs::set_permissions(&secrets, std::fs::Permissions::from_mode(0o700))?;
+        let host = ServingPanicHost {
+            panic_once: Arc::new(AtomicBool::new(true)),
+        };
+        let paths = BootstrapPaths::new(
+            &data,
+            &secrets,
+            positron_kernel::MountQualification::LocalHost,
+        )?;
+        let process = ApplicationRuntime::start(
+            ServeConfiguration::new(paths, InitializationMode::InitializeIfEmpty),
+            HostInputs::new(&host, &host),
+        )
+        .map_err(|failure| format!("start serving owner: {failure:?}"))?;
+        assert!(
+            !data.join("diagnostics/crash-records").exists(),
+            "no crash record may be written before the serving owner observes a failure"
+        );
+        let services = process.services().ok_or("serving services")?;
+        services.request_integrity_fence();
+        drop(services);
+
+        let outcome = wait_for_shutdown(
+            process,
+            Signals::new(std::iter::empty::<i32>())?,
+            Duration::from_secs(1),
+            &ReloadInputs {
+                config: None,
+                environment: Vec::new(),
+                overrides: Vec::new(),
+            },
+            data.clone(),
+        )
+        .map_err(|failure| format!("serving owner: {}", failure.message()))?;
+        assert_eq!(outcome, ExitOutcome::Forced);
+        let records = std::fs::read_dir(data.join("diagnostics/crash-records"))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(
+            std::fs::metadata(record.path())?.permissions().mode() & 0o777,
+            0o600
+        );
+        let rendered = std::fs::read_to_string(record.path())?;
+        assert!(rendered.contains("phase=serving"));
+        assert!(rendered.contains("finding_code=runtime_serving_loop_panicked"));
+        assert!(
+            rendered
+                .lines()
+                .find_map(|line| line.strip_prefix("catalog_generation="))
+                .is_some_and(|generation| generation.parse::<u64>().is_ok_and(|value| value > 0)),
+            "the serving owner must capture its closed catalog-generation snapshot: {rendered}"
+        );
+        assert!(rendered.contains("backtrace_identity="));
+        assert!(!rendered.contains("serving-owner-private-panic-canary"));
+        assert!(!rendered.contains("panic_payload"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
     struct SignalHost {
         draining: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    struct JoinedPanicHost;
+
+    #[cfg(unix)]
+    struct ServingPanicHost {
+        panic_once: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl ListenerFactory for ServingPanicHost {
+        fn bind(
+            &self,
+            request: ListenerRequest,
+        ) -> Result<Box<dyn BoundListener>, ListenerFailure> {
+            let endpoint = if request.role() == ListenerRole::Control {
+                BoundEndpoint::control(PathBuf::from("/tmp/positron-serving-owner-panic.sock"))?
+            } else {
+                BoundEndpoint::tcp(
+                    request.role(),
+                    "127.0.0.1:42502"
+                        .parse()
+                        .map_err(|_| ListenerFailure::BindUnavailable)?,
+                )?
+            };
+            Ok(Box::new(ServingPanicListener {
+                endpoint,
+                panic_once: Arc::clone(&self.panic_once),
+            }))
+        }
+    }
+
+    #[cfg(unix)]
+    impl TaskRegistrar for ServingPanicHost {
+        fn register(&self, _: TaskRole) -> Result<Box<dyn RegisteredTask>, TaskFailure> {
+            Ok(Box::new(ServingPanicRegisteredTask))
+        }
+    }
+
+    #[cfg(unix)]
+    struct ServingPanicListener {
+        endpoint: BoundEndpoint,
+        panic_once: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl BoundListener for ServingPanicListener {
+        fn endpoint(&self) -> &BoundEndpoint {
+            &self.endpoint
+        }
+
+        fn close(&mut self) -> Result<(), ListenerFailure> {
+            if self.endpoint.role().is_data() && self.panic_once.swap(false, Ordering::AcqRel) {
+                panic!("serving-owner-private-panic-canary");
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    struct ServingPanicRegisteredTask;
+
+    #[cfg(unix)]
+    impl RegisteredTask for ServingPanicRegisteredTask {
+        fn spawn(
+            self: Box<Self>,
+            _: TaskCancellation,
+            _: positron_runtime::HealthState,
+            _: Option<positron_runtime::ServiceHandle>,
+        ) -> Result<Box<dyn RunningTask>, TaskFailure> {
+            Ok(Box::new(ServingPanicRunningTask))
+        }
+    }
+
+    #[cfg(unix)]
+    struct ServingPanicRunningTask;
+
+    #[cfg(unix)]
+    impl RunningTask for ServingPanicRunningTask {
+        fn poll_join(&mut self) -> Result<Option<TaskJoinOutcome>, TaskFailure> {
+            Ok(Some(TaskJoinOutcome::Joined))
+        }
+
+        fn join_within(&mut self, _: Duration) -> Result<TaskJoinOutcome, TaskFailure> {
+            Ok(TaskJoinOutcome::Joined)
+        }
+
+        fn abort(&mut self) -> Result<(), TaskFailure> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    impl ListenerFactory for JoinedPanicHost {
+        fn bind(
+            &self,
+            request: ListenerRequest,
+        ) -> Result<Box<dyn BoundListener>, ListenerFailure> {
+            let endpoint = if request.role() == ListenerRole::Control {
+                BoundEndpoint::control(PathBuf::from("/tmp/positron-owner-joined-panic.sock"))?
+            } else {
+                BoundEndpoint::tcp(
+                    request.role(),
+                    "127.0.0.1:42501"
+                        .parse()
+                        .map_err(|_| ListenerFailure::BindUnavailable)?,
+                )?
+            };
+            Ok(Box::new(SignalListener(endpoint)))
+        }
+    }
+
+    #[cfg(unix)]
+    impl TaskRegistrar for JoinedPanicHost {
+        fn register(&self, _: TaskRole) -> Result<Box<dyn RegisteredTask>, TaskFailure> {
+            Ok(Box::new(JoinedPanicRegisteredTask))
+        }
+    }
+
+    #[cfg(unix)]
+    struct JoinedPanicRegisteredTask;
+
+    #[cfg(unix)]
+    impl RegisteredTask for JoinedPanicRegisteredTask {
+        fn spawn(
+            self: Box<Self>,
+            _: TaskCancellation,
+            _: positron_runtime::HealthState,
+            _: Option<positron_runtime::ServiceHandle>,
+        ) -> Result<Box<dyn RunningTask>, TaskFailure> {
+            Ok(Box::new(JoinedPanicRunningTask {
+                handle: Some(std::thread::spawn(|| {
+                    panic!("owner-loop-private-panic-canary");
+                })),
+            }))
+        }
+    }
+
+    #[cfg(unix)]
+    struct JoinedPanicRunningTask {
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(unix)]
+    impl RunningTask for JoinedPanicRunningTask {
+        fn poll_join(&mut self) -> Result<Option<TaskJoinOutcome>, TaskFailure> {
+            let Some(handle) = self.handle.as_ref() else {
+                return Ok(Some(TaskJoinOutcome::Joined));
+            };
+            if !handle.is_finished() {
+                return Ok(None);
+            }
+            let handle = self.handle.take().ok_or(TaskFailure::JoinUnavailable)?;
+            handle.join().map_err(|_| TaskFailure::JoinPanicked)?;
+            Ok(Some(TaskJoinOutcome::Joined))
+        }
+
+        fn join_within(&mut self, _: Duration) -> Result<TaskJoinOutcome, TaskFailure> {
+            let Some(handle) = self.handle.take() else {
+                return Ok(TaskJoinOutcome::Joined);
+            };
+            handle.join().map_err(|_| TaskFailure::JoinPanicked)?;
+            Ok(TaskJoinOutcome::Joined)
+        }
+
+        fn abort(&mut self) -> Result<(), TaskFailure> {
+            if let Some(handle) = self.handle.take() {
+                handle.join().map_err(|_| TaskFailure::JoinPanicked)?;
+            }
+            Ok(())
+        }
     }
 
     #[cfg(unix)]

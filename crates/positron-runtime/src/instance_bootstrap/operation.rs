@@ -7,7 +7,7 @@ use positron_kernel::{
     AuditIntent, BootstrapArtifact, BootstrapArtifactAccess, BootstrapKeyCustody,
     BootstrapObjectPurpose, Catalog, CatalogObject, CatalogProposal, FormatEpoch, InstanceId,
     MaintenanceCoordinator, OwnedPrimaryDataVolume, ResourceAmounts, RetentionTimeAuthority,
-    StorageKernelResourceAuthority, TransactionId,
+    StorageKernelResourceAuthority, TransactionId, WorkClaim,
 };
 use zeroize::Zeroizing;
 
@@ -455,13 +455,20 @@ pub(super) fn verify_offline_integrity(
         IntegrityVerificationMode, TransactionId,
     };
 
-    let (volume, access) =
-        acquire(paths).map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
+    let (volume, access) = paths.storage.acquire().map_err(|failure| match failure {
+        positron_kernel::BootstrapStorageFailure::OwnershipLocked => {
+            crate::OfflineIntegrityFailure::OwnershipLocked
+        },
+        _ => crate::OfflineIntegrityFailure::BootstrapUnavailable,
+    })?;
     let state = storage::classify_with(&access)
         .map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
     if state != BootstrapState::Initialized {
         if state == BootstrapState::Inconsistent && access.open_key().is_err() {
             return Err(crate::OfflineIntegrityFailure::KeyUnavailable);
+        }
+        if state == BootstrapState::Inconsistent {
+            return Err(crate::OfflineIntegrityFailure::CorruptState);
         }
         return Err(crate::OfflineIntegrityFailure::BootstrapUnavailable);
     }
@@ -571,4 +578,34 @@ pub(super) fn verify_offline_integrity(
         reports.push(report);
     }
     Ok(crate::OfflineIntegrityVerification::new(reports, findings))
+}
+
+/// Holds exclusive offline ownership and a system diagnostics reservation for
+/// the complete caller operation when bootstrap key custody is unavailable.
+/// The closure cannot acquire a second Positron ownership lock while this
+/// capability is live, which keeps admission ahead of every collection step.
+pub(super) fn with_offline_key_unavailable_diagnostics<T>(
+    paths: &BootstrapPaths,
+    max_registered_tenants: u16,
+    claim: WorkClaim,
+    operation: impl FnOnce() -> T,
+) -> Result<T, crate::OfflineIntegrityFailure> {
+    let (volume, access) = paths.storage.acquire().map_err(|failure| match failure {
+        positron_kernel::BootstrapStorageFailure::OwnershipLocked => {
+            crate::OfflineIntegrityFailure::OwnershipLocked
+        },
+        _ => crate::OfflineIntegrityFailure::BootstrapUnavailable,
+    })?;
+    let state = storage::classify_with(&access)
+        .map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
+    if state != BootstrapState::Inconsistent || access.open_key().is_ok() {
+        return Err(crate::OfflineIntegrityFailure::BootstrapUnavailable);
+    }
+    let authority = resources::establish_system_diagnostics(volume, max_registered_tenants)
+        .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
+    let _reservation = authority
+        .governor()
+        .reserve(claim)
+        .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+    Ok(operation())
 }

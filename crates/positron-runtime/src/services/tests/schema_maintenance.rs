@@ -274,10 +274,11 @@ fn runtime_maintenance_worker_verifies_a_durable_integrity_scrub_task() -> Resul
     let identity = positron_governance::Identity::open(&catalog.pin()?)?;
     let key = super::super::tenant_segment_key(&initialized, &identity, scope)?;
     ActiveSegmentLedger::open(&initialized._authority, &catalog, scope, key)?.seal()?;
-    let generation = catalog.pin()?.number();
-    let task = MaintenanceTask::with_contract(
+    let snapshot = catalog.pin()?;
+    let generation = snapshot.number();
+    let source_manifest = snapshot.integrity_scope_source_identity(scope)?;
+    let task = MaintenanceTask::integrity_scrub(
         MaintenanceTaskId::new([0xdc; 16]).map_err(|_| "invalid task id")?,
-        MaintenanceTaskClass::IntegrityScrub,
         positron_kernel::MaintenanceScope::segment(
             scope.tenant_id(),
             scope.signal_kind(),
@@ -285,9 +286,8 @@ fn runtime_maintenance_worker_verifies_a_durable_integrity_scrub_task() -> Resul
         ),
         MaintenanceTrigger::Event,
         MaintenancePreconditions::new(generation, 1).map_err(|_| "invalid preconditions")?,
-        Vec::new(),
-        Vec::new(),
-        ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+        source_manifest,
+        0,
     )
     .map_err(|_| "invalid integrity scrub task")?;
     let task_id = task.identity();
@@ -305,6 +305,81 @@ fn runtime_maintenance_worker_verifies_a_durable_integrity_scrub_task() -> Resul
             .map_err(|_| "missing integrity scrub status")?
             .phase(),
         MaintenanceTaskPhase::Succeeded
+    );
+    Ok(())
+}
+
+#[test]
+fn queued_integrity_scrub_with_a_stale_source_binding_never_scans_or_succeeds()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _) = fixture.initialized()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let scope = SegmentScope::new(
+        initialized.tenant,
+        positron_domain::routing::SignalKind::Logs,
+        initialized.logs_shard,
+    );
+    let catalog = open_catalog(&initialized)?;
+    let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+    let key = super::super::tenant_segment_key(&initialized, &identity, scope)?;
+    ActiveSegmentLedger::open(&initialized._authority, &catalog, scope, key)?.seal()?;
+    let snapshot = catalog.pin()?;
+    let task = MaintenanceTask::integrity_scrub(
+        MaintenanceTaskId::new([0xde; 16]).map_err(|_| "invalid task id")?,
+        positron_kernel::MaintenanceScope::segment(
+            scope.tenant_id(),
+            scope.signal_kind(),
+            scope.shard_id(),
+        ),
+        MaintenanceTrigger::Event,
+        MaintenancePreconditions::new(snapshot.number(), 1).map_err(|_| "preconditions")?,
+        snapshot.integrity_scope_source_identity(scope)?,
+        0,
+    )
+    .map_err(|_| "source-bound scrub")?;
+    let task_id = task.identity();
+    initialized
+        .maintenance_coordinator()
+        .submit_and_persist(&catalog, task, 0)
+        .map_err(|_| "submit scrub")?;
+
+    let key = super::super::tenant_segment_key(&initialized, &identity, scope)?;
+    ActiveSegmentLedger::open(&initialized._authority, &catalog, scope, key)?.seal()?;
+    let replacement_binding = catalog.pin()?.integrity_scope_source_identity(scope)?;
+    drop(catalog);
+
+    assert!(services.wake_maintenance_worker()?);
+    let status = initialized
+        .maintenance_coordinator()
+        .status(task_id)
+        .map_err(|_| "stale scrub status")?;
+    assert_eq!(status.phase(), MaintenanceTaskPhase::Failed);
+    assert_eq!(
+        status.terminal_failure(),
+        Some(positron_kernel::MaintenanceTerminalFailure::StaleGeneration),
+        "the public maintenance status distinguishes a stale source basis from an execution failure"
+    );
+    assert!(
+        status.checkpoint().is_none(),
+        "a stale queued basis must be rejected before any scrub pass can report progress"
+    );
+    assert!(services.wake_maintenance_worker()?);
+    assert!(
+        initialized
+            .maintenance_coordinator()
+            .statuses()
+            .map_err(|_| "replacement scrub status")?
+            .iter()
+            .any(|candidate| {
+                candidate.task().identity() != task_id
+                    && candidate.task().class() == MaintenanceTaskClass::IntegrityScrub
+                    && candidate
+                        .task()
+                        .source_binding()
+                        .is_some_and(|binding| binding.to_bytes() == replacement_binding)
+            }),
+        "a later discovery pass must replace stale work with the current bound source"
     );
     Ok(())
 }
@@ -372,10 +447,11 @@ fn runtime_integrity_scrub_accumulates_three_passes_and_resumes_after_cancellati
             .into_store_block(),
     )?;
     drop(active);
-    let generation = catalog.pin()?.number();
-    let task = MaintenanceTask::with_contract(
+    let snapshot = catalog.pin()?;
+    let generation = snapshot.number();
+    let source_manifest = snapshot.integrity_scope_source_identity(scope)?;
+    let task = MaintenanceTask::integrity_scrub(
         MaintenanceTaskId::new([0xdd; 16]).map_err(|_| "invalid task id")?,
-        MaintenanceTaskClass::IntegrityScrub,
         positron_kernel::MaintenanceScope::segment(
             scope.tenant_id(),
             scope.signal_kind(),
@@ -383,9 +459,8 @@ fn runtime_integrity_scrub_accumulates_three_passes_and_resumes_after_cancellati
         ),
         MaintenanceTrigger::Event,
         MaintenancePreconditions::new(generation, 1).map_err(|_| "invalid preconditions")?,
-        Vec::new(),
-        Vec::new(),
-        ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+        source_manifest,
+        0,
     )
     .map_err(|_| "invalid integrity scrub task")?;
     let task_id = task.identity();
@@ -567,6 +642,63 @@ fn repeated_idle_integrity_discovery_does_not_republish_terminal_source()
             .len(),
         first_records.len(),
         "idle discovery after reopen must not consume the bounded task registry with duplicate records"
+    );
+    Ok(())
+}
+
+#[test]
+fn scheduled_integrity_scrub_persists_its_jittered_lifecycle_due_instant_across_reopen()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (mut initialized, _, _) = fixture.initialized()?;
+    let epoch_seconds = 7_u64.checked_mul(86_400).ok_or("fixture epoch")?;
+    let (retention_time, _elapsed) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(i64::try_from(
+            epoch_seconds
+                .checked_mul(1_000_000_000)
+                .ok_or("epoch nanos")?,
+        )?));
+    Arc::get_mut(&mut initialized)
+        .ok_or("sole initialized instance")?
+        .install_retention_time_for_test(retention_time)?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+
+    assert!(services.wake_maintenance_worker()?);
+    let task = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|_| "scheduled task status")?
+        .into_iter()
+        .find(|status| {
+            status.phase() == MaintenanceTaskPhase::Queued
+                && status.task().class() == MaintenanceTaskClass::IntegrityScrub
+        })
+        .ok_or("queued scheduled scrub")?
+        .task()
+        .clone();
+    let due = task.not_before();
+    assert!(
+        (epoch_seconds..epoch_seconds + 900).contains(&due),
+        "the scheduled descriptor stores an instance-scoped jitter inside its bounded epoch slot"
+    );
+    assert!(
+        due > epoch_seconds,
+        "the chosen fixture instance is not admitted before its persisted jittered due instant"
+    );
+    let identity = task.identity();
+    drop(services);
+    drop(initialized);
+
+    let reopened = fixture.reopen()?;
+    assert_eq!(
+        reopened
+            .maintenance_coordinator()
+            .status(identity)
+            .map_err(|_| "reopened task")?
+            .task()
+            .not_before(),
+        due,
+        "reopen preserves the descriptor's original lifecycle-clock due instant"
     );
     Ok(())
 }

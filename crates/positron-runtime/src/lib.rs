@@ -30,8 +30,9 @@ pub use health::{
 #[cfg(any(test, feature = "test-support"))]
 pub use instance_bootstrap::GovernanceTestFixture;
 pub use instance_bootstrap::{
-    BootstrapClaim, BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BootstrapState,
-    InitializationPlan, InitializedInstance, InstanceBootstrap, TenantRetentionImpactPreview,
+    BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
+    BootstrapPaths, BootstrapState, DoctorRuntimeFacts, InitializationPlan, InitializedInstance,
+    InstanceBootstrap, TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
     OfflineIntegrityFailure, OfflineIntegrityVerification, resume_offline_integrity,
@@ -50,9 +51,10 @@ pub use native_host::{
 #[cfg(feature = "test-support")]
 pub use native_host::{fuzz_connection_admission, fuzz_h2_observer};
 pub use process::{
-    ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole, DrainingProcess, ExitOutcome,
-    HostInputs, InitializationMode, PublicPlaintextApiStartupIntent, RecoveryAttempt,
-    RecoveryAttemptHost, RecoveryDecision, RunningProcess, ServeConfiguration, ShutdownTrigger,
+    ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole, CrashInspection,
+    DrainingProcess, ExitOutcome, HostInputs, InitializationMode, PublicPlaintextApiStartupIntent,
+    RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision, RunningProcess, ServeConfiguration,
+    ShutdownTrigger,
 };
 pub use services::{ConfiguredExportDestinationResolver, ServiceFailure, ServiceHandle};
 pub use task::{

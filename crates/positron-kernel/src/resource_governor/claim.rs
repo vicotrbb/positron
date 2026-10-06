@@ -25,6 +25,7 @@ pub enum WorkKind {
     Ingest,
     InteractiveQueryTail,
     OrdinaryMaintenanceBackup,
+    Diagnostics,
 }
 
 impl WorkKind {
@@ -36,6 +37,7 @@ impl WorkKind {
             Self::Ingest => WorkClass::Ingest,
             Self::InteractiveQueryTail => WorkClass::InteractiveQueryTail,
             Self::OrdinaryMaintenanceBackup => WorkClass::OrdinaryMaintenanceBackup,
+            Self::Diagnostics => WorkClass::OrdinaryMaintenanceBackup,
         }
     }
 }
@@ -111,6 +113,22 @@ impl WorkClaim {
             tenant: None,
             principal: None,
             kind: WorkKind::OrdinaryMaintenanceBackup,
+            amounts,
+            operation: None,
+        })
+    }
+
+    /// Creates a bounded system-scoped diagnostics claim. Diagnostics shares
+    /// the ordinary maintenance pool but retains a distinct durable work kind
+    /// for inspection and accounting.
+    pub fn system_diagnostics(amounts: ResourceAmounts) -> Result<Self, GovernorFailure> {
+        if amounts.is_empty() {
+            return Err(GovernorFailure::InvalidConfiguration);
+        }
+        Ok(Self {
+            tenant: None,
+            principal: None,
+            kind: WorkKind::Diagnostics,
             amounts,
             operation: None,
         })

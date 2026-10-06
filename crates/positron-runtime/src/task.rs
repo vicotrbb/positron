@@ -115,6 +115,7 @@ pub enum TaskFailure {
     RegistrationUnavailable,
     SpawnUnavailable,
     JoinUnavailable,
+    JoinPanicked,
     AbortUnavailable,
 }
 

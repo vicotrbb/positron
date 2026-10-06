@@ -91,7 +91,10 @@ pub(super) fn scan(
         };
         let metadata = unix_fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|_| BootstrapStorageFailure::Unavailable)?;
-        let expected_directory = matches!(kind, BootstrapEntry::Catalog | BootstrapEntry::Segments);
+        let expected_directory = matches!(
+            kind,
+            BootstrapEntry::Catalog | BootstrapEntry::Segments | BootstrapEntry::Diagnostics
+        );
         let file_type = unix_fs::FileType::from_raw_mode(metadata.st_mode);
         if (expected_directory && !file_type.is_dir())
             || (!expected_directory && !file_type.is_file())
@@ -119,6 +122,7 @@ fn recognized_entry(root: BootstrapRoot, name: &[u8]) -> Option<BootstrapEntry> 
         },
         (BootstrapRoot::Data, b"catalog") => Some(BootstrapEntry::Catalog),
         (BootstrapRoot::Data, b"segments") => Some(BootstrapEntry::Segments),
+        (BootstrapRoot::Data, b"diagnostics") => Some(BootstrapEntry::Diagnostics),
         (BootstrapRoot::Secrets, b"local-root-key.v1") => Some(BootstrapEntry::LocalKey),
         (BootstrapRoot::Secrets, b"local-root-key.v1.new") => Some(BootstrapEntry::LocalKeyStaging),
         (BootstrapRoot::Secrets, b"bootstrap-claim.v1") => Some(BootstrapEntry::Claim),

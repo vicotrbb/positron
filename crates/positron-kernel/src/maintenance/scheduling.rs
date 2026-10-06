@@ -305,7 +305,30 @@ pub(super) fn tasks_conflict(left: &MaintenanceTask, right: &MaintenanceTask) ->
     object_conflict
         || (scopes_overlap(left.scope, right.scope)
             && (matches!(left.class, MaintenanceTaskClass::TenantPurge)
-                || matches!(right.class, MaintenanceTaskClass::TenantPurge)))
+                || matches!(right.class, MaintenanceTaskClass::TenantPurge)
+                || integrity_scrub_conflicts_with_source_mutation(left.class, right.class)))
+}
+
+/// A scrub authenticates the complete immutable source manifest for its scope.
+/// These writers can replace that manifest even when their bounded physical
+/// object lists differ, so object-identity comparison alone is insufficient.
+fn integrity_scrub_conflicts_with_source_mutation(
+    left: MaintenanceTaskClass,
+    right: MaintenanceTaskClass,
+) -> bool {
+    (left == MaintenanceTaskClass::IntegrityScrub && source_mutation(right))
+        || (right == MaintenanceTaskClass::IntegrityScrub && source_mutation(left))
+}
+
+fn source_mutation(class: MaintenanceTaskClass) -> bool {
+    matches!(
+        class,
+        MaintenanceTaskClass::ActiveSegmentRoll
+            | MaintenanceTaskClass::Compaction
+            | MaintenanceTaskClass::RetentionPublication
+            | MaintenanceTaskClass::RetentionReclamation
+            | MaintenanceTaskClass::QuarantineFollowUp
+    )
 }
 
 fn scopes_overlap(left: MaintenanceScope, right: MaintenanceScope) -> bool {

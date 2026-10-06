@@ -1,0 +1,624 @@
+//! Bounded read-only Doctor reports.
+
+use std::{
+    io::{IsTerminal, Read, Write},
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
+
+use positron_config::{ConfigurationInputs, resolve};
+use positron_kernel::MountQualification;
+use positron_runtime::{BootstrapPaths, OfflineIntegrityFailure, verify_offline_integrity};
+use zeroize::Zeroizing;
+
+const EXIT_USAGE: u8 = 2;
+const EXIT_DIAGNOSTIC_FAILURE: u8 = 3;
+
+pub(super) fn run(
+    arguments: impl Iterator<Item = String>,
+    environment: impl IntoIterator<Item = (String, String)>,
+) -> ExitCode {
+    match execute(arguments, environment) {
+        Ok((exit, report)) => {
+            print!("{report}");
+            exit
+        },
+        Err(failure) => {
+            print!("{}", failure.render());
+            ExitCode::from(failure.exit_code())
+        },
+    }
+}
+
+fn execute(
+    arguments: impl Iterator<Item = String>,
+    environment: impl IntoIterator<Item = (String, String)>,
+) -> Result<(ExitCode, String), DoctorFailure> {
+    let options = Options::parse(arguments)?;
+    match options.mode {
+        Mode::Offline => execute_offline(&options, environment),
+        Mode::Online => execute_online(&options),
+    }
+}
+
+fn execute_offline(
+    options: &Options,
+    environment: impl IntoIterator<Item = (String, String)>,
+) -> Result<(ExitCode, String), DoctorFailure> {
+    let inputs = ConfigurationInputs::try_from_sources(
+        options.config.as_deref().map(Path::new),
+        environment,
+        options.overrides.clone(),
+    )
+    .map_err(|_| DoctorFailure::Arguments)?;
+    let effective = resolve(inputs).map_err(|_| DoctorFailure::Arguments)?;
+    let paths = BootstrapPaths::with_local_key(
+        Path::new(effective.data_directory()),
+        Path::new(effective.secrets_directory()),
+        effective.local_key_file().as_path(),
+        MountQualification::LocalHost,
+    )
+    .map_err(|_| DoctorFailure::Arguments)?;
+    match verify_offline_integrity(&paths, effective.max_registered_tenants()) {
+        Ok(report) => {
+            let verified = report.is_verified();
+            Ok((
+                if verified {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(EXIT_DIAGNOSTIC_FAILURE)
+                },
+                format!(
+                    "report_version=1\nmode=offline\nstatus={}\nfinding_code=DOCTOR_INTEGRITY_{}\nseverity={}\nevidence_scope=primary_data_volume\nsafe_command={}\nreport_count={}\n",
+                    if verified { "healthy" } else { "fenced" },
+                    if verified { "VERIFIED" } else { "FENCED" },
+                    if verified { "info" } else { "error" },
+                    if verified {
+                        "none"
+                    } else {
+                        "positron verify --offline"
+                    },
+                    report.reports().len(),
+                ),
+            ))
+        },
+        Err(failure) => Ok((
+            ExitCode::from(EXIT_DIAGNOSTIC_FAILURE),
+            offline_failure_report(failure),
+        )),
+    }
+}
+
+fn execute_online(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {
+    let input = std::io::stdin();
+    if input.is_terminal() {
+        return Err(DoctorFailure::Arguments);
+    }
+    let mut credential = Zeroizing::new(String::new());
+    input
+        .take(1025)
+        .read_to_string(&mut credential)
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    let bearer = credential.trim_end_matches(['\r', '\n']);
+    if credential.len() > 1024
+        || bearer.is_empty()
+        || bearer.len() > 1024
+        || !bearer
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(DoctorFailure::Arguments);
+    }
+    online_status_request(options, bearer)
+}
+
+fn online_status_request(
+    options: &Options,
+    bearer: &str,
+) -> Result<(ExitCode, String), DoctorFailure> {
+    let report = operations_status(options, bearer)?;
+    let report = report
+        .as_object()
+        .ok_or(DoctorFailure::EndpointUnavailable)?;
+    let phase = required_string(report, "phase")?;
+    if phase == "fenced" {
+        return fenced_control_report(report);
+    }
+    let degraded = required_bool(report, "integrity_degraded")?;
+    let maintenance = required_object(report, "maintenance")?;
+    let queued = required_u64(maintenance, "queued")?;
+    let reservations = required_u64(maintenance, "outstanding_reservations")?;
+    let doctor = required_object(report, "doctor")?;
+    let key_custody = required_string(doctor, "key_custody")?;
+    let catalog_bootstrap = required_string(doctor, "catalog_bootstrap")?;
+    let catalog_generation = required_u64(doctor, "catalog_generation")?;
+    let backup_repository = required_string(doctor, "backup_repository")?;
+    let listeners = required_object(doctor, "listener_topology")?;
+    let topology_active = [
+        "control",
+        "operations",
+        "api",
+        "otlp_grpc",
+        "otlp_http",
+        "loki_push",
+    ]
+    .into_iter()
+    .try_fold(true, |active, role| {
+        required_bool(listeners, role).map(|bound| active && bound)
+    })?;
+    let evidence = format!(
+        "evidence_scope=authenticated_operations_status\nprocess_phase={phase}\nintegrity_degraded={degraded}\nmaintenance_queued={queued}\noutstanding_reservations={reservations}\nkey_custody={key_custody}\ncatalog_bootstrap={catalog_bootstrap}\ncatalog_generation={catalog_generation}\nlistener_topology={}\nbackup_repository={backup_repository}\n",
+        if topology_active {
+            "active"
+        } else {
+            "incomplete"
+        },
+    );
+    if key_custody != "verified" || catalog_bootstrap != "verified" || !topology_active {
+        return Ok((
+            ExitCode::from(EXIT_DIAGNOSTIC_FAILURE),
+            format!(
+                "report_version=1\nmode=online\nstatus=inspection_incomplete\nfinding_code=DOCTOR_RUNTIME_FACTS_INCOMPLETE\nseverity=warning\n{evidence}"
+            ),
+        ));
+    }
+    if backup_repository == "not_configured" {
+        return Ok((
+            ExitCode::from(EXIT_DIAGNOSTIC_FAILURE),
+            format!(
+                "report_version=1\nmode=online\nstatus=degraded\nfinding_code=DOCTOR_BACKUP_REPOSITORY_NOT_CONFIGURED\nseverity=warning\n{evidence}safe_command=configure_backup_repository\n"
+            ),
+        ));
+    }
+    if phase == "serving" && !degraded && backup_repository == "configured" {
+        return Ok((
+            ExitCode::SUCCESS,
+            format!(
+                "report_version=1\nmode=online\nstatus=healthy\nfinding_code=DOCTOR_RUNTIME_VERIFIED\nseverity=info\n{evidence}safe_command=none\n"
+            ),
+        ));
+    }
+    Ok((
+        ExitCode::from(EXIT_DIAGNOSTIC_FAILURE),
+        format!(
+            "report_version=1\nmode=online\nstatus=degraded\nfinding_code=DOCTOR_RUNTIME_DEGRADED\nseverity=error\n{evidence}safe_command=inspect_runtime_state\n"
+        ),
+    ))
+}
+
+fn required_object<'a>(
+    value: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, DoctorFailure> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_object)
+        .ok_or(DoctorFailure::EndpointUnavailable)
+}
+
+fn required_string<'a>(
+    value: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<&'a str, DoctorFailure> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or(DoctorFailure::EndpointUnavailable)
+}
+
+fn required_bool(
+    value: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<bool, DoctorFailure> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or(DoctorFailure::EndpointUnavailable)
+}
+
+fn required_u64(
+    value: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<u64, DoctorFailure> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(DoctorFailure::EndpointUnavailable)
+}
+
+fn operations_status(options: &Options, bearer: &str) -> Result<serde_json::Value, DoctorFailure> {
+    if let Some(path) = options.control_path.as_deref() {
+        return control_status(path, bearer);
+    }
+    let endpoint = options.endpoint.ok_or(DoctorFailure::Arguments)?;
+    if endpoint.port() == 0 {
+        return Err(DoctorFailure::Arguments);
+    }
+    let mut builder = reqwest::blocking::Client::builder();
+    let target = if options.allow_plaintext {
+        if options.server_name.is_some() || options.trust_file.is_some() {
+            return Err(DoctorFailure::Arguments);
+        }
+        format!("http://{endpoint}")
+    } else {
+        let name = options
+            .server_name
+            .as_deref()
+            .ok_or(DoctorFailure::Arguments)?;
+        let pem = std::fs::read(
+            options
+                .trust_file
+                .as_deref()
+                .ok_or(DoctorFailure::Arguments)?,
+        )
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+        builder = builder
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(&pem).map_err(|_| DoctorFailure::Arguments)?,
+            )
+            .resolve(name, endpoint);
+        format!("https://{name}:{}", endpoint.port())
+    };
+    let response = builder
+        .build()
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?
+        .get(format!("{target}/status"))
+        .bearer_auth(bearer)
+        .send()
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    if response.status().as_u16() == 401 {
+        return Err(DoctorFailure::AuthenticationRejected);
+    }
+    if !response.status().is_success() {
+        return Err(DoctorFailure::EndpointUnavailable);
+    }
+    let mut bytes = Vec::with_capacity(8_192);
+    response
+        .take(8_193)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    if bytes.len() > 8_192 {
+        return Err(DoctorFailure::EndpointUnavailable);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| DoctorFailure::EndpointUnavailable)
+}
+
+fn fenced_control_report(
+    report: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(ExitCode, String), DoctorFailure> {
+    let doctor = required_object(report, "doctor")?;
+    let key_custody = required_string(doctor, "key_custody")?;
+    let catalog_bootstrap = required_string(doctor, "catalog_bootstrap")?;
+    let catalog_generation = required_u64(doctor, "catalog_generation")?;
+    let backup_repository = required_string(doctor, "backup_repository")?;
+    let listeners = required_object(doctor, "listener_topology")?;
+    let control = required_bool(listeners, "control")?;
+    let operations = required_bool(listeners, "operations")?;
+    let data_retired = ["api", "otlp_grpc", "otlp_http", "loki_push"]
+        .into_iter()
+        .try_fold(true, |retired, role| {
+            required_bool(listeners, role).map(|bound| retired && !bound)
+        })?;
+    let reason = required_string(report, "reason")?;
+    Ok((
+        ExitCode::from(EXIT_DIAGNOSTIC_FAILURE),
+        format!(
+            "report_version=1\nmode=online\nstatus=fenced\nfinding_code=DOCTOR_RUNTIME_FENCED\nseverity=error\nevidence_scope=owner_local_control\nprocess_phase=fenced\nfence_reason={reason}\nkey_custody={key_custody}\ncatalog_bootstrap={catalog_bootstrap}\ncatalog_generation={catalog_generation}\nbackup_repository={backup_repository}\ncontrol_listener_active={control}\noperations_listener_active={operations}\ndata_listeners_retired={data_retired}\nsafe_command=inspect_integrity_recovery\n"
+        ),
+    ))
+}
+
+#[cfg(unix)]
+fn control_status(path: &Path, bearer: &str) -> Result<serde_json::Value, DoctorFailure> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(path).map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    stream
+        .write_all(
+            format!(
+                "GET /control/fenced/inspection HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {bearer}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    let mut response = Vec::with_capacity(8_192);
+    stream
+        .take(8_193)
+        .read_to_end(&mut response)
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    if response.len() > 8_192 {
+        return Err(DoctorFailure::EndpointUnavailable);
+    }
+    let separator = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or(DoctorFailure::EndpointUnavailable)?;
+    let (head, body) = response.split_at(separator + 4);
+    if head.starts_with(b"HTTP/1.1 401 ") {
+        return Err(DoctorFailure::AuthenticationRejected);
+    }
+    if !head.starts_with(b"HTTP/1.1 200 ") {
+        return Err(DoctorFailure::EndpointUnavailable);
+    }
+    serde_json::from_slice(body).map_err(|_| DoctorFailure::EndpointUnavailable)
+}
+
+#[cfg(not(unix))]
+fn control_status(_path: &Path, _bearer: &str) -> Result<serde_json::Value, DoctorFailure> {
+    Err(DoctorFailure::EndpointUnavailable)
+}
+
+fn offline_failure_report(failure: OfflineIntegrityFailure) -> String {
+    format!(
+        "report_version=1\nmode=offline\nstatus={}\nfinding_code={}\nseverity=error\nevidence_scope=primary_data_volume\nsafe_command={}\nreport_count=0\n",
+        status(failure),
+        code(failure),
+        safe_command(failure)
+    )
+}
+
+fn status(failure: OfflineIntegrityFailure) -> &'static str {
+    match failure {
+        OfflineIntegrityFailure::OwnershipLocked => "storage_locked",
+        OfflineIntegrityFailure::BootstrapUnavailable => "bootstrap_unavailable",
+        OfflineIntegrityFailure::KeyUnavailable => "key_unavailable",
+        OfflineIntegrityFailure::CatalogUnavailable => "catalog_busy",
+        OfflineIntegrityFailure::CorruptState => "fenced",
+        OfflineIntegrityFailure::CapacityUnavailable => "capacity_unavailable",
+        OfflineIntegrityFailure::StorageUnavailable => "storage_unavailable",
+    }
+}
+fn code(failure: OfflineIntegrityFailure) -> &'static str {
+    match failure {
+        OfflineIntegrityFailure::OwnershipLocked => "DOCTOR_STORAGE_LOCKED",
+        OfflineIntegrityFailure::BootstrapUnavailable => "DOCTOR_BOOTSTRAP_UNAVAILABLE",
+        OfflineIntegrityFailure::KeyUnavailable => "DOCTOR_KEY_UNAVAILABLE",
+        OfflineIntegrityFailure::CatalogUnavailable => "DOCTOR_CATALOG_BUSY",
+        OfflineIntegrityFailure::CorruptState => "DOCTOR_INTEGRITY_FENCED",
+        OfflineIntegrityFailure::CapacityUnavailable => "DOCTOR_CAPACITY_UNAVAILABLE",
+        OfflineIntegrityFailure::StorageUnavailable => "DOCTOR_STORAGE_UNAVAILABLE",
+    }
+}
+const fn safe_command(failure: OfflineIntegrityFailure) -> &'static str {
+    match failure {
+        OfflineIntegrityFailure::OwnershipLocked => "stop_positron_before_offline_doctor",
+        _ => "inspect_storage_without_mutation",
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Offline,
+    Online,
+}
+struct Options {
+    mode: Mode,
+    config: Option<PathBuf>,
+    overrides: Vec<(String, String)>,
+    endpoint: Option<SocketAddr>,
+    control_path: Option<PathBuf>,
+    server_name: Option<String>,
+    trust_file: Option<PathBuf>,
+    allow_plaintext: bool,
+}
+
+impl Options {
+    fn parse(arguments: impl Iterator<Item = String>) -> Result<Self, DoctorFailure> {
+        let mut mode = None;
+        let mut config = None;
+        let mut overrides = Vec::new();
+        let mut endpoint = None;
+        let mut control_path = None;
+        let mut server_name = None;
+        let mut trust_file = None;
+        let mut allow_plaintext = false;
+        let mut credential_stdin = false;
+        let mut arguments = arguments;
+        while let Some(argument) = arguments.next() {
+            match argument.as_str() {
+                "--offline" if mode.is_none() => mode = Some(Mode::Offline),
+                "--online" if mode.is_none() => mode = Some(Mode::Online),
+                "--config" if config.is_none() => {
+                    config = Some(PathBuf::from(
+                        arguments.next().ok_or(DoctorFailure::Arguments)?,
+                    ))
+                },
+                "--set" => {
+                    let value = arguments.next().ok_or(DoctorFailure::Arguments)?;
+                    let (key, value) = value.split_once('=').ok_or(DoctorFailure::Arguments)?;
+                    overrides.push((key.to_owned(), value.to_owned()));
+                },
+                "--endpoint" if endpoint.is_none() => {
+                    endpoint = Some(
+                        arguments
+                            .next()
+                            .ok_or(DoctorFailure::Arguments)?
+                            .parse()
+                            .map_err(|_| DoctorFailure::Arguments)?,
+                    )
+                },
+                "--control-path" if control_path.is_none() => {
+                    control_path = Some(PathBuf::from(
+                        arguments.next().ok_or(DoctorFailure::Arguments)?,
+                    ))
+                },
+                "--server-name" if server_name.is_none() => {
+                    server_name = Some(arguments.next().ok_or(DoctorFailure::Arguments)?)
+                },
+                "--trust-file" if trust_file.is_none() => {
+                    trust_file = Some(PathBuf::from(
+                        arguments.next().ok_or(DoctorFailure::Arguments)?,
+                    ))
+                },
+                "--allow-plaintext" if !allow_plaintext => allow_plaintext = true,
+                "--credential-stdin" if !credential_stdin => credential_stdin = true,
+                _ => return Err(DoctorFailure::Arguments),
+            }
+        }
+        let mode = mode.ok_or(DoctorFailure::Arguments)?;
+        match mode {
+            Mode::Offline
+                if endpoint.is_some()
+                    || control_path.is_some()
+                    || server_name.is_some()
+                    || trust_file.is_some()
+                    || allow_plaintext
+                    || credential_stdin =>
+            {
+                Err(DoctorFailure::Arguments)
+            },
+            Mode::Online
+                if config.is_some()
+                    || !overrides.is_empty()
+                    || !credential_stdin
+                    || (endpoint.is_some() == control_path.is_some())
+                    || (control_path.is_some()
+                        && (server_name.is_some() || trust_file.is_some() || allow_plaintext)) =>
+            {
+                Err(DoctorFailure::Arguments)
+            },
+            Mode::Offline | Mode::Online => Ok(Self {
+                mode,
+                config,
+                overrides,
+                endpoint,
+                control_path,
+                server_name,
+                trust_file,
+                allow_plaintext,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DoctorFailure {
+    Arguments,
+    AuthenticationRejected,
+    EndpointUnavailable,
+}
+impl std::fmt::Display for DoctorFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.render())
+    }
+}
+impl std::error::Error for DoctorFailure {}
+impl DoctorFailure {
+    const fn exit_code(self) -> u8 {
+        match self {
+            Self::Arguments => EXIT_USAGE,
+            Self::AuthenticationRejected | Self::EndpointUnavailable => EXIT_DIAGNOSTIC_FAILURE,
+        }
+    }
+    const fn render(self) -> &'static str {
+        match self {
+            Self::Arguments => {
+                "report_version=1\nmode=unknown\nstatus=invalid_arguments\nfinding_code=DOCTOR_ARGUMENTS_INVALID\nseverity=error\nsafe_command=correct_doctor_arguments\n"
+            },
+            Self::AuthenticationRejected => {
+                "report_version=1\nmode=online\nstatus=authentication_rejected\nfinding_code=DOCTOR_AUTHENTICATION_REJECTED\nseverity=error\nevidence_scope=none\nsafe_command=use_system_administrator_credential\n"
+            },
+            Self::EndpointUnavailable => {
+                "report_version=1\nmode=online\nstatus=inspection_unavailable\nfinding_code=DOCTOR_ONLINE_INSPECTION_UNAVAILABLE\nseverity=error\nevidence_scope=none\nsafe_command=inspect_runtime_connectivity\n"
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DoctorFailure, Options, online_status_request};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
+    #[test]
+    fn doctor_requires_one_explicit_mode() {
+        assert!(Options::parse(["--offline".to_owned()].into_iter()).is_ok());
+        assert!(Options::parse(std::iter::empty()).is_err());
+        assert!(Options::parse(["--online".to_owned()].into_iter()).is_err());
+    }
+
+    #[test]
+    fn online_doctor_uses_authenticated_operations_status() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> Result<(), std::io::Error> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request)?;
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /status HTTP/1.1\r\n"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer system-administrator")
+            );
+            let body = "{\"phase\":\"serving\",\"integrity_degraded\":false,\"doctor\":{\"key_custody\":\"verified\",\"catalog_bootstrap\":\"verified\",\"catalog_generation\":1,\"backup_repository\":\"not_configured\",\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true,\"otlp_grpc\":true,\"otlp_http\":true,\"loki_push\":true}},\"maintenance\":{\"queued\":0,\"outstanding_reservations\":0}}";
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+        });
+        let options = Options::parse(
+            [
+                "--online",
+                "--credential-stdin",
+                "--endpoint",
+                &endpoint.to_string(),
+                "--allow-plaintext",
+            ]
+            .into_iter()
+            .map(ToOwned::to_owned),
+        )?;
+        let (exit, report) = online_status_request(&options, "system-administrator")?;
+        assert_eq!(exit, std::process::ExitCode::from(3));
+        assert!(
+            report
+                .contains("status=degraded\nfinding_code=DOCTOR_BACKUP_REPOSITORY_NOT_CONFIGURED")
+        );
+        assert!(report.contains("evidence_scope=authenticated_operations_status"));
+        assert!(report.contains("key_custody=verified"));
+        assert!(report.contains("catalog_bootstrap=verified"));
+        assert!(report.contains("listener_topology=active"));
+        assert!(!report.contains("system-administrator"));
+        server.join().map_err(|_| "server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn online_doctor_rejects_unauthorized_status_without_a_fallback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> Result<(), std::io::Error> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request)?;
+            stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 34\r\nConnection: close\r\n\r\n{\"code\":\"authentication_rejected\"}")
+        });
+        let options = Options::parse(
+            [
+                "--online",
+                "--credential-stdin",
+                "--endpoint",
+                &endpoint.to_string(),
+                "--allow-plaintext",
+            ]
+            .into_iter()
+            .map(ToOwned::to_owned),
+        )?;
+        assert!(matches!(
+            online_status_request(&options, "unauthorized"),
+            Err(DoctorFailure::AuthenticationRejected)
+        ));
+        server.join().map_err(|_| "server panicked")??;
+        Ok(())
+    }
+}

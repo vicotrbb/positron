@@ -176,6 +176,7 @@ const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
 // that has not changed is still reauthenticated without turning each Catalog
 // publication into an immediate self-triggering loop.
 const INTEGRITY_SCRUB_CADENCE_SECONDS: u64 = 86_400;
+const INTEGRITY_SCRUB_JITTER_SECONDS: u64 = 900;
 
 /// Performs one bounded coordinator dispatch for the runtime's installed
 /// maintenance handlers. Unsupported durable classes remain queued for their
@@ -605,6 +606,35 @@ fn complete_integrity_scrub(
     let snapshot = catalog
         .pin()
         .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
+    let Some(source_binding) = execution.task().source_binding() else {
+        // A record written before source binding existed is never allowed to
+        // authenticate a mutable current scope by implication. Completing it
+        // unsuccessfully permits discovery to publish a fresh bound task.
+        execution
+            .fail_and_persist(
+                coordinator,
+                catalog,
+                positron_kernel::MaintenanceTerminalFailure::Unclassified,
+            )
+            .map_err(map_failure)?;
+        return Ok(true);
+    };
+    if snapshot
+        .integrity_scope_source_identity(scope)
+        .map_err(|failure| super::classify_ledger_failure_code(failure.code()))?
+        != source_binding.to_bytes()
+    {
+        // The queued basis changed before this task was admitted. It neither
+        // scanned nor succeeded; the next discovery pass owns a new basis.
+        execution
+            .fail_and_persist(
+                coordinator,
+                catalog,
+                positron_kernel::MaintenanceTerminalFailure::StaleGeneration,
+            )
+            .map_err(map_failure)?;
+        return Ok(true);
+    }
     let identity =
         positron_governance::Identity::open(&snapshot).map_err(|_| ServiceFailure::CorruptState)?;
     let key = super::tenant_segment_key(instance, &identity, scope)?;
@@ -877,9 +907,8 @@ fn discover_integrity_scrubs(
             Err(positron_kernel::MaintenanceFailure::UnknownTask) => {},
             Err(failure) => return Err(map_failure(failure)),
         }
-        let task = positron_kernel::MaintenanceTask::with_contract(
+        let task = positron_kernel::MaintenanceTask::integrity_scrub(
             identity,
-            MaintenanceTaskClass::IntegrityScrub,
             maintenance_scope,
             positron_kernel::MaintenanceTrigger::Scheduled,
             // A task record publication advances the Catalog generation but
@@ -895,9 +924,8 @@ fn discover_integrity_scrubs(
                 1,
             )
             .map_err(map_failure)?,
-            Vec::new(),
-            Vec::new(),
-            positron_kernel::ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+            source_identity,
+            integrity_scrub_not_before(instance.instance, scope, verification_epoch)?,
         )
         .map_err(map_failure)?;
         coordinator
@@ -906,6 +934,34 @@ fn discover_integrity_scrubs(
         submitted = true;
     }
     Ok(submitted)
+}
+
+fn integrity_scrub_not_before(
+    instance: positron_kernel::InstanceId,
+    scope: SegmentScope,
+    verification_epoch: u64,
+) -> Result<u64, ServiceFailure> {
+    let epoch_start = verification_epoch
+        .checked_mul(INTEGRITY_SCRUB_CADENCE_SECONDS)
+        .ok_or(ServiceFailure::CapacityUnavailable)?;
+    let mut digest = Sha256::new();
+    digest.update(b"positron/integrity-scrub-jitter/v1");
+    digest.update(instance.to_bytes());
+    digest.update(scope.tenant_id().to_bytes());
+    digest.update([match scope.signal_kind() {
+        positron_domain::routing::SignalKind::Logs => 1,
+        positron_domain::routing::SignalKind::Traces => 2,
+    }]);
+    digest.update(scope.shard_id().value().to_be_bytes());
+    digest.update(verification_epoch.to_be_bytes());
+    let bytes: [u8; 8] = digest
+        .finalize()
+        .get(..8)
+        .and_then(|value| value.try_into().ok())
+        .ok_or(ServiceFailure::Internal)?;
+    epoch_start
+        .checked_add(u64::from_be_bytes(bytes) % INTEGRITY_SCRUB_JITTER_SECONDS)
+        .ok_or(ServiceFailure::CapacityUnavailable)
 }
 
 fn integrity_task_identity(
@@ -1045,6 +1101,69 @@ fn map_failure(failure: MaintenanceFailure) -> ServiceFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integrity_scrub_jitter_is_stable_per_instance_and_separates_known_fixtures() {
+        let scope = SegmentScope::new(
+            positron_domain::identity::TenantId::from_bytes([0x31; 16]).expect("tenant"),
+            positron_domain::routing::SignalKind::Logs,
+            positron_domain::routing::VirtualShardId::new(1).expect("shard"),
+        );
+        let first = integrity_scrub_not_before(
+            positron_kernel::InstanceId::new([0x41; 16]).expect("instance"),
+            scope,
+            7,
+        )
+        .expect("jitter");
+        assert_eq!(
+            first,
+            integrity_scrub_not_before(
+                positron_kernel::InstanceId::new([0x41; 16]).expect("instance"),
+                scope,
+                7,
+            )
+            .expect("reopen jitter"),
+            "the persisted descriptor receives one repeatable per-instance due instant"
+        );
+        assert_ne!(
+            first,
+            integrity_scrub_not_before(
+                positron_kernel::InstanceId::new([0x42; 16]).expect("other instance"),
+                scope,
+                7,
+            )
+            .expect("other jitter"),
+            "the fixed fleet fixtures do not synchronize their next scrub"
+        );
+    }
+
+    #[test]
+    fn integrity_scrub_jitter_uses_the_current_slot_at_an_arbitrary_lifecycle_time() {
+        let scope = SegmentScope::new(
+            positron_domain::identity::TenantId::from_bytes([0x31; 16]).expect("tenant"),
+            positron_domain::routing::SignalKind::Logs,
+            positron_domain::routing::VirtualShardId::new(1).expect("shard"),
+        );
+        let now = 7_u64
+            .checked_mul(INTEGRITY_SCRUB_CADENCE_SECONDS)
+            .and_then(|start| start.checked_add(413))
+            .expect("bounded fixture time");
+        let epoch = now / INTEGRITY_SCRUB_CADENCE_SECONDS;
+        let due = integrity_scrub_not_before(
+            positron_kernel::InstanceId::new([0x41; 16]).expect("instance"),
+            scope,
+            epoch,
+        )
+        .expect("jitter");
+        let slot_start = epoch
+            .checked_mul(INTEGRITY_SCRUB_CADENCE_SECONDS)
+            .expect("bounded fixture slot");
+        assert!(
+            (slot_start..slot_start + INTEGRITY_SCRUB_JITTER_SECONDS).contains(&due),
+            "an arbitrary lifecycle time schedules within its current bounded slot"
+        );
+        assert_eq!(epoch, 7, "the elapsed offset must not reset the epoch");
+    }
 
     #[test]
     fn poisoned_wake_preserves_the_next_runtime_notification() {

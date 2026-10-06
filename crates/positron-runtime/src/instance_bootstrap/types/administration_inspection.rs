@@ -1,6 +1,85 @@
 use super::*;
 
 impl InitializedInstance {
+    /// Verifies the current authenticated bootstrap, Catalog, and opaque key
+    /// custody binding for Doctor. This inspection never publishes Catalog
+    /// state, creates a key, or exports key material.
+    pub fn doctor_runtime_facts(
+        &self,
+        actor: positron_governance::AuthorizedContext,
+    ) -> Result<DoctorRuntimeFacts, BootstrapFailure> {
+        let secret = self
+            .key
+            .catalog_secret(self.instance)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        let view = Catalog::read_current_view(&self._authority, self.instance, secret)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let identity = positron_governance::Identity::open(view.snapshot())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+        identity
+            .inspect(actor, &[])
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ApiKeyUnauthorized))?;
+        let (_, governance) = view
+            .snapshot()
+            .governance_object()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+        if governance.integrity_key_fingerprint() != self.integrity_key_fingerprint {
+            return Err(BootstrapFailure::new(
+                BootstrapFailureCode::IdentityMismatch,
+            ));
+        }
+        let signer = self
+            .key
+            .export_manifest_signer(self.instance, governance.protected_integrity_key())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        if signer.identity().public_key() != governance.integrity_public_key() {
+            return Err(BootstrapFailure::new(
+                BootstrapFailureCode::IdentityMismatch,
+            ));
+        }
+        Ok(DoctorRuntimeFacts::verified(view.snapshot().number()))
+    }
+
+    /// Opens the existing Instance Integrity Key only as an opaque signer for
+    /// an authenticated operator export. The wrapped seed never crosses this
+    /// boundary.
+    pub fn support_bundle_manifest_signer(
+        &self,
+        actor: positron_governance::AuthorizedContext,
+    ) -> Result<positron_kernel::ExportManifestSigner, BootstrapFailure> {
+        if actor.principal_id() != self.administrator {
+            return Err(BootstrapFailure::new(
+                BootstrapFailureCode::ApiKeyUnauthorized,
+            ));
+        }
+        let secret = self
+            .key
+            .catalog_secret(self.instance)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        let catalog = Catalog::open(&self._authority, self.instance, secret)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let snapshot = catalog
+            .pin()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let (_, governance) = snapshot
+            .governance_object()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+        if governance.integrity_key_fingerprint() != self.integrity_key_fingerprint {
+            return Err(BootstrapFailure::new(
+                BootstrapFailureCode::IdentityMismatch,
+            ));
+        }
+        let signer = self
+            .key
+            .export_manifest_signer(self.instance, governance.protected_integrity_key())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        (signer.identity().public_key() == governance.integrity_public_key())
+            .then_some(signer)
+            .ok_or(BootstrapFailure::new(
+                BootstrapFailureCode::IdentityMismatch,
+            ))
+    }
+
     /// Returns the bounded, decoded Governance Audit history visible to this
     /// authenticated principal. System administrators receive the complete
     /// retained history; tenant administrators receive only entries with an

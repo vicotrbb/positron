@@ -420,6 +420,19 @@ pub struct RunningProcess {
 /// A process that has stopped data admission and awaits one terminal trigger.
 pub struct DrainingProcess(RunningProcess);
 
+/// Closed crash evidence available only while the runtime still owns its
+/// instance. It deliberately exposes no catalog contents or operation data.
+#[derive(Clone, Copy)]
+pub struct CrashInspection {
+    catalog_generation: Option<u64>,
+}
+impl CrashInspection {
+    #[must_use]
+    pub const fn catalog_generation(self) -> Option<u64> {
+        self.catalog_generation
+    }
+}
+
 type RunningTasks = Vec<(TaskRole, Box<dyn RunningTask>)>;
 
 mod cleanup;
@@ -471,12 +484,27 @@ impl RunningProcess {
 
     fn take_listeners(&self) -> Vec<Box<dyn BoundListener>> {
         let mut listeners = self.listeners();
-        std::mem::take(&mut *listeners)
+        let taken = std::mem::take(&mut *listeners);
+        self.state.replace_bound_listener_roles(0);
+        taken
     }
 
     #[must_use]
     pub fn health(&self) -> HealthState {
         self.state.health()
+    }
+
+    /// Returns only the stable crash context available while this process
+    /// still owns the live instance. It never exposes catalog contents,
+    /// operation state, or mutable authority.
+    #[must_use]
+    pub fn crash_inspection(&self) -> CrashInspection {
+        CrashInspection {
+            catalog_generation: self
+                .instance
+                .as_ref()
+                .map(|instance| instance.catalog_generation()),
+        }
     }
 
     #[must_use]
@@ -521,6 +549,11 @@ impl RunningProcess {
             .listeners
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = retained_listeners;
+        self.state.replace_bound_listener_roles(listener_roles(
+            self.listeners
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ));
         let (mut retired_tasks, retained_tasks): (RunningTasks, RunningTasks) = self
             .tasks
             .get_mut()
@@ -564,6 +597,12 @@ impl RunningProcess {
             self.cleanup.set_primary(ExitOutcome::Fenced);
         }
         self.services.take();
+        // A fenced process has retired its active Configuration generation.
+        // Keeping its publication would retain the just-shut-down instance,
+        // causing restricted inspection to read through stale authority rather
+        // than reopen the current durable owner-local view.
+        self.configuration_publication.take();
+        self.configuration.take();
         self.instance.take();
         self.fenced_volume.take();
     }
@@ -852,6 +891,8 @@ impl RunningProcess {
                     true
                 }
             });
+            self.state
+                .replace_bound_listener_roles(listener_roles(&listeners));
             failed_roles
         };
         for role in failed_roles {
@@ -871,6 +912,12 @@ impl RunningProcess {
         self.cancel_listener_tasks();
         DrainingProcess(self)
     }
+}
+
+fn listener_roles(listeners: &[Box<dyn BoundListener>]) -> u8 {
+    listeners.iter().fold(0_u8, |roles, listener| {
+        roles | crate::health::listener_role_bit(listener.endpoint().role())
+    })
 }
 
 fn split_listener_tasks(tasks: RunningTasks) -> (RunningTasks, RunningTasks) {
@@ -1000,6 +1047,10 @@ mod retirement_tests {
 }
 
 impl DrainingProcess {
+    #[must_use]
+    pub fn crash_inspection(&self) -> CrashInspection {
+        self.0.crash_inspection()
+    }
     #[must_use]
     pub fn health(&self) -> HealthState {
         self.0.health()

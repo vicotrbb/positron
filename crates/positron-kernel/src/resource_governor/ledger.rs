@@ -30,6 +30,7 @@ pub(super) enum GrantKind {
     Ingest,
     InteractiveQueryTail,
     OrdinaryMaintenanceBackup,
+    Diagnostics,
     DurabilityCompletion,
     Retention,
     EmergencyCompaction,
@@ -298,6 +299,7 @@ impl GrantKind {
             WorkKind::Ingest => Self::Ingest,
             WorkKind::InteractiveQueryTail => Self::InteractiveQueryTail,
             WorkKind::OrdinaryMaintenanceBackup => Self::OrdinaryMaintenanceBackup,
+            WorkKind::Diagnostics => Self::Diagnostics,
         }
     }
 
@@ -319,6 +321,7 @@ impl GrantKind {
             Self::Ingest => Some(WorkKind::Ingest),
             Self::InteractiveQueryTail => Some(WorkKind::InteractiveQueryTail),
             Self::OrdinaryMaintenanceBackup => Some(WorkKind::OrdinaryMaintenanceBackup),
+            Self::Diagnostics => Some(WorkKind::Diagnostics),
             _ => None,
         }
     }

@@ -1529,7 +1529,7 @@ fn join_thread(
     handle: &mut Option<JoinHandle<Result<(), TaskFailure>>>,
 ) -> Result<(), TaskFailure> {
     if let Some(handle) = handle.take() {
-        return handle.join().map_err(|_| TaskFailure::JoinUnavailable)?;
+        return handle.join().map_err(|_| TaskFailure::JoinPanicked)?;
     }
     Ok(())
 }
@@ -2254,6 +2254,23 @@ mod tests {
         );
         fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn actual_native_join_panic_is_typed_without_exposing_the_panic_payload() {
+        let marker = "native-task-panic-secret-canary";
+        let mut task = NativeRunningTask {
+            force: TaskCancellation::new(),
+            maintenance_wake: None,
+            shutdown_cancellation: None,
+            handle: Some(std::thread::spawn(move || -> Result<(), TaskFailure> {
+                panic!("{marker}");
+            })),
+        };
+        assert_eq!(
+            task.join_within(Duration::from_secs(1)),
+            Err(TaskFailure::JoinPanicked)
+        );
     }
 
     const fn loopback(port: u16) -> SocketAddr {

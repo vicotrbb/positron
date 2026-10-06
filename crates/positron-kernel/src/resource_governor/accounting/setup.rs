@@ -14,6 +14,7 @@ impl GovernorInner {
             ordinary_ceiling,
             principal_quota,
             tenant_quotas,
+            system_only,
             maximum_outstanding,
             pool_capacities,
             recovery_pool_capacities,
@@ -24,7 +25,11 @@ impl GovernorInner {
         } = input;
         let required = layout.overhead();
         let tenant_count = layout.tenant_count();
-        let total_weight = total_weight(&tenant_quotas)?;
+        let total_weight = if system_only {
+            1
+        } else {
+            total_weight(&tenant_quotas)?
+        };
 
         let ordinary_fair = allocate_exact(
             tenant_count,

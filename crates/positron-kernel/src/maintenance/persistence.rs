@@ -15,7 +15,12 @@ use super::*;
 use crate::Catalog;
 
 pub(crate) fn retention_publication_record_bytes_bound() -> Result<usize, MaintenanceFailure> {
-    record::encoded_record_capacity(MAX_TASK_OBJECTS, MAX_TASK_OBJECTS, MAX_CHECKPOINT_BYTES)
+    record::encoded_record_capacity(
+        MaintenanceTaskClass::IntegrityScrub,
+        MAX_TASK_OBJECTS,
+        MAX_TASK_OBJECTS,
+        MAX_CHECKPOINT_BYTES,
+    )
 }
 
 mod catalog;

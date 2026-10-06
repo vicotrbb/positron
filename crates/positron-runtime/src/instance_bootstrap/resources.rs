@@ -52,6 +52,22 @@ pub(super) fn establish(
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
 }
 
+/// Establishes the canonical storage-bound governor for an exclusively owned
+/// offline diagnostics operation while encrypted bootstrap custody is absent.
+/// Its policy is system-only, so no tenant identity is fabricated.
+pub(super) fn establish_system_diagnostics(
+    volume: OwnedPrimaryDataVolume,
+    max_registered_tenants: u16,
+) -> Result<StorageKernelResourceAuthority, BootstrapFailure> {
+    let sizing = resource_sizing(max_registered_tenants)?;
+    let observed =
+        ObservedResourceEnvironment::observe(&volume, registered_resource_bounds(sizing.raw)?)
+            .map_err(resource_failure)?;
+    let configuration = system_diagnostics_resource_configuration(sizing, observed)?;
+    StorageKernelResourceAuthority::establish(volume, configuration)
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
+}
+
 fn resource_sizing(max_registered_tenants: u16) -> Result<ResourceSizing, BootstrapFailure> {
     let max_registered_tenants = usize::from(max_registered_tenants);
     let cardinality =
@@ -145,6 +161,35 @@ fn resource_configuration(
             ResourceAmounts::new(DEFAULT_PRINCIPAL_AGGREGATE_QUOTA),
         )
         .map_err(resource_failure)?,
+    );
+    ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(resource_failure)
+}
+
+fn system_diagnostics_resource_configuration(
+    sizing: ResourceSizing,
+    observed: ObservedResourceEnvironment,
+) -> Result<ResourceGovernorConfiguration, BootstrapFailure> {
+    let disk = observed.initial_disk().usable_bytes();
+    let recovery_disk = sizing
+        .recovery_capacity
+        .get(ResourceDimension::DiskHeadroomBytes);
+    let inventory = ResourceInventory::new_observed(
+        observed,
+        OperatorLimits::new(sizing.raw).map_err(resource_failure)?,
+        RecoveryReserve::new(sizing.recovery_capacity).map_err(resource_failure)?,
+        sizing.cardinality,
+        DiskPressureThresholds::new(
+            recovery_disk,
+            recovery_disk.saturating_add(1),
+            recovery_disk.saturating_add(2),
+            disk,
+        )
+        .map_err(resource_failure)?,
+    )
+    .map_err(resource_failure)?;
+    let policy = GovernorPolicy::system_only(
+        OrdinaryPoolPolicy::new(uniform(8), uniform(6), uniform(4), uniform(2))
+            .map_err(resource_failure)?,
     );
     ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(resource_failure)
 }

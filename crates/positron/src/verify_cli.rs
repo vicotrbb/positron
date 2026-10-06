@@ -376,6 +376,7 @@ const fn hex_value(byte: u8) -> Option<u8> {
 
 fn failure_status(failure: OfflineIntegrityFailure) -> &'static str {
     match failure {
+        OfflineIntegrityFailure::OwnershipLocked => "storage_locked",
         OfflineIntegrityFailure::BootstrapUnavailable => "bootstrap_unavailable",
         OfflineIntegrityFailure::KeyUnavailable => "key_unavailable",
         OfflineIntegrityFailure::CatalogUnavailable => "catalog_busy",

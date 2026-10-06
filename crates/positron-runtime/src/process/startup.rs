@@ -530,6 +530,7 @@ fn bind(
         return Err(ExitOutcome::ListenerUnavailable(role));
     }
     listeners.push(listener);
+    state.record_bound_listener(role);
     Ok(())
 }
 

@@ -236,7 +236,9 @@ pub(super) fn storage_failure(failure: BootstrapStorageFailure) -> BootstrapFail
         BootstrapStorageFailure::UnsafeOrCorrupt | BootstrapStorageFailure::AlreadyExists => {
             BootstrapFailureCode::CorruptState
         },
-        BootstrapStorageFailure::Unavailable => BootstrapFailureCode::StorageUnavailable,
+        BootstrapStorageFailure::OwnershipLocked | BootstrapStorageFailure::Unavailable => {
+            BootstrapFailureCode::StorageUnavailable
+        },
     };
     BootstrapFailure::new(code)
 }

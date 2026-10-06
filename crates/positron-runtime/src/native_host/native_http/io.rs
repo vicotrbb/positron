@@ -7,7 +7,9 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::super::TrustedProxy;
 use crate::health::MaintenanceHealth;
-use crate::{ConfigurationObservation, HealthWarning, ProcessPhase};
+use crate::{
+    ConfigurationObservation, DoctorRuntimeFacts, HealthWarning, ListenerRole, ProcessPhase,
+};
 
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 
@@ -267,11 +269,13 @@ pub(in crate::native_host) fn configuration_status_response(
     integrity_degraded: bool,
     status: &ConfigurationObservation,
     maintenance: MaintenanceHealth,
+    doctor: DoctorRuntimeFacts,
+    bound_listener_roles: u8,
 ) -> Response {
     Response::json(
         200,
         format!(
-            "{{\"phase\":\"{}\",\"integrity_degraded\":{},\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
+            "{{\"phase\":\"{}\",\"integrity_degraded\":{},\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"doctor\":{{\"key_custody\":\"{}\",\"catalog_bootstrap\":\"{}\",\"catalog_generation\":{},\"backup_repository\":\"{}\",\"listener_topology\":{{\"control\":{},\"operations\":{},\"api\":{},\"otlp_grpc\":{},\"otlp_http\":{},\"loki_push\":{}}}}},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
             process_phase_name(phase),
             integrity_degraded,
             status.generation(),
@@ -283,6 +287,24 @@ pub(in crate::native_host) fn configuration_status_response(
             )),
             drift_disposition_name(status.drift_disposition()),
             status.pending_restart().is_some(),
+            if doctor.key_custody_verified() {
+                "verified"
+            } else {
+                "unavailable"
+            },
+            if doctor.catalog_bootstrap_verified() {
+                "verified"
+            } else {
+                "unavailable"
+            },
+            doctor.catalog_generation(),
+            doctor.backup_repository().label(),
+            listener_bound(bound_listener_roles, ListenerRole::Control),
+            listener_bound(bound_listener_roles, ListenerRole::Operations),
+            listener_bound(bound_listener_roles, ListenerRole::Api),
+            listener_bound(bound_listener_roles, ListenerRole::OtlpGrpc),
+            listener_bound(bound_listener_roles, ListenerRole::OtlpHttp),
+            listener_bound(bound_listener_roles, ListenerRole::LokiPush),
             maintenance.queued(),
             maintenance.running(),
             maintenance.deferred(),
@@ -310,6 +332,42 @@ pub(in crate::native_host) fn configuration_status_response(
             maintenance.failed_unclassified(),
         ),
     )
+}
+
+pub(in crate::native_host) fn fenced_doctor_response(
+    doctor: DoctorRuntimeFacts,
+    bound_listener_roles: u8,
+    reason: Option<crate::IntegrityFenceReason>,
+) -> Response {
+    let reason = reason.map_or("none", crate::IntegrityFenceReason::redacted_label);
+    Response::json(
+        200,
+        format!(
+            "{{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\",\"reason\":\"{reason}\",\"doctor\":{{\"key_custody\":\"{}\",\"catalog_bootstrap\":\"{}\",\"catalog_generation\":{},\"backup_repository\":\"{}\",\"listener_topology\":{{\"control\":{},\"operations\":{},\"api\":{},\"otlp_grpc\":{},\"otlp_http\":{},\"loki_push\":{}}}}}}}",
+            if doctor.key_custody_verified() {
+                "verified"
+            } else {
+                "unavailable"
+            },
+            if doctor.catalog_bootstrap_verified() {
+                "verified"
+            } else {
+                "unavailable"
+            },
+            doctor.catalog_generation(),
+            doctor.backup_repository().label(),
+            listener_bound(bound_listener_roles, ListenerRole::Control),
+            listener_bound(bound_listener_roles, ListenerRole::Operations),
+            listener_bound(bound_listener_roles, ListenerRole::Api),
+            listener_bound(bound_listener_roles, ListenerRole::OtlpGrpc),
+            listener_bound(bound_listener_roles, ListenerRole::OtlpHttp),
+            listener_bound(bound_listener_roles, ListenerRole::LokiPush),
+        ),
+    )
+}
+
+fn listener_bound(roles: u8, role: ListenerRole) -> bool {
+    roles & crate::health::listener_role_bit(role) != 0
 }
 
 fn process_phase_name(phase: ProcessPhase) -> &'static str {

@@ -101,6 +101,32 @@ fn reopened_identity_authenticates_the_hash_only_administrator_without_impersona
 }
 
 #[test]
+fn system_administrator_reads_current_doctor_facts_without_exporting_key_material()
+-> Result<(), Box<dyn Error>> {
+    let roots = Roots::new()?;
+    let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    let administrator = reopened.attribute(
+        PresentedCredential::parse(claim.secret())?,
+        RequestedIntent::SystemAdministration,
+        CompatibilityHints::none(),
+    )?;
+
+    let facts = reopened.doctor_runtime_facts(administrator)?;
+
+    assert!(facts.key_custody_verified());
+    assert!(facts.catalog_bootstrap_verified());
+    assert_eq!(facts.backup_repository().label(), "not_configured");
+    assert!(!format!("{facts:?}").contains(claim.secret()));
+    Ok(())
+}
+
+#[test]
 fn system_administrator_publishes_and_verifies_a_bootstrap_bound_audit_checkpoint()
 -> Result<(), Box<dyn Error>> {
     let roots = Roots::new()?;

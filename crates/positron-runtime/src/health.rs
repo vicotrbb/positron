@@ -8,8 +8,8 @@ use positron_kernel::{
 };
 
 use crate::{
-    BootstrapPaths, ConfigurationObservation, ConfigurationRuntimeFailure, InitializedInstance,
-    InstanceBootstrap, ListenerRole, RuntimeConfiguration,
+    BootstrapPaths, ConfigurationObservation, ConfigurationRuntimeFailure, DoctorRuntimeFacts,
+    InitializedInstance, InstanceBootstrap, ListenerRole, RuntimeConfiguration,
 };
 
 /// The one runtime phase that controls admission and shutdown behavior.
@@ -196,6 +196,14 @@ impl MaintenanceHealth {
 pub(crate) struct OperationsStatus {
     pub(crate) configuration: Option<ConfigurationObservation>,
     pub(crate) maintenance: MaintenanceHealth,
+    pub(crate) doctor: DoctorRuntimeFacts,
+    pub(crate) bound_listener_roles: u8,
+}
+
+pub(crate) struct FencedDoctorStatus {
+    pub(crate) doctor: DoctorRuntimeFacts,
+    pub(crate) bound_listener_roles: u8,
+    pub(crate) reason: Option<IntegrityFenceReason>,
 }
 
 /// A bounded operator-visible security condition that does not affect readiness.
@@ -231,6 +239,7 @@ pub struct HealthState {
     integrity_fence_reason: Arc<AtomicU8>,
     integrity_degraded: Arc<AtomicBool>,
     plaintext_listener_roles: Arc<AtomicU8>,
+    bound_listener_roles: Arc<AtomicU8>,
     configuration: Arc<OnceLock<Arc<RuntimeConfiguration>>>,
     inspection_authority: Arc<OnceLock<Weak<InitializedInstance>>>,
     fenced_inspection: Arc<OnceLock<FencedInspection>>,
@@ -419,6 +428,71 @@ impl HealthState {
             .map_err(|_| ())
     }
 
+    fn inspect_fenced_doctor(
+        paths: &BootstrapPaths,
+        max_registered_tenants: u16,
+        bearer: &str,
+    ) -> Result<DoctorRuntimeFacts, ()> {
+        let authority =
+            InstanceBootstrap::reopen_with_max_registered_tenants(paths, max_registered_tenants)
+                .map_err(|_| ())?;
+        let actor = authority
+            .attribute(
+                PresentedCredential::parse(bearer).map_err(|_| ())?,
+                RequestedIntent::SystemAdministration,
+                CompatibilityHints::none(),
+            )
+            .map_err(|_| ())?;
+        authority.doctor_runtime_facts(actor).map_err(|_| ())
+    }
+
+    pub(crate) fn authorized_fenced_doctor_status(
+        &self,
+        bearer: &str,
+    ) -> Result<FencedDoctorStatus, ConfigurationStatusFailure> {
+        if self.phase() != ProcessPhase::Fenced {
+            return Err(ConfigurationStatusFailure::Unavailable);
+        }
+        let inspection = self
+            .fenced_inspection
+            .get()
+            .ok_or(ConfigurationStatusFailure::Unavailable)?;
+        let retained = self
+            .inspection_authority
+            .get()
+            .and_then(Weak::upgrade)
+            .and_then(|authority| {
+                let credential = PresentedCredential::parse(bearer).ok()?;
+                let actor = authority
+                    .attribute(
+                        credential,
+                        RequestedIntent::SystemAdministration,
+                        CompatibilityHints::none(),
+                    )
+                    .ok()?;
+                authority.doctor_runtime_facts(actor).ok()
+            });
+        // A running process fence releases its mutable instance. A concurrent
+        // holder of its former `Arc` can keep the weak reference upgradeable,
+        // but its authority has already been shut down. Reopen only to
+        // reattribute this same bearer against the current durable catalog;
+        // never use an old successful authorization as a fallback.
+        let doctor = match retained {
+            Some(doctor) => doctor,
+            None => Self::inspect_fenced_doctor(
+                &inspection.paths,
+                inspection.max_registered_tenants,
+                bearer,
+            )
+            .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?,
+        };
+        Ok(FencedDoctorStatus {
+            doctor,
+            bound_listener_roles: self.bound_listener_roles.load(Ordering::Acquire),
+            reason: self.integrity_fence_reason(),
+        })
+    }
+
     pub(crate) fn authorized_configuration_status(
         &self,
         bearer: &str,
@@ -438,6 +512,17 @@ impl HealthState {
             .get()
             .and_then(Weak::upgrade)
             .ok_or(ConfigurationStatusFailure::Unavailable)?;
+        let actor = authority
+            .attribute(
+                PresentedCredential::parse(bearer)
+                    .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?,
+                RequestedIntent::SystemAdministration,
+                CompatibilityHints::none(),
+            )
+            .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?;
+        let doctor = authority
+            .doctor_runtime_facts(actor)
+            .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
         let clock_uncertain =
             authority.retention_time.status().state() == LifecycleClockState::ClockUncertain;
         let now = if clock_uncertain {
@@ -600,6 +685,8 @@ impl HealthState {
                 .configuration_status()
                 .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
             maintenance,
+            doctor,
+            bound_listener_roles: self.bound_listener_roles.load(Ordering::Acquire),
         })
     }
 }
@@ -627,6 +714,7 @@ impl ProcessState {
                 integrity_fence_reason: Arc::new(AtomicU8::new(0)),
                 integrity_degraded: Arc::new(AtomicBool::new(false)),
                 plaintext_listener_roles: Arc::new(AtomicU8::new(0)),
+                bound_listener_roles: Arc::new(AtomicU8::new(0)),
                 configuration: Arc::new(OnceLock::new()),
                 inspection_authority: Arc::new(OnceLock::new()),
                 fenced_inspection: Arc::new(OnceLock::new()),
@@ -652,6 +740,18 @@ impl ProcessState {
         });
         self.health
             .plaintext_listener_roles
+            .store(roles, Ordering::Release);
+    }
+
+    pub(crate) fn record_bound_listener(&self, role: ListenerRole) {
+        self.health
+            .bound_listener_roles
+            .fetch_or(listener_role_bit(role), Ordering::AcqRel);
+    }
+
+    pub(crate) fn replace_bound_listener_roles(&self, roles: u8) {
+        self.health
+            .bound_listener_roles
             .store(roles, Ordering::Release);
     }
 
@@ -705,6 +805,17 @@ fn plaintext_role_bit(role: ListenerRole) -> Option<u8> {
         ListenerRole::OtlpGrpc => Some(1 << 2),
         ListenerRole::OtlpHttp => Some(1 << 3),
         ListenerRole::LokiPush => Some(1 << 4),
+    }
+}
+
+pub(crate) const fn listener_role_bit(role: ListenerRole) -> u8 {
+    match role {
+        ListenerRole::Control => 1,
+        ListenerRole::Operations => 1 << 1,
+        ListenerRole::Api => 1 << 2,
+        ListenerRole::OtlpGrpc => 1 << 3,
+        ListenerRole::OtlpHttp => 1 << 4,
+        ListenerRole::LokiPush => 1 << 5,
     }
 }
 

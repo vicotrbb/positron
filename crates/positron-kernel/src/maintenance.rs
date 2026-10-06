@@ -262,8 +262,8 @@ pub enum MaintenanceTerminalFailure {
     /// A Governance Audit checkpoint binding no longer matches durable
     /// identity material and cannot safely execute.
     IdentityMismatch,
-    /// A Compaction descriptor's immutable source or policy binding changed
-    /// before any output publication could begin.
+    /// An immutable source or policy binding changed before its handler could
+    /// begin externally visible work.
     StaleGeneration,
 }
 

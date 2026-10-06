@@ -25,7 +25,7 @@ use positron_kernel::{
     LifecycleClockState, MaintenanceCoordinator, MaintenanceFailure, MaintenancePreconditions,
     MaintenanceReservationAuthority, MaintenanceScope, MaintenanceTask, MaintenanceTaskClass,
     MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTrigger, NO_DURABLE_PROGRESS_SLO_SECONDS,
-    ResourceAmounts, ResourceDimension, SegmentScope, TransactionId, integrity_quarantine_findings,
+    ResourceDimension, SegmentScope, TransactionId, integrity_quarantine_findings,
 };
 
 use crate::ServiceHandle;
@@ -191,6 +191,9 @@ impl ServiceHandle {
             snapshot.identity().to_bytes(),
             request.continuation(),
         )?;
+        let source_manifest = snapshot
+            .integrity_scope_source_identity(scope)
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let now = self.maintenance_status_now()?;
         let coordinator = self.instance.maintenance_coordinator();
         let execution = {
@@ -198,16 +201,14 @@ impl ServiceHandle {
                 .catalog_operation()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             let catalog = self.open_maintenance_catalog()?;
-            let task = MaintenanceTask::with_contract(
+            let task = MaintenanceTask::integrity_scrub(
                 task_identity,
-                MaintenanceTaskClass::IntegrityScrub,
                 MaintenanceScope::segment(tenant, signal, shard),
                 MaintenanceTrigger::Event,
                 MaintenancePreconditions::new(snapshot.number(), 1)
                     .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
-                Vec::new(),
-                Vec::new(),
-                ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+                source_manifest,
+                0,
             )
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             coordinator
