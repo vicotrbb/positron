@@ -85,9 +85,7 @@ pub(super) fn authority() -> (StorageKernelResourceAuthority, TenantId) {
     )
 }
 
-pub(super) fn integrity_scrub_authority(
-    tenant: TenantId,
-) -> StorageKernelResourceAuthority {
+pub(super) fn integrity_scrub_authority(tenant: TenantId) -> StorageKernelResourceAuthority {
     let capacity = ResourceAmounts::new([1_000_000_000; 11]);
     let minimum = ResourceAmounts::new([1; 11]);
     let repair = ResourceAmounts::new([
@@ -135,10 +133,9 @@ pub(super) fn integrity_scrub_authority(
         .expect("ordinary pools"),
     )
     .expect("policy");
-    let recovery_pools = RecoveryPoolCapacities::new(
-        dual, minimum, dual, minimum, repair, minimum, minimum,
-    )
-    .expect("recovery pools");
+    let recovery_pools =
+        RecoveryPoolCapacities::new(dual, minimum, dual, minimum, repair, minimum, minimum)
+            .expect("recovery pools");
     StorageKernelResourceAuthority::establish_for_test(inventory, policy, recovery_pools)
         .expect("resource authority")
 }

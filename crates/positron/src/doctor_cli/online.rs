@@ -330,7 +330,9 @@ fn read_trust_file(path: &std::path::Path) -> Result<Vec<u8>, DoctorFailure> {
     )
     .map_err(|_| DoctorFailure::TrustFileRejected)?;
     let file = std::fs::File::from(descriptor);
-    let opened = file.metadata().map_err(|_| DoctorFailure::TrustFileRejected)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| DoctorFailure::TrustFileRejected)?;
     if !opened.file_type().is_file() || opened.len() > MAX_TRUST_FILE_BYTES {
         return Err(DoctorFailure::TrustFileRejected);
     }

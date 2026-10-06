@@ -200,7 +200,9 @@ fn integrity_scrub_admission_holds_the_bounded_repair_peak_without_clock_uncerta
     let first = integrity_scrub_task_for_tenant(0x76, tenant, 1);
     let second = integrity_scrub_task_for_tenant(0x77, tenant, 2);
     let second_id = second.identity();
-    coordinator.submit_at(first.clone(), 1).expect("first submit");
+    coordinator
+        .submit_at(first.clone(), 1)
+        .expect("first submit");
     coordinator.submit_at(second, 1).expect("second submit");
 
     let running = coordinator
@@ -213,11 +215,16 @@ fn integrity_scrub_admission_holds_the_bounded_repair_peak_without_clock_uncerta
         Err(MaintenanceFailure::ResourceAdmissionRefused)
     ));
     assert_eq!(
-        coordinator.status(second_id).expect("queued scrub status").phase(),
+        coordinator
+            .status(second_id)
+            .expect("queued scrub status")
+            .phase(),
         MaintenanceTaskPhase::Queued
     );
 
-    running.complete(&coordinator, true).expect("release first scrub");
+    running
+        .complete(&coordinator, true)
+        .expect("release first scrub");
     let admitted = coordinator
         .start_next_with_reservation(&authority, 2, true)
         .expect("released repair capacity admits the queued scrub")
@@ -233,11 +240,7 @@ fn integrity_scrub_task(identity: u8, shard: u32) -> MaintenanceTask {
     )
 }
 
-fn integrity_scrub_task_for_tenant(
-    identity: u8,
-    tenant: TenantId,
-    shard: u32,
-) -> MaintenanceTask {
+fn integrity_scrub_task_for_tenant(identity: u8, tenant: TenantId, shard: u32) -> MaintenanceTask {
     MaintenanceTask::integrity_scrub(
         MaintenanceTaskId::new([identity; 16]).expect("task"),
         MaintenanceScope::segment(

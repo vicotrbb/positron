@@ -75,7 +75,8 @@ fn online_doctor_reports_unavailable_within_the_five_second_deadline_when_a_peer
 
 #[cfg(unix)]
 #[test]
-fn online_doctor_rejects_an_oversized_trust_file_before_connecting() -> Result<(), Box<dyn std::error::Error>> {
+fn online_doctor_rejects_an_oversized_trust_file_before_connecting()
+-> Result<(), Box<dyn std::error::Error>> {
     let path = temporary_path("oversized-trust.pem");
     std::fs::write(&path, vec![0_u8; 65_537])?;
 
