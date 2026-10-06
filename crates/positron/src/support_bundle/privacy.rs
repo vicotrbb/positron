@@ -11,6 +11,48 @@ pub(crate) enum IdentifierRetention {
     DataDirectory,
 }
 
+/// Records both the authenticated operator's requested policy and the policy
+/// that the available authority could actually apply. This prevents a fenced
+/// process from representing a retired runtime configuration as a live source.
+#[derive(Clone, Copy)]
+pub(crate) struct IdentifierRetentionPolicy {
+    requested: IdentifierRetention,
+    applied: IdentifierRetention,
+    outcome: &'static str,
+}
+
+impl IdentifierRetentionPolicy {
+    pub(super) const fn from_requested(retention: IdentifierRetention) -> Self {
+        Self {
+            requested: retention,
+            applied: retention,
+            outcome: "applied",
+        }
+    }
+
+    pub(super) const fn unavailable_after_runtime_retirement(
+        requested: IdentifierRetention,
+    ) -> Self {
+        Self {
+            requested,
+            applied: IdentifierRetention::Ephemeral,
+            outcome: "unavailable_retired_runtime_configuration",
+        }
+    }
+
+    pub(super) const fn requested(self) -> IdentifierRetention {
+        self.requested
+    }
+
+    pub(super) const fn applied_retention(self) -> IdentifierRetention {
+        self.applied
+    }
+
+    pub(super) const fn outcome(self) -> &'static str {
+        self.outcome
+    }
+}
+
 impl IdentifierRetention {
     pub(super) const fn request_value(self) -> Option<&'static str> {
         match self {

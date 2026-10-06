@@ -32,6 +32,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "support_bundle_options"
+path = "fuzz_targets/support_bundle_options.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "configuration_document"
 path = "fuzz_targets/configuration_document.rs"
 test = false

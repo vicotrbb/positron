@@ -16,7 +16,7 @@ use super::{
     AgeRecipients, BundleFailure, BundleLimits, BundleMember, BundleOptions, Class,
     DEFAULT_ELAPSED_LIMIT, DEFAULT_LOG_WINDOW, DEFAULT_OUTPUT_LIMIT, DEFAULT_SOURCE_FILES,
     ManifestAuthentication, SupportBundle, canonical_members, diagnostics_claim,
-    privacy::IdentifierRetention,
+    privacy::{IdentifierRetention, IdentifierRetentionPolicy},
 };
 
 /// Binary-owned serving collector. It receives only an opaque bearer and a
@@ -118,11 +118,13 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     let limits = BundleLimits::new(14, DEFAULT_OUTPUT_LIMIT)
                         .map_err(|_| ())?
                         .with_elapsed_limit(DEFAULT_ELAPSED_LIMIT);
-                    let bundle = SupportBundle::build_authenticated_with_retention(
+                    let bundle = SupportBundle::build_authenticated_with_retention_policy(
                         members,
                         limits,
                         ManifestAuthentication::Signed(&signer),
-                        IdentifierRetention::Ephemeral,
+                        IdentifierRetentionPolicy::unavailable_after_runtime_retirement(
+                            request.identifier_retention,
+                        ),
                     )
                     .map_err(|_| ())?;
                     let recipients = AgeRecipients::parse(request.recipients).map_err(|_| ())?;
@@ -408,11 +410,23 @@ pub(super) fn request_live_bundle(
         if options.remaining_time(started).is_none() {
             return Err(BundleFailure::DeadlineExceeded);
         }
-        let mut response = Vec::with_capacity(options.output_limit.saturating_add(512));
+        let response_capacity = options
+            .output_limit
+            .checked_add(512)
+            .ok_or(BundleFailure::OutputLimitExceeded)?;
+        let mut response = Vec::new();
+        response
+            .try_reserve_exact(response_capacity)
+            .map_err(|_| BundleFailure::OutputUnavailable)?;
         stream
             .take(
-                u64::try_from(options.output_limit.saturating_add(8_193))
-                    .map_err(|_| BundleFailure::InspectionUnavailable)?,
+                u64::try_from(
+                    options
+                        .output_limit
+                        .checked_add(8_193)
+                        .ok_or(BundleFailure::OutputLimitExceeded)?,
+                )
+                .map_err(|_| BundleFailure::OutputLimitExceeded)?,
             )
             .read_to_end(&mut response)
             .map_err(|_| BundleFailure::InspectionUnavailable)?;

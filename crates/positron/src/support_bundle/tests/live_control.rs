@@ -217,7 +217,11 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
     assert!(archive.contains("DOCTOR_FENCED_OWNER_VERIFIED"));
     assert!(archive.contains("configuration_runtime=unavailable_retired_after_fence"));
     assert!(archive.contains("manifest-signature.txt"));
+    assert!(archive.contains("requested_retained_identifier_classes=data_directory"));
     assert!(archive.contains("retained_identifier_classes=none"));
+    assert!(
+        archive.contains("identifier_retention_outcome=unavailable_retired_runtime_configuration")
+    );
     assert!(archive.contains("identifier_pseudonymization=ephemeral_per_bundle"));
     assert!(!archive.contains(data.to_string_lossy().as_ref()));
     assert!(!archive.contains("status=healthy"));

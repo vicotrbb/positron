@@ -84,6 +84,47 @@ fn doctor_verify_and_bundle_report_stdout_failure_without_panicking()
 }
 
 #[cfg(unix)]
+#[test]
+fn support_bundle_rejects_an_impossible_live_output_limit_before_inspection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-support-limit-{nonce}"));
+    let roots = ChildRoots::new(&root)?;
+    let config = root.join("positron.toml");
+    fs::write(
+        &config,
+        process_configuration(
+            &root,
+            &roots.data,
+            &roots.secrets,
+            [42_001, 42_002, 42_003, 42_004, 42_005],
+        ),
+    )?;
+    let identity = age::x25519::Identity::generate();
+    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["support", "bundle", "create", "--config"])
+        .arg(&config)
+        .args(["--output"])
+        .arg(root.join("bundle.age"))
+        .args(["--recipient"])
+        .arg(identity.to_public().to_string())
+        .args([
+            "--credential-stdin",
+            "--max-output-bytes",
+            &usize::MAX.to_string(),
+        ])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stdout)?.contains("SUPPORT_BUNDLE_OUTPUT_LIMIT_EXCEEDED"));
+    assert!(!root.join("bundle.age").exists());
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn command_with_closed_stdout(
     arguments: &[&str],
 ) -> Result<std::process::Output, Box<dyn std::error::Error>> {

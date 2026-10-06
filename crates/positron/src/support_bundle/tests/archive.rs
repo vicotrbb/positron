@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn fenced_retention_report_preserves_the_administrator_request_and_the_unavailable_outcome() {
+    let bundle = SupportBundle::build_authenticated_with_retention_policy(
+        [BundleMember::doctor_report(b"fenced")],
+        BundleLimits::new(1, 12_000).expect("bounded limits"),
+        super::super::ManifestAuthentication::UnsignedKeyUnavailableOffline,
+        super::super::privacy::IdentifierRetentionPolicy::unavailable_after_runtime_retirement(
+            super::super::privacy::IdentifierRetention::DataDirectory,
+        ),
+    )
+    .expect("the public report remains buildable without retired configuration");
+    let archive = String::from_utf8_lossy(bundle.archive());
+    assert!(archive.contains("requested_retained_identifier_classes=data_directory"));
+    assert!(archive.contains("retained_identifier_classes=none"));
+    assert!(
+        archive.contains("identifier_retention_outcome=unavailable_retired_runtime_configuration")
+    );
+    assert!(archive.contains("identifier_pseudonymization=ephemeral_per_bundle"));
+}
+
+#[test]
 fn canonical_allowlist_admits_typed_configuration_and_crash_families() {
     let bundle = SupportBundle::build(
         [

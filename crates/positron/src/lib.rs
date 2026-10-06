@@ -31,7 +31,7 @@ mod tenant_service_cli;
 mod verify_cli;
 
 #[doc(hidden)]
-pub use support_bundle::fuzz_live_bundle_request;
+pub use support_bundle::{fuzz_live_bundle_request, fuzz_support_bundle_options};
 
 const EXIT_OK: u8 = 0;
 const EXIT_CONFIGURATION: u8 = 2;

@@ -92,6 +92,46 @@ fn identifier_retention_is_closed_and_never_available_to_key_unavailable_exports
 }
 
 #[test]
+fn output_limit_is_limited_to_the_canonical_live_transport_bound() {
+    let arguments = [
+        "bundle",
+        "create",
+        "--config",
+        "positron.toml",
+        "--output",
+        "bundle.age",
+        "--recipient",
+        "age1example",
+        "--credential-stdin",
+        "--max-output-bytes",
+        &usize::MAX.to_string(),
+    ];
+    assert!(BundleOptions::parse(arguments.into_iter().map(str::to_owned)).is_err());
+
+    let valid = BundleOptions::parse(
+        [
+            "bundle",
+            "create",
+            "--config",
+            "positron.toml",
+            "--output",
+            "bundle.age",
+            "--recipient",
+            "age1example",
+            "--credential-stdin",
+            "--max-output-bytes",
+            "1048576",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    assert!(
+        valid.is_ok(),
+        "the canonical bounded live limit remains valid"
+    );
+}
+
+#[test]
 fn explicit_plaintext_export_is_owner_only_and_never_overwrites() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
