@@ -2,6 +2,45 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::Sha256;
 
+/// The closed set of non-secret deployment identifiers that a current System
+/// Administrator may explicitly retain in one support bundle. Secret paths,
+/// credentials, keys, and telemetry are deliberately not identifier classes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IdentifierRetention {
+    Ephemeral,
+    DataDirectory,
+}
+
+impl IdentifierRetention {
+    pub(super) const fn request_value(self) -> Option<&'static str> {
+        match self {
+            Self::Ephemeral => None,
+            Self::DataDirectory => Some("data_directory"),
+        }
+    }
+
+    pub(super) fn parse(value: &str) -> Result<Self, ()> {
+        match value {
+            "data_directory" => Ok(Self::DataDirectory),
+            _ => Err(()),
+        }
+    }
+
+    pub(super) const fn report_value(self) -> &'static str {
+        match self {
+            Self::Ephemeral => "none",
+            Self::DataDirectory => "data_directory",
+        }
+    }
+
+    pub(super) const fn pseudonymization_value(self) -> &'static str {
+        match self {
+            Self::Ephemeral => "ephemeral_per_bundle",
+            Self::DataDirectory => "data_directory_retained",
+        }
+    }
+}
+
 /// Ephemeral keyed mapping. It deliberately exposes only the pseudonym, never
 /// the key or reverse map, so values correlate inside one export only.
 pub(super) struct Pseudonymizer([u8; 32]);

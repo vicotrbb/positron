@@ -23,7 +23,7 @@ const CONTINUATION_BYTES: usize = 1 + 7 + 32 + 16;
 
 /// The bounded number of immutable segments one scrub pass may authenticate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct IntegrityScrubBudget(usize);
+pub struct IntegrityScrubBudget(usize, u64);
 
 impl IntegrityScrubBudget {
     pub const MAX_SEGMENTS: usize = 128;
@@ -36,7 +36,13 @@ impl IntegrityScrubBudget {
         if segments == 0 || segments > Self::MAX_SEGMENTS {
             return Err(IntegrityFailureCode::InvalidInput);
         }
-        Ok(Self(segments))
+        Ok(Self(segments, Self::MAX_BYTES))
+    }
+    pub fn with_bytes(segments: usize, bytes: u64) -> Result<Self, IntegrityFailureCode> {
+        if segments == 0 || segments > Self::MAX_SEGMENTS || bytes == 0 || bytes > Self::MAX_BYTES {
+            return Err(IntegrityFailureCode::InvalidInput);
+        }
+        Ok(Self(segments, bytes))
     }
 }
 

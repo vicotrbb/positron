@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 
 use super::archive::{encode_bytes, hex};
 use super::live_control;
+use super::privacy::IdentifierRetention;
 use super::{
     AgeRecipients, BundleLimits, BundleMember, DEFAULT_ELAPSED_LIMIT, DEFAULT_LOG_WINDOW,
     DEFAULT_OUTPUT_LIMIT, DEFAULT_SOURCE_FILES, EXIT_FAILURE, EXIT_USAGE, ManifestAuthentication,
@@ -91,16 +92,18 @@ fn execute(
                 let members =
                     canonical_members(&effective, report, &operational, &options, started)?;
                 let bundle = if options.plaintext_warning {
-                    SupportBundle::build_authenticated_for_explicit_plaintext(
+                    SupportBundle::build_authenticated_for_explicit_plaintext_with_retention(
                         members,
                         limits,
                         ManifestAuthentication::UnsignedKeyUnavailableOffline,
+                        options.identifier_retention,
                     )
                 } else {
-                    SupportBundle::build_authenticated(
+                    SupportBundle::build_authenticated_with_retention(
                         members,
                         limits,
                         ManifestAuthentication::UnsignedKeyUnavailableOffline,
+                        options.identifier_retention,
                     )
                 }
                 .map_err(|_| BundleFailure::OutputUnavailable)?;
@@ -117,16 +120,18 @@ fn execute(
                 let members =
                     canonical_members(&effective, &report, &operational, &options, started)?;
                 let bundle = if options.plaintext_warning {
-                    SupportBundle::build_authenticated_for_explicit_plaintext(
+                    SupportBundle::build_authenticated_for_explicit_plaintext_with_retention(
                         members,
                         limits,
                         ManifestAuthentication::Signed(&signer),
+                        options.identifier_retention,
                     )
                 } else {
-                    SupportBundle::build_authenticated(
+                    SupportBundle::build_authenticated_with_retention(
                         members,
                         limits,
                         ManifestAuthentication::Signed(&signer),
+                        options.identifier_retention,
                     )
                 }
                 .map_err(|_| BundleFailure::OutputUnavailable)?;
@@ -239,9 +244,12 @@ pub(crate) fn canonical_members(
         return Err(BundleFailure::DeadlineExceeded);
     }
     let pseudonyms = privacy::Pseudonymizer::new();
-    let data_directory = pseudonyms
-        .pseudonymize(effective.data_directory())
-        .map_err(|_| BundleFailure::OutputUnavailable)?;
+    let data_directory = match options.identifier_retention {
+        IdentifierRetention::Ephemeral => pseudonyms
+            .pseudonymize(effective.data_directory())
+            .map_err(|_| BundleFailure::OutputUnavailable)?,
+        IdentifierRetention::DataDirectory => effective.data_directory().to_owned(),
+    };
     let secrets_directory = pseudonyms
         .pseudonymize(effective.secrets_directory())
         .map_err(|_| BundleFailure::OutputUnavailable)?;
@@ -551,6 +559,7 @@ pub(crate) struct BundleOptions {
     pub(super) log_window: Duration,
     pub(super) source_file_limit: usize,
     pub(super) control_path: Option<PathBuf>,
+    pub(super) identifier_retention: IdentifierRetention,
 }
 
 impl BundleOptions {
@@ -572,6 +581,7 @@ impl BundleOptions {
         let mut log_window = DEFAULT_LOG_WINDOW;
         let mut source_file_limit = DEFAULT_SOURCE_FILES;
         let mut control_path = None;
+        let mut identifier_retention = IdentifierRetention::Ephemeral;
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--config" if config.is_none() => {
@@ -596,6 +606,12 @@ impl BundleOptions {
                     control_path = Some(PathBuf::from(
                         arguments.next().ok_or(BundleFailure::Arguments)?,
                     ))
+                },
+                "--retain-identifier" if identifier_retention == IdentifierRetention::Ephemeral => {
+                    identifier_retention = IdentifierRetention::parse(
+                        &arguments.next().ok_or(BundleFailure::Arguments)?,
+                    )
+                    .map_err(|_| BundleFailure::Arguments)?
                 },
                 "--max-output-bytes" => {
                     output_limit = arguments
@@ -641,6 +657,7 @@ impl BundleOptions {
             || source_file_limit == 0
             || (plaintext_warning && !recipients.is_empty())
             || (!plaintext_warning && recipients.is_empty())
+            || (offline_key_unavailable && identifier_retention != IdentifierRetention::Ephemeral)
         {
             return Err(BundleFailure::Arguments);
         }
@@ -655,6 +672,7 @@ impl BundleOptions {
             log_window,
             source_file_limit,
             control_path,
+            identifier_retention,
         })
     }
 

@@ -60,5 +60,26 @@ pub(crate) fn capture_process_failure_with_catalog_generation(
     crash_record::CrashRecordStore::under_data_directory(data_directory).persist(&record)
 }
 
+/// Bounded public fuzz seam for the unauthenticated Control request body.
+/// A successfully parsed request must preserve its exact typed recipients and
+/// explicit retention choice through the canonical encoder and parser.
+#[doc(hidden)]
+#[allow(dead_code, reason = "called by the external cargo-fuzz target")]
+pub fn fuzz_live_bundle_request(bytes: &[u8]) {
+    let Ok(request) = live_control::LiveBundleRequest::parse(bytes) else {
+        return;
+    };
+    let Ok(encoded) = live_control::LiveBundleRequest::encode_with_retention(
+        &request.recipients,
+        request.identifier_retention,
+    ) else {
+        panic!("accepted live support-bundle request must re-encode");
+    };
+    let Ok(round_trip) = live_control::LiveBundleRequest::parse(&encoded) else {
+        panic!("encoded live support-bundle request must re-parse");
+    };
+    assert_eq!(round_trip, request);
+}
+
 #[cfg(test)]
 mod tests;

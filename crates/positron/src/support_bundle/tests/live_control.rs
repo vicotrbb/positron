@@ -19,6 +19,28 @@ fn live_recipient_wire_round_trip_accepts_native_x25519_only() {
     );
 }
 
+#[test]
+fn live_bundle_request_round_trips_the_explicit_data_directory_retention_choice() {
+    let identity = age::x25519::Identity::generate();
+    let encoded = super::super::live_control::LiveBundleRequest::encode_with_retention(
+        &[identity.to_public().to_string()],
+        super::super::privacy::IdentifierRetention::DataDirectory,
+    )
+    .unwrap_or_else(|_| panic!("typed retention request encodes"));
+    let request = super::super::live_control::LiveBundleRequest::parse(&encoded)
+        .expect("typed retention request decodes");
+    assert_eq!(
+        request.identifier_retention,
+        super::super::privacy::IdentifierRetention::DataDirectory
+    );
+    assert!(
+        super::super::live_control::LiveBundleRequest::parse(
+            b"version=1\nretain_identifier=secrets_directory\nrecipient=age1invalid\n"
+        )
+        .is_err()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtime_configuration()
@@ -134,9 +156,11 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
         "{status_response}"
     );
     let identity = age::x25519::Identity::generate();
-    let request =
-        super::super::live_control::LiveBundleRequest::encode(&[identity.to_public().to_string()])
-            .map_err(|_| "encode live bundle request")?;
+    let request = super::super::live_control::LiveBundleRequest::encode_with_retention(
+        &[identity.to_public().to_string()],
+        super::super::privacy::IdentifierRetention::DataDirectory,
+    )
+    .map_err(|_| "encode authorized live bundle request")?;
     let (head, ciphertext) = control_bundle(&control, administrator.secret(), &request)?;
     assert!(head.starts_with(b"HTTP/1.1 200 "), "{head:?}");
     let decryptor = Decryptor::new(Cursor::new(ciphertext))?;
@@ -145,6 +169,10 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
     reader.read_to_end(&mut archive)?;
     let archive = String::from_utf8_lossy(&archive);
     assert!(archive.contains("inspection_owner=maintenance_coordinator"));
+    assert!(archive.contains(data.to_string_lossy().as_ref()));
+    assert!(!archive.contains(secrets.to_string_lossy().as_ref()));
+    assert!(archive.contains("retained_identifier_classes=data_directory"));
+    assert!(archive.contains("identifier_pseudonymization=data_directory_retained"));
     for required in [
         "queued=",
         "clock_uncertain=",
@@ -189,6 +217,9 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
     assert!(archive.contains("DOCTOR_FENCED_OWNER_VERIFIED"));
     assert!(archive.contains("configuration_runtime=unavailable_retired_after_fence"));
     assert!(archive.contains("manifest-signature.txt"));
+    assert!(archive.contains("retained_identifier_classes=none"));
+    assert!(archive.contains("identifier_pseudonymization=ephemeral_per_bundle"));
+    assert!(!archive.contains(data.to_string_lossy().as_ref()));
     assert!(!archive.contains("status=healthy"));
     assert!(!archive.contains("process_phase=serving"));
     assert!(!archive.contains(administrator.secret()));

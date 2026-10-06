@@ -1,5 +1,14 @@
 # Fuzz tests
 
+The live support-bundle request target drives arbitrary Control-listener bytes
+through the bounded `LiveBundleRequest` parser and re-encodes every accepted
+request before parsing it again. It covers recipient and request-size bounds
+plus the closed explicit data-directory retention choice:
+
+```console
+cargo +nightly fuzz run live_bundle_request -- -runs=1000
+```
+
 Add fuzz targets with the untrusted-input or stateful product boundary they
 exercise. Applicable targets include parsers, protocol decoders, public request
 bodies, persistent formats, recovery inputs, cryptographic envelopes, and

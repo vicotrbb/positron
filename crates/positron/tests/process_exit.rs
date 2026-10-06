@@ -102,7 +102,7 @@ fn command_with_closed_stdout(
 
 #[cfg(unix)]
 #[test]
-fn offline_doctor_inspects_an_initialized_volume_without_changing_its_listing_or_bytes()
+fn offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_listing_or_bytes()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -119,11 +119,17 @@ fn offline_doctor_inspects_an_initialized_volume_without_changing_its_listing_or
         InitializationPlan::non_interactive(),
     )?);
     let before = volume_bytes(&roots.data)?;
-    let ports = available_ports()?;
     let config = root.join("positron.toml");
     fs::write(
         &config,
-        process_configuration(&root, &roots.data, &roots.secrets, ports),
+        // Offline Doctor does not bind listeners, so fixed valid port values
+        // keep this public binary contract independent of socket permission.
+        process_configuration(
+            &root,
+            &roots.data,
+            &roots.secrets,
+            [42_001, 42_002, 42_003, 42_004, 42_005],
+        ),
     )?;
 
     let output = Command::new(env!("CARGO_BIN_EXE_positron"))
@@ -153,6 +159,14 @@ fn offline_doctor_inspects_an_initialized_volume_without_changing_its_listing_or
         );
     }
     assert!(!stdout.contains("pos_"));
+    let verify = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["verify", "--offline", "--config"])
+        .arg(&config)
+        .output()?;
+    let verify_stdout = String::from_utf8(verify.stdout)?;
+    assert!(verify.status.success(), "{verify_stdout}");
+    assert!(verify_stdout.contains("mode=offline\nstatus=verified\nverification_complete=true\n"));
+    assert!(verify_stdout.contains("report_count=2\n"));
     assert_eq!(before, volume_bytes(&roots.data)?);
     fs::remove_dir_all(root)?;
     Ok(())

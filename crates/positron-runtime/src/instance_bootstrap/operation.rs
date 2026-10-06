@@ -444,15 +444,14 @@ fn generate_record(key: &BootstrapKeyCustody) -> Result<BootstrapRecord, Bootstr
 pub(super) fn verify_offline_integrity(
     paths: &BootstrapPaths,
     max_registered_tenants: u16,
-    resume: Option<(
-        positron_kernel::SegmentScope,
-        positron_kernel::IntegrityScrubContinuation,
-    )>,
+    selected_scope: Option<positron_kernel::SegmentScope>,
+    resume: Option<crate::OfflineIntegrityContinuation>,
+    claim: positron_kernel::WorkClaim,
+    cancellation: &positron_kernel::IntegrityCancellation,
 ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
     use positron_domain::routing::SignalKind;
     use positron_kernel::{
-        ActiveSegmentLedger, IntegrityCancellation, IntegrityScrubBudget,
-        IntegrityVerificationMode, TransactionId,
+        ActiveSegmentLedger, IntegrityScrubBudget, IntegrityVerificationMode, TransactionId,
     };
 
     let (volume, access) = paths.storage.acquire().map_err(|failure| match failure {
@@ -481,8 +480,12 @@ pub(super) fn verify_offline_integrity(
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     require_key_identity(&record, key.identity())
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
-    let authority = resources::establish(volume, record.tenant, max_registered_tenants)
+    let authority = resources::establish_system_diagnostics(volume, max_registered_tenants)
         .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
+    let _reservation = authority
+        .governor()
+        .reserve(claim)
+        .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
     let resource_snapshot = authority
         .governor()
         .inspect()
@@ -553,16 +556,73 @@ pub(super) fn verify_offline_integrity(
             scopes.extend(found);
         }
     }
-    let resume_scope = resume.map(|(scope, _)| scope);
-    if let Some(scope) = resume_scope {
+    let resuming = resume.is_some();
+    if selected_scope.is_some() && resuming {
+        return Err(crate::OfflineIntegrityFailure::CorruptState);
+    }
+    let reachable_scope_count = scopes.len();
+    let OfflineIntegrityContinuationState {
+        mode,
+        mut scope_index,
+        covered: mut covered_scope_count,
+        verified: mut verified_scope_count,
+        fenced: mut fenced_scope_count,
+        mut all_verified,
+        cursor: mut resume_cursor,
+    } = if let Some(token) = resume {
+        let decoded = key
+            .open_object(
+                record.instance,
+                BootstrapObjectPurpose::Initialized,
+                token.encoded(),
+            )
+            .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+        decode_offline_integrity_continuation(&decoded, snapshot.number())?
+    } else {
+        OfflineIntegrityContinuationState {
+            mode: selected_scope.map_or(OfflineIntegrityContinuationMode::Aggregate, |scope| {
+                OfflineIntegrityContinuationMode::Scope(scope)
+            }),
+            scope_index: 0,
+            covered: 0,
+            verified: 0,
+            fenced: 0,
+            all_verified: true,
+            cursor: None,
+        }
+    };
+    let aggregate = matches!(mode, OfflineIntegrityContinuationMode::Aggregate);
+    if aggregate && (scope_index > scopes.len() || covered_scope_count > scopes.len()) {
+        return Err(crate::OfflineIntegrityFailure::CorruptState);
+    }
+    if let OfflineIntegrityContinuationMode::Scope(scope) = mode {
         if !scopes.contains(&scope) {
             return Err(crate::OfflineIntegrityFailure::CorruptState);
         }
-        scopes.clear();
-        scopes.push(scope);
+        let target_index = scopes
+            .iter()
+            .position(|candidate| *candidate == scope)
+            .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+        if resuming {
+            if scope_index != target_index || covered_scope_count > 1 || verified_scope_count > 1 {
+                return Err(crate::OfflineIntegrityFailure::CorruptState);
+            }
+        } else {
+            scope_index = target_index;
+            covered_scope_count = 0;
+            verified_scope_count = 0;
+            all_verified = true;
+            resume_cursor = None;
+        }
     }
     let mut reports = Vec::new();
-    for scope in scopes {
+    let mut remaining_segments = IntegrityScrubBudget::MAX_SEGMENTS;
+    let mut remaining_bytes = IntegrityScrubBudget::MAX_BYTES;
+    let mut incomplete_scope_count = 0_usize;
+    while let Some(scope) = scopes.get(scope_index).copied() {
+        if remaining_segments == 0 || remaining_bytes == 0 {
+            break;
+        }
         let envelope = identity
             .tenant_key_envelope(scope.tenant_id())
             .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
@@ -576,14 +636,12 @@ pub(super) fn verify_offline_integrity(
             scope,
             protection,
             IntegrityVerificationMode::Offline,
-            IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
+            IntegrityScrubBudget::with_bytes(remaining_segments, remaining_bytes)
                 .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
-            &IntegrityCancellation::new(),
+            cancellation,
             TransactionId::new([0xf1; 16])
                 .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
-            resume.and_then(|(resume_scope, continuation)| {
-                (resume_scope == scope).then_some(continuation)
-            }),
+            resume_cursor,
         )
         .map_err(|failure| match failure.code() {
             positron_kernel::IntegrityFailureCode::StorageUnavailable => {
@@ -596,33 +654,39 @@ pub(super) fn verify_offline_integrity(
                 crate::OfflineIntegrityFailure::CorruptState
             },
         })?;
+        remaining_segments = remaining_segments.saturating_sub(report.examined_segments());
+        remaining_bytes = remaining_bytes.saturating_sub(report.examined_bytes());
+        let outcome = report.outcome();
         reports
             .try_reserve(1)
             .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
         reports.push(report);
-    }
-    let mut verified_scope_count = 0_usize;
-    let mut fenced_scope_count = 0_usize;
-    let mut incomplete_scope_count = 0_usize;
-    for report in &reports {
-        match report.outcome() {
-            positron_kernel::IntegrityVerificationOutcome::Verified => {
-                verified_scope_count = verified_scope_count
-                    .checked_add(1)
-                    .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-            },
-            positron_kernel::IntegrityVerificationOutcome::Fenced => {
+        if outcome == positron_kernel::IntegrityVerificationOutcome::Incomplete {
+            incomplete_scope_count = 1;
+            resume_cursor = reports.last().and_then(|report| report.continuation());
+            break;
+        }
+        covered_scope_count = covered_scope_count
+            .checked_add(1)
+            .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+        if outcome == positron_kernel::IntegrityVerificationOutcome::Verified {
+            verified_scope_count = verified_scope_count
+                .checked_add(1)
+                .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+        } else {
+            all_verified = false;
+            if outcome == positron_kernel::IntegrityVerificationOutcome::Fenced {
                 fenced_scope_count = fenced_scope_count
                     .checked_add(1)
                     .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-            },
-            positron_kernel::IntegrityVerificationOutcome::Incomplete => {
-                incomplete_scope_count = incomplete_scope_count
-                    .checked_add(1)
-                    .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-            },
-            positron_kernel::IntegrityVerificationOutcome::Stale
-            | positron_kernel::IntegrityVerificationOutcome::Quarantined => {},
+            }
+        }
+        scope_index = scope_index
+            .checked_add(1)
+            .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+        resume_cursor = None;
+        if !aggregate {
+            break;
         }
     }
     let disk_pressure = match resource_snapshot.disk_pressure() {
@@ -633,7 +697,7 @@ pub(super) fn verify_offline_integrity(
     let facts = crate::OfflineInspectionFacts::new(
         snapshot.number(),
         tenants.len(),
-        reports.len(),
+        reachable_scope_count,
         verified_envelope_count,
         findings.len(),
         verified_scope_count,
@@ -643,9 +707,194 @@ pub(super) fn verify_offline_integrity(
         disk_pressure,
         backup_repository,
     );
+    let needs_continuation = if aggregate {
+        covered_scope_count < reachable_scope_count
+    } else {
+        resume_cursor.is_some()
+    };
+    let continuation = if needs_continuation {
+        let encoded = encode_offline_integrity_continuation(
+            snapshot.number(),
+            OfflineIntegrityContinuationState {
+                mode,
+                scope_index,
+                covered: covered_scope_count,
+                verified: verified_scope_count,
+                fenced: fenced_scope_count,
+                all_verified,
+                cursor: resume_cursor,
+            },
+        )?;
+        Some(crate::OfflineIntegrityContinuation(
+            key.protect(
+                record.instance,
+                BootstrapObjectPurpose::Initialized,
+                &encoded,
+            )
+            .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
+        ))
+    } else {
+        None
+    };
     Ok(crate::OfflineIntegrityVerification::new(
-        reports, findings, facts,
+        reports,
+        findings,
+        facts,
+        continuation,
+        covered_scope_count,
+        all_verified,
     ))
+}
+
+fn encode_offline_integrity_continuation(
+    generation: u64,
+    state: OfflineIntegrityContinuationState,
+) -> Result<Vec<u8>, crate::OfflineIntegrityFailure> {
+    let mut encoded = Vec::with_capacity(112);
+    encoded.push(2);
+    encoded.extend_from_slice(&generation.to_be_bytes());
+    match state.mode {
+        OfflineIntegrityContinuationMode::Aggregate => encoded.push(0),
+        OfflineIntegrityContinuationMode::Scope(scope) => {
+            encoded.push(1);
+            encoded.extend_from_slice(&scope.tenant_id().to_bytes());
+            encoded.push(match scope.signal_kind() {
+                positron_domain::routing::SignalKind::Logs => 1,
+                positron_domain::routing::SignalKind::Traces => 2,
+            });
+            encoded.extend_from_slice(&scope.shard_id().value().to_be_bytes());
+        },
+    }
+    for value in [
+        state.scope_index,
+        state.covered,
+        state.verified,
+        state.fenced,
+    ] {
+        encoded.extend_from_slice(
+            &u16::try_from(value)
+                .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?
+                .to_be_bytes(),
+        );
+    }
+    encoded.push(u8::from(state.all_verified));
+    if let Some(cursor) = state.cursor {
+        encoded.push(1);
+        encoded.extend_from_slice(&cursor.encode());
+    } else {
+        encoded.push(0);
+    }
+    Ok(encoded)
+}
+
+#[derive(Clone, Copy)]
+enum OfflineIntegrityContinuationMode {
+    Aggregate,
+    Scope(positron_kernel::SegmentScope),
+}
+
+#[derive(Clone, Copy)]
+struct OfflineIntegrityContinuationState {
+    mode: OfflineIntegrityContinuationMode,
+    scope_index: usize,
+    covered: usize,
+    verified: usize,
+    fenced: usize,
+    all_verified: bool,
+    cursor: Option<positron_kernel::IntegrityScrubContinuation>,
+}
+
+fn decode_offline_integrity_continuation(
+    encoded: &[u8],
+    generation: u64,
+) -> Result<OfflineIntegrityContinuationState, crate::OfflineIntegrityFailure> {
+    if encoded.first() != Some(&2) || encoded.get(1..9) != Some(generation.to_be_bytes().as_slice())
+    {
+        return Err(crate::OfflineIntegrityFailure::CorruptState);
+    }
+    let (mode, offset) = match encoded.get(9) {
+        Some(0) => (OfflineIntegrityContinuationMode::Aggregate, 10),
+        Some(1) => {
+            let tenant = encoded
+                .get(10..26)
+                .and_then(|bytes| bytes.try_into().ok())
+                .and_then(|bytes| positron_domain::identity::TenantId::from_bytes(bytes).ok())
+                .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+            let signal = match encoded.get(26) {
+                Some(1) => positron_domain::routing::SignalKind::Logs,
+                Some(2) => positron_domain::routing::SignalKind::Traces,
+                _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
+            };
+            let shard = encoded
+                .get(27..31)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_be_bytes)
+                .and_then(|value| positron_domain::routing::VirtualShardId::new(value).ok())
+                .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+            (
+                OfflineIntegrityContinuationMode::Scope(positron_kernel::SegmentScope::new(
+                    tenant, signal, shard,
+                )),
+                31,
+            )
+        },
+        _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
+    };
+    let number = |offset| {
+        encoded
+            .get(offset..offset + 2)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_be_bytes)
+            .map(usize::from)
+            .ok_or(crate::OfflineIntegrityFailure::CorruptState)
+    };
+    let scope_index = number(offset)?;
+    let covered = number(offset + 2)?;
+    let verified = number(offset + 4)?;
+    let fenced = number(offset + 6)?;
+    let all_verified = match encoded.get(offset + 8) {
+        Some(0) => false,
+        Some(1) => true,
+        _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
+    };
+    let cursor_offset = offset + 9;
+    let cursor = match encoded.get(cursor_offset) {
+        Some(0) if encoded.len() == cursor_offset + 1 => None,
+        Some(1) if encoded.len() == cursor_offset + 57 => Some(
+            positron_kernel::IntegrityScrubContinuation::decode(&encoded[cursor_offset + 1..])
+                .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
+        ),
+        _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
+    };
+    Ok(OfflineIntegrityContinuationState {
+        mode,
+        scope_index,
+        covered,
+        verified,
+        fenced,
+        all_verified,
+        cursor,
+    })
+}
+
+pub(super) fn offline_integrity_claim()
+-> Result<positron_kernel::WorkClaim, crate::OfflineIntegrityFailure> {
+    use positron_kernel::{IntegrityScrubBudget, ResourceAmounts, WorkClaim};
+
+    WorkClaim::system_diagnostics(ResourceAmounts::new([
+        IntegrityScrubBudget::MAX_BYTES,
+        0,
+        1,
+        4_000_000,
+        IntegrityScrubBudget::MAX_SEGMENTS as u64,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+    ]))
+    .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)
 }
 
 /// Holds exclusive offline ownership and a system diagnostics reservation for

@@ -3,6 +3,7 @@ use std::{io, time::Duration};
 
 #[cfg(test)]
 use super::crash_record;
+use super::privacy::IdentifierRetention;
 use super::{BLOCK, DEFAULT_ELAPSED_LIMIT, FOOTER, POLICY, TAR_RECORD, crypto, output};
 
 #[derive(Clone, Copy)]
@@ -252,24 +253,58 @@ impl SupportBundle {
         input: impl IntoIterator<Item = BundleMember>,
         limits: BundleLimits,
     ) -> Result<Self, ()> {
-        Self::build_with_export_policy(input, limits, false, "not_applied", "not_applied")
+        Self::build_with_export_policy(
+            input,
+            limits,
+            false,
+            "not_applied",
+            "not_applied",
+            IdentifierRetention::Ephemeral,
+        )
     }
     #[cfg(test)]
     pub(crate) fn build_for_explicit_plaintext(
         input: impl IntoIterator<Item = BundleMember>,
         limits: BundleLimits,
     ) -> Result<Self, ()> {
-        Self::build_with_export_policy(input, limits, true, "plaintext_explicit", "not_applied")
+        Self::build_with_export_policy(
+            input,
+            limits,
+            true,
+            "plaintext_explicit",
+            "not_applied",
+            IdentifierRetention::Ephemeral,
+        )
     }
+    #[cfg(test)]
     pub(crate) fn build_authenticated(
         input: impl IntoIterator<Item = BundleMember>,
         limits: BundleLimits,
         authentication: ManifestAuthentication<'_>,
     ) -> Result<Self, ()> {
+        Self::build_authenticated_with_retention(
+            input,
+            limits,
+            authentication,
+            IdentifierRetention::Ephemeral,
+        )
+    }
+    pub(crate) fn build_authenticated_with_retention(
+        input: impl IntoIterator<Item = BundleMember>,
+        limits: BundleLimits,
+        authentication: ManifestAuthentication<'_>,
+        identifier_retention: IdentifierRetention,
+    ) -> Result<Self, ()> {
         match authentication {
             ManifestAuthentication::Signed(signer) => {
-                let bundle =
-                    Self::build_with_export_policy(input, limits, false, "age_x25519", "signed")?;
+                let bundle = Self::build_with_export_policy(
+                    input,
+                    limits,
+                    false,
+                    "age_x25519",
+                    "signed",
+                    identifier_retention,
+                )?;
                 // The signature is over the canonical manifest bytes retained
                 // in the standard tar archive; opaque signer custody remains
                 // wholly in Runtime/Kernel.
@@ -284,14 +319,16 @@ impl SupportBundle {
                     false,
                     "age_x25519",
                     "unsigned_key_unavailable_offline",
+                    identifier_retention,
                 )
             },
         }
     }
-    pub(crate) fn build_authenticated_for_explicit_plaintext(
+    pub(crate) fn build_authenticated_for_explicit_plaintext_with_retention(
         input: impl IntoIterator<Item = BundleMember>,
         limits: BundleLimits,
         authentication: ManifestAuthentication<'_>,
+        identifier_retention: IdentifierRetention,
     ) -> Result<Self, ()> {
         match authentication {
             ManifestAuthentication::Signed(signer) => {
@@ -301,6 +338,7 @@ impl SupportBundle {
                     true,
                     "plaintext_explicit",
                     "signed",
+                    identifier_retention,
                 )?;
                 let signature = signer.sign(&bundle.manifest_bytes()?).map_err(|_| ())?;
                 bundle.attach_signature(signature)
@@ -312,6 +350,7 @@ impl SupportBundle {
                     true,
                     "plaintext_explicit",
                     "unsigned_key_unavailable_offline",
+                    identifier_retention,
                 )
             },
         }
@@ -322,6 +361,7 @@ impl SupportBundle {
         plaintext_warning: bool,
         encryption_state: &'static str,
         signature_state: &'static str,
+        identifier_retention: IdentifierRetention,
     ) -> Result<Self, ()> {
         let mut selected = Vec::new();
         let mut unknown = 0;
@@ -364,7 +404,9 @@ impl SupportBundle {
             plaintext_warning,
         };
         let redaction = format!(
-            "policy_version={POLICY}\nincluded_classes={included_classes}\nidentifier_pseudonymization=ephemeral_per_bundle\nmember_count_limit={}\narchive_byte_limit={}\nelapsed_time_limit_seconds={}\nexcluded_unknown_members={}\nomissions={}\nencryption={encryption_state}\nplaintext_export_warning={}\nsignature={signature_state}\n",
+            "policy_version={POLICY}\nincluded_classes={included_classes}\nidentifier_pseudonymization={}\nretained_identifier_classes={}\nmember_count_limit={}\narchive_byte_limit={}\nelapsed_time_limit_seconds={}\nexcluded_unknown_members={}\nomissions={}\nencryption={encryption_state}\nplaintext_export_warning={}\nsignature={signature_state}\n",
+            identifier_retention.pseudonymization_value(),
+            identifier_retention.report_value(),
             limits.count,
             limits.bytes,
             limits.elapsed_limit.as_secs(),
@@ -373,8 +415,9 @@ impl SupportBundle {
             plaintext_warning
         );
         let mut manifest = format!(
-            "format=positron-support-bundle-tar-v1\nredaction_policy_version={POLICY}\narchive_byte_limit={}\n",
-            limits.bytes
+            "format=positron-support-bundle-tar-v1\nredaction_policy_version={POLICY}\narchive_byte_limit={}\nretained_identifier_classes={}\n",
+            limits.bytes,
+            identifier_retention.report_value(),
         );
         for (class, bytes) in &selected {
             manifest.push_str(&format!(

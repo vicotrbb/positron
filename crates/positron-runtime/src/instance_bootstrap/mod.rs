@@ -60,12 +60,52 @@ impl InstanceBootstrap {
     pub(crate) fn verify_offline_integrity(
         paths: &BootstrapPaths,
         max_registered_tenants: u16,
-        resume: Option<(
-            positron_kernel::SegmentScope,
-            positron_kernel::IntegrityScrubContinuation,
-        )>,
+        selected_scope: Option<positron_kernel::SegmentScope>,
+        resume: Option<crate::OfflineIntegrityContinuation>,
     ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
-        operation::verify_offline_integrity(paths, max_registered_tenants, resume)
+        let cancellation = positron_kernel::IntegrityCancellation::new();
+        operation::verify_offline_integrity(
+            paths,
+            max_registered_tenants,
+            selected_scope,
+            resume,
+            operation::offline_integrity_claim()?,
+            &cancellation,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verify_offline_integrity_with_claim_for_test(
+        paths: &BootstrapPaths,
+        max_registered_tenants: u16,
+        claim: positron_kernel::WorkClaim,
+    ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
+        let cancellation = positron_kernel::IntegrityCancellation::new();
+        operation::verify_offline_integrity(
+            paths,
+            max_registered_tenants,
+            None,
+            None,
+            claim,
+            &cancellation,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verify_offline_integrity_with_claim_and_cancellation_for_test(
+        paths: &BootstrapPaths,
+        max_registered_tenants: u16,
+        claim: positron_kernel::WorkClaim,
+        cancellation: &positron_kernel::IntegrityCancellation,
+    ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
+        operation::verify_offline_integrity(
+            paths,
+            max_registered_tenants,
+            None,
+            None,
+            claim,
+            cancellation,
+        )
     }
 
     /// Runs one caller-supplied, bounded diagnostic operation under the

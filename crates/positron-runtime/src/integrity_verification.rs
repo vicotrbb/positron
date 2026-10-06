@@ -1,5 +1,6 @@
 use positron_kernel::{
     IntegrityQuarantineFinding, IntegrityVerificationOutcome, IntegrityVerificationReport,
+    SegmentScope,
 };
 
 use crate::{BootstrapPaths, InstanceBootstrap};
@@ -10,6 +11,25 @@ pub struct OfflineIntegrityVerification {
     reports: Vec<IntegrityVerificationReport>,
     findings: Vec<IntegrityQuarantineFinding>,
     facts: OfflineInspectionFacts,
+    continuation: Option<OfflineIntegrityContinuation>,
+    covered_scope_count: usize,
+    all_covered_scopes_verified: bool,
+}
+
+/// Opaque, authenticated aggregate progress for an offline verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineIntegrityContinuation(pub(crate) Vec<u8>);
+
+impl OfflineIntegrityContinuation {
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.0
+    }
+    pub fn from_encoded(encoded: Vec<u8>) -> Result<Self, OfflineIntegrityFailure> {
+        (!encoded.is_empty() && encoded.len() <= 1024)
+            .then_some(Self(encoded))
+            .ok_or(OfflineIntegrityFailure::CorruptState)
+    }
 }
 
 /// Facts captured while the caller holds the Primary Data Volume ownership
@@ -117,11 +137,17 @@ impl OfflineIntegrityVerification {
         reports: Vec<IntegrityVerificationReport>,
         findings: Vec<IntegrityQuarantineFinding>,
         facts: OfflineInspectionFacts,
+        continuation: Option<OfflineIntegrityContinuation>,
+        covered_scope_count: usize,
+        all_covered_scopes_verified: bool,
     ) -> Self {
         Self {
             reports,
             findings,
             facts,
+            continuation,
+            covered_scope_count,
+            all_covered_scopes_verified,
         }
     }
 
@@ -141,23 +167,28 @@ impl OfflineIntegrityVerification {
         self.facts
     }
 
-    /// An offline invocation is complete only when every registered sealed
-    /// scope reached a terminal result. A fenced result is terminal evidence,
-    /// never a successful verification claim.
+    /// Authenticated aggregate progress for the next bounded invocation.
+    #[must_use]
+    pub fn continuation(&self) -> Option<&OfflineIntegrityContinuation> {
+        self.continuation.as_ref()
+    }
+
+    /// An offline invocation is complete only when its evidence covers every
+    /// reachable sealed scope and each reached a terminal result. A fenced
+    /// result is terminal evidence, never a successful verification claim.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.reports
-            .iter()
-            .all(|report| report.outcome() != IntegrityVerificationOutcome::Incomplete)
+        self.covered_scope_count == self.facts.reachable_scope_count()
+            && self.continuation.is_none()
+            && self
+                .reports
+                .iter()
+                .all(|report| report.outcome() != IntegrityVerificationOutcome::Incomplete)
     }
 
     #[must_use]
     pub fn is_verified(&self) -> bool {
-        self.is_complete()
-            && self
-                .reports
-                .iter()
-                .all(|report| report.outcome() == IntegrityVerificationOutcome::Verified)
+        self.is_complete() && self.all_covered_scopes_verified
     }
 }
 
@@ -174,16 +205,27 @@ pub enum OfflineIntegrityFailure {
     StorageUnavailable,
 }
 
-/// Verifies every registered immutable segment scope without creating or
+/// Begins a bounded offline verification sequence without creating or
 /// repairing bootstrap, Catalog, ledger, or quarantine state. Scope discovery
-/// is bounded by the authenticated Catalog's 1,024-object limit; each scope
-/// consumes at most the kernel's 128-segment, 16 MiB scrub-pass budget and
-/// reports an authenticated cursor instead of continuing internally.
+/// is bounded by the authenticated Catalog's 1,024-object limit; this
+/// invocation processes one scope under the kernel's 128-segment, 16 MiB
+/// scrub-pass budget and reports authenticated progress instead of continuing
+/// internally.
 pub fn verify_offline_integrity(
     paths: &BootstrapPaths,
     max_registered_tenants: u16,
 ) -> Result<OfflineIntegrityVerification, OfflineIntegrityFailure> {
-    InstanceBootstrap::verify_offline_integrity(paths, max_registered_tenants, None)
+    InstanceBootstrap::verify_offline_integrity(paths, max_registered_tenants, None, None)
+}
+
+/// Verifies one caller-selected offline scope without promoting it to an
+/// aggregate verification claim.
+pub fn verify_offline_integrity_scope(
+    paths: &BootstrapPaths,
+    max_registered_tenants: u16,
+    scope: SegmentScope,
+) -> Result<OfflineIntegrityVerification, OfflineIntegrityFailure> {
+    InstanceBootstrap::verify_offline_integrity(paths, max_registered_tenants, Some(scope), None)
 }
 
 /// Resumes exactly one bounded offline scrub pass from an authenticated
@@ -192,13 +234,13 @@ pub fn verify_offline_integrity(
 pub fn resume_offline_integrity(
     paths: &BootstrapPaths,
     max_registered_tenants: u16,
-    scope: positron_kernel::SegmentScope,
-    continuation: positron_kernel::IntegrityScrubContinuation,
+    continuation: OfflineIntegrityContinuation,
 ) -> Result<OfflineIntegrityVerification, OfflineIntegrityFailure> {
     InstanceBootstrap::verify_offline_integrity(
         paths,
         max_registered_tenants,
-        Some((scope, continuation)),
+        None,
+        Some(continuation),
     )
 }
 
@@ -207,12 +249,15 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{OfflineIntegrityFailure, resume_offline_integrity, verify_offline_integrity};
+    use super::{
+        OfflineIntegrityFailure, resume_offline_integrity, verify_offline_integrity,
+        verify_offline_integrity_scope,
+    };
     use crate::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
-    use positron_kernel::{MountQualification, ResourceAmounts, WorkClaim};
+    use positron_kernel::{IntegrityCancellation, MountQualification, ResourceAmounts, WorkClaim};
 
     #[test]
-    fn offline_verification_reads_healthy_instance_without_changing_any_file()
+    fn offline_verification_aggregates_healthy_reachable_scopes_without_changing_any_file()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = temporary_root()?;
         let paths = BootstrapPaths::new(
@@ -232,14 +277,47 @@ mod tests {
         assert!(facts.catalog_generation() > 0);
         assert_eq!(facts.registered_tenant_count(), 1);
         assert_eq!(facts.verified_envelope_count(), 1);
-        assert_eq!(facts.reachable_scope_count(), report.reports().len());
+        assert_eq!(facts.reachable_scope_count(), 2);
+        assert_eq!(report.reports().len(), 2);
         assert_eq!(facts.verified_scope_count(), report.reports().len());
         assert_eq!(facts.fenced_scope_count(), 0);
         assert_eq!(facts.incomplete_scope_count(), 0);
+        let retained = paths.retain_volume_for_test()?;
+        drop(retained);
         assert_eq!(
             after, before,
             "offline verification must not create, repair, or publish"
         );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_terminal_scope_does_not_claim_whole_instance_completion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+
+        let first = verify_offline_integrity(&paths, 2)
+            .map_err(|failure| format!("first offline pass failed: {failure:?}"))?;
+        let selected_scope = first.reports()[0].scope();
+        let selected = verify_offline_integrity_scope(&paths, 2, selected_scope)
+            .map_err(|failure| format!("selected scope failed: {failure:?}"))?;
+
+        assert_eq!(
+            selected.reports()[0].outcome(),
+            positron_kernel::IntegrityVerificationOutcome::Verified
+        );
+        assert!(
+            !selected.is_complete(),
+            "a selected terminal scope must not claim other reachable scopes were verified"
+        );
+        assert!(!selected.is_verified());
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -292,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_verification_returns_a_bound_cursor_and_resumes_to_verified()
+    fn selected_scope_verification_returns_a_bound_cursor_and_resumes_without_global_claim()
     -> Result<(), Box<dyn std::error::Error>> {
         use positron_domain::routing::SignalKind;
         use positron_kernel::{ActiveSegmentLedger, Catalog, SegmentScope};
@@ -324,11 +402,11 @@ mod tests {
         drop(instance);
 
         let before = file_tree(&root)?;
-        let first = verify_offline_integrity(&paths, 2)
+        let first = verify_offline_integrity_scope(&paths, 2, scope)
             .map_err(|failure| format!("first offline pass failed: {failure:?}"))?;
         assert!(!first.is_complete());
         assert!(!first.is_verified());
-        assert_eq!(first.reports().len(), 2);
+        assert_eq!(first.reports().len(), 1);
         let partial = first
             .reports()
             .iter()
@@ -341,15 +419,294 @@ mod tests {
         );
         assert_eq!(partial.examined_segments(), 128);
         assert_eq!(partial.omitted_segments(), 1);
-        let cursor = partial.continuation().ok_or("missing offline cursor")?;
+        assert!(partial.continuation().is_some());
+        let continuation = first
+            .continuation()
+            .cloned()
+            .ok_or("missing aggregate continuation")?;
+        let mut tampered = continuation.clone();
+        tampered.0[0] ^= 0x80;
+        assert_eq!(
+            resume_offline_integrity(&paths, 2, tampered),
+            Err(OfflineIntegrityFailure::CorruptState)
+        );
         assert_eq!(file_tree(&root)?, before);
 
-        let resumed = resume_offline_integrity(&paths, 2, scope, cursor)
+        let resumed = resume_offline_integrity(&paths, 2, continuation)
             .map_err(|failure| format!("resumed offline pass failed: {failure:?}"))?;
+        assert!(!resumed.is_complete());
+        assert!(!resumed.is_verified());
+        assert!(resumed.continuation().is_none());
+        assert_eq!(resumed.reports().len(), 1);
+        assert_eq!(resumed.reports()[0].scope(), scope);
+        assert_eq!(resumed.reports()[0].examined_segments(), 1);
+        assert_eq!(file_tree(&root)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_verification_bounds_valid_multi_scope_bytes_and_resumes_with_a_fresh_claim()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_domain::routing::{SignalKind, VirtualShardId};
+        use positron_kernel::{
+            ActiveSegmentLedger, Catalog, IntegrityScrubBudget, PreparedStoreBlock, SegmentScope,
+            StoreBlockIdentity,
+        };
+
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let instance = InstanceBootstrap::reopen(&paths)?;
+        let catalog = Catalog::open(
+            &instance._authority,
+            instance.instance,
+            instance.key.catalog_secret(instance.instance)?,
+        )?;
+        let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+        drop(catalog);
+
+        // Seventeen non-default Trace scopes each contain one normally sealed
+        // segment with two valid 512 KiB Store Blocks. Every scope fits under
+        // the claim independently, while their cumulative authenticated bytes
+        // exceed it. Reopening the Catalog after each seal is the normal
+        // next-segment path, so this is not an oversized or invalid fixture.
+        for shard in 2_u16..=18 {
+            let scope = SegmentScope::new(
+                instance.tenant,
+                SignalKind::Traces,
+                VirtualShardId::new(shard.into())?,
+            );
+            let catalog = Catalog::open(
+                &instance._authority,
+                instance.instance,
+                instance.key.catalog_secret(instance.instance)?,
+            )?;
+            let key = crate::services::tenant_segment_key(&instance, &identity, scope)
+                .map_err(|failure| format!("trace segment key unavailable: {failure:?}"))?;
+            let ledger = ActiveSegmentLedger::open(&instance._authority, &catalog, scope, key)?;
+            let identity_byte = u8::try_from(shard * 2)?;
+            for block in 0_u8..2 {
+                ledger.append(PreparedStoreBlock::new(
+                    scope,
+                    StoreBlockIdentity::new([identity_byte.saturating_add(block); 16])?,
+                    vec![identity_byte.saturating_add(block); 524_288],
+                )?)?;
+            }
+            ledger
+                .seal()
+                .map_err(|failure| format!("trace seal {shard} failed: {failure:?}"))?;
+        }
+        drop(instance);
+
+        let before = file_tree(&root)?;
+        let first = verify_offline_integrity(&paths, 2)
+            .map_err(|failure| format!("aggregate offline pass failed: {failure:?}"))?;
+        let examined_bytes = first
+            .reports()
+            .iter()
+            .map(|report| report.examined_bytes())
+            .sum::<u64>();
+        assert!(
+            examined_bytes <= IntegrityScrubBudget::MAX_BYTES,
+            "the actual bytes examined by one aggregate invocation must fit its single 16 MiB resource claim"
+        );
+        let partial = first
+            .reports()
+            .iter()
+            .copied()
+            .find(|report| {
+                report.outcome() == positron_kernel::IntegrityVerificationOutcome::Incomplete
+            })
+            .ok_or("missing truthful aggregate byte-bound partial report")?;
+        assert!(partial.omitted_segments() > 0);
+        assert!(!first.is_complete());
+        assert!(!first.is_verified());
+        let continuation = first
+            .continuation()
+            .cloned()
+            .ok_or("missing aggregate byte-bound continuation")?;
+        assert_eq!(file_tree(&root)?, before);
+
+        let resumed = resume_offline_integrity(&paths, 2, continuation)
+            .map_err(|failure| format!("fresh aggregate continuation failed: {failure:?}"))?;
+        let resumed_bytes = resumed
+            .reports()
+            .iter()
+            .map(|report| report.examined_bytes())
+            .sum::<u64>();
+        assert!(resumed_bytes <= IntegrityScrubBudget::MAX_BYTES);
+        assert!(resumed.reports().iter().all(|report| {
+            report.outcome() == positron_kernel::IntegrityVerificationOutcome::Verified
+        }));
         assert!(resumed.is_complete());
         assert!(resumed.is_verified());
+        assert!(resumed.continuation().is_none());
+        assert_eq!(file_tree(&root)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn selected_nonfirst_scope_resumes_its_own_bound_cursor_without_claiming_instance_completion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_domain::routing::{SignalKind, VirtualShardId};
+        use positron_kernel::{ActiveSegmentLedger, Catalog, SegmentScope};
+
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let instance = InstanceBootstrap::reopen(&paths)?;
+        let catalog = Catalog::open(
+            &instance._authority,
+            instance.instance,
+            instance.key.catalog_secret(instance.instance)?,
+        )?;
+        // Traces sorts after the initialized Logs scope, so this proves that
+        // an authenticated selected-scope continuation retains its target.
+        let scope = SegmentScope::new(instance.tenant, SignalKind::Traces, VirtualShardId::new(2)?);
+        let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+        for _ in 0..129 {
+            let key = crate::services::tenant_segment_key(&instance, &identity, scope)
+                .map_err(|failure| format!("segment key unavailable: {failure:?}"))?;
+            ActiveSegmentLedger::open(&instance._authority, &catalog, scope, key)?.seal()?;
+        }
+        drop(catalog);
+        drop(instance);
+
+        let before = file_tree(&root)?;
+        let first = verify_offline_integrity_scope(&paths, 2, scope)
+            .map_err(|failure| format!("selected offline pass failed: {failure:?}"))?;
+        assert_eq!(first.reports().len(), 1);
+        assert_eq!(
+            first.reports()[0].outcome(),
+            positron_kernel::IntegrityVerificationOutcome::Incomplete
+        );
+        assert_eq!(first.reports()[0].examined_segments(), 128);
+        let continuation = first
+            .continuation()
+            .cloned()
+            .ok_or("missing selected continuation")?;
+
+        let resumed = resume_offline_integrity(&paths, 2, continuation)
+            .map_err(|failure| format!("selected resume failed: {failure:?}"))?;
         assert_eq!(resumed.reports().len(), 1);
-        assert_eq!(resumed.reports()[0].examined_segments(), 1);
+        assert_eq!(resumed.reports()[0].scope(), scope);
+        assert_eq!(
+            resumed.reports()[0].outcome(),
+            positron_kernel::IntegrityVerificationOutcome::Verified
+        );
+        assert!(
+            resumed.continuation().is_none(),
+            "the selected terminal scope must not continue into aggregate scopes"
+        );
+        assert!(
+            !resumed.is_complete(),
+            "selected completion must not claim the whole instance was covered"
+        );
+        assert!(!resumed.is_verified());
+        assert_eq!(file_tree(&root)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn protected_malformed_v2_continuation_fails_closed_without_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_kernel::BootstrapObjectPurpose;
+
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let instance = InstanceBootstrap::reopen(&paths)?;
+        let malformed = crate::OfflineIntegrityContinuation(instance.key.protect(
+            instance.instance,
+            BootstrapObjectPurpose::Initialized,
+            b"\x02malformed-v2",
+        )?);
+        drop(instance);
+        let before = file_tree(&root)?;
+
+        assert_eq!(
+            resume_offline_integrity(&paths, 2, malformed),
+            Err(OfflineIntegrityFailure::CorruptState)
+        );
+        assert_eq!(file_tree(&root)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_authenticated_continuation_fails_closed_without_mutating_after_catalog_advance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_domain::{identity::Scope, routing::SignalKind};
+        use positron_governance::{
+            AdministrativeIdempotencyKey, CompatibilityHints, PresentedCredential, RequestedIntent,
+            ResourceGeneration,
+        };
+        use positron_kernel::{ActiveSegmentLedger, Catalog, SegmentScope};
+
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let instance = InstanceBootstrap::reopen(&paths)?;
+        let catalog = Catalog::open(
+            &instance._authority,
+            instance.instance,
+            instance.key.catalog_secret(instance.instance)?,
+        )?;
+        let scope = SegmentScope::new(instance.tenant, SignalKind::Logs, instance.logs_shard);
+        let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+        for _ in 0..128 {
+            let key = crate::services::tenant_segment_key(&instance, &identity, scope)
+                .map_err(|failure| format!("segment key unavailable: {failure:?}"))?;
+            ActiveSegmentLedger::open(&instance._authority, &catalog, scope, key)?.seal()?;
+        }
+        drop(catalog);
+        drop(instance);
+        let continuation = verify_offline_integrity_scope(&paths, 2, scope)
+            .map_err(|failure| format!("selected pass failed: {failure:?}"))?
+            .continuation()
+            .cloned()
+            .ok_or("missing continuation")?;
+
+        let claim = InstanceBootstrap::claim(&paths)?;
+        let instance = InstanceBootstrap::reopen(&paths)?;
+        let administrator = instance.attribute(
+            PresentedCredential::parse(claim.secret())?,
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )?;
+        instance.create_api_key(
+            administrator,
+            Scope::Ingest,
+            None,
+            ResourceGeneration::new(1)?,
+            AdministrativeIdempotencyKey::new([0x91; 16])?,
+        )?;
+        drop(instance);
+        let before = file_tree(&root)?;
+
+        assert_eq!(
+            resume_offline_integrity(&paths, 2, continuation),
+            Err(OfflineIntegrityFailure::CorruptState)
+        );
         assert_eq!(file_tree(&root)?, before);
         fs::remove_dir_all(root)?;
         Ok(())
@@ -442,6 +799,96 @@ mod tests {
         );
         assert_eq!(refusal, Err(OfflineIntegrityFailure::CapacityUnavailable));
         assert!(!entered.get(), "refused admission must precede collection");
+        assert_eq!(file_tree(&root)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn offline_verification_refuses_the_aggregate_reservation_before_collection_and_releases()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let before = file_tree(&root)?;
+        let refusal = InstanceBootstrap::verify_offline_integrity_with_claim_for_test(
+            &paths,
+            2,
+            WorkClaim::system_diagnostics(ResourceAmounts::new([
+                u64::MAX,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                1,
+                0,
+            ]))?,
+        );
+
+        assert_eq!(refusal, Err(OfflineIntegrityFailure::CapacityUnavailable));
+        let retained = paths.retain_volume_for_test()?;
+        drop(retained);
+        assert_eq!(file_tree(&root)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn offline_verification_releases_its_reservation_after_a_cancelled_scrub()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_domain::routing::SignalKind;
+        use positron_kernel::{ActiveSegmentLedger, Catalog, SegmentScope};
+
+        let root = temporary_root()?;
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            MountQualification::LocalHost,
+        )?;
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let instance = InstanceBootstrap::reopen(&paths)?;
+        let catalog = Catalog::open(
+            &instance._authority,
+            instance.instance,
+            instance.key.catalog_secret(instance.instance)?,
+        )?;
+        let scope = SegmentScope::new(instance.tenant, SignalKind::Logs, instance.logs_shard);
+        let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+        let key = crate::services::tenant_segment_key(&instance, &identity, scope)
+            .map_err(|failure| format!("segment key unavailable: {failure:?}"))?;
+        ActiveSegmentLedger::open(&instance._authority, &catalog, scope, key)?.seal()?;
+        drop(catalog);
+        drop(instance);
+        let before = file_tree(&root)?;
+        let cancellation = IntegrityCancellation::new();
+        cancellation.cancel();
+        let cancelled =
+            InstanceBootstrap::verify_offline_integrity_with_claim_and_cancellation_for_test(
+                &paths,
+                2,
+                WorkClaim::system_diagnostics(ResourceAmounts::new([
+                    16_000_000, 0, 1, 4_000_000, 128, 0, 0, 1, 1, 1, 0,
+                ]))?,
+                &cancellation,
+            );
+
+        let cancelled = cancelled
+            .map_err(|failure| format!("cancelled scrub failed unexpectedly: {failure:?}"))?;
+        assert!(!cancelled.is_complete());
+        assert_eq!(
+            cancelled.reports()[0].outcome(),
+            positron_kernel::IntegrityVerificationOutcome::Incomplete
+        );
+        let retained = paths.retain_volume_for_test()?;
+        drop(retained);
         assert_eq!(file_tree(&root)?, before);
         fs::remove_dir_all(root)?;
         Ok(())

@@ -14,9 +14,10 @@ use positron_domain::{
     identity::TenantId,
     routing::{SignalKind, VirtualShardId},
 };
-use positron_kernel::{IntegrityScrubContinuation, MountQualification, SegmentScope};
+use positron_kernel::{MountQualification, SegmentScope};
 use positron_runtime::{
-    BootstrapPaths, OfflineIntegrityFailure, resume_offline_integrity, verify_offline_integrity,
+    BootstrapPaths, OfflineIntegrityContinuation, OfflineIntegrityFailure,
+    resume_offline_integrity, verify_offline_integrity, verify_offline_integrity_scope,
 };
 use zeroize::Zeroizing;
 
@@ -71,15 +72,14 @@ fn execute(
     if options.online {
         return execute_online(&options);
     }
+    let offline_scope =
+        (options.tenant.is_some() || options.signal.is_some() || options.shard.is_some())
+            .then(|| offline_scope(&options))
+            .transpose()?;
     let offline_resume = options
         .continuation
         .as_deref()
-        .map(|cursor| {
-            Ok((
-                offline_scope(&options)?,
-                decode_offline_continuation(cursor)?,
-            ))
-        })
+        .map(decode_offline_continuation)
         .transpose()?;
     let inputs = ConfigurationInputs::try_from_sources(
         options.config.as_deref().map(Path::new),
@@ -96,11 +96,13 @@ fn execute(
     )
     .map_err(|_| VerifyFailure::Configuration)?;
     let offline = match offline_resume {
-        Some((scope, continuation)) => resume_offline_integrity(
+        Some(continuation) => {
+            resume_offline_integrity(&paths, effective.max_registered_tenants(), continuation)
+        },
+        None if offline_scope.is_some() => verify_offline_integrity_scope(
             &paths,
             effective.max_registered_tenants(),
-            scope,
-            continuation,
+            offline_scope.ok_or(VerifyFailure::Usage)?,
         ),
         None => verify_offline_integrity(&paths, effective.max_registered_tenants()),
     };
@@ -108,6 +110,8 @@ fn execute(
         Ok(report) => {
             let status = if report.is_verified() {
                 "verified"
+            } else if !report.is_complete() {
+                "incomplete"
             } else {
                 "fenced"
             };
@@ -118,6 +122,12 @@ fn execute(
             );
             for item in report.reports() {
                 output.push_str(&render_report(*item));
+            }
+            if let Some(continuation) = report.continuation() {
+                output.push_str(&format!(
+                    "aggregate_continuation={}\n",
+                    hex(continuation.encoded())
+                ));
             }
             for finding in report.findings() {
                 output.push_str(&render_finding(*finding));
@@ -361,17 +371,21 @@ fn offline_scope(options: &VerifyOptions) -> Result<SegmentScope, VerifyFailure>
     Ok(SegmentScope::new(tenant, signal, shard))
 }
 
-fn decode_offline_continuation(value: &str) -> Result<IntegrityScrubContinuation, VerifyFailure> {
-    if value.len() != 112 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+fn decode_offline_continuation(value: &str) -> Result<OfflineIntegrityContinuation, VerifyFailure> {
+    if value.is_empty()
+        || value.len() > 2048
+        || !value.len().is_multiple_of(2)
+        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return Err(VerifyFailure::Usage);
     }
-    let mut bytes = [0_u8; 56];
-    for (slot, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
         let high = hex_value(pair[0]).ok_or(VerifyFailure::Usage)?;
         let low = hex_value(pair[1]).ok_or(VerifyFailure::Usage)?;
-        *slot = (high << 4) | low;
+        bytes.push((high << 4) | low);
     }
-    IntegrityScrubContinuation::decode(&bytes).map_err(|_| VerifyFailure::Usage)
+    OfflineIntegrityContinuation::from_encoded(bytes).map_err(|_| VerifyFailure::Usage)
 }
 
 const fn hex_value(byte: u8) -> Option<u8> {
@@ -492,13 +506,14 @@ impl VerifyOptions {
         }
         if result.offline
             && result.continuation.is_some()
-            && (result.tenant.is_none() || result.signal.is_none() || result.shard.is_none())
+            && (result.tenant.is_some() || result.signal.is_some() || result.shard.is_some())
         {
             return Err(VerifyFailure::Usage);
         }
         if result.offline
             && result.continuation.is_none()
             && (result.tenant.is_some() || result.signal.is_some() || result.shard.is_some())
+            && (result.tenant.is_none() || result.signal.is_none() || result.shard.is_none())
         {
             return Err(VerifyFailure::Usage);
         }
@@ -587,18 +602,7 @@ mod tests {
     fn offline_resume_requires_and_accepts_the_reported_scope_and_cursor() {
         let cursor = format!("01{}{}", "00".repeat(32), "01".repeat(16));
         let options = VerifyOptions::parse(
-            [
-                "--offline".to_owned(),
-                "--tenant".to_owned(),
-                "00000000-0000-0000-0000-000000000001".to_owned(),
-                "--signal".to_owned(),
-                "logs".to_owned(),
-                "--shard".to_owned(),
-                "1".to_owned(),
-                "--continuation".to_owned(),
-                cursor,
-            ]
-            .into_iter(),
+            ["--offline".to_owned(), "--continuation".to_owned(), cursor].into_iter(),
         )
         .expect("offline resume arguments");
         assert!(options.offline);
@@ -607,6 +611,8 @@ mod tests {
             VerifyOptions::parse(
                 [
                     "--offline".to_owned(),
+                    "--tenant".to_owned(),
+                    "00000000-0000-0000-0000-000000000001".to_owned(),
                     "--continuation".to_owned(),
                     "01".repeat(56),
                 ]

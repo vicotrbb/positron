@@ -16,6 +16,7 @@ use super::{
     AgeRecipients, BundleFailure, BundleLimits, BundleMember, BundleOptions, Class,
     DEFAULT_ELAPSED_LIMIT, DEFAULT_LOG_WINDOW, DEFAULT_OUTPUT_LIMIT, DEFAULT_SOURCE_FILES,
     ManifestAuthentication, SupportBundle, canonical_members, diagnostics_claim,
+    privacy::IdentifierRetention,
 };
 
 /// Binary-owned serving collector. It receives only an opaque bearer and a
@@ -37,12 +38,12 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
         match health.phase() {
             ProcessPhase::Serving => health
                 .with_authenticated_serving_diagnostics(bearer, |instance, actor, runtime| {
-                let observed = runtime.observed().map_err(|_| ())?;
-                let effective = observed.effective();
                 let reservation = instance
                     .resource_governor()
                     .reserve(diagnostics_claim(DEFAULT_OUTPUT_LIMIT).map_err(|_| ())?)
                     .map_err(|_| ())?;
+                let observed = runtime.observed().map_err(|_| ())?;
+                let effective = observed.effective();
                 let facts = instance.doctor_runtime_facts(actor).map_err(|_| ())?;
                 let signer = instance.support_bundle_manifest_signer(actor).map_err(|_| ())?;
                 let maintenance = health
@@ -62,6 +63,7 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     log_window: DEFAULT_LOG_WINDOW,
                     source_file_limit: DEFAULT_SOURCE_FILES,
                     control_path: None,
+                    identifier_retention: request.identifier_retention,
                 };
                 let operational = format!(
                     "inspection_mode=online\nprocess_phase=serving\nkey_custody={}\ncatalog_bootstrap={}\ncatalog_generation={}\nbackup_repository={}\n",
@@ -82,16 +84,20 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                 let limits = BundleLimits::new(14, DEFAULT_OUTPUT_LIMIT)
                     .map_err(|_| ())?
                     .with_elapsed_limit(DEFAULT_ELAPSED_LIMIT);
-                let bundle = SupportBundle::build_authenticated(
+                let bundle = SupportBundle::build_authenticated_with_retention(
                     members,
                     limits,
                     ManifestAuthentication::Signed(&signer),
+                    request.identifier_retention,
                 )
                 .map_err(|_| ())?;
                 let recipients = AgeRecipients::parse(options.recipients).map_err(|_| ())?;
                 let ciphertext = recipients
                     .encrypt_bounded(bundle.archive(), DEFAULT_OUTPUT_LIMIT)
                     .map_err(|_| ())?;
+                if started.elapsed() > DEFAULT_ELAPSED_LIMIT {
+                    return Err(());
+                }
                 Ok(ControlDiagnosticsResponse::new(ciphertext, reservation.transfer()))
             })
             .map_err(|failure| match failure {
@@ -112,16 +118,20 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     let limits = BundleLimits::new(14, DEFAULT_OUTPUT_LIMIT)
                         .map_err(|_| ())?
                         .with_elapsed_limit(DEFAULT_ELAPSED_LIMIT);
-                    let bundle = SupportBundle::build_authenticated(
+                    let bundle = SupportBundle::build_authenticated_with_retention(
                         members,
                         limits,
                         ManifestAuthentication::Signed(&signer),
+                        IdentifierRetention::Ephemeral,
                     )
                     .map_err(|_| ())?;
                     let recipients = AgeRecipients::parse(request.recipients).map_err(|_| ())?;
                     let ciphertext = recipients
                         .encrypt_bounded(bundle.archive(), DEFAULT_OUTPUT_LIMIT)
                         .map_err(|_| ())?;
+                    if started.elapsed() > DEFAULT_ELAPSED_LIMIT {
+                        return Err(());
+                    }
                     Ok(ControlDiagnosticsResponse::new(ciphertext, reservation.transfer()))
                 })
                 .map_err(|failure| match failure {
@@ -282,19 +292,33 @@ fn live_canonical_members(
     Ok(members)
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub(super) struct LiveBundleRequest {
     pub(super) recipients: Vec<String>,
+    pub(super) identifier_retention: IdentifierRetention,
 }
 
 impl LiveBundleRequest {
     pub(super) fn parse(bytes: &[u8]) -> Result<Self, ()> {
+        if bytes.len() > 8_192 {
+            return Err(());
+        }
         let text = std::str::from_utf8(bytes).map_err(|_| ())?;
         let mut lines = text.lines();
         if lines.next() != Some("version=1") {
             return Err(());
         }
         let mut recipients = Vec::new();
+        let mut identifier_retention = IdentifierRetention::Ephemeral;
         for line in lines {
+            if let Some(value) = line.strip_prefix("retain_identifier=") {
+                if !recipients.is_empty() || identifier_retention != IdentifierRetention::Ephemeral
+                {
+                    return Err(());
+                }
+                identifier_retention = IdentifierRetention::parse(value)?;
+                continue;
+            }
             let recipient = line.strip_prefix("recipient=").ok_or(())?;
             if recipient.is_empty() || recipient.len() > 128 || recipients.len() == 16 {
                 return Err(());
@@ -303,13 +327,29 @@ impl LiveBundleRequest {
         }
         AgeRecipients::parse(&recipients)?;
         (!recipients.is_empty())
-            .then_some(Self { recipients })
+            .then_some(Self {
+                recipients,
+                identifier_retention,
+            })
             .ok_or(())
     }
 
+    #[cfg(test)]
     pub(super) fn encode(recipients: &[String]) -> Result<Vec<u8>, BundleFailure> {
+        Self::encode_with_retention(recipients, IdentifierRetention::Ephemeral)
+    }
+
+    pub(super) fn encode_with_retention(
+        recipients: &[String],
+        identifier_retention: IdentifierRetention,
+    ) -> Result<Vec<u8>, BundleFailure> {
         AgeRecipients::parse(recipients).map_err(|_| BundleFailure::Arguments)?;
         let mut body = String::from("version=1\n");
+        if let Some(retention) = identifier_retention.request_value() {
+            body.push_str("retain_identifier=");
+            body.push_str(retention);
+            body.push('\n');
+        }
         for recipient in recipients {
             if recipient.len() > 128 {
                 return Err(BundleFailure::Arguments);
@@ -328,7 +368,10 @@ pub(super) fn request_live_bundle(
     path: &Path,
     options: &BundleOptions,
 ) -> Result<Vec<u8>, BundleFailure> {
-    let body = LiveBundleRequest::encode(&options.recipients)?;
+    let body = LiveBundleRequest::encode_with_retention(
+        &options.recipients,
+        options.identifier_retention,
+    )?;
     let bearer = read_credential()?;
     #[cfg(unix)]
     {

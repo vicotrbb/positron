@@ -77,7 +77,12 @@ fn execute_offline(
                 } else {
                     ExitCode::from(EXIT_DIAGNOSTIC_FAILURE)
                 },
-                offline_success_report(verified, &report),
+                offline_success_report(
+                    verified,
+                    &report,
+                    options.config.as_deref(),
+                    &options.overrides,
+                ),
             ))
         },
         Err(failure) => Ok((
@@ -94,6 +99,8 @@ fn execute_offline(
 pub(crate) fn offline_success_report(
     verified: bool,
     inspection: &OfflineIntegrityVerification,
+    configuration: Option<&Path>,
+    overrides: &[(String, String)],
 ) -> String {
     let facts = inspection.facts();
     let pressure = match facts.disk_pressure() {
@@ -101,21 +108,39 @@ pub(crate) fn offline_success_report(
         OfflineDiskPressure::Soft => "soft",
         OfflineDiskPressure::Hard => "hard",
     };
+    let complete = inspection.is_complete();
+    let (status, finding, severity) = if verified {
+        ("healthy", "VERIFIED", "info")
+    } else if !complete {
+        ("incomplete", "INCOMPLETE", "warning")
+    } else {
+        ("fenced", "FENCED", "error")
+    };
+    let continuation = inspection.continuation().map(|value| hex(value.encoded()));
+    let safe_command = continuation.as_ref().map_or_else(
+        || {
+            if verified {
+                "none".to_owned()
+            } else {
+                "positron verify --offline".to_owned()
+            }
+        },
+        |value| offline_verify_command(Some(value), configuration, overrides),
+    );
     let mut report = format!(
         "report_version=1\nmode=offline\nstatus={}\nfinding_code=DOCTOR_INTEGRITY_{}\nseverity={}\nevidence_scope=offline_integrity_reports\nsafe_command={}\nreport_count={}\nverified_scope_count={}\nfenced_scope_count={}\nincomplete_scope_count={}\n",
-        if verified { "healthy" } else { "fenced" },
-        if verified { "VERIFIED" } else { "FENCED" },
-        if verified { "info" } else { "error" },
-        if verified {
-            "none"
-        } else {
-            "positron verify --offline"
-        },
+        status,
+        finding,
+        severity,
+        safe_command,
         inspection.reports().len(),
         facts.verified_scope_count(),
         facts.fenced_scope_count(),
         facts.incomplete_scope_count(),
     );
+    if let Some(continuation) = continuation {
+        report.push_str(&format!("aggregate_continuation={continuation}\n"));
+    }
     report.push_str(
         "finding_code=DOCTOR_CONFIGURATION_RESOLVED\nseverity=info\nevidence_scope=effective_configuration\nsafe_command=none\n",
     );
@@ -168,6 +193,54 @@ pub(crate) fn offline_success_report(
         ));
     }
     report
+}
+
+fn offline_verify_command(
+    continuation: Option<&str>,
+    configuration: Option<&Path>,
+    overrides: &[(String, String)],
+) -> String {
+    let Some(continuation) = continuation else {
+        return "positron verify --offline".to_owned();
+    };
+    let mut command = String::from("positron verify --offline");
+    if let Some(configuration) = configuration {
+        let Some(configuration) = configuration.to_str().and_then(shell_quote) else {
+            return "inspect_effective_configuration_before_resuming".to_owned();
+        };
+        command.push_str(" --config ");
+        command.push_str(&configuration);
+    }
+    for (key, value) in overrides {
+        let Some(override_value) = shell_quote(&format!("{key}={value}")) else {
+            return "inspect_effective_configuration_before_resuming".to_owned();
+        };
+        command.push_str(" --set ");
+        command.push_str(&override_value);
+    }
+    let Some(continuation) = shell_quote(continuation) else {
+        return "inspect_effective_configuration_before_resuming".to_owned();
+    };
+    command.push_str(" --continuation ");
+    command.push_str(&continuation);
+    command
+}
+
+fn shell_quote(value: &str) -> Option<String> {
+    if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_control()) {
+        return None;
+    }
+    Some(format!("'{}'", value.replace('\'', "'\"'\"'")))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn execute_online(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {
@@ -629,10 +702,11 @@ impl DoctorFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::{DoctorFailure, Options, online_status_request};
+    use super::{DoctorFailure, Options, offline_verify_command, online_status_request};
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        path::Path,
     };
 
     #[test]
@@ -640,6 +714,20 @@ mod tests {
         assert!(Options::parse(["--offline".to_owned()].into_iter()).is_ok());
         assert!(Options::parse(std::iter::empty()).is_err());
         assert!(Options::parse(["--online".to_owned()].into_iter()).is_err());
+    }
+
+    #[test]
+    fn offline_continuation_command_preserves_safe_configuration_arguments() {
+        let command = offline_verify_command(
+            Some("deadbeef"),
+            Some(Path::new("/tmp/operator's config.toml")),
+            &[("runtime.max_registered_tenants".to_owned(), "4".to_owned())],
+        );
+
+        assert_eq!(
+            command,
+            "positron verify --offline --config '/tmp/operator'\"'\"'s config.toml' --set 'runtime.max_registered_tenants=4' --continuation 'deadbeef'"
+        );
     }
 
     #[test]

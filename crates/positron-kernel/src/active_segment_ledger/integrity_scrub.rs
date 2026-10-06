@@ -516,7 +516,7 @@ fn verify_integrity_against_snapshot(
                 ));
             },
         };
-        if physical > integrity_bytes_remaining(examined_bytes) {
+        if physical > integrity_bytes_remaining(examined_bytes, budget.1) {
             return Ok(report(
                 mode,
                 scope,
@@ -641,8 +641,8 @@ fn verify_integrity_against_snapshot(
     ))
 }
 
-fn integrity_bytes_remaining(examined: u64) -> u64 {
-    IntegrityScrubBudget::MAX_BYTES.saturating_sub(examined)
+fn integrity_bytes_remaining(examined: u64, budget: u64) -> u64 {
+    budget.saturating_sub(examined)
 }
 
 #[allow(clippy::too_many_arguments)]

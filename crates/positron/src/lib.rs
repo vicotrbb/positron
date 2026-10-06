@@ -30,6 +30,9 @@ mod tenant_retention;
 mod tenant_service_cli;
 mod verify_cli;
 
+#[doc(hidden)]
+pub use support_bundle::fuzz_live_bundle_request;
+
 const EXIT_OK: u8 = 0;
 const EXIT_CONFIGURATION: u8 = 2;
 const EXIT_STARTUP: u8 = 3;

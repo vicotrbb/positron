@@ -24,6 +24,74 @@ fn plaintext_bundle_uses_the_canonical_explicit_warning_flag() {
 }
 
 #[test]
+fn identifier_retention_is_closed_and_never_available_to_key_unavailable_exports() {
+    let retained = BundleOptions::parse(
+        [
+            "bundle",
+            "create",
+            "--config",
+            "positron.toml",
+            "--output",
+            "bundle.tar",
+            "--recipient",
+            "age1example",
+            "--credential-stdin",
+            "--retain-identifier",
+            "data_directory",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    let Ok(retained) = retained else {
+        panic!("current authenticated system administration may request data directory retention");
+    };
+    assert_eq!(
+        retained.identifier_retention,
+        super::super::privacy::IdentifierRetention::DataDirectory
+    );
+    assert!(
+        BundleOptions::parse(
+            [
+                "bundle",
+                "create",
+                "--config",
+                "positron.toml",
+                "--output",
+                "bundle.tar",
+                "--recipient",
+                "age1example",
+                "--offline-key-unavailable",
+                "--retain-identifier",
+                "data_directory",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .is_err()
+    );
+    assert!(
+        BundleOptions::parse(
+            [
+                "bundle",
+                "create",
+                "--config",
+                "positron.toml",
+                "--output",
+                "bundle.tar",
+                "--recipient",
+                "age1example",
+                "--credential-stdin",
+                "--retain-identifier",
+                "secrets_directory",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn explicit_plaintext_export_is_owner_only_and_never_overwrites() {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -313,6 +381,7 @@ fn elapsed_deadline_prevents_plaintext_output_creation() -> Result<(), Box<dyn s
         log_window: std::time::Duration::from_secs(1),
         source_file_limit: 1,
         control_path: None,
+        identifier_retention: super::super::privacy::IdentifierRetention::Ephemeral,
     };
     let started = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(2))
@@ -357,6 +426,7 @@ fn deadline_crossing_after_publication_succeeds_without_removing_a_replacement_o
         log_window: std::time::Duration::from_secs(1),
         source_file_limit: 1,
         control_path: None,
+        identifier_retention: super::super::privacy::IdentifierRetention::Ephemeral,
     };
     super::write_bundle_with_after_publication_hook(
         &bundle,
