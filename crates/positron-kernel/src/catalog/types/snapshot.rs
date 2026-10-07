@@ -53,10 +53,23 @@ impl CatalogSnapshot {
         successor: &Self,
         task: crate::MaintenanceTaskId,
     ) -> Result<bool, CatalogFailure> {
-        fn retained(
-            snapshot: &CatalogSnapshot,
-            task: crate::MaintenanceTaskId,
-        ) -> Result<Vec<(CatalogObjectId, &[u8])>, CatalogFailure> {
+        self.same_except_maintenance_tasks(successor, &[task])
+    }
+
+    /// Compares two authenticated Catalog states while excluding only the
+    /// supplied durable maintenance records. Callers derive this bounded
+    /// allowlist from their authenticated operation lineage; every other
+    /// record, including foreign maintenance work and non-maintenance
+    /// authority, remains part of the compare-and-swap basis.
+    pub fn same_except_maintenance_tasks(
+        &self,
+        successor: &Self,
+        permitted_tasks: &[crate::MaintenanceTaskId],
+    ) -> Result<bool, CatalogFailure> {
+        fn retained<'snapshot>(
+            snapshot: &'snapshot CatalogSnapshot,
+            permitted_tasks: &[crate::MaintenanceTaskId],
+        ) -> Result<Vec<(CatalogObjectId, &'snapshot [u8])>, CatalogFailure> {
             let mut objects = Vec::new();
             objects
                 .try_reserve(snapshot.0.objects.len())
@@ -64,14 +77,14 @@ impl CatalogSnapshot {
             for (identity, object) in &snapshot.0.objects {
                 let record = crate::maintenance::durable_task_record_identity(object)
                     .map_err(|_| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
-                if record != Some(task) {
+                if !record.is_some_and(|record| permitted_tasks.contains(&record)) {
                     objects.push((*identity, object.as_ref()));
                 }
             }
             Ok(objects)
         }
 
-        Ok(retained(self, task)? == retained(successor, task)?)
+        Ok(retained(self, permitted_tasks)? == retained(successor, permitted_tasks)?)
     }
     pub(crate) fn plaintext_objects(&self) -> impl Iterator<Item = &[u8]> {
         self.0.objects.values().map(AsRef::as_ref)

@@ -24,7 +24,7 @@ use positron_kernel::{
 use positron_query::QueryBudget;
 use prost::Message;
 
-use super::super::tests::schema_maintenance::{Fixture, open_catalog, request};
+use super::super::tests::schema_maintenance::{Fixture, open_catalog, publish_unrelated, request};
 use super::super::{OnlineVerificationTestHook, ServiceHandle};
 use super::{
     MaintenanceServiceFailure, append_status_task_within_response_limit, hex,

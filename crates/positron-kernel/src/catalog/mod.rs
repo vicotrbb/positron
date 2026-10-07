@@ -423,6 +423,41 @@ impl<'authority> Catalog<'authority> {
         Ok(Self::read_current_view(authority, instance, secret)?.snapshot)
     }
 
+    /// Reads one authenticated immutable ancestor of a supplied current view
+    /// without acquiring the Catalog Writer lease.
+    pub fn read_historical_snapshot(
+        authority: &'authority StorageKernelResourceAuthority,
+        instance: InstanceId,
+        secret: CatalogSecret,
+        current: &CatalogSnapshot,
+        identity: [u8; 32],
+        number: u64,
+    ) -> Result<CatalogSnapshot, CatalogFailure> {
+        let recovery_claim =
+            RecoveryWorkClaim::system(RecoveryWorkKind::Repair, recovery_resource_claim())
+                .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let _reservation = authority
+            .recovery()
+            .reserve(recovery_claim)
+            .map_err(CatalogFailure::admission)?;
+        let volume = authority
+            .primary_data_volume()
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::ResourceAdmissionRefused))?;
+        let root = volume
+            ._root
+            .try_clone()
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::StorageUnavailable))?;
+        let storage = CatalogStorage::inspect(&root)?;
+        pin_historical_generation(
+            &storage,
+            &secret,
+            instance,
+            current,
+            CatalogGenerationId::from_authenticated_bytes(identity),
+            number,
+        )
+    }
+
     /// Reads the highest complete authenticated generation and its visible
     /// audit records without acquiring the Catalog writer lease.
     pub fn read_current_view(
@@ -516,42 +551,18 @@ impl<'authority> Catalog<'authority> {
         identity: CatalogGenerationId,
         number: u64,
     ) -> Result<CatalogSnapshot, CatalogFailure> {
-        if number == 0 || number > current.number() {
-            return Err(CatalogFailure::new(CatalogFailureCode::StaleGeneration));
-        }
         let secret = self
             .secret
             .lock()
             .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
-        let mut generation = current.identity();
-        let mut expected_number = current.number();
-        let mut traversed = 0_usize;
-        loop {
-            traversed = traversed
-                .checked_add(1)
-                .filter(|count| *count <= storage::MAX_GENERATIONS)
-                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
-            let encoded = self
-                .storage
-                .read_commit(&secret, self.instance, generation)?;
-            let record = decode_commit(generation, &encoded)?;
-            if !record.format_epoch.is_catalog_readable()
-                || record.instance != self.instance
-                || record.number != expected_number
-            {
-                return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
-            }
-            if expected_number == number {
-                if record.generation != identity {
-                    return Err(CatalogFailure::new(CatalogFailureCode::StaleGeneration));
-                }
-                return load_snapshot(&self.storage, &secret, self.instance, &record);
-            }
-            expected_number = expected_number
-                .checked_sub(1)
-                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
-            generation = record.predecessor;
-        }
+        pin_historical_generation(
+            &self.storage,
+            &secret,
+            self.instance,
+            current,
+            identity,
+            number,
+        )
     }
 
     pub(crate) fn export_output_root(&self) -> Result<File, CatalogFailure> {
@@ -1732,6 +1743,46 @@ impl<'authority> Catalog<'authority> {
     #[doc(hidden)]
     pub fn refresh_after_ambiguous_publication_for_test(&self) -> Result<(), CatalogFailure> {
         self.refresh_state()
+    }
+}
+
+fn pin_historical_generation(
+    storage: &CatalogStorage,
+    secret: &CatalogSecret,
+    instance: InstanceId,
+    current: &CatalogSnapshot,
+    identity: CatalogGenerationId,
+    number: u64,
+) -> Result<CatalogSnapshot, CatalogFailure> {
+    if number == 0 || number > current.number() {
+        return Err(CatalogFailure::new(CatalogFailureCode::StaleGeneration));
+    }
+    let mut generation = current.identity();
+    let mut expected_number = current.number();
+    let mut traversed = 0_usize;
+    loop {
+        traversed = traversed
+            .checked_add(1)
+            .filter(|count| *count <= storage::MAX_GENERATIONS)
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let encoded = storage.read_commit(secret, instance, generation)?;
+        let record = decode_commit(generation, &encoded)?;
+        if !record.format_epoch.is_catalog_readable()
+            || record.instance != instance
+            || record.number != expected_number
+        {
+            return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
+        }
+        if expected_number == number {
+            if record.generation != identity {
+                return Err(CatalogFailure::new(CatalogFailureCode::StaleGeneration));
+            }
+            return load_snapshot(storage, secret, instance, &record);
+        }
+        expected_number = expected_number
+            .checked_sub(1)
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
+        generation = record.predecessor;
     }
 }
 

@@ -34,7 +34,7 @@ pub(super) use append::write_segment_bytes;
 #[cfg(test)]
 pub(crate) use catalog::recognized_ledger_name;
 
-const MAX_SEGMENTS: usize = 1_024;
+pub(super) const MAX_SEGMENTS: usize = 1_024;
 const MAX_HEADER_BYTES: usize = 512;
 const MAX_ENCRYPTED_METADATA_BYTES: u32 = 256;
 

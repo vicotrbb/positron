@@ -1,8 +1,9 @@
 use std::error::Error;
 
 use positron_kernel::{
-    ActiveSegmentLedger, IntegrityCancellation, IntegrityScrubBudget, IntegrityVerificationMode,
-    IntegrityVerificationOutcome, SegmentProtectionKey, TransactionId,
+    ActiveSegmentLedger, CatalogIntegrityVerificationRequest, IntegrityCancellation,
+    IntegrityScrubBudget, IntegrityVerificationMode, IntegrityVerificationOutcome,
+    IntegrityVerificationRequest, SegmentProtectionKey, TransactionId,
 };
 use positron_query::{
     QueryAffectedRange, QueryBudget, QueryEvent, QueryFailureCode, QueryTerminal, TemporalAxis,
@@ -23,13 +24,17 @@ fn reopened_query_uses_authenticated_holes_without_hiding_healthy_same_scope_dat
         let report = ActiveSegmentLedger::verify_catalog_integrity(
             fixture.kernel.authority,
             fixture.kernel.catalog_for_test(),
-            scope,
-            SegmentProtectionKey::from_owned(Box::new([0x34; 32])),
-            IntegrityVerificationMode::Online,
-            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-            &IntegrityCancellation::new(),
-            TransactionId::new([0xe1; 16])?,
-            None,
+            CatalogIntegrityVerificationRequest::new(
+                IntegrityVerificationRequest::new(
+                    scope,
+                    SegmentProtectionKey::from_owned(Box::new([0x34; 32])),
+                    IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+                    &IntegrityCancellation::new(),
+                    TransactionId::new([0xe1; 16])?,
+                    None,
+                ),
+                IntegrityVerificationMode::Online,
+            ),
         )?;
         assert_eq!(report.outcome(), IntegrityVerificationOutcome::Quarantined);
         let live_snapshot = fixture.kernel.ledger()?.snapshot()?;
@@ -157,13 +162,17 @@ fn correlation_with_a_quarantined_trace_dependency_is_explicitly_incomplete()
         let report = ActiveSegmentLedger::verify_catalog_integrity(
             fixture.kernel.authority,
             fixture.kernel.catalog_for_test(),
-            scope,
-            SegmentProtectionKey::from_owned(Box::new([0x35; 32])),
-            IntegrityVerificationMode::Online,
-            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-            &IntegrityCancellation::new(),
-            TransactionId::new([0xe2; 16])?,
-            None,
+            CatalogIntegrityVerificationRequest::new(
+                IntegrityVerificationRequest::new(
+                    scope,
+                    SegmentProtectionKey::from_owned(Box::new([0x35; 32])),
+                    IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+                    &IntegrityCancellation::new(),
+                    TransactionId::new([0xe2; 16])?,
+                    None,
+                ),
+                IntegrityVerificationMode::Online,
+            ),
         )?;
         assert_eq!(report.outcome(), IntegrityVerificationOutcome::Quarantined);
         fixture.kernel.reopen_trace_ledger()?;

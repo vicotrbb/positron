@@ -19,6 +19,9 @@ mod integrity_quarantine;
 mod integrity_scrub;
 pub use integrity_quarantine::integrity_quarantine_findings;
 pub(super) use integrity_quarantine::{publish_quarantine, quarantined_segment_ids};
+pub use integrity_scrub::{
+    CatalogIntegrityVerificationRequest, IntegrityVerificationRequest, OnlineQuarantinePublication,
+};
 const CONTINUATION_BYTES: usize = 1 + 7 + 32 + 16;
 
 /// The bounded number of immutable segments one scrub pass may authenticate.
@@ -164,6 +167,10 @@ pub struct IntegrityScrubContinuation {
 }
 
 impl IntegrityScrubContinuation {
+    /// A scope has at most one cursor-producing pass per retained segment.
+    /// This bound keeps a runtime's authenticated publication lineage finite.
+    pub const MAX_PASSES: usize = super::storage::MAX_SEGMENTS;
+
     #[must_use]
     pub const fn source_identity(self) -> [u8; 32] {
         self.source_identity

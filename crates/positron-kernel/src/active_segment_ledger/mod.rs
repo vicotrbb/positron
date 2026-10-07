@@ -57,10 +57,11 @@ use capacity::{recovery_claim, retained_claim, snapshot_retained_claim};
 pub use compaction::PreparedCompactionTask;
 use format::{SegmentMetadata, SegmentState};
 pub use integrity::{
-    IntegrityCancellation, IntegrityCancellationProbe, IntegrityFailure, IntegrityFailureCode,
-    IntegrityFinding, IntegrityQuarantineFinding, IntegrityScrubBudget, IntegrityScrubContinuation,
-    IntegrityVerificationMode, IntegrityVerificationOutcome, IntegrityVerificationReport,
-    IntegrityVerificationScope, integrity_quarantine_findings,
+    CatalogIntegrityVerificationRequest, IntegrityCancellation, IntegrityCancellationProbe,
+    IntegrityFailure, IntegrityFailureCode, IntegrityFinding, IntegrityQuarantineFinding,
+    IntegrityScrubBudget, IntegrityScrubContinuation, IntegrityVerificationMode,
+    IntegrityVerificationOutcome, IntegrityVerificationReport, IntegrityVerificationRequest,
+    IntegrityVerificationScope, OnlineQuarantinePublication, integrity_quarantine_findings,
 };
 use protection::{map_frame_failure, object_context};
 use publication::{fresh_metadata, publish_segments};

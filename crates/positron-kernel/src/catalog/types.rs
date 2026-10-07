@@ -191,6 +191,29 @@ impl CatalogSecret {
     /// material. Callers must supply a non-empty domain for their persisted
     /// private binding.
     pub fn opaque_digest(&self, domain: &[u8], payload: &[u8]) -> Result<[u8; 32], CatalogFailure> {
+        let authenticated = self.opaque_digest_payload(domain, payload)?;
+        DataProtection::authenticate(&self.marker_key, &authenticated)
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::AuthenticationFailed))
+    }
+
+    /// Verifies one domain-separated opaque binding without exposing Catalog
+    /// key material.
+    pub fn verify_opaque_digest(
+        &self,
+        domain: &[u8],
+        payload: &[u8],
+        expected: &[u8; 32],
+    ) -> Result<(), CatalogFailure> {
+        let authenticated = self.opaque_digest_payload(domain, payload)?;
+        DataProtection::verify_authentication(&self.marker_key, &authenticated, expected)
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::AuthenticationFailed))
+    }
+
+    fn opaque_digest_payload(
+        &self,
+        domain: &[u8],
+        payload: &[u8],
+    ) -> Result<Vec<u8>, CatalogFailure> {
         if domain.is_empty() || payload.is_empty() {
             return Err(CatalogFailure::new(CatalogFailureCode::InvalidInput));
         }
@@ -214,8 +237,7 @@ impl CatalogSecret {
         authenticated.extend_from_slice(domain);
         authenticated.extend_from_slice(&payload_length.to_be_bytes());
         authenticated.extend_from_slice(payload);
-        DataProtection::authenticate(&self.marker_key, &authenticated)
-            .map_err(|_| CatalogFailure::new(CatalogFailureCode::AuthenticationFailed))
+        Ok(authenticated)
     }
 }
 

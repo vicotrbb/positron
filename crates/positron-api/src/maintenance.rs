@@ -23,7 +23,8 @@ pub const MAX_CONTROL_REQUEST_BYTES: usize = 192;
 /// The exact largest canonical JSON window request: six permitted classes,
 /// maximum generation and duration, and a canonical idempotency key.
 pub const MAX_WINDOW_REQUEST_BYTES: usize = 266;
-pub const MAX_VERIFY_REQUEST_BYTES: usize = 256;
+pub const MAX_VERIFY_REQUEST_BYTES: usize = 512;
+const ONLINE_VERIFY_CONTINUATION_HEX_BYTES: usize = 272;
 pub const MAX_PAUSE_DURATION_SECONDS: u64 = 86_400;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// The total number of durable tasks the coordinator may expose in one
@@ -1092,7 +1093,8 @@ fn valid_integrity_finding(finding: &IntegrityQuarantineDescriptor) -> bool {
 }
 
 fn valid_continuation(value: &str) -> bool {
-    value.len() == 112 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == ONLINE_VERIFY_CONTINUATION_HEX_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

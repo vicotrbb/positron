@@ -102,18 +102,19 @@ pub use catalog::{GovernanceFixtureObject, GovernanceFixtureTarget};
 pub use active_segment_ledger::publish_snapshot_lease_marker_for_test;
 pub use active_segment_ledger::{
     ActiveSegmentLedger, AppendCancellation, AuthenticatedEventRange, AuthenticatedIngestRange,
-    CommitReceipt, CommittedBlock, CommittedLedgerReader, CompactionBlock, CompactionBlockTime,
-    CompactionPreparation, CompactionPublication, EventRangeUnavailable, IntegrityCancellation,
-    IntegrityCancellationProbe, IntegrityFailure, IntegrityFailureCode, IntegrityFinding,
-    IntegrityQuarantineFinding, IntegrityScrubBudget, IntegrityScrubContinuation,
-    IntegrityVerificationMode, IntegrityVerificationOutcome, IntegrityVerificationReport,
-    IntegrityVerificationScope, LedgerCompletionState, LedgerFailure, LedgerFailureCode,
-    LedgerSnapshot, MAX_SNAPSHOT_LEASE_TTL_SECONDS, PreparedCompactionTask, PreparedStoreBlock,
-    RetentionBucket, RetentionEvaluation, RetentionImpactPreview, RetentionImpactTimeRange,
-    RetentionReclamation, RetentionReclamationEstimate, SealedSegment, SegmentId,
-    SegmentProtectionKey, SegmentScope, SnapshotLeaseAttempt, SnapshotLeaseGrant, SnapshotLeaseId,
-    SnapshotLeaseReplacement, SnapshotLeaseUsage, StoreBlockIdentity, StoreBlockPreparation,
-    integrity_quarantine_findings,
+    CatalogIntegrityVerificationRequest, CommitReceipt, CommittedBlock, CommittedLedgerReader,
+    CompactionBlock, CompactionBlockTime, CompactionPreparation, CompactionPublication,
+    EventRangeUnavailable, IntegrityCancellation, IntegrityCancellationProbe, IntegrityFailure,
+    IntegrityFailureCode, IntegrityFinding, IntegrityQuarantineFinding, IntegrityScrubBudget,
+    IntegrityScrubContinuation, IntegrityVerificationMode, IntegrityVerificationOutcome,
+    IntegrityVerificationReport, IntegrityVerificationRequest, IntegrityVerificationScope,
+    LedgerCompletionState, LedgerFailure, LedgerFailureCode, LedgerSnapshot,
+    MAX_SNAPSHOT_LEASE_TTL_SECONDS, OnlineQuarantinePublication, PreparedCompactionTask,
+    PreparedStoreBlock, RetentionBucket, RetentionEvaluation, RetentionImpactPreview,
+    RetentionImpactTimeRange, RetentionReclamation, RetentionReclamationEstimate, SealedSegment,
+    SegmentId, SegmentProtectionKey, SegmentScope, SnapshotLeaseAttempt, SnapshotLeaseGrant,
+    SnapshotLeaseId, SnapshotLeaseReplacement, SnapshotLeaseUsage, StoreBlockIdentity,
+    StoreBlockPreparation, integrity_quarantine_findings,
 };
 
 pub use catalog::integrity_scrub_resource_claim;

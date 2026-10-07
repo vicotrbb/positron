@@ -22,7 +22,7 @@ pub(in super::super) fn verify(
 ) -> Result<crate::OfflineIntegrityVerification, crate::OfflineIntegrityFailure> {
     use positron_domain::routing::SignalKind;
     use positron_kernel::{
-        ActiveSegmentLedger, IntegrityScrubBudget, IntegrityVerificationMode, TransactionId,
+        ActiveSegmentLedger, IntegrityScrubBudget, IntegrityVerificationRequest, TransactionId,
     };
 
     let (volume, access) = paths.storage.acquire().map_err(|failure| match failure {
@@ -219,15 +219,16 @@ pub(in super::super) fn verify(
             &authority,
             &snapshot,
             record.instance,
-            scope,
-            protection,
-            IntegrityVerificationMode::Offline,
-            IntegrityScrubBudget::with_bytes(remaining_segments, remaining_bytes)
-                .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
-            cancellation,
-            TransactionId::new([0xf1; 16])
-                .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
-            resume_cursor,
+            IntegrityVerificationRequest::new(
+                scope,
+                protection,
+                IntegrityScrubBudget::with_bytes(remaining_segments, remaining_bytes)
+                    .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
+                cancellation,
+                TransactionId::new([0xf1; 16])
+                    .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
+                resume_cursor,
+            ),
         )
         .map_err(|failure| match failure.code() {
             positron_kernel::IntegrityFailureCode::StorageUnavailable => {

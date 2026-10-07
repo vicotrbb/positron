@@ -8,13 +8,36 @@ use positron_domain::time::UnixNanoseconds;
 use super::support::{TemporaryRoot, establish_authority};
 use crate::active_segment_ledger::recovery::segment_name;
 use crate::{
-    ActiveSegmentLedger, AuthenticatedEventRange, Catalog, CatalogSecret, CommittedLedgerReader,
-    EventRangeUnavailable, InstanceId, IntegrityCancellation, IntegrityFinding,
-    IntegrityScrubBudget, IntegrityVerificationMode, IntegrityVerificationOutcome,
-    IntegrityVerificationScope, LedgerFailureCode, MountQualification, PreparedStoreBlock,
-    PrimaryDataVolume, SegmentProtectionKey, SegmentScope, StoreBlockIdentity, TransactionId,
+    ActiveSegmentLedger, AuthenticatedEventRange, Catalog, CatalogIntegrityVerificationRequest,
+    CatalogSecret, CommittedLedgerReader, EventRangeUnavailable, InstanceId, IntegrityCancellation,
+    IntegrityFinding, IntegrityScrubBudget, IntegrityVerificationMode,
+    IntegrityVerificationOutcome, IntegrityVerificationRequest, IntegrityVerificationScope,
+    LedgerFailureCode, MountQualification, PreparedStoreBlock, PrimaryDataVolume,
+    SegmentProtectionKey, SegmentScope, StoreBlockIdentity, TransactionId,
     integrity_quarantine_findings,
 };
+
+fn catalog_integrity_request<'a>(
+    scope: SegmentScope,
+    protection: SegmentProtectionKey,
+    mode: IntegrityVerificationMode,
+    budget: IntegrityScrubBudget,
+    cancellation: &'a dyn crate::IntegrityCancellationProbe,
+    transaction: TransactionId,
+    continuation: Option<crate::IntegrityScrubContinuation>,
+) -> CatalogIntegrityVerificationRequest<'a> {
+    CatalogIntegrityVerificationRequest::new(
+        IntegrityVerificationRequest::new(
+            scope,
+            protection,
+            budget,
+            cancellation,
+            transaction,
+            continuation,
+        ),
+        mode,
+    )
+}
 
 #[test]
 fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
@@ -67,13 +90,15 @@ fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
     let report = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        damaged_scope,
-        damaged_key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0x96; 16])?,
-        None,
+        catalog_integrity_request(
+            damaged_scope,
+            damaged_key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0x96; 16])?,
+            None,
+        ),
     )?;
     assert_eq!(report.outcome(), IntegrityVerificationOutcome::Quarantined);
     assert_eq!(report.quarantined_segment(), Some(sealed.segment_id()));
@@ -103,13 +128,15 @@ fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
     let retained = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        damaged_scope,
-        damaged_key(),
-        IntegrityVerificationMode::Offline,
-        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0x97; 16])?,
-        None,
+        catalog_integrity_request(
+            damaged_scope,
+            damaged_key(),
+            IntegrityVerificationMode::Offline,
+            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0x97; 16])?,
+            None,
+        ),
     )?;
     assert_eq!(
         retained.outcome(),
@@ -186,13 +213,15 @@ fn retained_quarantine_allows_bounded_same_scope_resume_and_later_bitrot_detecti
     let first_report = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        scope,
-        key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xa1; 16])?,
-        None,
+        catalog_integrity_request(
+            scope,
+            key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xa1; 16])?,
+            None,
+        ),
     )?;
     assert_eq!(
         first_report.outcome(),
@@ -228,13 +257,15 @@ fn retained_quarantine_allows_bounded_same_scope_resume_and_later_bitrot_detecti
     let healthy_report = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        scope,
-        key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(1).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xa2; 16])?,
-        None,
+        catalog_integrity_request(
+            scope,
+            key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(1).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xa2; 16])?,
+            None,
+        ),
     )?;
     assert_eq!(
         healthy_report.outcome(),
@@ -256,13 +287,15 @@ fn retained_quarantine_allows_bounded_same_scope_resume_and_later_bitrot_detecti
     let resumed_report = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        scope,
-        key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(1).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xa3; 16])?,
-        Some(continuation),
+        catalog_integrity_request(
+            scope,
+            key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(1).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xa3; 16])?,
+            Some(continuation),
+        ),
     )?;
     assert_eq!(
         resumed_report.outcome(),
@@ -296,13 +329,15 @@ fn retained_quarantine_allows_bounded_same_scope_resume_and_later_bitrot_detecti
     let later_report = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        scope,
-        key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xa4; 16])?,
-        None,
+        catalog_integrity_request(
+            scope,
+            key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xa4; 16])?,
+            None,
+        ),
     )?;
     assert_eq!(
         later_report.outcome(),
@@ -445,13 +480,15 @@ fn bounded_scrub_checkpoint_resumes_after_catalog_reopen_and_rejects_changed_sou
     let first = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        scope,
-        key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(1).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xc5; 16])?,
-        None,
+        catalog_integrity_request(
+            scope,
+            key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(1).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xc5; 16])?,
+            None,
+        ),
     )?;
     assert_eq!(first.outcome(), IntegrityVerificationOutcome::Incomplete);
     assert!(
@@ -468,13 +505,15 @@ fn bounded_scrub_checkpoint_resumes_after_catalog_reopen_and_rejects_changed_sou
     let resumed = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &reopened,
-        scope,
-        key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xc6; 16])?,
-        Some(continuation),
+        catalog_integrity_request(
+            scope,
+            key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xc6; 16])?,
+            Some(continuation),
+        ),
     )?;
     assert_eq!(resumed.outcome(), IntegrityVerificationOutcome::Verified);
 
@@ -482,13 +521,15 @@ fn bounded_scrub_checkpoint_resumes_after_catalog_reopen_and_rejects_changed_sou
     let stale = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &reopened,
-        scope,
-        key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xc7; 16])?,
-        Some(continuation),
+        catalog_integrity_request(
+            scope,
+            key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xc7; 16])?,
+            Some(continuation),
+        ),
     )?;
     assert_eq!(stale.outcome(), IntegrityVerificationOutcome::Stale);
     Ok(())
@@ -527,13 +568,15 @@ fn unavailable_or_mismatched_segment_key_fences_without_quarantine() -> Result<(
     let report = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        scope,
-        SegmentProtectionKey::from_owned(Box::new([0xd5; 32])),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xd6; 16])?,
-        None,
+        catalog_integrity_request(
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0xd5; 32])),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(8).map_err(|_| "valid scrub budget rejected")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xd6; 16])?,
+            None,
+        ),
     )?;
     assert_eq!(report.outcome(), IntegrityVerificationOutcome::Fenced);
     assert_eq!(report.quarantined_segment(), None);

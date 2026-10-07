@@ -55,7 +55,7 @@ mod integrity;
 mod recovery;
 mod retention;
 mod schema_corruption;
-fn publish_unrelated(
+pub(crate) fn publish_unrelated(
     initialized: &crate::InitializedInstance,
 ) -> Result<positron_kernel::CatalogObjectId, Box<dyn Error>> {
     let catalog = open_catalog(initialized)?;

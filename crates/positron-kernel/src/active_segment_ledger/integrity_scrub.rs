@@ -15,6 +15,97 @@ use super::{
     publish_quarantine, quarantined_segment_ids,
 };
 
+/// Inputs shared by every bounded integrity traversal. Keeping the scope,
+/// protection, budget, cancellation, transaction, and cursor together makes
+/// the immutable verification basis explicit at every entrypoint.
+pub struct IntegrityVerificationRequest<'a> {
+    scope: SegmentScope,
+    protection: SegmentProtectionKey,
+    budget: IntegrityScrubBudget,
+    cancellation: &'a dyn IntegrityCancellationProbe,
+    transaction: TransactionId,
+    continuation: Option<IntegrityScrubContinuation>,
+}
+
+impl<'a> IntegrityVerificationRequest<'a> {
+    #[must_use]
+    pub fn new(
+        scope: SegmentScope,
+        protection: SegmentProtectionKey,
+        budget: IntegrityScrubBudget,
+        cancellation: &'a dyn IntegrityCancellationProbe,
+        transaction: TransactionId,
+        continuation: Option<IntegrityScrubContinuation>,
+    ) -> Self {
+        Self {
+            scope,
+            protection,
+            budget,
+            cancellation,
+            transaction,
+            continuation,
+        }
+    }
+}
+
+/// Adds the catalog-mode and optional governance audit binding to one bounded
+/// catalog traversal.
+pub struct CatalogIntegrityVerificationRequest<'a> {
+    verification: IntegrityVerificationRequest<'a>,
+    mode: IntegrityVerificationMode,
+    quarantine_audit: Option<crate::AuditIntent>,
+}
+
+impl<'a> CatalogIntegrityVerificationRequest<'a> {
+    #[must_use]
+    pub fn new(
+        verification: IntegrityVerificationRequest<'a>,
+        mode: IntegrityVerificationMode,
+    ) -> Self {
+        Self {
+            verification,
+            mode,
+            quarantine_audit: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_quarantine_audit(mut self, quarantine_audit: crate::AuditIntent) -> Self {
+        self.quarantine_audit = Some(quarantine_audit);
+        self
+    }
+}
+
+/// The short, serialized publication boundary for a localized online finding.
+/// The allowlist names only the authenticated durable task lineage permitted to
+/// have advanced the catalog since the immutable scan began.
+pub struct OnlineQuarantinePublication<'a> {
+    report: IntegrityVerificationReport,
+    transaction: TransactionId,
+    maintenance_task: crate::MaintenanceTaskId,
+    permitted_maintenance_tasks: &'a [crate::MaintenanceTaskId],
+    audit: crate::AuditIntent,
+}
+
+impl<'a> OnlineQuarantinePublication<'a> {
+    #[must_use]
+    pub fn new(
+        report: IntegrityVerificationReport,
+        transaction: TransactionId,
+        maintenance_task: crate::MaintenanceTaskId,
+        permitted_maintenance_tasks: &'a [crate::MaintenanceTaskId],
+        audit: crate::AuditIntent,
+    ) -> Self {
+        Self {
+            report,
+            transaction,
+            maintenance_task,
+            permitted_maintenance_tasks,
+            audit,
+        }
+    }
+}
+
 impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     /// Authenticates a bounded immutable prefix of this scope. A sealed-object
     /// failure is atomically made visible as a catalog-authenticated quarantine;
@@ -68,47 +159,21 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
 
     /// Verifies one catalog scope without reconstructing or repairing the
     /// ledger first. This is the runtime startup and maintenance entrypoint.
-    #[allow(clippy::too_many_arguments)]
     pub fn verify_catalog_integrity(
         authority: &'kernel crate::StorageKernelResourceAuthority,
         catalog: &'catalog crate::Catalog<'kernel>,
-        scope: SegmentScope,
-        protection: SegmentProtectionKey,
-        mode: IntegrityVerificationMode,
-        budget: IntegrityScrubBudget,
-        cancellation: &dyn IntegrityCancellationProbe,
-        transaction: TransactionId,
-        continuation: Option<IntegrityScrubContinuation>,
+        request: CatalogIntegrityVerificationRequest<'_>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
-        Self::verify_catalog_integrity_with_audit(
-            authority,
-            catalog,
-            scope,
-            protection,
-            mode,
-            budget,
-            cancellation,
-            transaction,
-            continuation,
-            None,
-        )
+        Self::verify_catalog_integrity_with_audit(authority, catalog, request)
     }
 
     /// The runtime-only trusted publication path may bind one system-derived
     /// Governance Audit intent to a localized quarantine. Offline and startup
     /// callers retain the audit-free observation API above.
-    #[allow(clippy::too_many_arguments)]
     pub fn verify_catalog_integrity_with_audit(
         authority: &'kernel crate::StorageKernelResourceAuthority,
         catalog: &'catalog crate::Catalog<'kernel>,
-        scope: SegmentScope,
-        protection: SegmentProtectionKey,
-        mode: IntegrityVerificationMode,
-        budget: IntegrityScrubBudget,
-        cancellation: &dyn IntegrityCancellationProbe,
-        transaction: TransactionId,
-        continuation: Option<IntegrityScrubContinuation>,
-        quarantine_audit: Option<crate::AuditIntent>,
+        request: CatalogIntegrityVerificationRequest<'_>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
         let volume = authority
             .primary_data_volume()
@@ -118,14 +183,14 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             authority,
             &storage,
             catalog,
-            scope,
-            &protection,
-            mode,
-            budget,
-            cancellation,
-            transaction,
-            continuation,
-            quarantine_audit,
+            request.verification.scope,
+            &request.verification.protection,
+            request.mode,
+            request.verification.budget,
+            request.verification.cancellation,
+            request.verification.transaction,
+            request.verification.continuation,
+            request.quarantine_audit,
         )
     }
 
@@ -133,17 +198,11 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     /// immutable corruption may publish only the canonical quarantine bound to
     /// that same generation; a concurrent successor therefore cannot become
     /// an implicit verification basis.
-    #[allow(clippy::too_many_arguments)]
     pub fn verify_pinned_catalog_integrity(
         authority: &'kernel crate::StorageKernelResourceAuthority,
         catalog: &'catalog crate::Catalog<'kernel>,
         snapshot: &crate::CatalogSnapshot,
-        scope: SegmentScope,
-        protection: SegmentProtectionKey,
-        budget: IntegrityScrubBudget,
-        cancellation: &dyn IntegrityCancellationProbe,
-        transaction: TransactionId,
-        continuation: Option<IntegrityScrubContinuation>,
+        request: IntegrityVerificationRequest<'_>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
         let volume = authority
             .primary_data_volume()
@@ -155,13 +214,13 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             snapshot,
             catalog.instance(),
             Some(catalog),
-            scope,
-            &protection,
+            request.scope,
+            &request.protection,
             IntegrityVerificationMode::Online,
-            budget,
-            cancellation,
-            transaction,
-            continuation,
+            request.budget,
+            request.cancellation,
+            request.transaction,
+            request.continuation,
             None,
         )
     }
@@ -169,22 +228,12 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     /// Observes an already authenticated Catalog snapshot without acquiring a
     /// Catalog writer, creating storage directories, publishing a finding, or
     /// attempting recovery. Offline callers may only use Offline mode.
-    #[allow(clippy::too_many_arguments)]
     pub fn verify_snapshot_integrity(
         authority: &'kernel crate::StorageKernelResourceAuthority,
         snapshot: &crate::CatalogSnapshot,
         instance: InstanceId,
-        scope: SegmentScope,
-        protection: SegmentProtectionKey,
-        mode: IntegrityVerificationMode,
-        budget: IntegrityScrubBudget,
-        cancellation: &dyn IntegrityCancellationProbe,
-        transaction: TransactionId,
-        continuation: Option<IntegrityScrubContinuation>,
+        request: IntegrityVerificationRequest<'_>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
-        if mode != IntegrityVerificationMode::Offline {
-            return Err(IntegrityFailure(IntegrityFailureCode::InvalidInput));
-        }
         let volume = authority
             .primary_data_volume()
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
@@ -195,13 +244,13 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             snapshot,
             instance,
             None,
-            scope,
-            &protection,
-            mode,
-            budget,
-            cancellation,
-            transaction,
-            continuation,
+            request.scope,
+            &request.protection,
+            IntegrityVerificationMode::Offline,
+            request.budget,
+            request.cancellation,
+            request.transaction,
+            request.continuation,
             None,
         )
     }
@@ -210,17 +259,11 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     /// writer lease. A localized immutable failure is reported for the caller
     /// to publish through an exact-generation compare-and-swap; this method
     /// never substitutes a newer Catalog generation or mutates source bytes.
-    #[allow(clippy::too_many_arguments)]
     pub fn verify_online_snapshot_integrity(
         authority: &'kernel crate::StorageKernelResourceAuthority,
         snapshot: &crate::CatalogSnapshot,
         instance: InstanceId,
-        scope: SegmentScope,
-        protection: SegmentProtectionKey,
-        budget: IntegrityScrubBudget,
-        cancellation: &dyn IntegrityCancellationProbe,
-        transaction: TransactionId,
-        continuation: Option<IntegrityScrubContinuation>,
+        request: IntegrityVerificationRequest<'_>,
     ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
         let volume = authority
             .primary_data_volume()
@@ -232,13 +275,13 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             snapshot,
             instance,
             None,
-            scope,
-            &protection,
+            request.scope,
+            &request.protection,
             IntegrityVerificationMode::Online,
-            budget,
-            cancellation,
-            transaction,
-            continuation,
+            request.budget,
+            request.cancellation,
+            request.transaction,
+            request.continuation,
             None,
         )
     }
@@ -248,27 +291,27 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     /// scan basis solely by this request's durable maintenance record. The
     /// caller must serialize this short compare-and-swap with other Catalog
     /// writers; the immutable scan itself deliberately needs neither.
-    #[allow(clippy::too_many_arguments)]
     pub fn publish_online_quarantine(
         authority: &'kernel crate::StorageKernelResourceAuthority,
         catalog: &'catalog crate::Catalog<'kernel>,
         proof: &crate::CatalogSnapshot,
         current: &crate::CatalogSnapshot,
-        report: IntegrityVerificationReport,
-        transaction: TransactionId,
-        maintenance_task: crate::MaintenanceTaskId,
-        audit: crate::AuditIntent,
+        publication: OnlineQuarantinePublication<'_>,
     ) -> Result<(), IntegrityFailure> {
-        if report.outcome() != IntegrityVerificationOutcome::Quarantined
-            || report.mode() != IntegrityVerificationMode::Online
-            || report.catalog_generation() != proof.number()
+        if publication.report.outcome() != IntegrityVerificationOutcome::Quarantined
+            || publication.report.mode() != IntegrityVerificationMode::Online
+            || publication.report.catalog_generation() != proof.number()
+            || !publication
+                .permitted_maintenance_tasks
+                .contains(&publication.maintenance_task)
             || !proof
-                .same_except_maintenance_task(current, maintenance_task)
+                .same_except_maintenance_tasks(current, publication.permitted_maintenance_tasks)
                 .map_err(map_catalog_failure)?
         {
             return Err(IntegrityFailure(IntegrityFailureCode::InvalidInput));
         }
-        let segment = report
+        let segment = publication
+            .report
             .quarantined_segment()
             .ok_or(IntegrityFailure(IntegrityFailureCode::InvalidInput))?;
         let volume = authority
@@ -276,7 +319,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
         let storage = LedgerStorage::open(volume).map_err(map_ledger_failure)?;
         let metadata = storage
-            .catalog_segments_observed(proof, report.scope())
+            .catalog_segments_observed(proof, publication.report.scope())
             .map_err(map_ledger_failure)?;
         let metadata = metadata
             .into_iter()
@@ -285,11 +328,11 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?;
         publish_quarantine(
             catalog,
-            report.scope(),
+            publication.report.scope(),
             current,
             metadata,
-            transaction,
-            Some(audit),
+            publication.transaction,
+            Some(publication.audit),
         )
     }
 }

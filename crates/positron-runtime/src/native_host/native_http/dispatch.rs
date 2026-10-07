@@ -627,11 +627,14 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{RequestHead, route};
+    use positron_config::{
+        CommandLineOverrides, ConfigurationInputs, EnvironmentOverrides, resolve,
+    };
     use positron_kernel::MountQualification;
 
     use crate::{
-        BootstrapPaths, InitializationPlan, InstanceBootstrap, ListenerRole, ServiceHandle,
-        health::ProcessState,
+        BootstrapPaths, CatalogConfigurationPublication, InitializationPlan, InstanceBootstrap,
+        ListenerRole, RuntimeConfiguration, ServiceHandle, health::ProcessState,
     };
 
     #[test]
@@ -700,6 +703,74 @@ mod tests {
         request
             .join()
             .map_err(|_| "status request thread panicked")?;
+        drop(services);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_status_handler_preserves_initialized_sources_without_workers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-status-readonly-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        #[cfg(unix)]
+        fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
+        let local_key = secrets.join("local-root-key.v1");
+        let configuration = format!(
+            "schema_version = 1\n[listener]\ncontrol_path = \"{}\"\noperations_bind_address = \"127.0.0.1:0\"\napi_bind_address = \"127.0.0.1:0\"\notlp_grpc_bind_address = \"127.0.0.1:0\"\notlp_http_bind_address = \"127.0.0.1:0\"\nloki_push_bind_address = \"127.0.0.1:0\"\noperations_transport = \"plaintext\"\napi_transport = \"plaintext\"\notlp_grpc_transport = \"plaintext\"\notlp_http_transport = \"plaintext\"\nloki_push_transport = \"plaintext\"\n[storage]\ndata_directory = \"{}\"\nsecrets_directory = \"{}\"\n[security]\nlocal_key_file = \"{}\"\n",
+            root.join("control.sock").display(),
+            data.display(),
+            secrets.display(),
+            local_key.display(),
+        );
+        let effective = Arc::new(resolve(ConfigurationInputs::try_new(
+            Some(&configuration),
+            EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+            CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+        )?)?);
+        let paths = BootstrapPaths::with_local_key(
+            &data,
+            &secrets,
+            effective.local_key_file().as_path(),
+            MountQualification::LocalHost,
+        )?;
+        drop(InstanceBootstrap::initialize(
+            &paths,
+            InitializationPlan::non_interactive(),
+        )?);
+        let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
+        let instance = Arc::new(InstanceBootstrap::reopen(&paths)?);
+        let generation =
+            CatalogConfigurationPublication::new(Arc::clone(&instance)).establish(&effective)?;
+        let state = ProcessState::starting();
+        state.set_configuration_runtime(Arc::new(RuntimeConfiguration::new_at_generation(
+            Arc::clone(&effective),
+            generation,
+        )))?;
+        state.set_inspection_authority(Arc::clone(&instance))?;
+        let services = ServiceHandle::new(instance)?;
+        state.set_catalog_operation(services.catalog_operation_gate())?;
+        state.record_bound_listener(ListenerRole::Operations);
+        state.transition(crate::ProcessPhase::Serving);
+
+        let before = source_listing(&data, &secrets)?;
+        let response = request_for_role(
+            &state.health(),
+            ListenerRole::Operations,
+            "GET",
+            "/status",
+            Some(administrator.clone()),
+        );
+        assert_eq!(response.status(), 200);
+        let body = std::str::from_utf8(response.body())?;
+        assert!(body.contains("\"key_custody\":\"verified\""));
+        assert!(!body.contains(&administrator));
+        assert_eq!(source_listing(&data, &secrets)?, before);
+
         drop(services);
         fs::remove_dir_all(root)?;
         Ok(())
@@ -859,5 +930,33 @@ mod tests {
         ) {
             Ok(response) | Err(response) => response,
         }
+    }
+
+    fn source_listing(
+        data: &std::path::Path,
+        secrets: &std::path::Path,
+    ) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, std::io::Error> {
+        let mut listing = Vec::new();
+        collect_regular_files(data, &mut listing)?;
+        collect_regular_files(secrets, &mut listing)?;
+        listing.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(listing)
+    }
+
+    fn collect_regular_files(
+        root: &std::path::Path,
+        listing: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+    ) -> Result<(), std::io::Error> {
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                collect_regular_files(&path, listing)?;
+            } else if file_type.is_file() {
+                listing.push((path, fs::read(entry.path())?));
+            }
+        }
+        Ok(())
     }
 }

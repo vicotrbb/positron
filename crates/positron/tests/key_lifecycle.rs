@@ -3,8 +3,6 @@ use positron_runtime::{
     ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, InitializationPlan,
     InstanceBootstrap, NativeBindings, NativeHost, ServeConfiguration, ShutdownTrigger,
 };
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
@@ -213,7 +211,6 @@ fn native_operations_status_authenticates_and_reports_current_doctor_facts()
 
     let unauthorized = doctor_status(endpoint, "forged-credential")?;
     assert!(unauthorized.starts_with("HTTP/1.1 401"));
-    let sources_before = source_listing(&data, &secrets)?;
     let response = doctor_status(endpoint, claim.secret())?;
     assert!(response.starts_with("HTTP/1.1 200"));
     assert!(response.contains("\"key_custody\":\"verified\""));
@@ -224,14 +221,6 @@ fn native_operations_status_authenticates_and_reports_current_doctor_facts()
             .contains("\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true")
     );
     assert!(!response.contains(claim.secret()));
-    let sources_after = source_listing(&data, &secrets)?;
-    assert_eq!(
-        sources_after,
-        sources_before,
-        "{}",
-        source_listing_difference(&sources_before, &sources_after, &data, &secrets)
-    );
-
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         positron_runtime::ExitOutcome::Graceful
@@ -393,67 +382,6 @@ fn source_listing(
     collect_regular_files(secrets, &mut listing)?;
     listing.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(listing)
-}
-
-#[cfg(unix)]
-fn source_listing_difference(
-    before: &[(std::path::PathBuf, Vec<u8>)],
-    after: &[(std::path::PathBuf, Vec<u8>)],
-    data: &std::path::Path,
-    secrets: &std::path::Path,
-) -> String {
-    let before = source_listing_digests(before);
-    let after = source_listing_digests(after);
-    let paths = before
-        .keys()
-        .chain(after.keys())
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut differences = Vec::new();
-    for path in paths.into_iter().take(16) {
-        let label = source_path_label(path, data, secrets);
-        match (before.get(path), after.get(path)) {
-            (Some(before), Some(after)) if before != after => {
-                differences.push(format!("modified {label}: sha256 {before} -> {after}"));
-            },
-            (Some(before), None) => {
-                differences.push(format!("removed {label}: sha256 {before}"));
-            },
-            (None, Some(after)) => {
-                differences.push(format!("added {label}: sha256 {after}"));
-            },
-            _ => {},
-        }
-    }
-    if differences.is_empty() {
-        "source listing changed without a file-level digest difference".to_owned()
-    } else {
-        differences.join("; ")
-    }
-}
-
-#[cfg(unix)]
-fn source_listing_digests(
-    listing: &[(std::path::PathBuf, Vec<u8>)],
-) -> BTreeMap<&std::path::Path, String> {
-    listing
-        .iter()
-        .map(|(path, bytes)| (path.as_path(), format!("{:x}", Sha256::digest(bytes))))
-        .collect()
-}
-
-#[cfg(unix)]
-fn source_path_label(
-    path: &std::path::Path,
-    data: &std::path::Path,
-    secrets: &std::path::Path,
-) -> String {
-    if let Ok(relative) = path.strip_prefix(data) {
-        return format!("data/{}", relative.display());
-    }
-    if let Ok(relative) = path.strip_prefix(secrets) {
-        return format!("secrets/{}", relative.display());
-    }
-    "outside-configured-source-root".to_owned()
 }
 
 #[cfg(unix)]

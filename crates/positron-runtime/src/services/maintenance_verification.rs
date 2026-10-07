@@ -12,10 +12,11 @@ use positron_governance::{
     Identity, IntegrityQuarantineAuditRequest, integrity_quarantine_audit_intent,
 };
 use positron_kernel::{
-    ActiveSegmentLedger, AuthenticatedEventRange, AuthenticatedIngestRange, Catalog,
-    IntegrityCancellation, IntegrityVerificationOutcome, LifecycleClockState,
-    MaintenanceCoordinator, MaintenancePreconditions, MaintenanceScope, MaintenanceTask,
-    MaintenanceTaskId, MaintenanceTrigger, SegmentScope, TransactionId,
+    ActiveSegmentLedger, AuthenticatedEventRange, AuthenticatedIngestRange, Catalog, CatalogSecret,
+    IntegrityCancellation, IntegrityScrubContinuation, IntegrityVerificationOutcome,
+    IntegrityVerificationRequest, LifecycleClockState, MaintenanceCoordinator,
+    MaintenancePreconditions, MaintenanceScope, MaintenanceTask, MaintenanceTaskId,
+    MaintenanceTrigger, OnlineQuarantinePublication, SegmentScope, TransactionId,
     integrity_quarantine_findings,
 };
 
@@ -25,6 +26,16 @@ use super::{
     maintenance_api::{MaintenanceServiceFailure, signal},
     tenant_segment_key,
 };
+
+const ONLINE_CONTINUATION_DOMAIN: &[u8] = b"positron.online-integrity-continuation.v1\0";
+const ONLINE_CONTINUATION_BYTES: usize = 1 + 7 + 32 + 8 + 56 + 32;
+
+struct OnlineVerificationContinuation {
+    cursor: IntegrityScrubContinuation,
+    catalog_identity: [u8; 32],
+    catalog_generation: u64,
+    pass: usize,
+}
 
 impl ServiceHandle {
     /// Authenticates before parsing one bounded online verification request.
@@ -45,15 +56,11 @@ impl ServiceHandle {
         let shard = VirtualShardId::new(request.shard())
             .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
         let scope = SegmentScope::new(tenant, signal, shard);
-        let continuation = request
-            .continuation()
-            .map(decode_continuation)
-            .transpose()?;
         // Capture an authenticated immutable basis without the sole Catalog
         // writer lease. The bounded scan below therefore cannot block safe
         // foreground reads. A local finding reacquires the writer only for an
         // exact-G0 quarantine compare-and-swap.
-        let snapshot = Catalog::read_current_snapshot(
+        let current = Catalog::read_current_snapshot(
             &self.instance._authority,
             self.instance.instance,
             self.instance
@@ -62,7 +69,7 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         )
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-        if !snapshot
+        if !current
             .reachable_ledger_scopes(tenant, signal)
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
             .into_iter()
@@ -70,21 +77,62 @@ impl ServiceHandle {
         {
             return Err(MaintenanceServiceFailure::SourceUnavailable);
         }
-        if continuation.is_none()
-            && request
-                .expected_catalog_generation()
-                .is_some_and(|expected| expected != snapshot.number())
-        {
-            return Ok(stale_online_report(scope, snapshot.number()));
-        }
-        let task_identity = online_verification_task_identity(
-            scope,
-            snapshot.identity().to_bytes(),
-            request.continuation(),
-        )?;
+        let continuation = request
+            .continuation()
+            .map(|value| {
+                decode_continuation(
+                    value,
+                    &self
+                        .instance
+                        .key
+                        .catalog_secret(self.instance.instance)
+                        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+                )
+            })
+            .transpose()?;
+        let current_source_manifest = current
+            .integrity_scope_source_identity(scope)
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        let current_generation = current.number();
+        let snapshot = match continuation.as_ref() {
+            Some(continuation) => {
+                if request.expected_catalog_generation() != Some(continuation.catalog_generation) {
+                    return Ok(stale_online_report(scope, current.number()));
+                }
+                Catalog::read_historical_snapshot(
+                    &self.instance._authority,
+                    self.instance.instance,
+                    self.instance
+                        .key
+                        .catalog_secret(self.instance.instance)
+                        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+                    &current,
+                    continuation.catalog_identity,
+                    continuation.catalog_generation,
+                )
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
+            },
+            None => {
+                if request
+                    .expected_catalog_generation()
+                    .is_some_and(|expected| expected != current.number())
+                {
+                    return Ok(stale_online_report(scope, current.number()));
+                }
+                current
+            },
+        };
+        let pass = continuation.as_ref().map_or(0, |value| value.pass);
+        let task_identity =
+            online_verification_task_identity(scope, snapshot.identity().to_bytes(), pass)?;
+        let publication_lineage =
+            online_verification_publication_lineage(scope, snapshot.identity().to_bytes(), pass)?;
         let source_manifest = snapshot
             .integrity_scope_source_identity(scope)
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        if continuation.is_some() && source_manifest != current_source_manifest {
+            return Ok(stale_online_report(scope, current_generation));
+        }
         let now = self.maintenance_status_now()?;
         let coordinator = self.instance.maintenance_coordinator();
         let execution = {
@@ -130,17 +178,20 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             let transaction =
                 online_verification_transaction(scope, snapshot.identity().to_bytes())?;
+            let cancellation = IntegrityCancellation::new();
             let report = ActiveSegmentLedger::verify_online_snapshot_integrity(
                 &self.instance._authority,
                 &snapshot,
                 self.instance.instance,
-                scope,
-                protection,
-                self.maintenance_integrity_scrub_budget()
-                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
-                &IntegrityCancellation::new(),
-                transaction,
-                continuation,
+                IntegrityVerificationRequest::new(
+                    scope,
+                    protection,
+                    self.maintenance_integrity_scrub_budget()
+                        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+                    &cancellation,
+                    transaction,
+                    continuation.as_ref().map(|value| value.cursor),
+                ),
             )
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             let current = Catalog::read_current_snapshot(
@@ -153,7 +204,7 @@ impl ServiceHandle {
             )
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             if !snapshot
-                .same_except_maintenance_task(&current, task_identity)
+                .same_except_maintenance_tasks(&current, &publication_lineage)
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
             {
                 let _catalog_operation = self
@@ -177,7 +228,7 @@ impl ServiceHandle {
                     .pin()
                     .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
                 if !snapshot
-                    .same_except_maintenance_task(&current, task_identity)
+                    .same_except_maintenance_tasks(&current, &publication_lineage)
                     .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
                 {
                     execution
@@ -205,10 +256,13 @@ impl ServiceHandle {
                         &catalog,
                         &snapshot,
                         &current,
-                        report,
-                        transaction,
-                        task_identity,
-                        audit,
+                        OnlineQuarantinePublication::new(
+                            report,
+                            transaction,
+                            task_identity,
+                            &publication_lineage,
+                            audit,
+                        ),
                     )
                     .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
                     self.mark_integrity_degraded();
@@ -227,7 +281,17 @@ impl ServiceHandle {
             // source selected and scanned above. The report generation is G0;
             // the current response snapshot supplies only the authorized
             // quarantine evidence that the scan just published.
-            online_report(report, &snapshot, &response_snapshot)
+            online_report(
+                report,
+                &snapshot,
+                &response_snapshot,
+                &self
+                    .instance
+                    .key
+                    .catalog_secret(self.instance.instance)
+                    .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+                pass,
+            )
         })();
         if let Err(failure) = result {
             // Admission published a durable Running record. Every later
@@ -295,6 +359,8 @@ fn online_report(
     report: positron_kernel::IntegrityVerificationReport,
     scanned_snapshot: &positron_kernel::CatalogSnapshot,
     response_snapshot: &positron_kernel::CatalogSnapshot,
+    secret: &CatalogSecret,
+    pass: usize,
 ) -> Result<OnlineVerificationReport, MaintenanceServiceFailure> {
     let outcome = match report.outcome() {
         IntegrityVerificationOutcome::Verified => "verified",
@@ -323,7 +389,14 @@ fn online_report(
         report_checksum: String::new(),
         continuation: report
             .continuation()
-            .map(|cursor| hex_bytes(&cursor.encode())),
+            .map(|cursor| {
+                let next_pass = pass
+                    .checked_add(1)
+                    .filter(|next| *next < IntegrityScrubContinuation::MAX_PASSES)
+                    .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
+                encode_continuation(cursor, scanned_snapshot, secret, next_pass)
+            })
+            .transpose()?,
         findings,
     };
     online.report_checksum = online.checksum();
@@ -439,10 +512,70 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn decode_continuation(
     value: &str,
-) -> Result<positron_kernel::IntegrityScrubContinuation, MaintenanceServiceFailure> {
-    let bytes = decode_fixed_hex::<56>(value).ok_or(MaintenanceServiceFailure::InvalidRequest)?;
-    positron_kernel::IntegrityScrubContinuation::decode(&bytes)
-        .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
+    secret: &CatalogSecret,
+) -> Result<OnlineVerificationContinuation, MaintenanceServiceFailure> {
+    let bytes = decode_fixed_hex::<ONLINE_CONTINUATION_BYTES>(value)
+        .ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+    let (payload, tag) = bytes.split_at(ONLINE_CONTINUATION_BYTES.saturating_sub(32));
+    let tag: [u8; 32] = tag
+        .try_into()
+        .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+    if payload.first().copied() != Some(1) {
+        return Err(MaintenanceServiceFailure::InvalidRequest);
+    }
+    secret
+        .verify_opaque_digest(ONLINE_CONTINUATION_DOMAIN, payload, &tag)
+        .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+    let catalog_identity = payload
+        .get(8..40)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+    let pass = payload
+        .get(1..5)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .and_then(|pass| usize::try_from(pass).ok())
+        .filter(|pass| *pass > 0 && *pass < IntegrityScrubContinuation::MAX_PASSES)
+        .ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+    let catalog_generation = payload
+        .get(40..48)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_be_bytes)
+        .ok_or(MaintenanceServiceFailure::InvalidRequest)?;
+    let cursor = payload
+        .get(48..104)
+        .ok_or(MaintenanceServiceFailure::InvalidRequest)
+        .and_then(|bytes| {
+            IntegrityScrubContinuation::decode(bytes)
+                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
+        })?;
+    Ok(OnlineVerificationContinuation {
+        cursor,
+        catalog_identity,
+        catalog_generation,
+        pass,
+    })
+}
+
+fn encode_continuation(
+    cursor: IntegrityScrubContinuation,
+    snapshot: &positron_kernel::CatalogSnapshot,
+    secret: &CatalogSecret,
+    pass: usize,
+) -> Result<String, MaintenanceServiceFailure> {
+    let mut bytes = [0_u8; ONLINE_CONTINUATION_BYTES];
+    bytes[0] = 1;
+    let pass =
+        u32::try_from(pass).map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    bytes[1..5].copy_from_slice(&pass.to_be_bytes());
+    bytes[8..40].copy_from_slice(&snapshot.identity().to_bytes());
+    bytes[40..48].copy_from_slice(&snapshot.number().to_be_bytes());
+    bytes[48..104].copy_from_slice(&cursor.encode());
+    let tag = secret
+        .opaque_digest(ONLINE_CONTINUATION_DOMAIN, &bytes[..104])
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    bytes[104..].copy_from_slice(&tag);
+    Ok(hex_bytes(&bytes))
 }
 
 fn online_verification_transaction(
@@ -471,7 +604,7 @@ fn online_verification_transaction(
 pub(super) fn online_verification_task_identity(
     scope: SegmentScope,
     catalog_identity: [u8; 32],
-    continuation: Option<&str>,
+    pass: usize,
 ) -> Result<MaintenanceTaskId, MaintenanceServiceFailure> {
     let mut digest = Sha256::new();
     digest.update(b"positron/online-verification-task/v1");
@@ -482,13 +615,9 @@ pub(super) fn online_verification_task_identity(
         SignalKind::Traces => 2,
     }]);
     digest.update(scope.shard_id().value().to_be_bytes());
-    match continuation {
-        Some(value) => {
-            digest.update([1]);
-            digest.update(value.as_bytes());
-        },
-        None => digest.update([0]),
-    }
+    let pass =
+        u32::try_from(pass).map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    digest.update(pass.to_be_bytes());
     let bytes: [u8; 32] = digest.finalize().into();
     let identity = bytes
         .get(..16)
@@ -496,6 +625,29 @@ pub(super) fn online_verification_task_identity(
         .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
     MaintenanceTaskId::new(identity)
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)
+}
+
+fn online_verification_publication_lineage(
+    scope: SegmentScope,
+    catalog_identity: [u8; 32],
+    pass: usize,
+) -> Result<Vec<MaintenanceTaskId>, MaintenanceServiceFailure> {
+    let count = pass
+        .checked_add(1)
+        .filter(|count| *count <= IntegrityScrubContinuation::MAX_PASSES)
+        .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
+    let mut lineage = Vec::new();
+    lineage
+        .try_reserve_exact(count)
+        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    for prior_pass in 0..count {
+        lineage.push(online_verification_task_identity(
+            scope,
+            catalog_identity,
+            prior_pass,
+        )?);
+    }
+    Ok(lineage)
 }
 
 fn decode_fixed_hex<const N: usize>(value: &str) -> Option<[u8; N]> {

@@ -9,9 +9,10 @@ use std::{
 use sha2::{Digest, Sha256};
 
 use positron_kernel::{
-    ActiveSegmentLedger, Catalog, IntegrityCancellation, IntegrityScrubBudget,
-    IntegrityVerificationOutcome, MaintenanceCheckpoint, MaintenanceExecution, MaintenanceFailure,
-    MaintenanceScope, MaintenanceTaskClass, SegmentScope, SnapshotLeaseId, TransactionId,
+    ActiveSegmentLedger, Catalog, CatalogIntegrityVerificationRequest, IntegrityCancellation,
+    IntegrityScrubBudget, IntegrityVerificationOutcome, IntegrityVerificationRequest,
+    MaintenanceCheckpoint, MaintenanceExecution, MaintenanceFailure, MaintenanceScope,
+    MaintenanceTaskClass, SegmentScope, SnapshotLeaseId, TransactionId,
 };
 use positron_signals::{
     LogRetentionPolicy, LogStore, LogStoreFailureCode, MaintenanceCompactionExecution,
@@ -115,17 +116,22 @@ pub(super) fn verify_startup_integrity(
     drop(snapshot);
     for scope in scopes {
         let key = super::tenant_segment_key(instance, &identity, scope)?;
+        let cancellation = IntegrityCancellation::new();
         let report = ActiveSegmentLedger::verify_catalog_integrity(
             &instance._authority,
             &catalog,
-            scope,
-            key,
-            positron_kernel::IntegrityVerificationMode::Startup,
-            IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
-                .map_err(|_| ServiceFailure::Internal)?,
-            &IntegrityCancellation::new(),
-            TransactionId::new([0x7c; 16]).map_err(|_| ServiceFailure::Internal)?,
-            None,
+            CatalogIntegrityVerificationRequest::new(
+                IntegrityVerificationRequest::new(
+                    scope,
+                    key,
+                    IntegrityScrubBudget::new(IntegrityScrubBudget::MAX_SEGMENTS)
+                        .map_err(|_| ServiceFailure::Internal)?,
+                    &cancellation,
+                    TransactionId::new([0x7c; 16]).map_err(|_| ServiceFailure::Internal)?,
+                    None,
+                ),
+                positron_kernel::IntegrityVerificationMode::Startup,
+            ),
         )
         .map_err(|failure| match failure.code() {
             positron_kernel::IntegrityFailureCode::StorageUnavailable => {
@@ -676,14 +682,18 @@ fn complete_integrity_scrub(
     let report = ActiveSegmentLedger::verify_catalog_integrity_with_audit(
         &instance._authority,
         catalog,
-        scope,
-        key,
-        positron_kernel::IntegrityVerificationMode::Online,
-        services.maintenance_integrity_scrub_budget()?,
-        cancellation,
-        transaction,
-        continuation,
-        Some(quarantine_audit),
+        CatalogIntegrityVerificationRequest::new(
+            IntegrityVerificationRequest::new(
+                scope,
+                key,
+                services.maintenance_integrity_scrub_budget()?,
+                cancellation,
+                transaction,
+                continuation,
+            ),
+            positron_kernel::IntegrityVerificationMode::Online,
+        )
+        .with_quarantine_audit(quarantine_audit),
     )
     .map_err(|failure| match failure.code() {
         positron_kernel::IntegrityFailureCode::StorageUnavailable => {

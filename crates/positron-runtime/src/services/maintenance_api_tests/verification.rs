@@ -86,9 +86,8 @@ fn post_admission_catalog_failure_terminalizes_the_scrub_and_releases_its_scope(
     )?
     .seal()?;
     let snapshot = catalog.pin()?;
-    let task =
-        super::online_verification_task_identity(scope, snapshot.identity().to_bytes(), None)
-            .map_err(|failure| format!("task identity: {failure:?}"))?;
+    let task = super::online_verification_task_identity(scope, snapshot.identity().to_bytes(), 0)
+        .map_err(|failure| format!("task identity: {failure:?}"))?;
     drop((snapshot, catalog));
     let body = OnlineVerificationRequest::new(
         initialized.default_tenant_id().to_canonical_text(),
@@ -188,7 +187,32 @@ fn online_verification_continuation_survives_its_own_durable_task_publications()
     assert_eq!(first.outcome, "incomplete");
     assert!(!first.verification_complete);
     assert_eq!(first.examined_segments, 1);
-
+    assert_eq!(
+        first.catalog_generation, generation,
+        "the first pass reports the immutable generation selected by the request"
+    );
+    let mut tampered = first.continuation.clone().ok_or("first continuation")?;
+    let replacement = if tampered.as_bytes().get(16) == Some(&b'0') {
+        "1"
+    } else {
+        "0"
+    };
+    tampered.replace_range(16..17, replacement);
+    assert_eq!(
+        services.verify_online_integrity(
+            &administrator,
+            &OnlineVerificationRequest::new(
+                initialized.default_tenant_id().to_canonical_text(),
+                "logs".to_owned(),
+                scope.shard_id().value(),
+                generation.checked_add(1),
+                Some(tampered),
+            )
+            .encode()?,
+        ),
+        Err(MaintenanceServiceFailure::InvalidRequest),
+        "changing the wrapper basis together with the expected generation must not rebind a continuation"
+    );
     let mut resumed = first;
     for _ in 0..4 {
         if resumed.verification_complete {
@@ -202,16 +226,325 @@ fn online_verification_continuation_survives_its_own_durable_task_publications()
                     initialized.default_tenant_id().to_canonical_text(),
                     "logs".to_owned(),
                     scope.shard_id().value(),
-                    Some(resumed.catalog_generation),
+                    Some(generation),
                     Some(continuation),
                 )
                 .encode()?,
             )
             .map_err(|failure| format!("resumed continuation pass: {failure:?}"))?;
+        assert_eq!(
+            resumed.catalog_generation, generation,
+            "every resumed pass must scan and report the original immutable Catalog generation"
+        );
     }
     assert_eq!(resumed.outcome, "verified");
     assert!(resumed.verification_complete);
     assert_eq!(resumed.omitted_segments, 0);
+    Ok(())
+}
+
+#[test]
+fn online_verification_continuation_refuses_a_replaced_scope_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    services
+        .install_integrity_scrub_budget_for_test(1)
+        .map_err(|failure| format!("install bounded test budget: {failure:?}"))?;
+    for ordinal in 1_u8..=2 {
+        services.ingest_otlp_logs(
+            &ingest,
+            request(&format!("online-verify-replaced-source-{ordinal}")).encode_to_vec(),
+        )?;
+        let catalog = open_catalog(&initialized)?;
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            &catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+    }
+    let catalog = open_catalog(&initialized)?;
+    let snapshot = catalog.pin()?;
+    let scope = snapshot
+        .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+        .into_iter()
+        .next()
+        .ok_or("log scope")?;
+    let generation = snapshot.number();
+    let source_before = snapshot.integrity_scope_source_identity(scope)?;
+    drop((snapshot, catalog));
+
+    let first = services
+        .verify_online_integrity(
+            &administrator,
+            &OnlineVerificationRequest::new(
+                initialized.default_tenant_id().to_canonical_text(),
+                "logs".to_owned(),
+                scope.shard_id().value(),
+                Some(generation),
+                None,
+            )
+            .encode()?,
+        )
+        .map_err(|failure| format!("first bounded pass: {failure:?}"))?;
+    assert_eq!(first.outcome, "incomplete");
+    let continuation = first.continuation.ok_or("continuation")?;
+
+    services.ingest_otlp_logs(
+        &ingest,
+        request("online-verify-replaced-source-successor").encode_to_vec(),
+    )?;
+    let catalog = open_catalog(&initialized)?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        initialized.tenant_segment_key_for_test(scope)?,
+    )?
+    .seal()?;
+    let current = catalog.pin()?;
+    assert_ne!(
+        current.integrity_scope_source_identity(scope)?,
+        source_before,
+        "the successor must carry a genuinely different authenticated scope source"
+    );
+    assert!(current.number() > generation);
+    drop((current, catalog));
+
+    let resumed = services
+        .verify_online_integrity(
+            &administrator,
+            &OnlineVerificationRequest::new(
+                initialized.default_tenant_id().to_canonical_text(),
+                "logs".to_owned(),
+                scope.shard_id().value(),
+                Some(generation),
+                Some(continuation),
+            )
+            .encode()?,
+        )
+        .map_err(|failure| format!("replaced-source resume: {failure:?}"))?;
+    assert_eq!(resumed.outcome, "stale");
+    assert!(!resumed.verification_complete);
+    assert!(
+        resumed.catalog_generation > generation,
+        "a rejected historical continuation names the current authoritative generation"
+    );
+    Ok(())
+}
+
+#[test]
+fn online_verification_continuation_publishes_a_localized_quarantine_after_its_first_pass()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    services
+        .install_integrity_scrub_budget_for_test(1)
+        .map_err(|failure| format!("install bounded test budget: {failure:?}"))?;
+    services.ingest_otlp_logs(
+        &ingest,
+        request("online-verify-resumed-quarantine-1").encode_to_vec(),
+    )?;
+    let catalog = open_catalog(&initialized)?;
+    let scope = catalog
+        .pin()?
+        .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+        .into_iter()
+        .next()
+        .ok_or("log scope")?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        initialized.tenant_segment_key_for_test(scope)?,
+    )?
+    .seal()?;
+    drop(catalog);
+    let sealed_directory = fixture.sealed_segments_directory();
+    let before_second = fs::read_dir(&sealed_directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    services.ingest_otlp_logs(
+        &ingest,
+        request("online-verify-resumed-quarantine-2").encode_to_vec(),
+    )?;
+    let catalog = open_catalog(&initialized)?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        initialized.tenant_segment_key_for_test(scope)?,
+    )?
+    .seal()?;
+    let generation = catalog.pin()?.number();
+    drop(catalog);
+    let damaged_segment = fs::read_dir(&sealed_directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| !before_second.contains(path))
+        .ok_or("second sealed segment")?;
+    let damaged_bytes = b"resumed online verification corruption";
+    fs::write(&damaged_segment, damaged_bytes)?;
+
+    let first = services
+        .verify_online_integrity(
+            &administrator,
+            &OnlineVerificationRequest::new(
+                initialized.default_tenant_id().to_canonical_text(),
+                "logs".to_owned(),
+                scope.shard_id().value(),
+                Some(generation),
+                None,
+            )
+            .encode()?,
+        )
+        .map_err(|failure| format!("first healthy pass: {failure:?}"))?;
+    assert_eq!(first.outcome, "incomplete");
+    assert_eq!(first.catalog_generation, generation);
+    let mut resumed = first;
+    for _ in 0..4 {
+        let continuation = resumed.continuation.take().ok_or("resumed continuation")?;
+        resumed = services
+            .verify_online_integrity(
+                &administrator,
+                &OnlineVerificationRequest::new(
+                    initialized.default_tenant_id().to_canonical_text(),
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    Some(generation),
+                    Some(continuation),
+                )
+                .encode()?,
+            )
+            .map_err(|failure| format!("resumed localized finding: {failure:?}"))?;
+        if resumed.outcome != "incomplete" {
+            break;
+        }
+    }
+    assert_eq!(resumed.catalog_generation, generation);
+    assert_eq!(resumed.outcome, "quarantined");
+    assert!(!resumed.verification_complete);
+    assert!(!resumed.findings.is_empty());
+    assert_eq!(fs::read(&damaged_segment)?, damaged_bytes);
+    assert!(
+        !positron_kernel::integrity_quarantine_findings(&open_catalog(&initialized)?.pin()?)?
+            .is_empty(),
+        "a localized resumed finding must use the canonical durable quarantine publication"
+    );
+    Ok(())
+}
+
+#[test]
+fn online_verification_continuation_refuses_foreign_catalog_mutation_before_quarantine()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    services
+        .install_integrity_scrub_budget_for_test(1)
+        .map_err(|failure| format!("install bounded test budget: {failure:?}"))?;
+    services.ingest_otlp_logs(
+        &ingest,
+        request("online-verify-foreign-cas-1").encode_to_vec(),
+    )?;
+    let catalog = open_catalog(&initialized)?;
+    let scope = catalog
+        .pin()?
+        .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+        .into_iter()
+        .next()
+        .ok_or("log scope")?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        initialized.tenant_segment_key_for_test(scope)?,
+    )?
+    .seal()?;
+    drop(catalog);
+    let sealed_directory = fixture.sealed_segments_directory();
+    let before_second = fs::read_dir(&sealed_directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    services.ingest_otlp_logs(
+        &ingest,
+        request("online-verify-foreign-cas-2").encode_to_vec(),
+    )?;
+    let catalog = open_catalog(&initialized)?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        initialized.tenant_segment_key_for_test(scope)?,
+    )?
+    .seal()?;
+    let generation = catalog.pin()?.number();
+    drop(catalog);
+    let damaged_segment = fs::read_dir(&sealed_directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| !before_second.contains(path))
+        .ok_or("second sealed segment")?;
+    let damaged_bytes = b"foreign-cas online verification corruption";
+    fs::write(&damaged_segment, damaged_bytes)?;
+
+    let first = services
+        .verify_online_integrity(
+            &administrator,
+            &OnlineVerificationRequest::new(
+                initialized.default_tenant_id().to_canonical_text(),
+                "logs".to_owned(),
+                scope.shard_id().value(),
+                Some(generation),
+                None,
+            )
+            .encode()?,
+        )
+        .map_err(|failure| format!("first healthy pass: {failure:?}"))?;
+    assert_eq!(first.outcome, "incomplete");
+    let continuation = first.continuation.ok_or("continuation")?;
+    publish_unrelated(&initialized)?;
+
+    let resumed = services
+        .verify_online_integrity(
+            &administrator,
+            &OnlineVerificationRequest::new(
+                initialized.default_tenant_id().to_canonical_text(),
+                "logs".to_owned(),
+                scope.shard_id().value(),
+                Some(generation),
+                Some(continuation),
+            )
+            .encode()?,
+        )
+        .map_err(|failure| format!("foreign-Catalog resume: {failure:?}"))?;
+    assert_eq!(resumed.outcome, "stale");
+    assert!(!resumed.verification_complete);
+    assert!(resumed.catalog_generation > generation);
+    assert_eq!(fs::read(&damaged_segment)?, damaged_bytes);
+    assert!(
+        positron_kernel::integrity_quarantine_findings(&open_catalog(&initialized)?.pin()?)?
+            .is_empty(),
+        "a foreign Catalog mutation must prevent durable quarantine publication"
+    );
     Ok(())
 }
 
@@ -390,9 +723,8 @@ fn expected_online_generation_never_rebases_after_admission()
     .seal()?;
     let snapshot = catalog.pin()?;
     let generation = snapshot.number();
-    let task =
-        super::online_verification_task_identity(scope, snapshot.identity().to_bytes(), None)
-            .map_err(|_| "online verification task identity")?;
+    let task = super::online_verification_task_identity(scope, snapshot.identity().to_bytes(), 0)
+        .map_err(|_| "online verification task identity")?;
     drop((snapshot, catalog));
 
     let (captured_tx, captured_rx) = mpsc::channel();

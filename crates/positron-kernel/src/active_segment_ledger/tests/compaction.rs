@@ -17,14 +17,14 @@ use crate::active_segment_ledger::publication::publish_segments;
 use crate::active_segment_ledger::recovery::{frontier_name, segment_name};
 use crate::catalog::{CatalogFileEvent, with_catalog_fault};
 use crate::{
-    ActiveSegmentLedger, AuthenticatedEventRange, Catalog, CatalogObject, CatalogProposal,
-    CatalogSecret, CommittedBlock, CompactionBlock, FormatEpoch, IngestTime, InstanceId,
-    IntegrityCancellation, IntegrityScrubBudget, IntegrityVerificationMode, LedgerCompletionState,
-    LedgerFailureCode, MaintenanceCoordinator, MaintenanceTaskId, MountQualification,
-    PreparedStoreBlock, PrimaryDataVolume, RecoveryWorkClaim, RecoveryWorkKind, ResourceAmounts,
-    ResourceDimension, RetentionBucket, RetentionTimeAuthority, SegmentId, SegmentProtectionKey,
-    SegmentScope, StoreBlockIdentity, TransactionId, WorkClaim, WorkKind,
-    integrity_quarantine_findings,
+    ActiveSegmentLedger, AuthenticatedEventRange, Catalog, CatalogIntegrityVerificationRequest,
+    CatalogObject, CatalogProposal, CatalogSecret, CommittedBlock, CompactionBlock, FormatEpoch,
+    IngestTime, InstanceId, IntegrityCancellation, IntegrityScrubBudget, IntegrityVerificationMode,
+    IntegrityVerificationRequest, LedgerCompletionState, LedgerFailureCode, MaintenanceCoordinator,
+    MaintenanceTaskId, MountQualification, PreparedStoreBlock, PrimaryDataVolume,
+    RecoveryWorkClaim, RecoveryWorkKind, ResourceAmounts, ResourceDimension, RetentionBucket,
+    RetentionTimeAuthority, SegmentId, SegmentProtectionKey, SegmentScope, StoreBlockIdentity,
+    TransactionId, WorkClaim, WorkKind, integrity_quarantine_findings,
 };
 
 #[cfg(feature = "test-support")]
@@ -1941,13 +1941,17 @@ fn compaction_preserves_quarantined_sources_and_other_scopes_remain_eligible()
     let report = ActiveSegmentLedger::verify_catalog_integrity(
         &authority,
         &catalog,
-        scope,
-        key(),
-        IntegrityVerificationMode::Online,
-        IntegrityScrubBudget::new(1).map_err(|_| "valid integrity budget")?,
-        &IntegrityCancellation::new(),
-        TransactionId::new([0xb7; 16])?,
-        None,
+        CatalogIntegrityVerificationRequest::new(
+            IntegrityVerificationRequest::new(
+                scope,
+                key(),
+                IntegrityScrubBudget::new(1).map_err(|_| "valid integrity budget")?,
+                &IntegrityCancellation::new(),
+                TransactionId::new([0xb7; 16])?,
+                None,
+            ),
+            IntegrityVerificationMode::Online,
+        ),
     )?;
     assert_eq!(report.quarantined_segment(), Some(sealed.segment_id()));
     let duration = NonZeroU64::new(60).ok_or("compaction retention duration")?;
