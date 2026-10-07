@@ -34,10 +34,7 @@ use offline::{decode_offline_continuation, failure_status, offline_scope};
 #[cfg(test)]
 use online::online_request;
 use options::{VerifyFailure, VerifyOptions};
-use render::{
-    hex, render_aggregate_evidence, render_finding, render_report,
-    render_retained_localized_observation,
-};
+use render::{hex, render_aggregate_evidence, render_finding, render_report};
 
 #[doc(hidden)]
 pub(super) fn fuzz_offline_continuation_hex(value: &str) {
@@ -130,7 +127,7 @@ fn execute(
         Ok(report) => {
             let status = offline_status(report.aggregate_outcome());
             let mut output = format!(
-                "mode=offline\nstatus={status}\naggregate_outcome={status}\nverification_complete={}\nreport_count={}\naggregate_scope=all_reachable\naggregate_catalog_generation={}\naggregate_covered_scopes={}\naggregate_reachable_scopes={}\naggregate_examined_segments={}\naggregate_examined_bytes={}\naggregate_omitted_segments={}\naggregate_evidence_count={}\n",
+                "mode=offline\nstatus={status}\naggregate_outcome={status}\nverification_complete={}\nreport_count={}\naggregate_scope=all_reachable\naggregate_catalog_generation={}\naggregate_covered_scopes={}\naggregate_reachable_scopes={}\naggregate_examined_segments={}\naggregate_examined_bytes={}\naggregate_omitted_segments={}\naggregate_omitted_segments_semantics=cumulative_deferred_observations\naggregate_evidence_count={}\n",
                 report.is_complete(),
                 report.reports().len(),
                 report.facts().catalog_generation(),
@@ -146,9 +143,6 @@ fn execute(
             }
             for evidence in report.aggregate_evidence() {
                 output.push_str(&render_aggregate_evidence(*evidence));
-            }
-            for observation in report.localized_observations() {
-                output.push_str(&render_retained_localized_observation(*observation));
             }
             if let Some(continuation) = report.continuation() {
                 output.push_str(&format!(

@@ -51,6 +51,314 @@ fn runtime_maintenance_worker_verifies_a_durable_integrity_scrub_task() -> Resul
 }
 
 #[test]
+fn continuously_admitted_compaction_does_not_starve_due_integrity_scrub_discovery()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (mut initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let (retention_time, elapsed) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
+    Arc::get_mut(&mut initialized)
+        .ok_or("sole initialized instance")?
+        .install_retention_time_for_test(retention_time)?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+
+    let target_request = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            scope_logs: vec![ScopeLogs {
+                log_records: vec![LogRecord {
+                    time_unix_nano: 10_000_000_000,
+                    body: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("scrub-target".to_owned())),
+                    }),
+                    ..LogRecord::default()
+                }],
+                ..ScopeLogs::default()
+            }],
+            ..ResourceLogs::default()
+        }],
+    };
+    let admitted = services.ingest_otlp_logs(&ingest, target_request.encode_to_vec())?;
+    if admitted.accepted_records() != 1 {
+        return Err(format!("authenticated scrub target admission: {admitted:?}").into());
+    }
+    let catalog = open_catalog(&initialized)?;
+    let target_scope = catalog
+        .pin()?
+        .reachable_ledger_scopes(initialized.tenant, SignalKind::Logs)?
+        .into_iter()
+        .next()
+        .ok_or("reachable authenticated logs target")?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        target_scope,
+        initialized.tenant_segment_key_for_test(target_scope)?,
+    )?
+    .seal()?;
+    drop(catalog);
+
+    assert_eq!(
+        services
+            .ingest_otlp_traces(
+                &ingest,
+                ExportTraceServiceRequest {
+                    resource_spans: vec![ResourceSpans {
+                        scope_spans: vec![ScopeSpans {
+                            spans: vec![Span {
+                                trace_id: vec![0x82; 16],
+                                span_id: vec![0x83; 8],
+                                name: "continuous-compaction-work-one".to_owned(),
+                                start_time_unix_nano: 10_000_000_001,
+                                end_time_unix_nano: 10_000_000_002,
+                                ..Span::default()
+                            }],
+                            ..ScopeSpans::default()
+                        }],
+                        ..ResourceSpans::default()
+                    }]
+                }
+                .encode_to_vec(),
+            )?
+            .accepted_records(),
+        1,
+        "authenticated first compaction input"
+    );
+    let catalog = open_catalog(&initialized)?;
+    let work_scope = catalog
+        .pin()?
+        .reachable_ledger_scopes(initialized.tenant, SignalKind::Traces)?
+        .into_iter()
+        .next()
+        .ok_or("reachable authenticated traces work scope")?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        work_scope,
+        initialized.tenant_segment_key_for_test(work_scope)?,
+    )?
+    .seal()?;
+    drop(catalog);
+    assert_eq!(
+        services
+            .ingest_otlp_traces(
+                &ingest,
+                ExportTraceServiceRequest {
+                    resource_spans: vec![ResourceSpans {
+                        scope_spans: vec![ScopeSpans {
+                            spans: vec![Span {
+                                trace_id: vec![0x84; 16],
+                                span_id: vec![0x85; 8],
+                                name: "continuous-compaction-work-two".to_owned(),
+                                start_time_unix_nano: 10_000_000_003,
+                                end_time_unix_nano: 10_000_000_004,
+                                ..Span::default()
+                            }],
+                            ..ScopeSpans::default()
+                        }],
+                        ..ResourceSpans::default()
+                    }]
+                }
+                .encode_to_vec(),
+            )?
+            .accepted_records(),
+        1,
+        "authenticated second compaction input"
+    );
+    let catalog = open_catalog(&initialized)?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        work_scope,
+        initialized.tenant_segment_key_for_test(work_scope)?,
+    )?
+    .seal()?;
+    let target_source = catalog
+        .pin()?
+        .integrity_scope_source_identity(target_scope)?;
+    drop(catalog);
+
+    let work_request = |turn: u8| {
+        positron_api::maintenance::MaintenanceRunRequest::new(
+            "compaction".to_owned(),
+            initialized.default_tenant_id().to_canonical_text(),
+            "traces".to_owned(),
+            work_scope.shard_id().value(),
+            format!("00000000-0000-0000-0000-{:012}", 82 + u32::from(turn)),
+        )
+    };
+    for turn in 0..3_u8 {
+        let request = work_request(turn);
+        services
+            .run_maintenance(&administrator, &request.encode()?)
+            .map_err(|failure| {
+                format!("admit continuously queued compaction {turn}: {failure:?}")
+            })?;
+        assert!(
+            services
+                .wake_maintenance_worker()
+                .map_err(|failure| format!("continuous compaction worker {turn}: {failure:?}"))?,
+            "each admitted public compaction must make bounded worker progress"
+        );
+    }
+
+    let target_maintenance_scope = MaintenanceScope::segment(
+        target_scope.tenant_id(),
+        target_scope.signal_kind(),
+        target_scope.shard_id(),
+    );
+    let statuses = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|failure| format!("statuses during continuous compaction: {failure:?}"))?;
+    let scrub = statuses
+        .iter()
+        .find(|status| {
+            status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                && status.task().scope() == target_maintenance_scope
+        })
+        .ok_or("continuous admitted compaction must not starve scrub discovery")?
+        .task()
+        .clone();
+    assert_eq!(
+        scrub.source_binding().map(|binding| binding.to_bytes()),
+        Some(target_source),
+        "the discovered scrub remains bound to the untouched authenticated target source"
+    );
+    let now = initialized
+        .retention_time
+        .governance_now_seconds()
+        .map_err(|failure| format!("lifecycle clock after continuous backlog: {failure:?}"))?;
+    elapsed.advance(
+        scrub
+            .not_before()
+            .checked_sub(now)
+            .ok_or("scheduled integrity due remains monotonic")?
+            .checked_mul(1_000_000_000)
+            .ok_or("scheduled integrity due nanos")?,
+    )?;
+    let due_now = initialized
+        .retention_time
+        .governance_now_seconds()
+        .map_err(|failure| format!("lifecycle clock after advance: {failure:?}"))?;
+    assert!(
+        due_now >= scrub.not_before(),
+        "the persisted target descriptor must be actually due before fairness is tested"
+    );
+    for turn in 3..11_u8 {
+        let due_work = work_request(turn);
+        services
+            .run_maintenance(&administrator, &due_work.encode()?)
+            .map_err(|failure| {
+                format!("admit continuous work beside due scrub {turn}: {failure:?}")
+            })?;
+        let live_now = initialized
+            .retention_time
+            .governance_now_seconds()
+            .map_err(|failure| format!("lifecycle clock beside due scrub {turn}: {failure:?}"))?;
+        assert!(
+            live_now >= scrub.not_before(),
+            "public compaction must not roll the persisted due scrub backward: turn={turn}, live_now={live_now}, due={}",
+            scrub.not_before()
+        );
+        if let Err(failure) = services.wake_maintenance_worker() {
+            let statuses =
+                initialized
+                    .maintenance_coordinator()
+                    .statuses()
+                    .map_err(|status_failure| {
+                        format!("due scrub status after worker {turn}: {status_failure:?}")
+                    })?;
+            let resources =
+                initialized
+                    .resource_governor()
+                    .inspect()
+                    .map_err(|resource_failure| {
+                        format!("due scrub resources after worker {turn}: {resource_failure:?}")
+                    })?;
+            return Err(format!(
+                "due scrub worker {turn}: {failure:?}; statuses={statuses:?}; resources={resources:?}"
+            )
+            .into());
+        }
+        let statuses = initialized
+            .maintenance_coordinator()
+            .statuses()
+            .map_err(|failure| format!("due scrub statuses {turn}: {failure:?}"))?;
+        if statuses.iter().any(|status| {
+            status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                && status.task().scope() == target_maintenance_scope
+                && status.phase() == MaintenanceTaskPhase::Succeeded
+        }) {
+            return Ok(());
+        }
+    }
+    let statuses = initialized
+        .maintenance_coordinator()
+        .statuses()
+        .map_err(|failure| format!("final continuous maintenance statuses: {failure:?}"))?;
+    let resources = initialized
+        .resource_governor()
+        .inspect()
+        .map_err(|failure| format!("due target resource inspection: {failure:?}"))?;
+    let live_now = initialized
+        .retention_time
+        .governance_now_seconds()
+        .map_err(|failure| format!("live lifecycle clock after continuous work: {failure:?}"))?;
+    let target_identity = scrub
+        .identity()
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let public_explanation = services
+        .explain_maintenance_task(
+            &administrator,
+            &serde_json::to_vec(&positron_api::maintenance::MaintenanceExplainRequest {
+                identity: target_identity,
+            })?,
+        )
+        .map(|response| response.task)
+        .map_err(|failure| format!("due target public explanation: {failure:?}"))?;
+    let selector_catalog = open_catalog(&initialized)?;
+    let selector_result = match initialized
+        .maintenance_coordinator()
+        .start_next_with_reservation_and_persist(
+            &selector_catalog,
+            &initialized._authority,
+            due_now,
+            false,
+        ) {
+        Ok(Some(execution)) => format!("selected {:?}", execution.task().identity()),
+        Ok(None) => "no eligible task".to_owned(),
+        Err(failure) => format!("selection failed: {failure:?}"),
+    };
+    let direct_admission = positron_kernel::RecoveryWorkClaim::tenant(
+        initialized.tenant,
+        positron_kernel::RecoveryWorkKind::Repair,
+        scrub.reservations(),
+    )?;
+    let direct_admission = match initialized._authority.recovery().reserve(direct_admission) {
+        Ok(reservation) => {
+            drop(reservation);
+            "admitted"
+        },
+        Err(failure) => {
+            return Err(format!(
+                "due target repair admission was refused: {failure:?}; statuses={statuses:?}, resources={resources:?}"
+            )
+            .into());
+        },
+    };
+    Err(format!(
+        "due target scrub did not progress while public compaction continued despite {direct_admission} repair admission, elapsed={}ns, previously_due={due_now}, live_now={live_now}, public explanation {public_explanation:?}, and selector result {selector_result}: statuses={statuses:?}, resources={resources:?}", elapsed.nanoseconds()
+    )
+    .into())
+}
+
+#[test]
 fn queued_integrity_scrub_with_a_stale_source_binding_never_scans_or_succeeds()
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;

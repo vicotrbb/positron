@@ -196,7 +196,24 @@ pub(super) fn wake_runtime_maintenance(
             execution
         },
     };
-    complete_installed_maintenance(services, cancellation, &execution)
+    let completed = complete_installed_maintenance(services, cancellation, &execution)?;
+    drop(execution);
+    discover_after_completed_maintenance(services, cancellation, completed)
+}
+
+fn discover_after_completed_maintenance(
+    services: &super::ServiceHandle,
+    cancellation: Option<&crate::TaskCancellation>,
+    completed: bool,
+) -> Result<bool, ServiceFailure> {
+    match discover_retention_publications(services, cancellation) {
+        Ok(discovered) => Ok(completed || discovered),
+        // Completion is already durable. A cancellation observed before the
+        // next bounded discovery must stop the worker normally instead of
+        // converting completed work into a worker failure.
+        Err(ServiceFailure::Cancelled) if completed => Ok(true),
+        Err(failure) => Err(failure),
+    }
 }
 
 enum InstalledMaintenanceExecution<'authority> {
@@ -1009,9 +1026,34 @@ pub(super) fn run_runtime_maintenance_worker(
     let mut retry_delay = INITIAL_TRANSIENT_BACKOFF;
     let mut in_flight = None;
     while !cancellation.is_cancelled() {
-        let result = match in_flight.as_ref() {
+        let mut completed_integrity = false;
+        let result = match in_flight.take() {
             Some(execution) => {
-                complete_installed_maintenance(services, Some(cancellation), execution)
+                completed_integrity = matches!(
+                    execution,
+                    InstalledMaintenanceExecution::IntegrityScrub { .. }
+                );
+                let completed =
+                    complete_installed_maintenance(services, Some(cancellation), &execution)?;
+                let continues_integrity_scrub = match &execution {
+                    InstalledMaintenanceExecution::IntegrityScrub { execution, .. } => {
+                        services
+                            .instance
+                            .maintenance_coordinator()
+                            .status(execution.task().identity())
+                            .map_err(map_failure)?
+                            .phase()
+                            == positron_kernel::MaintenanceTaskPhase::Running
+                    },
+                    _ => false,
+                };
+                if continues_integrity_scrub {
+                    in_flight = Some(execution);
+                    Ok(completed)
+                } else {
+                    drop(execution);
+                    discover_after_completed_maintenance(services, Some(cancellation), completed)
+                }
             },
             None => match start_installed_maintenance(services, Some(cancellation)) {
                 Ok(Some(execution)) => {
@@ -1039,15 +1081,8 @@ pub(super) fn run_runtime_maintenance_worker(
         };
         let delay = match result {
             Ok(true) => {
-                let integrity_completed = in_flight.as_ref().is_some_and(|execution| {
-                    matches!(
-                        execution,
-                        InstalledMaintenanceExecution::IntegrityScrub { .. }
-                    )
-                });
-                in_flight = None;
                 retry_delay = INITIAL_TRANSIENT_BACKOFF;
-                if integrity_completed {
+                if completed_integrity {
                     // Reuse the coordinator's existing instance-stable idle
                     // cadence between bounded full-scope passes. A verified
                     // pass publishes its terminal task and thus advances the

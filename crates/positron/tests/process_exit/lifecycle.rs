@@ -58,6 +58,8 @@ fn first_os_signal_drains_and_exits_successfully() -> Result<(), Box<dyn std::er
     let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
         .args(["serve", "--init-if-empty", "--config"])
         .arg(&config_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("spawn positron: {error}"))?;
     wait_for_ready(operations_port)?;
@@ -68,7 +70,21 @@ fn first_os_signal_drains_and_exits_successfully() -> Result<(), Box<dyn std::er
         .map_err(|error| format!("signal positron: {error}"))?;
     assert!(signal.success());
     let status = child.wait()?;
-    assert_eq!(status.code(), Some(0));
+    let authorization = format!(
+        "Bearer {}",
+        InstanceBootstrap::claim(&BootstrapPaths::new(
+            &data,
+            &secrets,
+            MountQualification::LocalHost,
+        )?)?
+        .secret()
+    );
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "first termination must drain gracefully; stderr={:?}",
+        bounded_child_stderr(&mut child, &authorization)
+    );
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -125,7 +141,13 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
-    wait_for_ready(operations_port)?;
+    if let Err(error) = wait_for_ready(operations_port) {
+        return Err(format!(
+            "initial reload fixture readiness failed: {error}; {}",
+            terminate_and_describe_child(&mut child, &authorization)
+        )
+        .into());
+    }
 
     fs::write(
         &config_path,
@@ -139,7 +161,13 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
     );
     std::thread::sleep(Duration::from_millis(100));
     assert!(child.try_wait()?.is_none());
-    wait_for_ready(operations_port)?;
+    if let Err(error) = wait_for_ready(operations_port) {
+        return Err(format!(
+            "valid reload did not return to readiness: {error}; {}",
+            terminate_and_describe_child(&mut child, &authorization)
+        )
+        .into());
+    }
 
     let restart_required_configuration = base_configuration.replacen(
         "shutdown_grace_seconds = 2",
@@ -566,22 +594,10 @@ fn configuration_status_response(
 }
 
 #[cfg(unix)]
-fn terminate_and_describe_child(child: &mut std::process::Child, authorization: &str) -> String {
+fn bounded_child_stderr(child: &mut std::process::Child, authorization: &str) -> String {
     const MAX_CHILD_STDERR_BYTES: u64 = 4 * 1024;
 
-    let termination = match Command::new("/bin/kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-    {
-        Ok(status) if status.success() => "term=sent".to_owned(),
-        Ok(status) => format!("term=exit_{status}"),
-        Err(error) => format!("term_error={error}"),
-    };
-    let exit = match wait_for_child(child) {
-        Ok(status) => format!("exit={status}"),
-        Err(error) => format!("exit_error={error}"),
-    };
-    let stderr = child
+    child
         .stderr
         .take()
         .map(|mut stderr| {
@@ -605,7 +621,24 @@ fn terminate_and_describe_child(child: &mut std::process::Child, authorization: 
                 Err(error) => format!("stderr_read_error={error}"),
             }
         })
-        .unwrap_or_else(|| "stderr_unavailable".to_owned());
+        .unwrap_or_else(|| "stderr_unavailable".to_owned())
+}
+
+#[cfg(unix)]
+fn terminate_and_describe_child(child: &mut std::process::Child, authorization: &str) -> String {
+    let termination = match Command::new("/bin/kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+    {
+        Ok(status) if status.success() => "term=sent".to_owned(),
+        Ok(status) => format!("term=exit_{status}"),
+        Err(error) => format!("term_error={error}"),
+    };
+    let exit = match wait_for_child(child) {
+        Ok(status) => format!("exit={status}"),
+        Err(error) => format!("exit_error={error}"),
+    };
+    let stderr = bounded_child_stderr(child, authorization);
     format!("child_cleanup {termination} {exit} stderr={stderr:?}")
 }
 

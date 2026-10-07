@@ -572,19 +572,26 @@ impl RetentionTimeAuthority {
             .safety
             .lock()
             .map_err(|_| LifecycleClockFailure::Unavailable)?;
-        // The durable anchor is the comparison baseline. A newly observed wall
-        // value must never replace it before reconciliation: doing so would
-        // turn a restart-time forward jump into a zero offset.
-        safety.anchor = record.anchor;
-        safety.anchor_elapsed = elapsed;
-        safety.last_wall_clock = record.last_wall_clock;
-        safety.observed_offset_nanoseconds = record.observed_offset_nanoseconds;
-        safety.wall_clock_correction_nanoseconds = record.wall_clock_correction_nanoseconds;
-        safety.state = record.state;
-        safety.revision = safety
-            .revision
-            .checked_add(1)
-            .ok_or(LifecycleClockFailure::OutOfRange)?;
+        let local = advance_global(*safety, elapsed)?;
+        if record.anchor >= local {
+            // The durable anchor is the comparison baseline. A newly observed wall
+            // value must never replace it before reconciliation: doing so would
+            // turn a restart-time forward jump into a zero offset.
+            safety.anchor = record.anchor;
+            safety.anchor_elapsed = elapsed;
+            safety.last_wall_clock = record.last_wall_clock;
+            safety.observed_offset_nanoseconds = record.observed_offset_nanoseconds;
+            safety.wall_clock_correction_nanoseconds = record.wall_clock_correction_nanoseconds;
+            safety.state = record.state;
+            safety.revision = safety
+                .revision
+                .checked_add(1)
+                .ok_or(LifecycleClockFailure::OutOfRange)?;
+        }
+        // A Catalog snapshot can legitimately carry an older anchor than an
+        // already-running process. It authenticates a lower bound, not
+        // permission to discard elapsed monotonic progress before the next
+        // durable lifecycle publication.
         drop(safety);
         self.reconcile_while_acceptance_held(record.anchor, elapsed)
     }

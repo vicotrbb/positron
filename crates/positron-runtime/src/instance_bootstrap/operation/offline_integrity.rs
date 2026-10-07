@@ -142,7 +142,6 @@ pub(in super::super) fn verify(
         mut examined_bytes,
         mut omitted_segments,
         mut aggregate_evidence,
-        localized_observations: mut retained_localized_observations,
         cursor: mut resume_cursor,
     } = if let Some(token) = resume {
         let decoded = key
@@ -167,7 +166,6 @@ pub(in super::super) fn verify(
             examined_bytes: 0,
             omitted_segments: 0,
             aggregate_evidence: Vec::new(),
-            localized_observations: Vec::new(),
             cursor: None,
         }
     };
@@ -261,15 +259,6 @@ pub(in super::super) fn verify(
             .try_reserve(1)
             .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
         reports.push(report);
-        if let Some(finding) = report.localized_finding() {
-            if retained_localized_observations.len() == MAX_OFFLINE_LOCALIZED_OBSERVATIONS {
-                return Err(crate::OfflineIntegrityFailure::CapacityUnavailable);
-            }
-            retained_localized_observations
-                .try_reserve(1)
-                .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-            retained_localized_observations.push(crate::OfflineLocalizedObservation::from(finding));
-        }
         if outcome == positron_kernel::IntegrityVerificationOutcome::Incomplete || resumable_scope {
             incomplete_scope_count = 1;
             all_verified = false;
@@ -371,18 +360,20 @@ pub(in super::super) fn verify(
                 examined_bytes,
                 omitted_segments,
                 aggregate_evidence: aggregate_evidence.clone(),
-                localized_observations: retained_localized_observations.clone(),
                 cursor: resume_cursor,
             },
         )?;
-        Some(crate::OfflineIntegrityContinuation(
-            key.protect(
+        let protected = key
+            .protect(
                 record.instance,
                 BootstrapObjectPurpose::Initialized,
                 &encoded,
             )
-            .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?,
-        ))
+            .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+        Some(
+            crate::OfflineIntegrityContinuation::from_encoded(protected)
+                .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
+        )
     } else {
         None
     };
@@ -397,7 +388,6 @@ pub(in super::super) fn verify(
         examined_bytes,
         omitted_segments,
         aggregate_evidence,
-        retained_localized_observations,
     ))
 }
 
@@ -406,142 +396,109 @@ pub(in super::super) fn verify(
 // remaining below the 64 KiB continuation limit without silently reducing a
 // valid manifest to a partial success claim.
 const MAX_OFFLINE_AGGREGATE_EVIDENCE: usize = 1_024;
-const LOCALIZED_OBSERVATION_BYTES: usize = 87;
-const MAX_OFFLINE_LOCALIZED_OBSERVATIONS: usize = 16;
+const OFFLINE_EVIDENCE_BYTES: usize = 62;
+const LEGACY_LOCALIZED_OBSERVATION_BYTES: usize = 87;
+const MAX_LEGACY_LOCALIZED_OBSERVATIONS: usize = 16;
+const CURSOR_BYTES: usize = 56;
 
-fn encode_localized_observations(
-    encoded: &mut Vec<u8>,
-    observations: &[crate::OfflineLocalizedObservation],
-) -> Result<(), crate::OfflineIntegrityFailure> {
-    if observations.len() > MAX_OFFLINE_LOCALIZED_OBSERVATIONS {
-        return Err(crate::OfflineIntegrityFailure::CapacityUnavailable);
-    }
-    encoded.push(
-        u8::try_from(observations.len())
-            .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
-    );
-    for observation in observations {
-        let scope = observation.scope();
-        encoded.extend_from_slice(&scope.tenant_id().to_bytes());
-        encoded.push(match scope.signal_kind() {
-            positron_domain::routing::SignalKind::Logs => 1,
-            positron_domain::routing::SignalKind::Traces => 2,
-        });
-        encoded.extend_from_slice(&scope.shard_id().value().to_be_bytes());
-        encoded.extend_from_slice(&observation.segment().to_bytes());
-        encoded.extend_from_slice(&observation.base_position().to_be_bytes());
-        encoded.extend_from_slice(&observation.sealed_frontier().to_be_bytes());
-        match observation.event_range() {
-            crate::OfflineEventRange::Known { earliest, latest } => {
-                encoded.push(1);
-                encoded.extend_from_slice(&earliest.to_be_bytes());
-                encoded.extend_from_slice(&latest.to_be_bytes());
-            },
-            crate::OfflineEventRange::MissingSourceTime => encoded.push(2),
-            crate::OfflineEventRange::InvalidSourceTime => encoded.push(3),
-            crate::OfflineEventRange::LegacyFormat => encoded.push(4),
-        }
-        match observation.ingest_range() {
-            crate::OfflineIngestRange::Known { earliest, latest } => {
-                encoded.push(1);
-                encoded.extend_from_slice(&earliest.to_be_bytes());
-                encoded.extend_from_slice(&latest.to_be_bytes());
-            },
-            crate::OfflineIngestRange::Unavailable => encoded.push(2),
-        }
-    }
-    Ok(())
-}
-
-fn decode_localized_observations(
+fn legacy_localized_observations_end(
     encoded: &[u8],
     offset: usize,
-) -> Result<(Vec<crate::OfflineLocalizedObservation>, usize), crate::OfflineIntegrityFailure> {
+) -> Result<usize, crate::OfflineIntegrityFailure> {
     let count = encoded
         .get(offset)
         .copied()
         .map(usize::from)
-        .filter(|count| *count <= MAX_OFFLINE_LOCALIZED_OBSERVATIONS)
+        .filter(|count| *count <= MAX_LEGACY_LOCALIZED_OBSERVATIONS)
         .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
-    let mut observations = Vec::new();
-    observations
-        .try_reserve(count)
-        .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-    let mut start = offset + 1;
-    for _ in 0..count {
-        let end = start
-            .checked_add(LOCALIZED_OBSERVATION_BYTES)
+    let start = offset
+        .checked_add(1)
+        .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+    let bytes = count
+        .checked_mul(LEGACY_LOCALIZED_OBSERVATION_BYTES)
+        .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+    let end = start
+        .checked_add(bytes)
+        .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+    for index in 0..count {
+        let observation_start = start
+            .checked_add(
+                index
+                    .checked_mul(LEGACY_LOCALIZED_OBSERVATION_BYTES)
+                    .ok_or(crate::OfflineIntegrityFailure::CorruptState)?,
+            )
             .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
-        let bytes = encoded
-            .get(start..end)
+        let observation_end = observation_start
+            .checked_add(LEGACY_LOCALIZED_OBSERVATION_BYTES)
             .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
-        let tenant = bytes
+        let observation = encoded
+            .get(observation_start..observation_end)
+            .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+        observation
             .get(0..16)
             .and_then(|value| value.try_into().ok())
             .and_then(|value| positron_domain::identity::TenantId::from_bytes(value).ok())
             .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
-        let signal = match bytes.get(16) {
-            Some(1) => positron_domain::routing::SignalKind::Logs,
-            Some(2) => positron_domain::routing::SignalKind::Traces,
+        match observation.get(16) {
+            Some(1 | 2) => {},
             _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
-        };
-        let shard = bytes
+        }
+        observation
             .get(17..21)
             .and_then(|value| value.try_into().ok())
             .map(u32::from_be_bytes)
             .and_then(|value| positron_domain::routing::VirtualShardId::new(value).ok())
             .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
-        let scope = positron_kernel::SegmentScope::new(tenant, signal, shard);
-        let segment = bytes
+        observation
             .get(21..37)
             .and_then(|value| value.try_into().ok())
             .and_then(|value| positron_kernel::SegmentId::from_bytes(value).ok())
             .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
-        let number = |range: std::ops::Range<usize>| {
-            bytes
-                .get(range)
-                .and_then(|value| value.try_into().ok())
-                .map(u64::from_be_bytes)
-                .ok_or(crate::OfflineIntegrityFailure::CorruptState)
-        };
-        let base_position = number(37..45)?;
-        let sealed_frontier = number(45..53)?;
         let signed = |range: std::ops::Range<usize>| {
-            bytes
+            observation
                 .get(range)
                 .and_then(|value| value.try_into().ok())
                 .map(i64::from_be_bytes)
                 .ok_or(crate::OfflineIntegrityFailure::CorruptState)
         };
-        let event_range = match bytes.get(53) {
-            Some(1) => crate::OfflineEventRange::Known {
-                earliest: signed(54..62)?,
-                latest: signed(62..70)?,
+        match observation.get(53) {
+            Some(1) => {
+                let _ = signed(54..62)?;
+                let _ = signed(62..70)?;
             },
-            Some(2) => crate::OfflineEventRange::MissingSourceTime,
-            Some(3) => crate::OfflineEventRange::InvalidSourceTime,
-            Some(4) => crate::OfflineEventRange::LegacyFormat,
+            Some(2..=4) => {},
             _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
-        };
-        let ingest_range = match bytes.get(70) {
-            Some(1) => crate::OfflineIngestRange::Known {
-                earliest: signed(71..79)?,
-                latest: signed(79..87)?,
+        }
+        match observation.get(70) {
+            Some(1) => {
+                let _ = signed(71..79)?;
+                let _ = signed(79..87)?;
             },
-            Some(2) => crate::OfflineIngestRange::Unavailable,
+            Some(2) => {},
             _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
-        };
-        observations.push(crate::OfflineLocalizedObservation {
-            scope,
-            segment,
-            base_position,
-            sealed_frontier,
-            event_range,
-            ingest_range,
-        });
-        start = end;
+        }
     }
-    Ok((observations, start))
+    Ok(end)
+}
+
+fn continuation_plaintext_len(
+    mode: OfflineIntegrityContinuationMode,
+    evidence_count: usize,
+    has_cursor: bool,
+) -> Result<usize, crate::OfflineIntegrityFailure> {
+    let mode_bytes = match mode {
+        OfflineIntegrityContinuationMode::Aggregate => 10_usize,
+        OfflineIntegrityContinuationMode::Scope(_) => 31,
+    };
+    let evidence_bytes = evidence_count
+        .checked_mul(OFFLINE_EVIDENCE_BYTES)
+        .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+    mode_bytes
+        .checked_add(8 + 1 + 24 + 2)
+        .and_then(|bytes| bytes.checked_add(evidence_bytes))
+        .and_then(|bytes| bytes.checked_add(1)) // v5 zero historical localizations
+        .and_then(|bytes| bytes.checked_add(if has_cursor { 1 + CURSOR_BYTES } else { 1 }))
+        .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)
 }
 
 fn encode_offline_integrity_continuation(
@@ -551,7 +508,15 @@ fn encode_offline_integrity_continuation(
     if state.aggregate_evidence.len() > MAX_OFFLINE_AGGREGATE_EVIDENCE {
         return Err(crate::OfflineIntegrityFailure::CapacityUnavailable);
     }
-    let mut encoded = Vec::with_capacity(16_384);
+    let required = continuation_plaintext_len(
+        state.mode,
+        state.aggregate_evidence.len(),
+        state.cursor.is_some(),
+    )?;
+    let mut encoded = Vec::new();
+    encoded
+        .try_reserve_exact(required)
+        .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
     encoded.push(5);
     encoded.extend_from_slice(&generation.to_be_bytes());
     match state.mode {
@@ -611,12 +576,15 @@ fn encode_offline_integrity_continuation(
         });
         encoded.extend_from_slice(&evidence.checksum());
     }
-    encode_localized_observations(&mut encoded, &state.localized_observations)?;
+    encoded.push(0); // v5 carries no historical raw localizations.
     if let Some(cursor) = state.cursor {
         encoded.push(1);
         encoded.extend_from_slice(&cursor.encode());
     } else {
         encoded.push(0);
+    }
+    if encoded.len() != required {
+        return Err(crate::OfflineIntegrityFailure::CorruptState);
     }
     Ok(encoded)
 }
@@ -639,7 +607,6 @@ struct OfflineIntegrityContinuationState {
     examined_bytes: u64,
     omitted_segments: u64,
     aggregate_evidence: Vec<crate::OfflineIntegrityEvidence>,
-    localized_observations: Vec<crate::OfflineLocalizedObservation>,
     cursor: Option<positron_kernel::IntegrityScrubContinuation>,
 }
 
@@ -718,11 +685,10 @@ fn decode_offline_integrity_continuation(
         .filter(|count| *count <= MAX_OFFLINE_AGGREGATE_EVIDENCE)
         .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
     let evidence_offset = evidence_count_offset + 2;
-    const EVIDENCE_BYTES: usize = 62;
     let evidence_end = evidence_offset
         .checked_add(
             evidence_count
-                .checked_mul(EVIDENCE_BYTES)
+                .checked_mul(OFFLINE_EVIDENCE_BYTES)
                 .ok_or(crate::OfflineIntegrityFailure::CorruptState)?,
         )
         .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
@@ -731,7 +697,7 @@ fn decode_offline_integrity_continuation(
         .try_reserve(evidence_count)
         .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
     for index in 0..evidence_count {
-        let start = evidence_offset + index * EVIDENCE_BYTES;
+        let start = evidence_offset + index * OFFLINE_EVIDENCE_BYTES;
         let tenant = encoded
             .get(start..start + 16)
             .and_then(|bytes| bytes.try_into().ok())
@@ -762,7 +728,7 @@ fn decode_offline_integrity_continuation(
             _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
         };
         let checksum = encoded
-            .get(start + 30..start + EVIDENCE_BYTES)
+            .get(start + 30..start + OFFLINE_EVIDENCE_BYTES)
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
         aggregate_evidence.push(crate::OfflineIntegrityEvidence::from_parts(
@@ -772,10 +738,10 @@ fn decode_offline_integrity_continuation(
             checksum,
         ));
     }
-    let (localized_observations, cursor_offset) = if version == 5 {
-        decode_localized_observations(encoded, evidence_end)?
+    let cursor_offset = if version == 5 {
+        legacy_localized_observations_end(encoded, evidence_end)?
     } else {
-        (Vec::new(), evidence_end)
+        evidence_end
     };
     let cursor = match encoded.get(cursor_offset) {
         Some(0) if encoded.len() == cursor_offset + 1 => None,
@@ -796,7 +762,6 @@ fn decode_offline_integrity_continuation(
         examined_bytes,
         omitted_segments,
         aggregate_evidence,
-        localized_observations,
         cursor,
     })
 }
@@ -811,33 +776,9 @@ pub(in super::super) fn offline_integrity_claim()
 mod continuation_codec_tests {
     use super::*;
 
-    fn observation(index: u8) -> crate::OfflineLocalizedObservation {
-        let tenant = positron_domain::identity::TenantId::from_bytes([0x41; 16])
-            .expect("nonzero test tenant");
-        let scope = positron_kernel::SegmentScope::new(
-            tenant,
-            positron_domain::routing::SignalKind::Logs,
-            positron_domain::routing::VirtualShardId::new(1).expect("test shard"),
-        );
-        crate::OfflineLocalizedObservation {
-            scope,
-            segment: positron_kernel::SegmentId::from_bytes([index; 16])
-                .expect("nonzero test segment"),
-            base_position: u64::from(index),
-            sealed_frontier: u64::from(index) + 1,
-            event_range: crate::OfflineEventRange::Known {
-                earliest: i64::from(index),
-                latest: i64::from(index) + 1,
-            },
-            ingest_range: crate::OfflineIngestRange::Known {
-                earliest: i64::from(index) + 2,
-                latest: i64::from(index) + 3,
-            },
-        }
-    }
-
     fn state(
-        observations: Vec<crate::OfflineLocalizedObservation>,
+        evidence: Vec<crate::OfflineIntegrityEvidence>,
+        cursor: Option<positron_kernel::IntegrityScrubContinuation>,
     ) -> OfflineIntegrityContinuationState {
         OfflineIntegrityContinuationState {
             mode: OfflineIntegrityContinuationMode::Aggregate,
@@ -849,10 +790,20 @@ mod continuation_codec_tests {
             examined_segments: 0,
             examined_bytes: 0,
             omitted_segments: 0,
-            aggregate_evidence: Vec::new(),
-            localized_observations: observations,
-            cursor: None,
+            aggregate_evidence: evidence,
+            cursor,
         }
+    }
+
+    fn legacy_observation() -> [u8; LEGACY_LOCALIZED_OBSERVATION_BYTES] {
+        let mut observation = [0_u8; LEGACY_LOCALIZED_OBSERVATION_BYTES];
+        observation[0..16].copy_from_slice(&[0x41; 16]);
+        observation[16] = 1;
+        observation[17..21].copy_from_slice(&1_u32.to_be_bytes());
+        observation[21..37].copy_from_slice(&[1; 16]);
+        observation[53] = 1;
+        observation[70] = 1;
+        observation
     }
 
     #[test]
@@ -867,32 +818,120 @@ mod continuation_codec_tests {
         encoded.push(0);
         let decoded = decode_offline_integrity_continuation(&encoded, 7)
             .expect("v4 continuation remains supported");
-        assert!(decoded.localized_observations.is_empty());
+        assert!(decoded.aggregate_evidence.is_empty());
         assert!(decoded.cursor.is_none());
     }
 
     #[test]
-    fn retained_localizations_are_bounded_and_authenticated_in_the_continuation() {
-        let observations = (1_u8..=MAX_OFFLINE_LOCALIZED_OBSERVATIONS as u8)
-            .map(observation)
-            .collect::<Vec<_>>();
-        let encoded = encode_offline_integrity_continuation(7, state(observations.clone()))
-            .expect("the bounded continuation must encode");
-        assert!(
-            encoded.len() <= crate::OfflineIntegrityContinuation::MAX_ENCODED_BYTES,
-            "the canonical limit includes every retained observation"
-        );
+    fn v5_legacy_localizations_are_validated_then_omitted_from_new_state() {
+        let mut encoded = encode_offline_integrity_continuation(7, state(Vec::new(), None))
+            .expect("v5 continuation must encode");
+        assert_eq!(encoded.pop(), Some(0), "legacy cursor tag");
+        assert_eq!(encoded.pop(), Some(0), "new v5 observation count");
+        encoded.push(1);
+        encoded.extend_from_slice(&legacy_observation());
+        encoded.push(0);
         let decoded = decode_offline_integrity_continuation(&encoded, 7)
-            .expect("the continuation must decode");
-        assert_eq!(decoded.localized_observations, observations);
+            .expect("legacy localization must remain resumable");
+        assert!(decoded.aggregate_evidence.is_empty());
+        assert!(decoded.cursor.is_none());
 
-        let excess = (1_u8..=MAX_OFFLINE_LOCALIZED_OBSERVATIONS as u8 + 1)
-            .map(observation)
-            .collect::<Vec<_>>();
+        let mut malformed = encoded;
+        malformed[62] = 9;
+        assert!(
+            matches!(
+                decode_offline_integrity_continuation(&malformed, 7),
+                Err(crate::OfflineIntegrityFailure::CorruptState)
+            ),
+            "legacy payload structure remains fail closed"
+        );
+    }
+
+    #[test]
+    fn continuation_reserves_the_full_aggregate_account_before_encoding() {
+        let tenant = positron_domain::identity::TenantId::from_bytes([0x41; 16])
+            .expect("nonzero test tenant");
+        let mut evidence = Vec::new();
+        evidence
+            .try_reserve_exact(MAX_OFFLINE_AGGREGATE_EVIDENCE)
+            .expect("test allocation");
+        for shard in 1..=u32::try_from(MAX_OFFLINE_AGGREGATE_EVIDENCE).expect("scope bound") {
+            let scope = positron_kernel::SegmentScope::new(
+                tenant,
+                positron_domain::routing::SignalKind::Logs,
+                positron_domain::routing::VirtualShardId::new(shard).expect("test shard"),
+            );
+            evidence.push(crate::OfflineIntegrityEvidence::from_parts(
+                scope,
+                7,
+                positron_kernel::IntegrityVerificationOutcome::Verified,
+                [0x5a; 32],
+            ));
+        }
+        let plaintext = continuation_plaintext_len(
+            OfflineIntegrityContinuationMode::Aggregate,
+            evidence.len(),
+            true,
+        )
+        .expect("bounded aggregate plus cursor");
+        assert_eq!(plaintext, 63_591);
+        let mut cursor_bytes = [0_u8; CURSOR_BYTES];
+        cursor_bytes[0] = 1;
+        cursor_bytes[8..40].copy_from_slice(&[0x32; 32]);
+        cursor_bytes[40..].copy_from_slice(&[0x51; 16]);
+        let cursor = positron_kernel::IntegrityScrubContinuation::decode(&cursor_bytes)
+            .expect("valid source-bound cursor");
+        let encoded = encode_offline_integrity_continuation(7, state(evidence, Some(cursor)))
+            .expect("full aggregate with cursor must encode");
+        assert_eq!(encoded.len(), plaintext);
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "positron-offline-continuation-bound-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("data")).expect("create data root");
+        std::fs::create_dir_all(root.join("secrets")).expect("create secrets root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join("secrets"), std::fs::Permissions::from_mode(0o700))
+                .expect("protect secrets root");
+        }
+        let paths = crate::BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            positron_kernel::MountQualification::LocalHost,
+        )
+        .expect("bootstrap paths");
+        crate::InstanceBootstrap::initialize(&paths, crate::InitializationPlan::non_interactive())
+            .expect("initialize protected continuation fixture");
+        let instance = crate::InstanceBootstrap::reopen(&paths).expect("reopen fixture");
+        let protected = instance
+            .key
+            .protect(
+                instance.instance,
+                positron_kernel::BootstrapObjectPurpose::Initialized,
+                &encoded,
+            )
+            .expect("protect full aggregate continuation");
+        assert!(
+            crate::OfflineIntegrityContinuation::from_encoded(protected).is_ok(),
+            "the protected 1,024-scope account with cursor remains portable"
+        );
+        drop(instance);
+        std::fs::remove_dir_all(root).expect("remove protected continuation fixture");
         assert_eq!(
-            encode_offline_integrity_continuation(7, state(excess)),
+            continuation_plaintext_len(
+                OfflineIntegrityContinuationMode::Aggregate,
+                usize::MAX,
+                true,
+            ),
             Err(crate::OfflineIntegrityFailure::CapacityUnavailable),
-            "a seventeenth observation must fail rather than being silently dropped"
+            "overflow is an explicit availability failure"
         );
     }
 }
