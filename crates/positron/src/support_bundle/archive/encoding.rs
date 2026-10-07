@@ -1,7 +1,46 @@
 use super::*;
 
-pub(crate) fn append(
-    tar: &mut tar::Builder<&mut Vec<u8>>,
+pub(crate) struct BoundedArchive {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedArchive {
+    pub(crate) const fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl io::Write for BoundedArchive {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let total = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .filter(|total| *total <= self.limit)
+            .ok_or_else(|| io::Error::other("support bundle archive limit"))?;
+        let additional = total.saturating_sub(self.bytes.len());
+        self.bytes
+            .try_reserve_exact(additional)
+            .map_err(|_| io::Error::other("support bundle archive allocation"))?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) fn append<W: io::Write>(
+    tar: &mut tar::Builder<&mut W>,
     path: &str,
     bytes: &[u8],
 ) -> io::Result<()> {
@@ -17,13 +56,19 @@ pub(crate) fn append(
 pub(crate) fn blocks(n: usize) -> usize {
     n.saturating_add(BLOCK - 1) / BLOCK * BLOCK
 }
-pub(crate) fn once(v: &mut Vec<&'static str>, value: &'static str) {
+pub(crate) fn once(v: &mut Vec<&'static str>, value: &'static str) -> Result<(), ()> {
     if !v.contains(&value) {
+        if v.len() == 16 {
+            return Err(());
+        }
+        v.try_reserve_exact(1).map_err(|_| ())?;
         v.push(value);
     }
+    Ok(())
 }
 pub(crate) fn hex(bytes: &[u8]) -> Result<String, ()> {
-    let mut s = String::with_capacity(64);
+    let mut s = String::new();
+    s.try_reserve_exact(64).map_err(|_| ())?;
     for b in Sha256::digest(bytes) {
         use std::fmt::Write as _;
         write!(&mut s, "{b:02x}").map_err(|_| ())?;
@@ -32,7 +77,9 @@ pub(crate) fn hex(bytes: &[u8]) -> Result<String, ()> {
 }
 
 pub(crate) fn encode_bytes(bytes: &[u8]) -> Result<String, ()> {
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    let length = bytes.len().checked_mul(2).ok_or(())?;
+    let mut encoded = String::new();
+    encoded.try_reserve_exact(length).map_err(|_| ())?;
     for byte in bytes {
         use std::fmt::Write as _;
         write!(&mut encoded, "{byte:02x}").map_err(|_| ())?;

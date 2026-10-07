@@ -11,7 +11,7 @@ mod model;
 pub(crate) use build::SupportBundle;
 #[cfg(test)]
 use encoding::decode_64;
-use encoding::{append, blocks, once};
+use encoding::{BoundedArchive, append, blocks, once};
 pub(crate) use encoding::{encode_bytes, hex};
 pub(crate) use model::{
     AgeRecipients, BundleLimits, BundleMember, Class, ManifestAuthentication, RedactionReport,

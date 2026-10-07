@@ -32,9 +32,14 @@ impl BoundedCiphertext {
 }
 impl Write for BoundedCiphertext {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
-            return Err(std::io::Error::other("ciphertext limit"));
-        }
+        self.bytes
+            .len()
+            .checked_add(bytes.len())
+            .filter(|end| *end <= self.limit)
+            .ok_or_else(|| std::io::Error::other("ciphertext limit"))?;
+        self.bytes
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| std::io::Error::other("ciphertext allocation"))?;
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
     }

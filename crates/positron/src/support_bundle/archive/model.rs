@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use super::super::{DEFAULT_ELAPSED_LIMIT, TAR_RECORD, crypto};
+use super::super::{DEFAULT_ELAPSED_LIMIT, MAX_OUTPUT_LIMIT, TAR_RECORD, crypto};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Class {
@@ -200,7 +200,7 @@ impl AgeRecipients {
 }
 impl BundleLimits {
     pub(crate) fn new(count: usize, bytes: usize) -> Result<Self, ()> {
-        (count > 0 && bytes >= TAR_RECORD)
+        (count > 0 && count <= 14 && (TAR_RECORD..=MAX_OUTPUT_LIMIT).contains(&bytes))
             .then_some(Self {
                 count,
                 bytes,

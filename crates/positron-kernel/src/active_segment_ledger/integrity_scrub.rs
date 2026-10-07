@@ -345,22 +345,25 @@ fn verify_integrity_against_snapshot(
     let metadata = storage
         .catalog_segments_observed(basis, scope)
         .map_err(map_ledger_failure)?;
-    let immutable_scope = matches!(mode, IntegrityVerificationMode::Online);
+    let scans_sealed = !matches!(mode, IntegrityVerificationMode::Startup);
+    let online_publication = matches!(mode, IntegrityVerificationMode::Online);
     let quarantined = quarantined_segment_ids(basis, scope)?;
-    let retained_quarantine = immutable_scope
-        .then(|| quarantined.first().copied())
-        .flatten();
+    let retained_quarantine = scans_sealed.then(|| quarantined.first().copied()).flatten();
     let targets = metadata
         .iter()
         .filter(|candidate| match mode {
             IntegrityVerificationMode::Startup => candidate.state == SegmentState::Active,
             IntegrityVerificationMode::Online => candidate.state == SegmentState::Sealed,
-            IntegrityVerificationMode::Offline => true,
+            IntegrityVerificationMode::Offline => {
+                matches!(candidate.state, SegmentState::Active | SegmentState::Sealed)
+            },
         })
-        .filter(|candidate| !immutable_scope || !quarantined.contains(&candidate.id))
+        .filter(|candidate| {
+            candidate.state != SegmentState::Sealed || !quarantined.contains(&candidate.id)
+        })
         .collect::<Vec<_>>();
     let target_count = targets.len();
-    let _snapshot_protection = if immutable_scope {
+    let _snapshot_protection = if online_publication {
         Some(
             super::super::SnapshotProtection::for_segments(
                 authority.snapshot_protection(),
@@ -437,7 +440,7 @@ fn verify_integrity_against_snapshot(
             Ok(None) => 0,
             Err(failure)
                 if mode == IntegrityVerificationMode::Online
-                    && immutable_scope
+                    && online_publication
                     && is_isolated_corruption(failure.code()) =>
             {
                 let Some(catalog) = catalog else {
@@ -541,7 +544,7 @@ fn verify_integrity_against_snapshot(
             },
             Err(failure)
                 if mode == IntegrityVerificationMode::Online
-                    && immutable_scope
+                    && online_publication
                     && is_isolated_corruption(failure.code()) =>
             {
                 let Some(catalog) = catalog else {

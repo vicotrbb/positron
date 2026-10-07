@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn bundle_limits_reject_a_construction_budget_larger_than_the_diagnostics_claim() {
+    assert!(BundleLimits::new(14, super::super::MAX_OUTPUT_LIMIT.saturating_add(1)).is_err());
+}
+
+#[test]
+fn all_canonical_families_fit_the_maximum_admitted_archive_budget() {
+    let payload = vec![b'x'; 65_536];
+    let bundle = SupportBundle::build(
+        [
+            BundleMember::effective_configuration(&payload),
+            BundleMember::compatibility_manifest(&payload),
+            BundleMember::product_identity(&payload),
+            BundleMember::health_state(&payload),
+            BundleMember::operational_telemetry(&payload),
+            BundleMember::operational_logs(&payload),
+            BundleMember::catalog_summary(&payload),
+            BundleMember::resource_status(&payload),
+            BundleMember::maintenance_status(&payload),
+            BundleMember::listener_status(&payload),
+            BundleMember::backup_repository_status(&payload),
+            BundleMember::environment(&payload),
+            BundleMember::doctor_report(&payload),
+            BundleMember::sanitized_crash_records(&payload),
+        ],
+        BundleLimits::new(14, super::super::MAX_OUTPUT_LIMIT).expect("maximum limit"),
+    )
+    .expect("all canonical bundle families fit the maximum admitted output");
+    assert_eq!(bundle.included_member_count(), 14);
+    assert!(bundle.archive().len() <= super::super::MAX_OUTPUT_LIMIT);
+}
+
+#[test]
 fn fenced_retention_report_preserves_the_administrator_request_and_the_unavailable_outcome() {
     let bundle = SupportBundle::build_authenticated_with_retention_policy(
         [BundleMember::doctor_report(b"fenced")],
@@ -344,8 +376,8 @@ fn authorized_runtime_signer_authenticates_the_final_archive_and_detects_member_
 }
 
 #[test]
-fn signature_attachment_cannot_bypass_the_final_archive_bound()
--> Result<(), Box<dyn std::error::Error>> {
+fn signed_archive_cannot_bypass_the_final_archive_bound() -> Result<(), Box<dyn std::error::Error>>
+{
     use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
     use positron_kernel::MountQualification;
     use positron_runtime::{BootstrapPaths, InitializationPlan, InstanceBootstrap};

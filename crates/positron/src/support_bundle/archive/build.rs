@@ -4,10 +4,8 @@ use super::*;
 
 pub(crate) struct SupportBundle {
     archive: Vec<u8>,
-    manifest: Vec<u8>,
     report: RedactionReport,
     count: usize,
-    maximum_archive_bytes: usize,
 }
 impl SupportBundle {
     #[cfg(test)]
@@ -22,6 +20,7 @@ impl SupportBundle {
             "not_applied",
             "not_applied",
             IdentifierRetentionPolicy::from_requested(IdentifierRetention::Ephemeral),
+            None,
         )
     }
     #[cfg(test)]
@@ -36,6 +35,7 @@ impl SupportBundle {
             "plaintext_explicit",
             "not_applied",
             IdentifierRetentionPolicy::from_requested(IdentifierRetention::Ephemeral),
+            None,
         )
     }
     #[cfg(test)]
@@ -72,22 +72,15 @@ impl SupportBundle {
         identifier_retention: IdentifierRetentionPolicy,
     ) -> Result<Self, ()> {
         match authentication {
-            ManifestAuthentication::Signed(signer) => {
-                let bundle = Self::build_with_export_policy(
-                    input,
-                    limits,
-                    false,
-                    "age_x25519",
-                    "signed",
-                    identifier_retention,
-                )?;
-                // The signature is over the canonical manifest bytes retained
-                // in the standard tar archive; opaque signer custody remains
-                // wholly in Runtime/Kernel.
-                let manifest = bundle.manifest_bytes()?;
-                let signature = signer.sign(&manifest).map_err(|_| ())?;
-                bundle.attach_signature(signature)
-            },
+            ManifestAuthentication::Signed(signer) => Self::build_with_export_policy(
+                input,
+                limits,
+                false,
+                "age_x25519",
+                "signed",
+                identifier_retention,
+                Some(signer),
+            ),
             ManifestAuthentication::UnsignedKeyUnavailableOffline => {
                 Self::build_with_export_policy(
                     input,
@@ -96,6 +89,7 @@ impl SupportBundle {
                     "age_x25519",
                     "unsigned_key_unavailable_offline",
                     identifier_retention,
+                    None,
                 )
             },
         }
@@ -107,18 +101,15 @@ impl SupportBundle {
         identifier_retention: IdentifierRetention,
     ) -> Result<Self, ()> {
         match authentication {
-            ManifestAuthentication::Signed(signer) => {
-                let bundle = Self::build_with_export_policy(
-                    input,
-                    limits,
-                    true,
-                    "plaintext_explicit",
-                    "signed",
-                    IdentifierRetentionPolicy::from_requested(identifier_retention),
-                )?;
-                let signature = signer.sign(&bundle.manifest_bytes()?).map_err(|_| ())?;
-                bundle.attach_signature(signature)
-            },
+            ManifestAuthentication::Signed(signer) => Self::build_with_export_policy(
+                input,
+                limits,
+                true,
+                "plaintext_explicit",
+                "signed",
+                IdentifierRetentionPolicy::from_requested(identifier_retention),
+                Some(signer),
+            ),
             ManifestAuthentication::UnsignedKeyUnavailableOffline => {
                 Self::build_with_export_policy(
                     input,
@@ -127,6 +118,7 @@ impl SupportBundle {
                     "plaintext_explicit",
                     "unsigned_key_unavailable_offline",
                     IdentifierRetentionPolicy::from_requested(identifier_retention),
+                    None,
                 )
             },
         }
@@ -138,8 +130,10 @@ impl SupportBundle {
         encryption_state: &'static str,
         signature_state: &'static str,
         identifier_retention: IdentifierRetentionPolicy,
+        signer: Option<&positron_kernel::ExportManifestSigner>,
     ) -> Result<Self, ()> {
         let mut selected = Vec::new();
+        selected.try_reserve_exact(limits.count).map_err(|_| ())?;
         let mut unknown = 0;
         let mut omissions = Vec::new();
         // Reserve two metadata members (manifest plus Redaction Report) before
@@ -152,22 +146,22 @@ impl SupportBundle {
                 continue;
             };
             for omission in member.omissions {
-                once(&mut omissions, omission);
+                once(&mut omissions, omission)?;
             }
             if selected.len() == limits.count {
-                once(&mut omissions, "member_count_limit");
+                once(&mut omissions, "member_count_limit")?;
                 continue;
             }
             let next = BLOCK + blocks(member.bytes.len());
             if projected.saturating_add(next) > limits.bytes {
-                once(&mut omissions, "archive_byte_limit");
+                once(&mut omissions, "archive_byte_limit")?;
                 continue;
             };
             projected += next;
             selected.push((class, member.bytes));
         }
         if unknown != 0 {
-            once(&mut omissions, "unknown_member_class");
+            once(&mut omissions, "unknown_member_class")?;
         }
         let included_classes = selected
             .iter()
@@ -213,11 +207,24 @@ impl SupportBundle {
             "redaction_report_sha256={}\n",
             hex(redaction.as_bytes())?
         ));
+        let signature = signer
+            .map(|signer| {
+                let signature = signer.sign(manifest.as_bytes()).map_err(|_| ())?;
+                Ok(format!(
+                    "integrity_identity={}\nsignature={}\n",
+                    encode_bytes(&signature.integrity_identity().public_key())?,
+                    encode_bytes(&signature.bytes())?
+                ))
+            })
+            .transpose()?;
         let meta = (BLOCK + blocks(manifest.len())).saturating_add(BLOCK + blocks(redaction.len()));
+        let meta = signature.as_ref().map_or(meta, |signature| {
+            meta.saturating_add(BLOCK + blocks(signature.len()))
+        });
         if projected.saturating_add(meta) > limits.bytes {
             return Err(());
         }
-        let mut archive = Vec::new();
+        let mut archive = BoundedArchive::new(limits.bytes);
         {
             let mut tar = tar::Builder::new(&mut archive);
             append(&mut tar, "manifest.txt", manifest.as_bytes()).map_err(|_| ())?;
@@ -225,15 +232,17 @@ impl SupportBundle {
             for (class, bytes) in &selected {
                 append(&mut tar, class.path(), bytes).map_err(|_| ())?;
             }
+            if let Some(signature) = &signature {
+                append(&mut tar, "manifest-signature.txt", signature.as_bytes()).map_err(|_| ())?;
+            }
             tar.finish().map_err(|_| ())?;
         }
+        let archive = archive.into_bytes();
         (archive.len() <= limits.bytes)
             .then_some(Self {
                 archive,
-                manifest: manifest.into_bytes(),
                 report,
                 count: selected.len(),
-                maximum_archive_bytes: limits.bytes,
             })
             .ok_or(())
     }
@@ -347,41 +356,6 @@ impl SupportBundle {
         }
         Ok(())
     }
-    fn manifest_bytes(&self) -> Result<Vec<u8>, ()> {
-        Ok(self.manifest.clone())
-    }
-    fn attach_signature(
-        mut self,
-        signature: positron_kernel::ExportManifestSignature,
-    ) -> Result<Self, ()> {
-        let evidence = format!(
-            "integrity_identity={}\nsignature={}\n",
-            encode_bytes(&signature.integrity_identity().public_key())?,
-            encode_bytes(&signature.bytes())?
-        );
-        let mut rebuilt = Vec::new();
-        let mut source = tar::Archive::new(self.archive.as_slice());
-        let entries = source.entries().map_err(|_| ())?;
-        {
-            let mut target = tar::Builder::new(&mut rebuilt);
-            for entry in entries {
-                let entry = entry.map_err(|_| ())?;
-                let path = entry.path().map_err(|_| ())?.into_owned();
-                let mut bytes = Vec::new();
-                use std::io::Read as _;
-                entry.take(42_496).read_to_end(&mut bytes).map_err(|_| ())?;
-                append(&mut target, path.to_str().ok_or(())?, &bytes).map_err(|_| ())?;
-            }
-            append(&mut target, "manifest-signature.txt", evidence.as_bytes()).map_err(|_| ())?;
-            target.finish().map_err(|_| ())?;
-        }
-        if rebuilt.len() > self.maximum_archive_bytes {
-            return Err(());
-        }
-        self.archive = rebuilt;
-        Ok(self)
-    }
-
     #[cfg(test)]
     pub(in crate::support_bundle) fn write_plaintext_explicitly(
         &self,
