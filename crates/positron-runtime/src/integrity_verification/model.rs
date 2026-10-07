@@ -15,6 +15,7 @@ pub struct OfflineIntegrityVerification {
     examined_bytes: u64,
     omitted_segments: u64,
     aggregate_evidence: Vec<OfflineIntegrityEvidence>,
+    localized_observations: Vec<OfflineLocalizedObservation>,
 }
 
 /// The only aggregate truth an offline verification may publish after it has
@@ -78,6 +79,101 @@ impl OfflineIntegrityEvidence {
     #[must_use]
     pub const fn checksum(self) -> [u8; 32] {
         self.checksum
+    }
+}
+
+/// Read-only localization observed in an earlier bounded offline pass and
+/// carried inside its authenticated continuation. It never claims a durable
+/// Catalog quarantine publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OfflineLocalizedObservation {
+    pub(crate) scope: positron_kernel::SegmentScope,
+    pub(crate) segment: positron_kernel::SegmentId,
+    pub(crate) base_position: u64,
+    pub(crate) sealed_frontier: u64,
+    pub(crate) event_range: OfflineEventRange,
+    pub(crate) ingest_range: OfflineIngestRange,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineEventRange {
+    Known { earliest: i64, latest: i64 },
+    MissingSourceTime,
+    InvalidSourceTime,
+    LegacyFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineIngestRange {
+    Known { earliest: i64, latest: i64 },
+    Unavailable,
+}
+
+impl From<IntegrityQuarantineFinding> for OfflineLocalizedObservation {
+    fn from(finding: IntegrityQuarantineFinding) -> Self {
+        let event_range = match finding.event_range() {
+            positron_kernel::AuthenticatedEventRange::Known { earliest, latest } => {
+                OfflineEventRange::Known {
+                    earliest: earliest.value(),
+                    latest: latest.value(),
+                }
+            },
+            positron_kernel::AuthenticatedEventRange::Unavailable(
+                positron_kernel::EventRangeUnavailable::MissingSourceTime,
+            ) => OfflineEventRange::MissingSourceTime,
+            positron_kernel::AuthenticatedEventRange::Unavailable(
+                positron_kernel::EventRangeUnavailable::InvalidSourceTime,
+            ) => OfflineEventRange::InvalidSourceTime,
+            positron_kernel::AuthenticatedEventRange::Unavailable(
+                positron_kernel::EventRangeUnavailable::LegacyFormat,
+            ) => OfflineEventRange::LegacyFormat,
+        };
+        let ingest_range = match finding.ingest_range() {
+            positron_kernel::AuthenticatedIngestRange::Known { earliest, latest } => {
+                OfflineIngestRange::Known {
+                    earliest: earliest.value(),
+                    latest: latest.value(),
+                }
+            },
+            positron_kernel::AuthenticatedIngestRange::Unavailable => {
+                OfflineIngestRange::Unavailable
+            },
+        };
+        Self {
+            scope: finding.scope(),
+            segment: finding.segment(),
+            base_position: finding.base_position(),
+            sealed_frontier: finding.sealed_frontier().value(),
+            event_range,
+            ingest_range,
+        }
+    }
+}
+
+impl OfflineLocalizedObservation {
+    #[must_use]
+    pub const fn scope(self) -> positron_kernel::SegmentScope {
+        self.scope
+    }
+    #[must_use]
+    pub const fn segment(self) -> positron_kernel::SegmentId {
+        self.segment
+    }
+    #[must_use]
+    pub const fn base_position(self) -> u64 {
+        self.base_position
+    }
+    #[must_use]
+    pub const fn sealed_frontier(self) -> u64 {
+        self.sealed_frontier
+    }
+    #[must_use]
+    pub const fn event_range(self) -> OfflineEventRange {
+        self.event_range
+    }
+    #[must_use]
+    pub const fn ingest_range(self) -> OfflineIngestRange {
+        self.ingest_range
     }
 }
 
@@ -219,6 +315,7 @@ impl OfflineIntegrityVerification {
         examined_bytes: u64,
         omitted_segments: u64,
         aggregate_evidence: Vec<OfflineIntegrityEvidence>,
+        localized_observations: Vec<OfflineLocalizedObservation>,
     ) -> Self {
         Self {
             reports,
@@ -231,7 +328,14 @@ impl OfflineIntegrityVerification {
             examined_bytes,
             omitted_segments,
             aggregate_evidence,
+            localized_observations,
         }
+    }
+
+    /// Authenticated read-only localizations retained across bounded passes.
+    #[must_use]
+    pub fn localized_observations(&self) -> &[OfflineLocalizedObservation] {
+        &self.localized_observations
     }
 
     #[must_use]

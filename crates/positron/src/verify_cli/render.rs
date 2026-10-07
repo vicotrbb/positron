@@ -108,6 +108,47 @@ fn render_localized_observation(
     )
 }
 
+pub(super) fn render_retained_localized_observation(
+    observation: positron_runtime::OfflineLocalizedObservation,
+) -> String {
+    let scope = observation.scope();
+    let signal = match scope.signal_kind() {
+        positron_domain::routing::SignalKind::Logs => "logs",
+        positron_domain::routing::SignalKind::Traces => "traces",
+    };
+    let (event_provenance, event_earliest, event_latest) = match observation.event_range() {
+        positron_runtime::OfflineEventRange::Known { earliest, latest } => {
+            ("known", earliest.to_string(), latest.to_string())
+        },
+        positron_runtime::OfflineEventRange::MissingSourceTime => {
+            ("missing_source_time", "none".to_owned(), "none".to_owned())
+        },
+        positron_runtime::OfflineEventRange::InvalidSourceTime => {
+            ("invalid_source_time", "none".to_owned(), "none".to_owned())
+        },
+        positron_runtime::OfflineEventRange::LegacyFormat => {
+            ("legacy_format", "none".to_owned(), "none".to_owned())
+        },
+    };
+    let (ingest_provenance, ingest_earliest, ingest_latest) = match observation.ingest_range() {
+        positron_runtime::OfflineIngestRange::Known { earliest, latest } => {
+            ("known", earliest.to_string(), latest.to_string())
+        },
+        positron_runtime::OfflineIngestRange::Unavailable => {
+            ("unavailable", "none".to_owned(), "none".to_owned())
+        },
+    };
+    format!(
+        "retained_localized_observation=observed retained_localized_publication=not_published retained_localized_tenant={} retained_localized_signal={signal} retained_localized_shard={} retained_localized_segment={} retained_localized_base_position={} retained_localized_sealed_frontier={} retained_localized_event_provenance={event_provenance} retained_localized_event_earliest_unix_nanos={event_earliest} retained_localized_event_latest_unix_nanos={event_latest} retained_localized_ingest_provenance={ingest_provenance} retained_localized_ingest_earliest_unix_nanos={ingest_earliest} retained_localized_ingest_latest_unix_nanos={ingest_latest}
+",
+        scope.tenant_id(),
+        scope.shard_id().value(),
+        hex(&observation.segment().to_bytes()),
+        observation.base_position(),
+        observation.sealed_frontier(),
+    )
+}
+
 pub(super) fn render_aggregate_evidence(
     evidence: positron_runtime::OfflineIntegrityEvidence,
 ) -> String {

@@ -289,6 +289,10 @@ impl SegmentId {
         Ok(Self(bytes))
     }
 
+    pub fn from_bytes(bytes: [u8; 16]) -> Result<Self, LedgerFailure> {
+        Self::new(bytes)
+    }
+
     #[must_use]
     pub const fn to_bytes(self) -> [u8; 16] {
         self.0

@@ -723,10 +723,11 @@ fn failed_listener_staging_preserves_the_serving_generation_and_endpoints()
         after.effective().operations_bind_address(),
         before.effective().operations_bind_address()
     );
-    assert!(matches!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    ));
+    let shutdown = process.shutdown(ShutdownTrigger::FirstSignal);
+    assert!(
+        matches!(shutdown, positron_runtime::ExitOutcome::Graceful),
+        "listener staging cleanup returned {shutdown:?}"
+    );
     let claim = InstanceBootstrap::claim(&paths)?;
     let reopened = InstanceBootstrap::reopen(&paths)?;
     let administrator = reopened.attribute(

@@ -452,12 +452,18 @@ fn verify_integrity_against_snapshot(
                             mode,
                             scope,
                             basis.number(),
-                            examined_segments,
+                            examined_segments.saturating_add(1),
                             examined_bytes,
-                            target_count.saturating_sub(start.saturating_add(examined_segments)),
+                            target_count.saturating_sub(
+                                start.saturating_add(examined_segments.saturating_add(1)),
+                            ),
                             IntegrityVerificationOutcome::Quarantined,
                             Some(candidate.id),
-                            None,
+                            continuation_for(source_identity, Some(candidate.id)).filter(|_| {
+                                mode == IntegrityVerificationMode::Offline
+                                    && target_count
+                                        > start.saturating_add(examined_segments.saturating_add(1))
+                            }),
                         )
                         .with_localized_finding(
                             localized_finding(scope, *candidate).ok_or(IntegrityFailure(
@@ -562,18 +568,29 @@ fn verify_integrity_against_snapshot(
                     )
                     && is_isolated_corruption(failure.code()) =>
             {
+                let localized_examined_segments = examined_segments.saturating_add(1);
+                let localized_examined_bytes = examined_bytes
+                    .checked_add(physical)
+                    .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
+                let localized_omitted_segments =
+                    target_count.saturating_sub(start.saturating_add(localized_examined_segments));
+                let localized_continuation = continuation_for(source_identity, Some(candidate.id))
+                    .filter(|_| {
+                        mode == IntegrityVerificationMode::Offline
+                            && localized_omitted_segments != 0
+                    });
                 let Some(catalog) = online_publication.then_some(catalog).flatten() else {
                     if can_localize_quarantine(*candidate) {
                         return Ok(report(
                             mode,
                             scope,
                             basis.number(),
-                            examined_segments,
-                            examined_bytes,
-                            target_count.saturating_sub(start.saturating_add(examined_segments)),
+                            localized_examined_segments,
+                            localized_examined_bytes,
+                            localized_omitted_segments,
                             IntegrityVerificationOutcome::Quarantined,
                             Some(candidate.id),
-                            None,
+                            localized_continuation,
                         )
                         .with_localized_finding(
                             localized_finding(scope, *candidate).ok_or(IntegrityFailure(

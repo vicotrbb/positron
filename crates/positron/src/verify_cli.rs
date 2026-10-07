@@ -144,6 +144,9 @@ fn execute(
             for evidence in report.aggregate_evidence() {
                 output.push_str(&render_aggregate_evidence(*evidence));
             }
+            for observation in report.localized_observations() {
+                output.push_str(&render_retained_localized_observation(*observation));
+            }
             if let Some(continuation) = report.continuation() {
                 output.push_str(&format!(
                     "aggregate_continuation={}\n",

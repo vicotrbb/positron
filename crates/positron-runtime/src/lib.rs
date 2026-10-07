@@ -37,10 +37,10 @@ pub use instance_bootstrap::{
     TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
-    OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityAggregateOutcome,
-    OfflineIntegrityContinuation, OfflineIntegrityEvidence, OfflineIntegrityFailure,
-    OfflineIntegrityVerification, resume_offline_integrity, verify_offline_integrity,
-    verify_offline_integrity_scope,
+    OfflineDiskPressure, OfflineEventRange, OfflineIngestRange, OfflineInspectionFacts,
+    OfflineIntegrityAggregateOutcome, OfflineIntegrityContinuation, OfflineIntegrityEvidence,
+    OfflineIntegrityFailure, OfflineIntegrityVerification, OfflineLocalizedObservation,
+    resume_offline_integrity, verify_offline_integrity, verify_offline_integrity_scope,
 };
 pub use listener::{
     BoundEndpoint, BoundListener, ConnectionProtection, ListenerFactory, ListenerFailure,
