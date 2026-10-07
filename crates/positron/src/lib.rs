@@ -18,6 +18,8 @@ use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 mod config_cli;
+#[cfg(unix)]
+mod control_socket;
 mod doctor_cli;
 mod keys;
 mod maintenance_cli;

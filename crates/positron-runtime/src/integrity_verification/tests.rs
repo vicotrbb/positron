@@ -151,20 +151,14 @@ fn offline_sealed_corruption_is_localized_without_publishing_a_quarantine()
     *byte ^= 0xa5;
     fs::write(sealed, damaged)?;
     let before = file_tree(&root)?;
-    let report = verify_offline_integrity(&paths, 2)
+    let first = verify_offline_integrity(&paths, 2)
         .map_err(|failure| format!("offline verification failed: {failure:?}"))?;
-    assert!(!report.is_verified());
-    assert_eq!(
-        report.aggregate_outcome(),
-        crate::OfflineIntegrityAggregateOutcome::Quarantined,
-        "isolated sealed corruption is localized even though offline inspection cannot publish it: {:?}",
-        report.reports()
-    );
-    assert!(report.reports().iter().any(|item| {
+    assert!(!first.is_verified());
+    assert!(first.reports().iter().any(|item| {
         item.outcome() == positron_kernel::IntegrityVerificationOutcome::Quarantined
             && item.quarantined_segment() == Some(sealed_receipt.segment_id())
     }));
-    let finding = report
+    let finding = first
         .reports()
         .iter()
         .copied()
@@ -180,6 +174,34 @@ fn offline_sealed_corruption_is_localized_without_publishing_a_quarantine()
         finding.ingest_range(),
         positron_kernel::AuthenticatedIngestRange::Known { .. }
     ));
+    assert_eq!(file_tree(&root)?, before);
+
+    if let Some(continuation) = first.continuation().cloned() {
+        assert!(!first.is_complete());
+        assert_eq!(
+            first.aggregate_outcome(),
+            crate::OfflineIntegrityAggregateOutcome::Incomplete,
+            "a cursor means the localized first pass must continue to cover its authenticated remainder: {:?}",
+            first.reports()
+        );
+        let resumed = resume_offline_integrity(&paths, 2, continuation)
+            .map_err(|failure| format!("localized offline continuation failed: {failure:?}"))?;
+        assert!(resumed.is_complete());
+        assert!(!resumed.is_verified());
+        assert_eq!(
+            resumed.aggregate_outcome(),
+            crate::OfflineIntegrityAggregateOutcome::Quarantined,
+            "the final aggregate retains the first pass's authenticated localized outcome"
+        );
+        assert!(resumed.continuation().is_none());
+    } else {
+        assert!(first.is_complete());
+        assert_eq!(
+            first.aggregate_outcome(),
+            crate::OfflineIntegrityAggregateOutcome::Quarantined,
+            "a complete localized pass must retain its authenticated quarantined outcome"
+        );
+    }
     assert_eq!(file_tree(&root)?, before);
     fs::remove_dir_all(root)?;
     Ok(())

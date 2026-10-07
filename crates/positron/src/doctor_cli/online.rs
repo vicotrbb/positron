@@ -374,9 +374,9 @@ fn fenced_control_report(
 
 #[cfg(unix)]
 fn control_status(path: &Path, bearer: &str) -> Result<serde_json::Value, DoctorFailure> {
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(path).map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    let mut stream =
+        crate::control_socket::connect_owner_control(path, std::time::Duration::from_secs(5))
+            .map_err(|_| DoctorFailure::EndpointUnavailable)?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .map_err(|_| DoctorFailure::EndpointUnavailable)?;

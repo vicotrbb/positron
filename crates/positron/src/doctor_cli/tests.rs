@@ -87,6 +87,132 @@ fn online_doctor_uses_authenticated_operations_status() -> Result<(), Box<dyn st
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn online_doctor_does_not_send_a_bearer_to_a_world_accessible_control_socket()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::{
+        fs,
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let path = std::env::temp_dir().join(format!("pdctl-{nonce}.sock"));
+    let listener = UnixListener::bind(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666))?;
+    let server = observe_control_request(listener);
+    let options = Options::parse(
+        [
+            "--online",
+            "--credential-stdin",
+            "--control-path",
+            path.to_str().ok_or("control path")?,
+        ]
+        .into_iter()
+        .map(ToOwned::to_owned),
+    )?;
+
+    assert!(matches!(
+        online_status_request(&options, "system-administrator"),
+        Err(DoctorFailure::EndpointUnavailable)
+    ));
+    assert_eq!(
+        server.join().map_err(|_| "control server panicked")??,
+        0,
+        "an untrusted control endpoint must be rejected before a bearer is written"
+    );
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn online_doctor_does_not_follow_a_control_socket_symlink() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::{
+        fs,
+        os::unix::{
+            fs::{PermissionsExt, symlink},
+            net::UnixListener,
+        },
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let target = std::env::temp_dir().join(format!("pdctl-target-{nonce}.sock"));
+    let alias = std::env::temp_dir().join(format!("pdctl-alias-{nonce}.sock"));
+    let listener = UnixListener::bind(&target)?;
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+    symlink(&target, &alias)?;
+    let server = observe_control_request(listener);
+    let options = Options::parse(
+        [
+            "--online",
+            "--credential-stdin",
+            "--control-path",
+            alias.to_str().ok_or("control path")?,
+        ]
+        .into_iter()
+        .map(ToOwned::to_owned),
+    )?;
+
+    assert!(matches!(
+        online_status_request(&options, "system-administrator"),
+        Err(DoctorFailure::EndpointUnavailable)
+    ));
+    assert_eq!(
+        server.join().map_err(|_| "control server panicked")??,
+        0,
+        "a Control-path symlink must be rejected before a bearer is written"
+    );
+    fs::remove_file(alias)?;
+    fs::remove_file(target)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn observe_control_request(
+    listener: std::os::unix::net::UnixListener,
+) -> std::thread::JoinHandle<Result<usize, std::io::Error>> {
+    use std::{
+        io::{ErrorKind, Read},
+        time::{Duration, Instant},
+    };
+
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true)?;
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+                    let mut request = [0_u8; 256];
+                    return match stream.read(&mut request) {
+                        Ok(received) => Ok(received),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                ErrorKind::TimedOut | ErrorKind::WouldBlock
+                            ) =>
+                        {
+                            Ok(0)
+                        },
+                        Err(error) => Err(error),
+                    };
+                },
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                },
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(0),
+                Err(error) => return Err(error),
+            }
+        }
+    })
+}
+
 #[test]
 fn online_doctor_reports_clock_uncertainty_and_stalled_work_as_degraded()
 -> Result<(), Box<dyn std::error::Error>> {

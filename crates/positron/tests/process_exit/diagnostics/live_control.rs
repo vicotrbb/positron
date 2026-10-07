@@ -147,6 +147,8 @@ fn live_control_support_bundle_is_signed_encrypted_and_reports_serving_facts()
 #[test]
 fn live_control_support_bundle_does_not_authenticate_an_arbitrary_control_response()
 -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
     let _serial = PROCESS_TEST
         .lock()
         .map_err(|_| "process test lock poisoned")?;
@@ -172,6 +174,7 @@ fn live_control_support_bundle_does_not_authenticate_an_arbitrary_control_respon
     let control =
         std::path::Path::new("/tmp").join(format!("p-us-{}-{nonce}.sock", std::process::id()));
     let listener = UnixListener::bind(&control)?;
+    fs::set_permissions(&control, fs::Permissions::from_mode(0o600))?;
     let expected_bearer = claim.secret().as_bytes().to_vec();
     let body = b"arbitrary unsigned control response".to_vec();
     let response_body = body.clone();
@@ -251,6 +254,104 @@ fn live_control_support_bundle_does_not_authenticate_an_arbitrary_control_respon
     assert!(report.contains("signature=unverified\n"));
     assert_eq!(fs::read(&output_path)?, body);
     fs::remove_file(&control)?;
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn live_control_support_bundle_withholds_credentials_from_a_world_accessible_socket()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::{io::ErrorKind, os::unix::fs::PermissionsExt, time::Instant};
+
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-untrusted-control-mode-{nonce}"));
+    let roots = ChildRoots::new(&root)?;
+    let paths = BootstrapPaths::new(&roots.data, &roots.secrets, MountQualification::LocalHost)?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let config = root.join("positron.toml");
+    fs::write(
+        &config,
+        process_configuration(
+            &root,
+            &roots.data,
+            &roots.secrets,
+            [42_011, 42_012, 42_013, 42_014, 42_015],
+        ),
+    )?;
+    let control =
+        std::path::Path::new("/tmp").join(format!("p-um-{}-{nonce}.sock", std::process::id()));
+    let listener = UnixListener::bind(&control)?;
+    fs::set_permissions(&control, fs::Permissions::from_mode(0o666))?;
+    let server = std::thread::spawn(move || -> Result<usize, std::io::Error> {
+        listener.set_nonblocking(true)?;
+        let deadline = Instant::now() + Duration::from_millis(250);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+                    let mut request = [0_u8; 4_096];
+                    return match stream.read(&mut request) {
+                        Ok(received) => Ok(received),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                ErrorKind::TimedOut | ErrorKind::WouldBlock
+                            ) =>
+                        {
+                            Ok(0)
+                        },
+                        Err(error) => Err(error),
+                    };
+                },
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                },
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(0),
+                Err(error) => return Err(error),
+            }
+        }
+    });
+    let output_path = root.join("untrusted-control-mode.age");
+    let identity = age::x25519::Identity::generate();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["support", "bundle", "create", "--config"])
+        .arg(&config)
+        .args(["--control-path"])
+        .arg(&control)
+        .args(["--output"])
+        .arg(&output_path)
+        .args(["--recipient"])
+        .arg(identity.to_public().to_string())
+        .arg("--credential-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut input = command.stdin.take().ok_or("untrusted bundle stdin")?;
+    input.write_all(claim.secret().as_bytes())?;
+    input.write_all(b"\n")?;
+    drop(input);
+    let result = command.wait_with_output()?;
+
+    assert_eq!(result.status.code(), Some(3), "{result:?}");
+    assert!(String::from_utf8(result.stdout)?.contains("SUPPORT_BUNDLE_INSPECTION_UNAVAILABLE"));
+    assert_eq!(
+        server
+            .join()
+            .map_err(|_| "untrusted control server panicked")??,
+        0,
+        "an unsafe Control endpoint must be rejected before the bundle credential is written"
+    );
+    fs::remove_file(control)?;
     fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -36,8 +36,18 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
             .map_err(|_| ControlDiagnosticsFailure::Unavailable)?;
         let started = Instant::now();
         match health.phase() {
-            ProcessPhase::Serving => health
-                .with_authenticated_serving_diagnostics(bearer, |instance, actor, runtime| {
+            ProcessPhase::Serving => {
+                let maintenance = health
+                    .authenticated_serving_maintenance_evidence(bearer)
+                    .map_err(|failure| match failure {
+                        ServingDiagnosticsFailure::AuthenticationRejected => {
+                            ControlDiagnosticsFailure::AuthenticationRejected
+                        },
+                        ServingDiagnosticsFailure::Unavailable => {
+                            ControlDiagnosticsFailure::Unavailable
+                        },
+                    })?;
+                health.with_authenticated_serving_diagnostics(bearer, |instance, actor, runtime| {
                 let reservation = instance
                     .resource_governor()
                     .reserve(diagnostics_claim(DEFAULT_OUTPUT_LIMIT).map_err(|_| ())?)
@@ -46,9 +56,6 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                 let effective = observed.effective();
                 let facts = instance.doctor_runtime_facts(actor).map_err(|_| ())?;
                 let signer = instance.support_bundle_manifest_signer(actor).map_err(|_| ())?;
-                let maintenance = health
-                    .authenticated_serving_maintenance_evidence(bearer)
-                    .map_err(|_| ())?;
                 let maintenance_inventory = instance.maintenance_bundle_evidence(facts).map_err(|_| ())?;
                 let maintenance = format!("{maintenance}{maintenance_inventory}");
                 let operational_logs = health.operational_log_snapshot().map_err(|_| ())?;
@@ -120,17 +127,21 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     ControlDiagnosticsFailure::AuthenticationRejected
                 },
                 ServingDiagnosticsFailure::Unavailable => ControlDiagnosticsFailure::Unavailable,
-            }),
+            })
+            },
             ProcessPhase::Fenced => health
                 .with_authenticated_fenced_diagnostics(bearer, |instance, actor, facts| {
                     let reservation = instance
                         .resource_governor()
                         .reserve(diagnostics_claim(DEFAULT_OUTPUT_LIMIT).map_err(|_| ())?)
                         .map_err(|_| ())?;
-                    let signer = instance.support_bundle_manifest_signer(actor).map_err(|_| ())?;
+                    let signer = instance
+                        .support_bundle_manifest_signer(actor)
+                        .map_err(|_| ())?;
                     let report = fenced_doctor_report(&facts);
                     let operational_logs = health.operational_log_snapshot().map_err(|_| ())?;
-                    let members = fenced_canonical_members(&facts, &report, &operational_logs, started)?;
+                    let members =
+                        fenced_canonical_members(&facts, &report, &operational_logs, started)?;
                     let limits = BundleLimits::new(14, DEFAULT_OUTPUT_LIMIT)
                         .map_err(|_| ())?
                         .with_elapsed_limit(DEFAULT_ELAPSED_LIMIT);
@@ -150,7 +161,10 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     if started.elapsed() > DEFAULT_ELAPSED_LIMIT {
                         return Err(());
                     }
-                    Ok(ControlDiagnosticsResponse::new(ciphertext, reservation.transfer()))
+                    Ok(ControlDiagnosticsResponse::new(
+                        ciphertext,
+                        reservation.transfer(),
+                    ))
                 })
                 .map_err(|failure| match failure {
                     FencedDiagnosticsFailure::AuthenticationRejected => {
@@ -414,12 +428,11 @@ pub(super) fn request_live_bundle(
     let bearer = read_credential()?;
     #[cfg(unix)]
     {
-        use std::os::unix::net::UnixStream;
-        let _ = options
+        let remaining = options
             .remaining_time(started)
             .ok_or(BundleFailure::DeadlineExceeded)?;
-        let mut stream =
-            UnixStream::connect(path).map_err(|_| BundleFailure::InspectionUnavailable)?;
+        let mut stream = crate::control_socket::connect_owner_control(path, remaining)
+            .map_err(|_| BundleFailure::InspectionUnavailable)?;
         let remaining = options
             .remaining_time(started)
             .ok_or(BundleFailure::DeadlineExceeded)?;

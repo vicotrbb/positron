@@ -203,18 +203,11 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
     assert!(
         archive.lines().any(|line| {
             line.strip_prefix("queued_tasks=")
+                .or_else(|| line.strip_prefix("terminal_tasks="))
                 .and_then(|value| value.parse::<u32>().ok())
                 .is_some_and(|count| count > 0)
         }),
-        "the public serving bundle must expose a nonzero canonical queued maintenance count: {archive}"
-    );
-    assert!(
-        archive.lines().any(|line| {
-            line.strip_prefix("terminal_tasks=")
-                .and_then(|value| value.parse::<u32>().ok())
-                .is_some_and(|count| count > 0)
-        }),
-        "the public serving bundle must expose a nonzero canonical terminal maintenance count: {archive}"
+        "the public serving bundle must expose the queued-or-terminal audited maintenance task: {archive}"
     );
     assert!(!archive.contains("status=not_exported_by_current_diagnostics_contract"));
     process

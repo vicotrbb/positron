@@ -350,6 +350,14 @@ impl HealthState {
         if self.phase() != ProcessPhase::Serving {
             return Err(ServingDiagnosticsFailure::Unavailable);
         }
+        let catalog_operation = self
+            .catalog_operation
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
+        let _catalog_operation = catalog_operation
+            .lock()
+            .map_err(|_| ServingDiagnosticsFailure::Unavailable)?;
         let authority = self
             .inspection_authority
             .get()
