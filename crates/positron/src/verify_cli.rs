@@ -16,8 +16,9 @@ use positron_domain::{
 };
 use positron_kernel::{MountQualification, SegmentScope};
 use positron_runtime::{
-    BootstrapPaths, OfflineIntegrityContinuation, OfflineIntegrityFailure,
-    resume_offline_integrity, verify_offline_integrity, verify_offline_integrity_scope,
+    BootstrapPaths, OfflineIntegrityAggregateOutcome, OfflineIntegrityContinuation,
+    OfflineIntegrityFailure, resume_offline_integrity, verify_offline_integrity,
+    verify_offline_integrity_scope,
 };
 use zeroize::Zeroizing;
 
@@ -124,19 +125,13 @@ fn execute(
     };
     match offline {
         Ok(report) => {
-            let status = if report.is_verified() {
-                "verified"
-            } else if !report.is_complete() {
-                "incomplete"
-            } else {
-                "fenced"
-            };
+            let status = offline_status(report.aggregate_outcome());
             let mut output = format!(
-                "mode=offline\nstatus={status}\nverification_complete={}\nreport_count={}\naggregate_scope=all_reachable\naggregate_catalog_generation={}\naggregate_covered_scopes={}\naggregate_reachable_scopes={}\naggregate_examined_segments={}\naggregate_examined_bytes={}\naggregate_omitted_segments={}\naggregate_evidence_count={}\n",
+                "mode=offline\nstatus={status}\naggregate_outcome={status}\nverification_complete={}\nreport_count={}\naggregate_scope=all_reachable\naggregate_catalog_generation={}\naggregate_covered_scopes={}\naggregate_reachable_scopes={}\naggregate_examined_segments={}\naggregate_examined_bytes={}\naggregate_omitted_segments={}\naggregate_evidence_count={}\n",
                 report.is_complete(),
                 report.reports().len(),
                 report.facts().catalog_generation(),
-                report.facts().verified_scope_count() + report.facts().fenced_scope_count(),
+                report.aggregate_evidence().len(),
                 report.facts().reachable_scope_count(),
                 report.examined_segments(),
                 report.examined_bytes(),
@@ -175,14 +170,40 @@ fn execute(
     }
 }
 
+const fn offline_status(outcome: OfflineIntegrityAggregateOutcome) -> &'static str {
+    match outcome {
+        OfflineIntegrityAggregateOutcome::Verified => "verified",
+        OfflineIntegrityAggregateOutcome::Incomplete => "incomplete",
+        OfflineIntegrityAggregateOutcome::Quarantined => "quarantined",
+        OfflineIntegrityAggregateOutcome::Fenced => "fenced",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
     use positron_api::maintenance::OnlineVerificationReport;
+    use positron_runtime::OfflineIntegrityAggregateOutcome;
 
-    use super::{VerifyFailure, VerifyOptions, online_request, selected_mode};
+    use super::{VerifyFailure, VerifyOptions, offline_status, online_request, selected_mode};
+
+    #[test]
+    fn offline_aggregate_status_preserves_quarantine_and_fence_distinctions() {
+        assert_eq!(
+            offline_status(OfflineIntegrityAggregateOutcome::Quarantined),
+            "quarantined"
+        );
+        assert_eq!(
+            offline_status(OfflineIntegrityAggregateOutcome::Fenced),
+            "fenced"
+        );
+        assert_eq!(
+            offline_status(OfflineIntegrityAggregateOutcome::Incomplete),
+            "incomplete"
+        );
+    }
 
     #[test]
     fn failure_mode_preserves_the_selected_online_path() {

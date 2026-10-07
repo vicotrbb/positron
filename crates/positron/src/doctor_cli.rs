@@ -11,8 +11,8 @@ use std::{
 use positron_config::{ConfigurationInputs, resolve};
 use positron_kernel::MountQualification;
 use positron_runtime::{
-    BootstrapPaths, OfflineDiskPressure, OfflineIntegrityFailure, OfflineIntegrityVerification,
-    verify_offline_integrity,
+    BootstrapPaths, OfflineDiskPressure, OfflineIntegrityAggregateOutcome, OfflineIntegrityFailure,
+    OfflineIntegrityVerification, verify_offline_integrity,
 };
 use zeroize::Zeroizing;
 

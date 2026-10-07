@@ -38,6 +38,9 @@ const DEFAULT_ELAPSED_LIMIT: Duration = Duration::from_secs(30);
 /// the deadline but cannot extend it beyond the documented default.
 const MAX_ELAPSED_LIMIT: Duration = DEFAULT_ELAPSED_LIMIT;
 const DEFAULT_LOG_WINDOW: Duration = Duration::from_secs(300);
+/// Support-bundle collection may inspect only a bounded recent crash-record
+/// interval. This cap applies to every command path that reaches `read_recent`.
+const MAX_LOG_WINDOW: Duration = DEFAULT_LOG_WINDOW;
 const DEFAULT_SOURCE_FILES: usize = 32;
 const EXIT_USAGE: u8 = 2;
 const EXIT_FAILURE: u8 = 3;

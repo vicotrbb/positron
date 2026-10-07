@@ -6,7 +6,7 @@ use std::{
 use super::privacy::IdentifierRetention;
 use super::{
     DEFAULT_ELAPSED_LIMIT, DEFAULT_LOG_WINDOW, DEFAULT_OUTPUT_LIMIT, DEFAULT_SOURCE_FILES,
-    EXIT_FAILURE, EXIT_USAGE, MAX_ELAPSED_LIMIT, MAX_OUTPUT_LIMIT, TAR_RECORD,
+    EXIT_FAILURE, EXIT_USAGE, MAX_ELAPSED_LIMIT, MAX_LOG_WINDOW, MAX_OUTPUT_LIMIT, TAR_RECORD,
 };
 
 /// Validated command-line choices for one bounded support-bundle invocation.
@@ -114,7 +114,7 @@ impl BundleOptions {
         if !(TAR_RECORD..=MAX_OUTPUT_LIMIT).contains(&output_limit) {
             return Err(BundleFailure::OutputLimitExceeded);
         }
-        if elapsed_limit > MAX_ELAPSED_LIMIT {
+        if elapsed_limit > MAX_ELAPSED_LIMIT || log_window > MAX_LOG_WINDOW {
             return Err(BundleFailure::Arguments);
         }
         if (control_path.is_some() || credential_stdin || !offline_key_unavailable)

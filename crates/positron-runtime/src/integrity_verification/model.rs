@@ -17,6 +17,17 @@ pub struct OfflineIntegrityVerification {
     aggregate_evidence: Vec<OfflineIntegrityEvidence>,
 }
 
+/// The only aggregate truth an offline verification may publish after it has
+/// examined every reachable scope. A localized quarantine is degraded but
+/// does not imply the instance-wide ambiguity represented by `Fenced`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineIntegrityAggregateOutcome {
+    Verified,
+    Incomplete,
+    Quarantined,
+    Fenced,
+}
+
 /// Terminal, secret-free evidence for one scope in an aggregate offline run.
 ///
 /// The runtime bounds this vector before it is authenticated into a resume
@@ -268,6 +279,35 @@ impl OfflineIntegrityVerification {
     #[must_use]
     pub fn is_verified(&self) -> bool {
         self.is_complete() && self.all_covered_scopes_verified
+    }
+
+    /// Derives one explicit aggregate outcome from authenticated terminal
+    /// evidence. An actual fenced scope takes precedence because it signals
+    /// instance-wide ambiguity even if another scope is already quarantined.
+    #[must_use]
+    pub fn aggregate_outcome(&self) -> OfflineIntegrityAggregateOutcome {
+        if !self.is_complete() {
+            return OfflineIntegrityAggregateOutcome::Incomplete;
+        }
+        if self
+            .aggregate_evidence
+            .iter()
+            .any(|evidence| evidence.outcome() == IntegrityVerificationOutcome::Fenced)
+        {
+            return OfflineIntegrityAggregateOutcome::Fenced;
+        }
+        if self
+            .aggregate_evidence
+            .iter()
+            .any(|evidence| evidence.outcome() == IntegrityVerificationOutcome::Quarantined)
+        {
+            return OfflineIntegrityAggregateOutcome::Quarantined;
+        }
+        if self.all_covered_scopes_verified {
+            OfflineIntegrityAggregateOutcome::Verified
+        } else {
+            OfflineIntegrityAggregateOutcome::Incomplete
+        }
     }
 
     #[must_use]

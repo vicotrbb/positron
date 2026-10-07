@@ -650,6 +650,30 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
             .iter()
             .any(|entry| entry.as_integrity_quarantine().is_some())
     );
+    drop(reopened);
+    let offline = crate::verify_offline_integrity(&fixture.paths()?, 2)
+        .map_err(|failure| format!("offline known-quarantine verification: {failure:?}"))?;
+    assert!(offline.is_complete());
+    assert!(!offline.is_verified());
+    assert_eq!(
+        offline.aggregate_outcome(),
+        crate::OfflineIntegrityAggregateOutcome::Quarantined,
+        "a durable, known sealed-segment quarantine degrades the aggregate without fencing the instance"
+    );
+    assert!(
+        offline
+            .aggregate_evidence()
+            .iter()
+            .any(|evidence| evidence.outcome()
+                == positron_kernel::IntegrityVerificationOutcome::Quarantined)
+    );
+    assert!(
+        offline
+            .aggregate_evidence()
+            .iter()
+            .any(|evidence| evidence.outcome()
+                == positron_kernel::IntegrityVerificationOutcome::Verified)
+    );
     Ok(())
 }
 

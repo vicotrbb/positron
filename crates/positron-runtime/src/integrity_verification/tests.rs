@@ -149,6 +149,11 @@ fn offline_verification_fences_corruption_at_an_active_durability_frontier()
         "a fenced terminal result still covers every reachable scope"
     );
     assert!(!report.is_verified());
+    assert_eq!(
+        report.aggregate_outcome(),
+        crate::OfflineIntegrityAggregateOutcome::Fenced,
+        "an active durability-frontier failure remains an instance-wide fence"
+    );
     assert!(
         report
             .reports()
@@ -734,6 +739,11 @@ fn offline_verification_releases_its_reservation_after_a_cancelled_scrub()
     let cancelled =
         cancelled.map_err(|failure| format!("cancelled scrub failed unexpectedly: {failure:?}"))?;
     assert!(!cancelled.is_complete());
+    assert_eq!(
+        cancelled.aggregate_outcome(),
+        crate::OfflineIntegrityAggregateOutcome::Incomplete,
+        "a resumable bounded pass remains incomplete rather than degraded or fenced"
+    );
     assert_eq!(
         cancelled.reports()[0].outcome(),
         positron_kernel::IntegrityVerificationOutcome::Incomplete

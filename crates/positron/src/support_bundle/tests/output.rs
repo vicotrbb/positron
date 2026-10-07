@@ -60,6 +60,54 @@ fn bundle_parser_rejects_elapsed_limits_outside_the_documented_window() {
 }
 
 #[test]
+fn bundle_parser_accepts_only_the_bounded_diagnostic_log_window() {
+    for seconds in ["0", "301", "18446744073709551615"] {
+        let result = BundleOptions::parse(
+            [
+                "bundle",
+                "create",
+                "--config",
+                "positron.toml",
+                "--output",
+                "bundle.age",
+                "--recipient",
+                "age1example",
+                "--credential-stdin",
+                "--log-window-seconds",
+                seconds,
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(
+            matches!(result, Err(super::super::options::BundleFailure::Arguments)),
+            "log window {seconds} must be rejected before credential, source, or output work"
+        );
+    }
+
+    for seconds in ["1", "300"] {
+        let result = BundleOptions::parse(
+            [
+                "bundle",
+                "create",
+                "--config",
+                "positron.toml",
+                "--output",
+                "bundle.age",
+                "--recipient",
+                "age1example",
+                "--credential-stdin",
+                "--log-window-seconds",
+                seconds,
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(result.is_ok(), "log window {seconds} must remain accepted");
+    }
+}
+
+#[test]
 fn identifier_retention_is_closed_and_never_available_to_key_unavailable_exports() {
     let retained = BundleOptions::parse(
         [

@@ -128,6 +128,62 @@ fn support_bundle_rejects_an_impossible_live_output_limit_before_inspection()
 }
 
 #[cfg(unix)]
+#[test]
+fn compiled_support_bundle_enforces_the_bounded_log_window_before_inspection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let (root, _roots, config) = initialized_support_bundle_fixture("log-window")?;
+
+    for seconds in ["0", "301", "18446744073709551615"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+            .args(["support", "bundle", "create", "--config"])
+            .arg(&config)
+            .args(["--output"])
+            .arg(root.join(format!("rejected-{seconds}.age")))
+            .args([
+                "--allow-plaintext-bundle",
+                "--offline-key-unavailable",
+                "--log-window-seconds",
+                seconds,
+            ])
+            .output()?;
+        assert_eq!(output.status.code(), Some(2), "log window {seconds}");
+        assert!(
+            String::from_utf8(output.stdout)?.contains("SUPPORT_BUNDLE_ARGUMENTS_INVALID"),
+            "log window {seconds} must be rejected before configuration, credential, source, or output work"
+        );
+        assert!(!root.join(format!("rejected-{seconds}.age")).exists());
+    }
+
+    let accepted = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["support", "bundle", "create", "--config"])
+        .arg(&config)
+        .args(["--output"])
+        .arg(root.join("accepted-boundary.age"))
+        .args([
+            "--allow-plaintext-bundle",
+            "--offline-key-unavailable",
+            "--log-window-seconds",
+            "300",
+        ])
+        .output()?;
+    assert_ne!(
+        accepted.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&accepted.stdout)
+    );
+    assert!(
+        !String::from_utf8(accepted.stdout)?.contains("SUPPORT_BUNDLE_ARGUMENTS_INVALID"),
+        "the canonical 300-second window reaches the bounded offline inspection boundary"
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn command_with_closed_stdout(
     arguments: &[&str],
 ) -> Result<std::process::Output, Box<dyn std::error::Error>> {

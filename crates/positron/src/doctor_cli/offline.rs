@@ -60,14 +60,8 @@ pub(super) fn offline_success_report(
         OfflineDiskPressure::Soft => "soft",
         OfflineDiskPressure::Hard => "hard",
     };
-    let complete = inspection.is_complete();
-    let (status, finding, severity) = if verified {
-        ("healthy", "VERIFIED", "info")
-    } else if !complete {
-        ("incomplete", "INCOMPLETE", "warning")
-    } else {
-        ("fenced", "FENCED", "error")
-    };
+    let outcome = inspection.aggregate_outcome();
+    let (status, finding, severity) = offline_outcome_fields(outcome);
     let continuation = inspection.continuation().map(|value| hex(value.encoded()));
     let safe_command = continuation.as_ref().map_or_else(
         || {
@@ -80,13 +74,21 @@ pub(super) fn offline_success_report(
         |value| offline_verify_command(Some(value), configuration, overrides),
     );
     let mut report = format!(
-        "report_version=1\nmode=offline\nstatus={}\nfinding_code=DOCTOR_INTEGRITY_{}\nseverity={}\nevidence_scope=offline_integrity_reports\nsafe_command={}\nreport_count={}\nverified_scope_count={}\nfenced_scope_count={}\nincomplete_scope_count={}\n",
+        "report_version=1\nmode=offline\nstatus={}\naggregate_integrity_outcome={}\nfinding_code=DOCTOR_INTEGRITY_{}\nseverity={}\nevidence_scope=offline_integrity_reports\nsafe_command={}\nreport_count={}\nverified_scope_count={}\nquarantined_scope_count={}\nfenced_scope_count={}\nincomplete_scope_count={}\n",
         status,
+        offline_outcome_label(outcome),
         finding,
         severity,
         safe_command,
         inspection.reports().len(),
         facts.verified_scope_count(),
+        inspection
+            .aggregate_evidence()
+            .iter()
+            .filter(|evidence| {
+                evidence.outcome() == positron_kernel::IntegrityVerificationOutcome::Quarantined
+            })
+            .count(),
         facts.fenced_scope_count(),
         facts.incomplete_scope_count(),
     );
@@ -147,6 +149,28 @@ pub(super) fn offline_success_report(
         ));
     }
     report
+}
+
+pub(super) const fn offline_outcome_label(
+    outcome: OfflineIntegrityAggregateOutcome,
+) -> &'static str {
+    match outcome {
+        OfflineIntegrityAggregateOutcome::Verified => "verified",
+        OfflineIntegrityAggregateOutcome::Incomplete => "incomplete",
+        OfflineIntegrityAggregateOutcome::Quarantined => "quarantined",
+        OfflineIntegrityAggregateOutcome::Fenced => "fenced",
+    }
+}
+
+pub(super) const fn offline_outcome_fields(
+    outcome: OfflineIntegrityAggregateOutcome,
+) -> (&'static str, &'static str, &'static str) {
+    match outcome {
+        OfflineIntegrityAggregateOutcome::Verified => ("healthy", "VERIFIED", "info"),
+        OfflineIntegrityAggregateOutcome::Incomplete => ("incomplete", "INCOMPLETE", "warning"),
+        OfflineIntegrityAggregateOutcome::Quarantined => ("degraded", "QUARANTINED", "warning"),
+        OfflineIntegrityAggregateOutcome::Fenced => ("fenced", "FENCED", "error"),
+    }
 }
 
 pub(super) fn offline_verify_command(

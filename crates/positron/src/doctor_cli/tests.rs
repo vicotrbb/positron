@@ -1,6 +1,7 @@
-use super::offline::offline_verify_command;
+use super::offline::{offline_outcome_fields, offline_outcome_label, offline_verify_command};
 use super::online::online_status_request;
 use super::{DoctorFailure, Options};
+use positron_runtime::OfflineIntegrityAggregateOutcome;
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -222,4 +223,31 @@ fn online_doctor_treats_missing_configuration_status_as_unavailable()
     ));
     server.join().map_err(|_| "server panicked")??;
     Ok(())
+}
+#[test]
+fn offline_doctor_preserves_verified_incomplete_quarantine_and_fence_outcomes() {
+    assert_eq!(
+        offline_outcome_fields(OfflineIntegrityAggregateOutcome::Verified),
+        ("healthy", "VERIFIED", "info")
+    );
+    assert_eq!(
+        offline_outcome_fields(OfflineIntegrityAggregateOutcome::Incomplete),
+        ("incomplete", "INCOMPLETE", "warning")
+    );
+    assert_eq!(
+        offline_outcome_fields(OfflineIntegrityAggregateOutcome::Quarantined),
+        ("degraded", "QUARANTINED", "warning")
+    );
+    assert_eq!(
+        offline_outcome_fields(OfflineIntegrityAggregateOutcome::Fenced),
+        ("fenced", "FENCED", "error")
+    );
+    assert_eq!(
+        offline_outcome_label(OfflineIntegrityAggregateOutcome::Quarantined),
+        "quarantined"
+    );
+    assert_eq!(
+        offline_outcome_label(OfflineIntegrityAggregateOutcome::Fenced),
+        "fenced"
+    );
 }
