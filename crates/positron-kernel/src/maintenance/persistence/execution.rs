@@ -240,6 +240,25 @@ impl MaintenanceExecution<'_> {
         }
     }
 
+    /// Terminalizes an authenticated retention publication whose current plan
+    /// no longer matches its durable pre-mutation binding. It intentionally
+    /// cannot complete a reclamation or reconcile an ambiguous publication.
+    pub fn fail_rejected_retention_publication_and_persist(
+        &self,
+        coordinator: &MaintenanceCoordinator,
+        catalog: &Catalog<'_>,
+        proof: &crate::LedgerFailure,
+    ) -> Result<(), MaintenanceFailure> {
+        if self.task.class != MaintenanceTaskClass::RetentionPublication {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
+        coordinator.fail_rejected_retention_publication_and_persist_dispatch(
+            catalog,
+            self.dispatch,
+            proof,
+        )
+    }
+
     /// Terminalizes a dispatched Compaction whose authenticated selected bucket
     /// contains no blocks. This commits only its exact PMTC successor; it must
     /// not invent a replacement segment or manifest publication.

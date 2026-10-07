@@ -175,7 +175,7 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
     )?;
     drop(reopened);
     let resumed_host = NativeHost::new(NativeBindings::from_effective(&plaintext)?);
-    let resumed = ApplicationRuntime::start(
+    let mut resumed = ApplicationRuntime::start(
         ServeConfiguration::new(paths.clone(), InitializationMode::ExistingOnly)
             .with_effective_configuration(plaintext),
         HostInputs::new(&resumed_host, &resumed_host),
@@ -194,8 +194,29 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
         })?;
     let deadline = Instant::now() + Duration::from_secs(3);
     let task_identity = loop {
-        let status =
-            maintenance_client.status(claim.secret(), &MaintenanceStatusRequest::default())?;
+        let status = match maintenance_client
+            .status(claim.secret(), &MaintenanceStatusRequest::default())
+        {
+            Ok(status) => status,
+            Err(failure) => {
+                let pre_fence_health = resumed.health();
+                let applied_pending_fence = resumed.apply_pending_integrity_fence();
+                let post_fence_health = resumed.health();
+                let shutdown = resumed.shutdown(ShutdownTrigger::FirstSignal);
+                return Err(format!(
+                    "maintenance status failed: {failure:?}; applied_pending_fence={applied_pending_fence}; \
+                     pre_phase={:?}; pre_readiness={:?}; pre_fence_reason={:?}; \
+                     post_phase={:?}; post_readiness={:?}; post_fence_reason={:?}; shutdown={shutdown:?}",
+                    pre_fence_health.phase(),
+                    pre_fence_health.readiness(),
+                    pre_fence_health.integrity_fence_reason(),
+                    post_fence_health.phase(),
+                    post_fence_health.readiness(),
+                    post_fence_health.integrity_fence_reason(),
+                )
+                .into());
+            },
+        };
         let tasks = status
             .tasks
             .into_iter()
@@ -218,31 +239,81 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
     // Catalog gate as a storage outage and exponentially defer this durable
     // reclamation.
     loop {
-        let task = maintenance_client
-            .explain(
-                claim.secret(),
-                &MaintenanceExplainRequest {
-                    identity: task_identity.clone(),
-                },
-            )?
-            .task;
+        let task = match maintenance_client.explain(
+            claim.secret(),
+            &MaintenanceExplainRequest {
+                identity: task_identity.clone(),
+            },
+        ) {
+            Ok(response) => response.task,
+            Err(failure) => {
+                let pre_fence_health = resumed.health();
+                let applied_pending_fence = resumed.apply_pending_integrity_fence();
+                let post_fence_health = resumed.health();
+                let shutdown = resumed.shutdown(ShutdownTrigger::FirstSignal);
+                return Err(format!(
+                    "maintenance explain failed: {failure:?}; applied_pending_fence={applied_pending_fence}; \
+                     pre_phase={:?}; pre_readiness={:?}; pre_fence_reason={:?}; \
+                     post_phase={:?}; post_readiness={:?}; post_fence_reason={:?}; shutdown={shutdown:?}",
+                    pre_fence_health.phase(),
+                    pre_fence_health.readiness(),
+                    pre_fence_health.integrity_fence_reason(),
+                    post_fence_health.phase(),
+                    post_fence_health.readiness(),
+                    post_fence_health.integrity_fence_reason(),
+                )
+                .into());
+            },
+        };
         match task.phase.as_str() {
             "succeeded" => break,
             "failed" | "cancelled" => {
                 return Err(format!(
-                    "system catalog reclamation task reached terminal phase {}",
-                    task.phase
+                    "system catalog reclamation task reached terminal phase {}: {task:?}",
+                    task.phase,
                 )
                 .into());
             },
             _ if Instant::now() >= deadline => {
-                return Err(
-                    "system catalog reclamation task did not succeed before deadline".into(),
-                );
+                let pre_fence_health = resumed.health();
+                let phase = pre_fence_health.phase();
+                let readiness = pre_fence_health.readiness();
+                let fence_reason = pre_fence_health.integrity_fence_reason();
+                let applied_pending_fence = resumed.apply_pending_integrity_fence();
+                let post_fence_health = resumed.health();
+                let tasks = maintenance_client
+                    .status(claim.secret(), &MaintenanceStatusRequest::default())
+                    .map(|status| status.tasks);
+                let resources = pre_fence_health
+                    .with_authenticated_serving_diagnostics(claim.secret(), |instance, _, _| {
+                        instance.resource_governor().inspect().map_err(|_| ())
+                    });
+                let shutdown = resumed.shutdown(ShutdownTrigger::FirstSignal);
+                return Err(format!(
+                    "system catalog reclamation task did not succeed before deadline: {task:?}; \
+                     applied_pending_fence={applied_pending_fence}; phase={phase:?}; \
+                     readiness={readiness:?}; fence_reason={fence_reason:?}; \
+                     post_phase={:?}; post_readiness={:?}; post_fence_reason={:?}; \
+                     tasks={tasks:?}; resources={resources:?}; shutdown={shutdown:?}",
+                    post_fence_health.phase(),
+                    post_fence_health.readiness(),
+                    post_fence_health.integrity_fence_reason(),
+                )
+                .into());
             },
             _ => std::thread::yield_now(),
         }
     }
+    let statuses =
+        maintenance_client.status(claim.secret(), &MaintenanceStatusRequest::default())?;
+    assert!(
+        statuses.tasks.iter().any(|candidate| {
+            candidate.class == "retention_publication"
+                && candidate.phase == "failed"
+                && candidate.terminal_failure_class.as_deref() == Some("stale_generation")
+        }),
+        "the current policy-derived plan terminalizes its stale predecessor before the released claim admits reclamation"
+    );
     assert_eq!(
         resumed.shutdown(ShutdownTrigger::FirstSignal),
         positron_runtime::ExitOutcome::Graceful

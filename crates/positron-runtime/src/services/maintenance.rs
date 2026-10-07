@@ -513,9 +513,33 @@ fn complete_installed_maintenance(
             identity,
             ..
         } => ledger.complete_running_snapshot_lease_expiry_task(coordinator, execution, *identity),
-        InstalledMaintenanceExecution::RetentionPublication { execution, .. } => ledger
-            .complete_running_retention_publication_task(coordinator, execution)
-            .map(|_| ()),
+        InstalledMaintenanceExecution::RetentionPublication { execution, .. } => {
+            match ledger.complete_running_retention_publication_task(coordinator, execution) {
+                Ok(_) => return Ok(true),
+                // A rejected-before-mutation binding mismatch cannot become
+                // valid by retrying the same durable execution. Publish its
+                // exact terminal cause, release the existing reservation, and
+                // let ordinary discovery derive a descriptor from the current
+                // immutable source and retention policy.
+                Err(failure)
+                    if failure.code() == positron_kernel::LedgerFailureCode::StaleGeneration
+                        && failure.completion_state()
+                            == positron_kernel::LedgerCompletionState::RejectedBeforeMutation =>
+                {
+                    execution
+                        .fail_rejected_retention_publication_and_persist(
+                            coordinator,
+                            &catalog,
+                            &failure,
+                        )
+                        .map_err(map_failure)?;
+                    return Ok(true);
+                },
+                Err(failure) => {
+                    return Err(super::classify_ledger_failure_code(failure.code()));
+                },
+            }
+        },
         InstalledMaintenanceExecution::RetentionReclamation { execution, .. } => {
             ledger.complete_running_retention_reclamation_task(coordinator, execution)
         },

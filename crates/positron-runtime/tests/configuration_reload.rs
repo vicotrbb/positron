@@ -429,10 +429,11 @@ fn listener_reload_publishes_the_staged_configuration_generation()
         .and_then(|endpoint| endpoint.socket_address())
         .ok_or("replacement operations endpoint missing")?;
     assert_eq!(operations.port(), successor_operations);
-    assert!(matches!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    ));
+    let shutdown = process.shutdown(ShutdownTrigger::FirstSignal);
+    assert!(
+        matches!(shutdown, positron_runtime::ExitOutcome::Graceful),
+        "listener reload shutdown returned {shutdown:?}"
+    );
     Ok(())
 }
 
