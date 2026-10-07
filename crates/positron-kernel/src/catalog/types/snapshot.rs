@@ -44,18 +44,6 @@ impl CatalogSnapshot {
         Ok(self.0.objects.get(&identity).map(AsRef::as_ref))
     }
 
-    /// Compares two authenticated catalog states while excluding one exact
-    /// maintenance task record. An online operation may advance only its own
-    /// durable coordinator record around an immutable observation; every
-    /// other object remains part of its pinned authority.
-    pub fn same_except_maintenance_task(
-        &self,
-        successor: &Self,
-        task: crate::MaintenanceTaskId,
-    ) -> Result<bool, CatalogFailure> {
-        self.same_except_maintenance_tasks(successor, &[task])
-    }
-
     /// Compares two authenticated Catalog states while excluding only the
     /// supplied durable maintenance records. Callers derive this bounded
     /// allowlist from their authenticated operation lineage; every other

@@ -54,6 +54,114 @@ fn online_verification_wire_requires_an_explicit_scope_and_never_marks_partial_w
 }
 
 #[test]
+fn generated_client_sends_a_bounded_authenticated_online_resume()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = listener.local_addr()?;
+    let continuation = "ab".repeat(136);
+    let mut response = OnlineVerificationReport {
+        report_version: 1,
+        tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+        signal: "logs".to_owned(),
+        shard: 1,
+        catalog_generation: 7,
+        examined_segments: 1,
+        examined_bytes: 42,
+        omitted_segments: 0,
+        outcome: "verified".to_owned(),
+        verification_complete: true,
+        report_checksum: String::new(),
+        continuation: None,
+        findings: Vec::new(),
+    };
+    response.report_checksum = response.checksum();
+    let body = String::from_utf8(response.encode()?)?;
+    let server = std::thread::spawn(move || -> Result<bool, std::io::Error> {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        };
+        let mut request = [0_u8; 2_048];
+        let read = stream.read(&mut request)?;
+        let request = String::from_utf8_lossy(&request[..read]);
+        stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )?;
+        Ok(request.starts_with("POST /v1/maintenance:verify HTTP/1.1\r\n"))
+    });
+
+    let client = MaintenanceServiceClient::new(MaintenanceTransport::PlaintextOptOut { endpoint })?;
+    let result = client.verify(
+        "system-administrator",
+        &OnlineVerificationRequest::new(
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+            "logs".to_owned(),
+            1,
+            Some(7),
+            Some(continuation),
+        ),
+    );
+    let reached = server
+        .join()
+        .map_err(|_| "verification server panicked")??;
+    assert!(
+        reached,
+        "a valid authenticated online continuation must reach the generated route"
+    );
+    assert_eq!(result?.catalog_generation, 7);
+    Ok(())
+}
+
+#[test]
+fn online_verification_contract_artifacts_publish_the_authenticated_wrapper_boundary() {
+    let mapping: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/http.json"))
+            .expect("canonical HTTP mapping");
+    let verify = mapping["mappings"]
+        .as_array()
+        .expect("mapping routes")
+        .iter()
+        .find(|route| route["rpc"] == "positron.v1.MaintenanceService/Verify")
+        .expect("online verification route");
+    assert_eq!(verify["max_request_bytes"], 512);
+
+    let openapi: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/openapi.json"))
+            .expect("canonical OpenAPI document");
+    assert_eq!(
+        openapi["paths"]["/v1/maintenance:verify"]["post"]["x-positron-max-request-bytes"],
+        512
+    );
+    for continuation in [
+        &openapi["components"]["schemas"]["OnlineVerificationRequest"]["properties"]["continuation"],
+        &openapi["components"]["schemas"]["OnlineVerificationReport"]["properties"]["continuation"],
+    ] {
+        assert_eq!(continuation["pattern"], "^[0-9a-f]{272}$");
+        assert_eq!(continuation["minLength"], 272);
+        assert_eq!(continuation["maxLength"], 272);
+    }
+}
+
+#[test]
 fn online_verification_report_checksum_is_deterministic_and_rejects_tampering() {
     let mut report = OnlineVerificationReport {
         report_version: 1,

@@ -762,7 +762,7 @@
       "request": "OnlineVerificationRequest",
       "response": "OnlineVerificationReport",
       "authentication": "Bearer SystemAdministration",
-      "max_request_bytes": 256,
+      "max_request_bytes": 512,
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
       "request_fields": [
