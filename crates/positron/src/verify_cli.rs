@@ -33,7 +33,7 @@ use offline::{decode_offline_continuation, failure_status, offline_scope};
 #[cfg(test)]
 use online::online_request;
 use options::{VerifyFailure, VerifyOptions};
-use render::{hex, render_finding, render_report};
+use render::{hex, render_aggregate_evidence, render_finding, render_report};
 
 pub(super) fn run(
     arguments: impl Iterator<Item = String>,
@@ -127,12 +127,22 @@ fn execute(
                 "fenced"
             };
             let mut output = format!(
-                "mode=offline\nstatus={status}\nverification_complete={}\nreport_count={}\n",
+                "mode=offline\nstatus={status}\nverification_complete={}\nreport_count={}\naggregate_scope=all_reachable\naggregate_catalog_generation={}\naggregate_covered_scopes={}\naggregate_reachable_scopes={}\naggregate_examined_segments={}\naggregate_examined_bytes={}\naggregate_omitted_segments={}\naggregate_evidence_count={}\n",
                 report.is_complete(),
                 report.reports().len(),
+                report.facts().catalog_generation(),
+                report.facts().verified_scope_count() + report.facts().fenced_scope_count(),
+                report.facts().reachable_scope_count(),
+                report.examined_segments(),
+                report.examined_bytes(),
+                report.omitted_segments(),
+                report.aggregate_evidence().len(),
             );
             for item in report.reports() {
                 output.push_str(&render_report(*item));
+            }
+            for evidence in report.aggregate_evidence() {
+                output.push_str(&render_aggregate_evidence(*evidence));
             }
             if let Some(continuation) = report.continuation() {
                 output.push_str(&format!(

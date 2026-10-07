@@ -134,6 +134,14 @@ impl WorkClaim {
         })
     }
 
+    #[must_use]
+    pub const fn is_system_diagnostics(&self) -> bool {
+        matches!(self.kind, WorkKind::Diagnostics)
+            && self.tenant.is_none()
+            && self.principal.is_none()
+            && self.operation.is_none()
+    }
+
     /// Creates one post-authentication tenant operation attributed to its
     /// credential Principal. The Governor retains this identity in its fixed
     /// grant ledger so one Principal cannot consume unbounded concurrent work.

@@ -67,6 +67,10 @@ fn write_report(report: &str) -> Result<(), ()> {
     locked.flush().map_err(|_| ())
 }
 
+pub(crate) const fn online_bundle_report() -> &'static str {
+    "report_version=1\nstatus=created\nformat=age_encrypted_opaque_bundle\nmode=online\nencryption=age_x25519\nartifact_authentication=unverified_control_response\nsignature=unverified\nplaintext_export_warning=false\n"
+}
+
 fn execute(
     arguments: impl Iterator<Item = String>,
     environment: impl IntoIterator<Item = (String, String)>,
@@ -102,9 +106,7 @@ fn execute(
             !options.deadline_exceeded(started)
         })
         .map_err(publication_failure)?;
-        return Ok(
-            "report_version=1\nstatus=created\nformat=positron-support-bundle-tar-v1\nmode=online\nencryption=age_x25519\nsignature=signed\nplaintext_export_warning=false\n".to_owned(),
-        );
+        return Ok(online_bundle_report().to_owned());
     }
     let bundle = if options.offline_key_unavailable {
         InstanceBootstrap::with_offline_key_unavailable_diagnostics(

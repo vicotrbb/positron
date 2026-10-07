@@ -482,33 +482,40 @@ pub(super) fn verify_offline_integrity(
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     let authority = resources::establish_system_diagnostics(volume, max_registered_tenants)
         .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
-    let _reservation = authority
-        .governor()
-        .reserve(claim)
-        .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-    let resource_snapshot = authority
+    let inspection =
+        Catalog::reserve_offline_integrity_inspection(&authority, claim).map_err(|failure| {
+            match failure.code() {
+                positron_kernel::CatalogFailureCode::ResourceAdmissionRefused
+                | positron_kernel::CatalogFailureCode::LimitExceeded => {
+                    crate::OfflineIntegrityFailure::CapacityUnavailable
+                },
+                _ => crate::OfflineIntegrityFailure::StorageUnavailable,
+            }
+        })?;
+    let resource_snapshot = inspection
+        .authority()
         .governor()
         .inspect()
         .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
-    let snapshot = Catalog::read_current_snapshot(
-        &authority,
-        record.instance,
-        key.catalog_secret(record.instance)
-            .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?,
-    )
-    .map_err(|failure| match failure.code() {
-        positron_kernel::CatalogFailureCode::StorageUnavailable => {
-            crate::OfflineIntegrityFailure::StorageUnavailable
-        },
-        positron_kernel::CatalogFailureCode::ConcurrentWriter => {
-            crate::OfflineIntegrityFailure::CatalogUnavailable
-        },
-        positron_kernel::CatalogFailureCode::LimitExceeded
-        | positron_kernel::CatalogFailureCode::ResourceAdmissionRefused => {
-            crate::OfflineIntegrityFailure::CapacityUnavailable
-        },
-        _ => crate::OfflineIntegrityFailure::CorruptState,
-    })?;
+    let snapshot = inspection
+        .read_current_snapshot(
+            record.instance,
+            key.catalog_secret(record.instance)
+                .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?,
+        )
+        .map_err(|failure| match failure.code() {
+            positron_kernel::CatalogFailureCode::StorageUnavailable => {
+                crate::OfflineIntegrityFailure::StorageUnavailable
+            },
+            positron_kernel::CatalogFailureCode::ConcurrentWriter => {
+                crate::OfflineIntegrityFailure::CatalogUnavailable
+            },
+            positron_kernel::CatalogFailureCode::LimitExceeded
+            | positron_kernel::CatalogFailureCode::ResourceAdmissionRefused => {
+                crate::OfflineIntegrityFailure::CapacityUnavailable
+            },
+            _ => crate::OfflineIntegrityFailure::CorruptState,
+        })?;
     if snapshot.number() == 0 {
         return Err(crate::OfflineIntegrityFailure::CorruptState);
     }
@@ -568,6 +575,10 @@ pub(super) fn verify_offline_integrity(
         verified: mut verified_scope_count,
         fenced: mut fenced_scope_count,
         mut all_verified,
+        mut examined_segments,
+        mut examined_bytes,
+        mut omitted_segments,
+        mut aggregate_evidence,
         cursor: mut resume_cursor,
     } = if let Some(token) = resume {
         let decoded = key
@@ -588,6 +599,10 @@ pub(super) fn verify_offline_integrity(
             verified: 0,
             fenced: 0,
             all_verified: true,
+            examined_segments: 0,
+            examined_bytes: 0,
+            omitted_segments: 0,
+            aggregate_evidence: Vec::new(),
             cursor: None,
         }
     };
@@ -657,6 +672,21 @@ pub(super) fn verify_offline_integrity(
         remaining_segments = remaining_segments.saturating_sub(report.examined_segments());
         remaining_bytes = remaining_bytes.saturating_sub(report.examined_bytes());
         let outcome = report.outcome();
+        examined_segments = examined_segments
+            .checked_add(
+                u64::try_from(report.examined_segments())
+                    .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
+            )
+            .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+        examined_bytes = examined_bytes
+            .checked_add(report.examined_bytes())
+            .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+        omitted_segments = omitted_segments
+            .checked_add(
+                u64::try_from(report.omitted_segments())
+                    .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?,
+            )
+            .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
         reports
             .try_reserve(1)
             .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
@@ -666,6 +696,13 @@ pub(super) fn verify_offline_integrity(
             resume_cursor = reports.last().and_then(|report| report.continuation());
             break;
         }
+        if aggregate_evidence.len() == MAX_OFFLINE_AGGREGATE_EVIDENCE {
+            return Err(crate::OfflineIntegrityFailure::CapacityUnavailable);
+        }
+        aggregate_evidence
+            .try_reserve(1)
+            .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+        aggregate_evidence.push(crate::OfflineIntegrityEvidence::from_report(report));
         covered_scope_count = covered_scope_count
             .checked_add(1)
             .ok_or(crate::OfflineIntegrityFailure::CapacityUnavailable)?;
@@ -722,6 +759,10 @@ pub(super) fn verify_offline_integrity(
                 verified: verified_scope_count,
                 fenced: fenced_scope_count,
                 all_verified,
+                examined_segments,
+                examined_bytes,
+                omitted_segments,
+                aggregate_evidence: aggregate_evidence.clone(),
                 cursor: resume_cursor,
             },
         )?;
@@ -743,15 +784,28 @@ pub(super) fn verify_offline_integrity(
         continuation,
         covered_scope_count,
         all_verified,
+        examined_segments,
+        examined_bytes,
+        omitted_segments,
+        aggregate_evidence,
     ))
 }
+
+// The canonical scope manifest admits at most 1,024 scopes. Its complete
+// terminal account is encoded in the protected continuation (62 bytes each),
+// remaining below the 64 KiB continuation limit without silently reducing a
+// valid manifest to a partial success claim.
+const MAX_OFFLINE_AGGREGATE_EVIDENCE: usize = 1_024;
 
 fn encode_offline_integrity_continuation(
     generation: u64,
     state: OfflineIntegrityContinuationState,
 ) -> Result<Vec<u8>, crate::OfflineIntegrityFailure> {
-    let mut encoded = Vec::with_capacity(112);
-    encoded.push(2);
+    if state.aggregate_evidence.len() > MAX_OFFLINE_AGGREGATE_EVIDENCE {
+        return Err(crate::OfflineIntegrityFailure::CapacityUnavailable);
+    }
+    let mut encoded = Vec::with_capacity(16_384);
+    encoded.push(4);
     encoded.extend_from_slice(&generation.to_be_bytes());
     match state.mode {
         OfflineIntegrityContinuationMode::Aggregate => encoded.push(0),
@@ -778,6 +832,38 @@ fn encode_offline_integrity_continuation(
         );
     }
     encoded.push(u8::from(state.all_verified));
+    for value in [
+        state.examined_segments,
+        state.examined_bytes,
+        state.omitted_segments,
+    ] {
+        encoded.extend_from_slice(&value.to_be_bytes());
+    }
+    encoded.extend_from_slice(
+        &u16::try_from(state.aggregate_evidence.len())
+            .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?
+            .to_be_bytes(),
+    );
+    for evidence in &state.aggregate_evidence {
+        let scope = evidence.scope();
+        encoded.extend_from_slice(&scope.tenant_id().to_bytes());
+        encoded.push(match scope.signal_kind() {
+            positron_domain::routing::SignalKind::Logs => 1,
+            positron_domain::routing::SignalKind::Traces => 2,
+        });
+        encoded.extend_from_slice(&scope.shard_id().value().to_be_bytes());
+        encoded.extend_from_slice(&evidence.catalog_generation().to_be_bytes());
+        encoded.push(match evidence.outcome() {
+            positron_kernel::IntegrityVerificationOutcome::Verified => 1,
+            positron_kernel::IntegrityVerificationOutcome::Stale => 2,
+            positron_kernel::IntegrityVerificationOutcome::Quarantined => 3,
+            positron_kernel::IntegrityVerificationOutcome::Fenced => 4,
+            positron_kernel::IntegrityVerificationOutcome::Incomplete => {
+                return Err(crate::OfflineIntegrityFailure::CorruptState);
+            },
+        });
+        encoded.extend_from_slice(&evidence.checksum());
+    }
     if let Some(cursor) = state.cursor {
         encoded.push(1);
         encoded.extend_from_slice(&cursor.encode());
@@ -793,7 +879,7 @@ enum OfflineIntegrityContinuationMode {
     Scope(positron_kernel::SegmentScope),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct OfflineIntegrityContinuationState {
     mode: OfflineIntegrityContinuationMode,
     scope_index: usize,
@@ -801,6 +887,10 @@ struct OfflineIntegrityContinuationState {
     verified: usize,
     fenced: usize,
     all_verified: bool,
+    examined_segments: u64,
+    examined_bytes: u64,
+    omitted_segments: u64,
+    aggregate_evidence: Vec<crate::OfflineIntegrityEvidence>,
     cursor: Option<positron_kernel::IntegrityScrubContinuation>,
 }
 
@@ -808,7 +898,7 @@ fn decode_offline_integrity_continuation(
     encoded: &[u8],
     generation: u64,
 ) -> Result<OfflineIntegrityContinuationState, crate::OfflineIntegrityFailure> {
-    if encoded.first() != Some(&2) || encoded.get(1..9) != Some(generation.to_be_bytes().as_slice())
+    if encoded.first() != Some(&4) || encoded.get(1..9) != Some(generation.to_be_bytes().as_slice())
     {
         return Err(crate::OfflineIntegrityFailure::CorruptState);
     }
@@ -857,7 +947,81 @@ fn decode_offline_integrity_continuation(
         Some(1) => true,
         _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
     };
-    let cursor_offset = offset + 9;
+    let aggregates_offset = offset + 9;
+    let aggregate = |offset| {
+        encoded
+            .get(offset..offset + 8)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_be_bytes)
+            .ok_or(crate::OfflineIntegrityFailure::CorruptState)
+    };
+    let examined_segments = aggregate(aggregates_offset)?;
+    let examined_bytes = aggregate(aggregates_offset + 8)?;
+    let omitted_segments = aggregate(aggregates_offset + 16)?;
+    let evidence_count_offset = aggregates_offset + 24;
+    let evidence_count = encoded
+        .get(evidence_count_offset..evidence_count_offset + 2)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u16::from_be_bytes)
+        .map(usize::from)
+        .filter(|count| *count <= MAX_OFFLINE_AGGREGATE_EVIDENCE)
+        .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+    let evidence_offset = evidence_count_offset + 2;
+    const EVIDENCE_BYTES: usize = 62;
+    let evidence_end = evidence_offset
+        .checked_add(
+            evidence_count
+                .checked_mul(EVIDENCE_BYTES)
+                .ok_or(crate::OfflineIntegrityFailure::CorruptState)?,
+        )
+        .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+    let mut aggregate_evidence = Vec::new();
+    aggregate_evidence
+        .try_reserve(evidence_count)
+        .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+    for index in 0..evidence_count {
+        let start = evidence_offset + index * EVIDENCE_BYTES;
+        let tenant = encoded
+            .get(start..start + 16)
+            .and_then(|bytes| bytes.try_into().ok())
+            .and_then(|bytes| positron_domain::identity::TenantId::from_bytes(bytes).ok())
+            .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+        let signal = match encoded.get(start + 16) {
+            Some(1) => positron_domain::routing::SignalKind::Logs,
+            Some(2) => positron_domain::routing::SignalKind::Traces,
+            _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
+        };
+        let shard = encoded
+            .get(start + 17..start + 21)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_be_bytes)
+            .and_then(|value| positron_domain::routing::VirtualShardId::new(value).ok())
+            .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+        let evidence_generation = encoded
+            .get(start + 21..start + 29)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_be_bytes)
+            .filter(|value| *value == generation)
+            .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+        let outcome = match encoded.get(start + 29) {
+            Some(1) => positron_kernel::IntegrityVerificationOutcome::Verified,
+            Some(2) => positron_kernel::IntegrityVerificationOutcome::Stale,
+            Some(3) => positron_kernel::IntegrityVerificationOutcome::Quarantined,
+            Some(4) => positron_kernel::IntegrityVerificationOutcome::Fenced,
+            _ => return Err(crate::OfflineIntegrityFailure::CorruptState),
+        };
+        let checksum = encoded
+            .get(start + 30..start + EVIDENCE_BYTES)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(crate::OfflineIntegrityFailure::CorruptState)?;
+        aggregate_evidence.push(crate::OfflineIntegrityEvidence::from_parts(
+            positron_kernel::SegmentScope::new(tenant, signal, shard),
+            evidence_generation,
+            outcome,
+            checksum,
+        ));
+    }
+    let cursor_offset = evidence_end;
     let cursor = match encoded.get(cursor_offset) {
         Some(0) if encoded.len() == cursor_offset + 1 => None,
         Some(1) if encoded.len() == cursor_offset + 57 => Some(
@@ -873,27 +1037,17 @@ fn decode_offline_integrity_continuation(
         verified,
         fenced,
         all_verified,
+        examined_segments,
+        examined_bytes,
+        omitted_segments,
+        aggregate_evidence,
         cursor,
     })
 }
 
 pub(super) fn offline_integrity_claim()
 -> Result<positron_kernel::WorkClaim, crate::OfflineIntegrityFailure> {
-    use positron_kernel::{IntegrityScrubBudget, ResourceAmounts, WorkClaim};
-
-    WorkClaim::system_diagnostics(ResourceAmounts::new([
-        IntegrityScrubBudget::MAX_BYTES,
-        0,
-        1,
-        4_000_000,
-        IntegrityScrubBudget::MAX_SEGMENTS as u64,
-        0,
-        0,
-        1,
-        1,
-        1,
-        0,
-    ]))
+    positron_kernel::WorkClaim::system_diagnostics(positron_kernel::integrity_scrub_resource_claim())
     .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)
 }
 
@@ -927,4 +1081,123 @@ pub(super) fn with_offline_key_unavailable_diagnostics<T>(
     let crash_records = positron_kernel::CrashRecordStore::from_authority(&authority)
         .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
     Ok(operation(crash_records))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use positron_kernel::{
+        AdmissionFailureCode, DiskObservation, DiskPressureThresholds, GovernorPolicy,
+        InventoryCardinalityLimits, MountQualification, ObservedResourceEnvironment,
+        OperatorLimits, OrdinaryPoolPolicy, PrimaryDataVolume, RecoveryPoolCapacities,
+        RecoveryReserve, ResourceAmounts, ResourceDimension, ResourceGovernorConfiguration,
+        ResourceInventory, StorageKernelResourceAuthority,
+    };
+
+    use super::offline_integrity_claim;
+
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn offline_integrity_claim_refuses_the_complete_catalog_peak_before_catalog_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "positron-offline-integrity-admission-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root)?;
+        let authority = bounded_system_diagnostics_authority(&root)?;
+
+        // This is the historical single-scrub claim. It fits the configured
+        // ordinary capacity and releases normally, demonstrating that the
+        // pressure fixture does not reject all diagnostics work.
+        let historical_scrub =
+            positron_kernel::WorkClaim::system_diagnostics(ResourceAmounts::new([
+                16_777_216, 0, 1, 4_000_000, 128, 0, 0, 1, 1, 1, 0,
+            ]))?;
+        let reservation = authority.governor().reserve(historical_scrub)?;
+        assert_eq!(authority.governor().inspect()?.outstanding_total(), 1);
+        drop(reservation);
+        assert!(authority.governor().inspect()?.complete());
+
+        let refusal =
+            authority
+                .governor()
+                .reserve(offline_integrity_claim().map_err(|failure| {
+                    std::io::Error::other(format!("claim failed: {failure:?}"))
+                })?)
+                .expect_err("the complete Catalog peak must be refused before Catalog inspection");
+        assert_eq!(refusal.code(), AdmissionFailureCode::CapacityExhausted);
+        assert!(authority.governor().inspect()?.complete());
+        drop(authority);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn bounded_system_diagnostics_authority(
+        root: &std::path::Path,
+    ) -> Result<StorageKernelResourceAuthority, Box<dyn std::error::Error>> {
+        let volume = PrimaryDataVolume::acquire(root, MountQualification::LocalHost)?;
+        let cardinality = InventoryCardinalityLimits::new(1, 16)?;
+        let ordinary = ResourceAmounts::new([
+            16_777_316, 32, 32, 4_000_100, 70_000, 32, 32, 32, 4_000_100, 32, 40_000_000,
+        ]);
+        let recovery_reserve = ResourceAmounts::new([7; 11]);
+        let raw = add(
+            add(ordinary, recovery_reserve)?,
+            cardinality.governor_bootstrap_overhead(1)?,
+        )?;
+        let observed = ObservedResourceEnvironment::for_test(
+            &volume,
+            raw,
+            DiskObservation::new(raw.get(ResourceDimension::DiskHeadroomBytes)),
+        )?;
+        let inventory = ResourceInventory::new_observed(
+            observed,
+            OperatorLimits::new(raw)?,
+            RecoveryReserve::new(recovery_reserve)?,
+            cardinality,
+            DiskPressureThresholds::new(7, 8, 9, raw.get(ResourceDimension::DiskHeadroomBytes))?,
+        )?;
+        let policy = GovernorPolicy::system_only(OrdinaryPoolPolicy::new(
+            ResourceAmounts::new([4; 11]),
+            ResourceAmounts::new([3; 11]),
+            ResourceAmounts::new([2; 11]),
+            ResourceAmounts::new([1; 11]),
+        )?);
+        let one = ResourceAmounts::new([1; 11]);
+        let recovery = RecoveryPoolCapacities::new(one, one, one, one, one, one, one)?;
+        let configuration = ResourceGovernorConfiguration::new(inventory, policy, recovery)?;
+        Ok(StorageKernelResourceAuthority::establish(
+            volume,
+            configuration,
+        )?)
+    }
+
+    fn add(
+        left: ResourceAmounts,
+        right: ResourceAmounts,
+    ) -> Result<ResourceAmounts, Box<dyn std::error::Error>> {
+        let amount = |dimension| {
+            left.get(dimension)
+                .checked_add(right.get(dimension))
+                .ok_or("resource amount overflow")
+        };
+        Ok(ResourceAmounts::new([
+            amount(ResourceDimension::MemoryBytes)?,
+            amount(ResourceDimension::QueueSlots)?,
+            amount(ResourceDimension::TaskSlots)?,
+            amount(ResourceDimension::BufferCacheBytes)?,
+            amount(ResourceDimension::BatchItems)?,
+            amount(ResourceDimension::LeaseSlots)?,
+            amount(ResourceDimension::RetrySlots)?,
+            amount(ResourceDimension::IoPermits)?,
+            amount(ResourceDimension::CpuWorkUnits)?,
+            amount(ResourceDimension::FileDescriptors)?,
+            amount(ResourceDimension::DiskHeadroomBytes)?,
+        ]))
+    }
 }

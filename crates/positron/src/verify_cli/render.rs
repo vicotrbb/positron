@@ -84,6 +84,30 @@ pub(super) fn render_report(report: positron_kernel::IntegrityVerificationReport
     )
 }
 
+pub(super) fn render_aggregate_evidence(
+    evidence: positron_runtime::OfflineIntegrityEvidence,
+) -> String {
+    let scope = evidence.scope();
+    let signal = match scope.signal_kind() {
+        positron_domain::routing::SignalKind::Logs => "logs",
+        positron_domain::routing::SignalKind::Traces => "traces",
+    };
+    let outcome = match evidence.outcome() {
+        positron_kernel::IntegrityVerificationOutcome::Verified => "verified",
+        positron_kernel::IntegrityVerificationOutcome::Incomplete => "incomplete",
+        positron_kernel::IntegrityVerificationOutcome::Stale => "stale",
+        positron_kernel::IntegrityVerificationOutcome::Quarantined => "quarantined",
+        positron_kernel::IntegrityVerificationOutcome::Fenced => "fenced",
+    };
+    format!(
+        "aggregate_evidence_tenant={} aggregate_evidence_signal={signal} aggregate_evidence_shard={} aggregate_evidence_generation={} aggregate_evidence_outcome={outcome} aggregate_evidence_checksum={}\n",
+        scope.tenant_id(),
+        scope.shard_id().value(),
+        evidence.catalog_generation(),
+        hex(&evidence.checksum()),
+    )
+}
+
 pub(super) fn render_online_report(report: &OnlineVerificationReport) -> String {
     let continuation = report.continuation.as_deref().unwrap_or("none");
     let mut output = format!(

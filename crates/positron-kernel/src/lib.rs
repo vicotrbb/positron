@@ -116,6 +116,7 @@ pub use active_segment_ledger::{
     integrity_quarantine_findings,
 };
 
+pub use catalog::integrity_scrub_resource_claim;
 pub use data_protection::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose, ControlTokenAuthentication, ControlTokenFailure, ControlTokenProtector,

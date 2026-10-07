@@ -300,6 +300,20 @@ fn aggregate_verification_bounds_valid_multi_scope_bytes_and_resumes_with_a_fres
     assert!(resumed.is_complete());
     assert!(resumed.is_verified());
     assert!(resumed.continuation().is_none());
+    assert_eq!(
+        resumed.aggregate_evidence().len(),
+        resumed.facts().reachable_scope_count(),
+        "the final aggregate must retain authenticated terminal evidence from the first pass as well as the final pass"
+    );
+    assert!(resumed.aggregate_evidence().iter().all(|evidence| {
+        evidence.catalog_generation() == resumed.facts().catalog_generation()
+            && evidence.outcome() == positron_kernel::IntegrityVerificationOutcome::Verified
+    }));
+    assert_eq!(
+        resumed.examined_bytes(),
+        examined_bytes + resumed_bytes,
+        "aggregate byte accounting must cover both bounded passes"
+    );
     assert_eq!(file_tree(&root)?, before);
     fs::remove_dir_all(root)?;
     Ok(())

@@ -11,6 +11,63 @@ pub struct OfflineIntegrityVerification {
     continuation: Option<OfflineIntegrityContinuation>,
     covered_scope_count: usize,
     all_covered_scopes_verified: bool,
+    examined_segments: u64,
+    examined_bytes: u64,
+    omitted_segments: u64,
+    aggregate_evidence: Vec<OfflineIntegrityEvidence>,
+}
+
+/// Terminal, secret-free evidence for one scope in an aggregate offline run.
+///
+/// The runtime bounds this vector before it is authenticated into a resume
+/// token, so a complete result always has inspectable evidence for every
+/// reachable scope rather than only the reports from its final invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OfflineIntegrityEvidence {
+    scope: positron_kernel::SegmentScope,
+    catalog_generation: u64,
+    outcome: IntegrityVerificationOutcome,
+    checksum: [u8; 32],
+}
+
+impl OfflineIntegrityEvidence {
+    pub(crate) fn from_report(report: IntegrityVerificationReport) -> Self {
+        Self {
+            scope: report.scope(),
+            catalog_generation: report.catalog_generation(),
+            outcome: report.outcome(),
+            checksum: report.checksum(),
+        }
+    }
+    pub(crate) const fn from_parts(
+        scope: positron_kernel::SegmentScope,
+        catalog_generation: u64,
+        outcome: IntegrityVerificationOutcome,
+        checksum: [u8; 32],
+    ) -> Self {
+        Self {
+            scope,
+            catalog_generation,
+            outcome,
+            checksum,
+        }
+    }
+    #[must_use]
+    pub const fn scope(self) -> positron_kernel::SegmentScope {
+        self.scope
+    }
+    #[must_use]
+    pub const fn catalog_generation(self) -> u64 {
+        self.catalog_generation
+    }
+    #[must_use]
+    pub const fn outcome(self) -> IntegrityVerificationOutcome {
+        self.outcome
+    }
+    #[must_use]
+    pub const fn checksum(self) -> [u8; 32] {
+        self.checksum
+    }
 }
 
 /// Opaque, authenticated aggregate progress for an offline verification.
@@ -23,7 +80,7 @@ impl OfflineIntegrityContinuation {
         &self.0
     }
     pub fn from_encoded(encoded: Vec<u8>) -> Result<Self, OfflineIntegrityFailure> {
-        (!encoded.is_empty() && encoded.len() <= 1024)
+        (!encoded.is_empty() && encoded.len() <= 65_536)
             .then_some(Self(encoded))
             .ok_or(OfflineIntegrityFailure::CorruptState)
     }
@@ -130,6 +187,10 @@ impl OfflineInspectionFacts {
 }
 
 impl OfflineIntegrityVerification {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one immutable aggregate inspection result"
+    )]
     pub(crate) fn new(
         reports: Vec<IntegrityVerificationReport>,
         findings: Vec<IntegrityQuarantineFinding>,
@@ -137,6 +198,10 @@ impl OfflineIntegrityVerification {
         continuation: Option<OfflineIntegrityContinuation>,
         covered_scope_count: usize,
         all_covered_scopes_verified: bool,
+        examined_segments: u64,
+        examined_bytes: u64,
+        omitted_segments: u64,
+        aggregate_evidence: Vec<OfflineIntegrityEvidence>,
     ) -> Self {
         Self {
             reports,
@@ -145,6 +210,10 @@ impl OfflineIntegrityVerification {
             continuation,
             covered_scope_count,
             all_covered_scopes_verified,
+            examined_segments,
+            examined_bytes,
+            omitted_segments,
+            aggregate_evidence,
         }
     }
 
@@ -157,6 +226,12 @@ impl OfflineIntegrityVerification {
     #[must_use]
     pub fn findings(&self) -> &[IntegrityQuarantineFinding] {
         &self.findings
+    }
+
+    /// Authenticated terminal evidence accumulated across every resumed pass.
+    #[must_use]
+    pub fn aggregate_evidence(&self) -> &[OfflineIntegrityEvidence] {
+        &self.aggregate_evidence
     }
 
     #[must_use]
@@ -177,6 +252,7 @@ impl OfflineIntegrityVerification {
     pub fn is_complete(&self) -> bool {
         self.covered_scope_count == self.facts.reachable_scope_count()
             && self.continuation.is_none()
+            && self.aggregate_evidence.len() == self.facts.reachable_scope_count()
             && self
                 .reports
                 .iter()
@@ -186,6 +262,19 @@ impl OfflineIntegrityVerification {
     #[must_use]
     pub fn is_verified(&self) -> bool {
         self.is_complete() && self.all_covered_scopes_verified
+    }
+
+    #[must_use]
+    pub const fn examined_segments(&self) -> u64 {
+        self.examined_segments
+    }
+    #[must_use]
+    pub const fn examined_bytes(&self) -> u64 {
+        self.examined_bytes
+    }
+    #[must_use]
+    pub const fn omitted_segments(&self) -> u64 {
+        self.omitted_segments
     }
 }
 

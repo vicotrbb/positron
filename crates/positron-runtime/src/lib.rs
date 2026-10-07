@@ -37,8 +37,8 @@ pub use instance_bootstrap::{
 };
 pub use integrity_verification::{
     OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityContinuation,
-    OfflineIntegrityFailure, OfflineIntegrityVerification, resume_offline_integrity,
-    verify_offline_integrity, verify_offline_integrity_scope,
+    OfflineIntegrityEvidence, OfflineIntegrityFailure, OfflineIntegrityVerification,
+    resume_offline_integrity, verify_offline_integrity, verify_offline_integrity_scope,
 };
 pub use listener::{
     BoundEndpoint, BoundListener, ConnectionProtection, ListenerFactory, ListenerFailure,

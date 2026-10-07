@@ -208,7 +208,11 @@ fn transient_detail_strings_are_reserved_while_materializing() -> Result<(), Box
     let blocker = governor.reserve(WorkClaim::tenant(
         tenant,
         WorkKind::SecurityLifecycle,
-        ResourceAmounts::only(ResourceDimension::MemoryBytes, 29_000_000)?,
+        // The bootstrap's tenant quota is 90 MiB after the governed repair
+        // lane expansion. Keep the same 1 MiB receiver headroom exercised by
+        // this admission test instead of allowing the larger quota to mask
+        // the materialization peak.
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, 87_000_000)?,
     )?)?;
     let capacity = governor.reserve(WorkClaim::tenant(
         tenant,
@@ -263,7 +267,7 @@ fn event_timestamp_presence_scratch_is_reserved_before_materialization()
     let blocker = governor.reserve(WorkClaim::tenant(
         tenant,
         WorkKind::SecurityLifecycle,
-        ResourceAmounts::only(ResourceDimension::MemoryBytes, 30_750_000)?,
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, 88_750_000)?,
     )?)?;
     let capacity = governor.reserve(WorkClaim::tenant(
         tenant,

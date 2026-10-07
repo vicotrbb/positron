@@ -262,12 +262,60 @@ fn valid(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 fn valid_rendered(bytes: &[u8]) -> bool {
-    std::str::from_utf8(bytes).is_ok_and(|value| {
-        value.lines().all(|line| {
-            line.split_once('=')
-                .is_some_and(|(key, value)| valid(key) && safe_value(value))
-        })
-    })
+    let Ok(value) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut fields = value.strip_suffix('\n').unwrap_or(value).split('\n');
+    let expected = [
+        ("record_version", Some("1")),
+        ("product", Some("positron")),
+        ("build_identity", None),
+        ("phase", None),
+        ("component", None),
+        ("finding_code", None),
+        ("backtrace_identity", None),
+        ("catalog_generation", None),
+        ("operation_generation", Some("unavailable")),
+    ];
+    expected.into_iter().all(|(key, fixed)| {
+        let Some((actual_key, value)) = fields.next().and_then(|line| line.split_once('=')) else {
+            return false;
+        };
+        actual_key == key
+            && fixed.map_or_else(
+                || canonical_crash_value(key, value),
+                |expected| value == expected,
+            )
+    }) && fields.next().is_none()
+}
+
+fn canonical_crash_value(key: &str, value: &str) -> bool {
+    match key {
+        "build_identity" => safe_value(value),
+        "phase" => matches!(
+            value,
+            "starting" | "serving" | "draining" | "stopping" | "fenced"
+        ),
+        "component" => matches!(value, "runtime" | "catalog" | "serving_loop"),
+        "finding_code" => matches!(
+            value,
+            "runtime_serving_loop_panicked"
+                | "runtime_poll_panicked"
+                | "joined_task_panicked"
+                | "runtime_drain_failed"
+                | "runtime_startup_failed"
+                | "catalog_unavailable"
+        ),
+        "backtrace_identity" => {
+            value == "unavailable"
+                || value == "disabled"
+                || (value.len() == 23
+                    && value.starts_with("sha256-")
+                    && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit()))
+        },
+        "catalog_generation" => value == "unavailable" || value.parse::<u64>().is_ok(),
+        _ => false,
+    }
 }
 fn safe_value(value: &str) -> bool {
     value == "unavailable"

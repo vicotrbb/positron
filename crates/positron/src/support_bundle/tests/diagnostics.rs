@@ -98,6 +98,40 @@ fn persisted_crash_record_reopens_as_bounded_sanitized_support_input()
 }
 
 #[test]
+fn persisted_noncanonical_crash_record_is_omitted_before_a_support_bundle_can_export_a_secret()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-crash-canary-{nonce}"));
+    fs::create_dir_all(&root)?;
+    super::capture_process_failure(&root, "starting", "runtime_startup_failed", "runtime")
+        .map_err(|_| "capture failed")?;
+    let record = root
+        .join("diagnostics/crash-records")
+        .read_dir()?
+        .next()
+        .ok_or("record missing")??
+        .path();
+    fs::write(
+        record,
+        b"record_version=1\nproduct=positron\nbuild_identity=0.0.0\nphase=starting\ncomponent=runtime\nfinding_code=runtime_startup_failed\nbacktrace_identity=unavailable\ncatalog_generation=unavailable\noperation_generation=unavailable\nauthorization=api_key_secret_canary\n",
+    )?;
+    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+        .map_err(|_| "store")?
+        .read_recent(
+            std::time::Duration::from_secs(60),
+            1,
+            512,
+            SystemTime::now(),
+        )
+        .map_err(|_| "readout failed")?;
+    assert_eq!(readout.render(), "record_count=0\n");
+    assert!(readout.omissions().contains(&"malformed_crash_record"));
+    assert!(!readout.render().contains("api_key_secret_canary"));
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn joined_task_panic_capture_reopens_only_owned_safe_identity()
 -> Result<(), Box<dyn std::error::Error>> {
     let marker = "joined-task-panic-private-canary";
@@ -138,9 +172,9 @@ fn crash_readout_declares_file_count_truncation_without_exporting_unread_records
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = std::env::temp_dir().join(format!("positron-crash-bound-{nonce}"));
     fs::create_dir_all(&root)?;
-    super::capture_process_failure(&root, "starting", "first_failure", "runtime")
+    super::capture_process_failure(&root, "starting", "runtime_startup_failed", "runtime")
         .map_err(|_| "first capture")?;
-    super::capture_process_failure(&root, "starting", "second_failure", "runtime")
+    super::capture_process_failure(&root, "starting", "catalog_unavailable", "runtime")
         .map_err(|_| "second capture")?;
     let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
         .map_err(|_| "store")?
@@ -152,7 +186,9 @@ fn crash_readout_declares_file_count_truncation_without_exporting_unread_records
         )
         .map_err(|_| "bounded readout")?;
     let rendered = readout.render();
-    assert!(rendered.contains("first_failure") || rendered.contains("second_failure"));
+    assert!(
+        rendered.contains("runtime_startup_failed") || rendered.contains("catalog_unavailable")
+    );
     assert!(readout.omissions().contains(&"crash_record_file_limit"));
     fs::remove_dir_all(root)?;
     Ok(())
@@ -164,7 +200,7 @@ fn crash_readout_declares_records_outside_the_log_window() -> Result<(), Box<dyn
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = std::env::temp_dir().join(format!("positron-crash-window-{nonce}"));
     fs::create_dir_all(&root)?;
-    super::capture_process_failure(&root, "starting", "window_failure", "runtime")
+    super::capture_process_failure(&root, "starting", "runtime_startup_failed", "runtime")
         .map_err(|_| "capture")?;
     let later = SystemTime::now()
         .checked_add(std::time::Duration::from_secs(60))
@@ -225,9 +261,9 @@ fn controlled_process_restart_preserves_each_crash_record() -> Result<(), Box<dy
         let root = std::path::PathBuf::from(std::env::var(ROOT)?);
         fs::create_dir_all(&root)?;
         let finding = if phase == "first" {
-            "first_failure"
+            "runtime_startup_failed"
         } else {
-            "second_failure"
+            "catalog_unavailable"
         };
         return super::capture_process_failure(&root, "starting", finding, "runtime")
             .map_err(|_| "crash record capture failed".into());
@@ -257,8 +293,8 @@ fn controlled_process_restart_preserves_each_crash_record() -> Result<(), Box<dy
         )
         .map_err(|_| "readout")?;
     let rendered = readout.render();
-    assert!(rendered.contains("first_failure"));
-    assert!(rendered.contains("second_failure"));
+    assert!(rendered.contains("runtime_startup_failed"));
+    assert!(rendered.contains("catalog_unavailable"));
     fs::remove_dir_all(root)?;
     Ok(())
 }

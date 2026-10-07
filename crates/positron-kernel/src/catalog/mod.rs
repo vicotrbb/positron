@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
-pub(crate) use budget::integrity_scrub_resource_claim;
+pub use budget::integrity_scrub_resource_claim;
 use budget::{
     audit_checkpoint_resource_claim, audit_reclamation_resource_claim, commit_resource_claim,
     recovery_resource_claim, reserve_history, retained_artifact_bytes,
@@ -72,6 +72,28 @@ pub use types::{
     TransactionId,
 };
 pub(crate) use types::{MAX_CATALOG_OBJECTS, MAX_CATALOG_TOTAL_BYTES};
+
+/// Exclusive, system-scoped admission for one complete offline integrity
+/// inspection. Its Catalog read cannot acquire a second independent grant.
+pub struct OfflineIntegrityCatalogInspection<'authority> {
+    authority: &'authority StorageKernelResourceAuthority,
+    _reservation: crate::ResourceReservation<'authority>,
+}
+
+impl OfflineIntegrityCatalogInspection<'_> {
+    #[must_use]
+    pub const fn authority(&self) -> &StorageKernelResourceAuthority {
+        self.authority
+    }
+
+    pub fn read_current_snapshot(
+        &self,
+        instance: InstanceId,
+        secret: CatalogSecret,
+    ) -> Result<CatalogSnapshot, CatalogFailure> {
+        Ok(Catalog::read_current_view_admitted(self.authority, instance, secret)?.snapshot)
+    }
+}
 
 #[cfg(any(test, fuzzing))]
 pub(crate) use storage::with_catalog_fault;
@@ -271,6 +293,26 @@ impl std::fmt::Debug for Catalog<'_> {
 }
 
 impl<'authority> Catalog<'authority> {
+    /// Admits the complete bounded offline inspection before Catalog recovery
+    /// or snapshot materialization. The returned capability binds the read to
+    /// this one system diagnostics reservation.
+    pub fn reserve_offline_integrity_inspection(
+        authority: &'authority StorageKernelResourceAuthority,
+        claim: WorkClaim,
+    ) -> Result<OfflineIntegrityCatalogInspection<'authority>, CatalogFailure> {
+        if !claim.is_system_diagnostics() {
+            return Err(CatalogFailure::new(CatalogFailureCode::InvalidInput));
+        }
+        let reservation = authority
+            .governor()
+            .reserve(claim)
+            .map_err(CatalogFailure::admission)?;
+        Ok(OfflineIntegrityCatalogInspection {
+            authority,
+            _reservation: reservation,
+        })
+    }
+
     /// Builds the sole durable coordinator task contract for a checkpoint of
     /// one already-visible Governance Audit frontier.
     pub fn governance_audit_checkpoint_task(
@@ -384,6 +426,14 @@ impl<'authority> Catalog<'authority> {
             .recovery()
             .reserve(recovery_claim)
             .map_err(CatalogFailure::admission)?;
+        Self::read_current_view_admitted(authority, instance, secret)
+    }
+
+    fn read_current_view_admitted(
+        authority: &StorageKernelResourceAuthority,
+        instance: InstanceId,
+        secret: CatalogSecret,
+    ) -> Result<CatalogReadView, CatalogFailure> {
         let volume = authority
             .primary_data_volume()
             .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::ResourceAdmissionRefused))?;

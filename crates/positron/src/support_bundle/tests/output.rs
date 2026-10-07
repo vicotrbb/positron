@@ -24,6 +24,15 @@ fn plaintext_bundle_uses_the_canonical_explicit_warning_flag() {
 }
 
 #[test]
+fn online_opaque_artifact_report_never_claims_a_verified_instance_signature() {
+    let report = super::super::command::online_bundle_report();
+    assert!(report.contains("format=age_encrypted_opaque_bundle"));
+    assert!(report.contains("artifact_authentication=unverified_control_response"));
+    assert!(report.contains("signature=unverified"));
+    assert!(!report.contains("signature=signed"));
+}
+
+#[test]
 fn identifier_retention_is_closed_and_never_available_to_key_unavailable_exports() {
     let retained = BundleOptions::parse(
         [
