@@ -126,8 +126,9 @@ fn execute(
     match offline {
         Ok(report) => {
             let status = offline_status(report.aggregate_outcome());
+            let aggregate_scope = offline_scope_label(offline_scope.is_some());
             let mut output = format!(
-                "mode=offline\nstatus={status}\naggregate_outcome={status}\nverification_complete={}\nreport_count={}\naggregate_scope=all_reachable\naggregate_catalog_generation={}\naggregate_covered_scopes={}\naggregate_reachable_scopes={}\naggregate_examined_segments={}\naggregate_examined_bytes={}\naggregate_omitted_segments={}\naggregate_omitted_segments_semantics=cumulative_deferred_observations\naggregate_evidence_count={}\n",
+                "mode=offline\nstatus={status}\naggregate_outcome={status}\nverification_complete={}\nreport_count={}\naggregate_scope={aggregate_scope}\naggregate_catalog_generation={}\naggregate_covered_scopes={}\naggregate_reachable_scopes={}\naggregate_examined_segments={}\naggregate_examined_bytes={}\naggregate_omitted_segments={}\naggregate_omitted_segments_semantics=cumulative_deferred_observations\naggregate_evidence_count={}\n",
                 report.is_complete(),
                 report.reports().len(),
                 report.facts().catalog_generation(),
@@ -179,6 +180,14 @@ const fn offline_status(outcome: OfflineIntegrityAggregateOutcome) -> &'static s
     }
 }
 
+const fn offline_scope_label(selected_scope: bool) -> &'static str {
+    if selected_scope {
+        "selected_scope"
+    } else {
+        "all_reachable"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -187,7 +196,10 @@ mod tests {
     use positron_api::maintenance::OnlineVerificationReport;
     use positron_runtime::OfflineIntegrityAggregateOutcome;
 
-    use super::{VerifyFailure, VerifyOptions, offline_status, online_request, selected_mode};
+    use super::{
+        VerifyFailure, VerifyOptions, offline_scope_label, offline_status, online_request,
+        selected_mode,
+    };
 
     #[test]
     fn offline_aggregate_status_preserves_quarantine_and_fence_distinctions() {
@@ -203,6 +215,12 @@ mod tests {
             offline_status(OfflineIntegrityAggregateOutcome::Incomplete),
             "incomplete"
         );
+    }
+
+    #[test]
+    fn scoped_offline_rendering_never_claims_all_reachable_scopes() {
+        assert_eq!(offline_scope_label(true), "selected_scope");
+        assert_eq!(offline_scope_label(false), "all_reachable");
     }
 
     #[test]

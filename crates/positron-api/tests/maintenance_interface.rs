@@ -155,7 +155,7 @@ fn online_verification_contract_artifacts_publish_the_authenticated_wrapper_boun
         &openapi["components"]["schemas"]["OnlineVerificationRequest"]["properties"]["continuation"],
         &openapi["components"]["schemas"]["OnlineVerificationReport"]["properties"]["continuation"],
     ] {
-        assert_eq!(continuation["pattern"], "^[0-9a-f]{272}$");
+        assert_eq!(continuation["pattern"], "^[0-9A-Fa-f]{272}$");
         assert_eq!(continuation["minLength"], 272);
         assert_eq!(continuation["maxLength"], 272);
     }

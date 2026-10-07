@@ -1501,7 +1501,7 @@
           "signal": {"type": "string", "enum": ["logs", "traces"]},
           "shard": {"type": "integer", "minimum": 1},
           "expected_catalog_generation": {"type": "integer", "minimum": 1},
-          "continuation": {"type": "string", "pattern": "^[0-9a-f]{272}$", "minLength": 272, "maxLength": 272}
+          "continuation": {"type": "string", "pattern": "^[0-9A-Fa-f]{272}$", "minLength": 272, "maxLength": 272}
         }
       },
       "OnlineVerificationReport": {
@@ -1519,7 +1519,7 @@
           "outcome": {"type": "string", "enum": ["verified", "incomplete", "stale", "quarantined", "fenced"]},
           "verification_complete": {"type": "boolean"},
           "report_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$", "minLength": 64, "maxLength": 64},
-          "continuation": {"type": "string", "pattern": "^[0-9a-f]{272}$", "minLength": 272, "maxLength": 272},
+          "continuation": {"type": "string", "pattern": "^[0-9A-Fa-f]{272}$", "minLength": 272, "maxLength": 272},
           "findings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/components/schemas/IntegrityQuarantineFinding"}}
         }
       },

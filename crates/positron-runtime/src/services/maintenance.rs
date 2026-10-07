@@ -1043,26 +1043,41 @@ pub(super) fn run_runtime_maintenance_worker(
                     execution,
                     InstalledMaintenanceExecution::IntegrityScrub { .. }
                 );
-                let completed =
-                    complete_installed_maintenance(services, Some(cancellation), &execution)?;
-                let continues_integrity_scrub = match &execution {
-                    InstalledMaintenanceExecution::IntegrityScrub { execution, .. } => {
-                        services
-                            .instance
-                            .maintenance_coordinator()
-                            .status(execution.task().identity())
-                            .map_err(map_failure)?
-                            .phase()
-                            == positron_kernel::MaintenanceTaskPhase::Running
+                match complete_installed_maintenance(services, Some(cancellation), &execution) {
+                    Ok(completed) => {
+                        let continues_integrity_scrub = match &execution {
+                            InstalledMaintenanceExecution::IntegrityScrub { execution, .. } => {
+                                services
+                                    .instance
+                                    .maintenance_coordinator()
+                                    .status(execution.task().identity())
+                                    .map_err(map_failure)?
+                                    .phase()
+                                    == positron_kernel::MaintenanceTaskPhase::Running
+                            },
+                            _ => false,
+                        };
+                        if continues_integrity_scrub {
+                            in_flight = Some(execution);
+                            Ok(completed)
+                        } else {
+                            drop(execution);
+                            discover_after_completed_maintenance(
+                                services,
+                                Some(cancellation),
+                                completed,
+                            )
+                        }
                     },
-                    _ => false,
-                };
-                if continues_integrity_scrub {
-                    in_flight = Some(execution);
-                    Ok(completed)
-                } else {
-                    drop(execution);
-                    discover_after_completed_maintenance(services, Some(cancellation), completed)
+                    Err(ServiceFailure::Cancelled) => break,
+                    Err(failure) => {
+                        // A durable task remains Running when its terminal
+                        // publication has a transient failure. Keep the same
+                        // execution and reservation so the loop's existing
+                        // bounded retry policy can reconcile that exact task.
+                        in_flight = Some(execution);
+                        Err(failure)
+                    },
                 }
             },
             None => match start_installed_maintenance(services, Some(cancellation)) {

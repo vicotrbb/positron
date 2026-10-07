@@ -71,6 +71,34 @@ fn offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_
         "mode=offline\nstatus=verified\naggregate_outcome=verified\nverification_complete=true\n"
     ));
     assert!(verify_stdout.contains("report_count=2\n"));
+    let selected = verify_stdout
+        .lines()
+        .find(|line| line.starts_with("report_scope_tenant="))
+        .ok_or("global offline verify omitted its first report scope")?;
+    let selected_field = |name| {
+        selected
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(name))
+            .ok_or("global offline verify omitted a report scope field")
+    };
+    let tenant = selected_field("report_scope_tenant=")?;
+    let signal = selected_field("report_scope_signal=")?;
+    let shard = selected_field("report_scope_shard=")?;
+    let scoped_verify = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["verify", "--offline", "--config"])
+        .arg(&config)
+        .args(["--tenant", tenant, "--signal", signal, "--shard", shard])
+        .output()?;
+    let scoped_stdout = String::from_utf8(scoped_verify.stdout)?;
+    assert_eq!(scoped_verify.status.code(), Some(3), "{scoped_stdout}");
+    assert!(scoped_stdout.contains("status=incomplete\n"));
+    assert!(
+        scoped_stdout.contains("aggregate_scope=selected_scope\n"),
+        "a one-scope command must not claim all reachable scopes: {scoped_stdout}"
+    );
+    assert!(scoped_stdout.contains("report_count=1\n"));
+    assert!(scoped_stdout.contains("aggregate_reachable_scopes=2\n"));
+    assert!(scoped_stdout.contains(&format!("report_scope_signal={signal}")));
     assert_eq!(before, volume_bytes(&roots.data)?);
     fs::remove_dir_all(root)?;
     Ok(())
