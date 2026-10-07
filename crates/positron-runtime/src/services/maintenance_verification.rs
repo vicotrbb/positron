@@ -119,7 +119,7 @@ impl ServiceHandle {
                 {
                     return Ok(stale_online_report(scope, current.number()));
                 }
-                current
+                current.clone()
             },
         };
         let pass = continuation.as_ref().map_or(0, |value| value.pass);
@@ -131,6 +131,13 @@ impl ServiceHandle {
             .integrity_scope_source_identity(scope)
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         if continuation.is_some() && source_manifest != current_source_manifest {
+            return Ok(stale_online_report(scope, current_generation));
+        }
+        if continuation.is_some()
+            && !snapshot
+                .same_except_maintenance_tasks(&current, &publication_lineage)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
+        {
             return Ok(stale_online_report(scope, current_generation));
         }
         let now = self.maintenance_status_now()?;

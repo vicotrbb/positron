@@ -522,6 +522,7 @@ fn online_verification_continuation_refuses_foreign_catalog_mutation_before_quar
     assert_eq!(first.outcome, "incomplete");
     let continuation = first.continuation.ok_or("continuation")?;
     publish_unrelated(&initialized)?;
+    let foreign_generation = open_catalog(&initialized)?.pin()?.number();
 
     let resumed = services
         .verify_online_integrity(
@@ -538,7 +539,12 @@ fn online_verification_continuation_refuses_foreign_catalog_mutation_before_quar
         .map_err(|failure| format!("foreign-Catalog resume: {failure:?}"))?;
     assert_eq!(resumed.outcome, "stale");
     assert!(!resumed.verification_complete);
-    assert!(resumed.catalog_generation > generation);
+    assert_eq!(resumed.catalog_generation, foreign_generation);
+    assert_eq!(
+        open_catalog(&initialized)?.pin()?.number(),
+        foreign_generation,
+        "a foreign successor must reject the continuation before it admits or completes another durable scrub task"
+    );
     assert_eq!(fs::read(&damaged_segment)?, damaged_bytes);
     assert!(
         positron_kernel::integrity_quarantine_findings(&open_catalog(&initialized)?.pin()?)?

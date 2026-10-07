@@ -162,8 +162,11 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
     std::thread::sleep(Duration::from_millis(100));
     assert!(child.try_wait()?.is_none());
     if let Err(error) = wait_for_ready(operations_port) {
+        let status = configuration_status(operations_port, &authorization)
+            .map(|response| bounded_redacted_observation(&response, &authorization))
+            .unwrap_or_else(|status_error| format!("status_request={status_error}"));
         return Err(format!(
-            "valid reload did not return to readiness: {error}; {}",
+            "valid reload did not return to readiness: {error}; status={status}; {}",
             terminate_and_describe_child(&mut child, &authorization)
         )
         .into());
@@ -264,7 +267,16 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
         "positron: warning: operations transport is plaintext\npositron: configuration reload rejected category=source_rejected\n"
     );
     assert!(rejected_child.try_wait()?.is_none());
-    wait_for_ready(operations_port)?;
+    if let Err(error) = wait_for_ready(operations_port) {
+        let status = configuration_status(operations_port, &authorization)
+            .map(|response| bounded_redacted_observation(&response, &authorization))
+            .unwrap_or_else(|status_error| format!("status_request={status_error}"));
+        return Err(format!(
+            "rejected reload did not preserve readiness: {error}; status={status}; {}",
+            terminate_and_describe_child(&mut rejected_child, &authorization)
+        )
+        .into());
+    }
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &rejected_child.id().to_string()])
