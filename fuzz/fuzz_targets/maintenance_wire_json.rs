@@ -71,7 +71,16 @@ fuzz_target!(|data: &[u8]| {
         IntegrityScrubContinuation::decode(&encoded_continuation),
         Ok(continuation)
     );
-    let continuation_hex = hex(&encoded_continuation);
+    // The kernel cursor stays 56 bytes; the public online request carries its
+    // 136-byte authenticated wrapper instead. Exercise both wire boundaries.
+    let mut online_wrapper = [0_u8; 136];
+    for (index, byte) in online_wrapper.iter_mut().enumerate() {
+        *byte = data
+            .get(index % data.len().max(1))
+            .copied()
+            .unwrap_or(u8::try_from(index).unwrap_or_default());
+    }
+    let continuation_hex = hex(&online_wrapper);
     let request = OnlineVerificationRequest::new(
         "00000000-0000-0000-0000-000000000001".to_owned(),
         if data.first().copied().unwrap_or_default() & 1 == 0 {
@@ -91,8 +100,8 @@ fuzz_target!(|data: &[u8]| {
         "00000000-0000-0000-0000-000000000001".to_owned(),
         "logs".to_owned(),
         1,
-        None,
-        Some(continuation_hex.clone()),
+        Some(1),
+        Some(hex(&online_wrapper[..135])),
     )
     .encode()
     .is_err());

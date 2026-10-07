@@ -10,7 +10,9 @@ use positron_api::maintenance::{
 
 #[test]
 fn online_verification_wire_requires_an_explicit_scope_and_never_marks_partial_work_complete() {
-    let continuation = "ab".repeat(56);
+    // The continuation is the 136-byte authenticated online wrapper: version,
+    // pass, immutable Catalog identity/generation, kernel cursor, and MAC.
+    let continuation = "ab".repeat(136);
     let request = OnlineVerificationRequest::new(
         "00000000-0000-0000-0000-000000000001".to_owned(),
         "logs".to_owned(),
@@ -45,7 +47,7 @@ fn online_verification_wire_requires_an_explicit_scope_and_never_marks_partial_w
         outcome: "incomplete".to_owned(),
         verification_complete: true,
         report_checksum: "0".repeat(64),
-        continuation: Some("ab".repeat(56)),
+        continuation: Some("ab".repeat(136)),
         findings: Vec::new(),
     };
     assert!(partial.encode().is_err());
