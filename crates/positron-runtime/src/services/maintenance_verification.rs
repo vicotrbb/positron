@@ -70,9 +70,10 @@ impl ServiceHandle {
         {
             return Err(MaintenanceServiceFailure::SourceUnavailable);
         }
-        if request
-            .expected_catalog_generation()
-            .is_some_and(|expected| expected != snapshot.number())
+        if continuation.is_none()
+            && request
+                .expected_catalog_generation()
+                .is_some_and(|expected| expected != snapshot.number())
         {
             return Ok(stale_online_report(scope, snapshot.number()));
         }
@@ -221,7 +222,12 @@ impl ServiceHandle {
                     .pin()
                     .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
             };
-            online_report(report, &response_snapshot)
+            // The maintenance task's admission and completion publications
+            // advance the Catalog, but they were not part of the immutable
+            // source selected and scanned above. The report generation is G0;
+            // the current response snapshot supplies only the authorized
+            // quarantine evidence that the scan just published.
+            online_report(report, &snapshot, &response_snapshot)
         })();
         if let Err(failure) = result {
             // Admission published a durable Running record. Every later
@@ -287,7 +293,8 @@ pub(super) fn integrity_findings(
 
 fn online_report(
     report: positron_kernel::IntegrityVerificationReport,
-    snapshot: &positron_kernel::CatalogSnapshot,
+    scanned_snapshot: &positron_kernel::CatalogSnapshot,
+    response_snapshot: &positron_kernel::CatalogSnapshot,
 ) -> Result<OnlineVerificationReport, MaintenanceServiceFailure> {
     let outcome = match report.outcome() {
         IntegrityVerificationOutcome::Verified => "verified",
@@ -296,7 +303,7 @@ fn online_report(
         IntegrityVerificationOutcome::Quarantined => "quarantined",
         IntegrityVerificationOutcome::Fenced => "fenced",
     };
-    let findings = integrity_findings_for_scope(snapshot, report.scope())?;
+    let findings = integrity_findings_for_scope(response_snapshot, report.scope())?;
     let mut online = OnlineVerificationReport {
         report_version: 1,
         tenant: report.scope().tenant_id().to_canonical_text(),
@@ -305,7 +312,7 @@ fn online_report(
             SignalKind::Traces => "traces".to_owned(),
         },
         shard: report.scope().shard_id().value(),
-        catalog_generation: snapshot.number(),
+        catalog_generation: scanned_snapshot.number(),
         examined_segments: u32::try_from(report.examined_segments())
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         examined_bytes: report.examined_bytes(),

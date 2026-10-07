@@ -21,6 +21,20 @@ pub enum ConfigurationWarning {
     PublicPlaintextListener(NetworkListenerRole),
 }
 
+/// The closed classes of deployment identifiers that can appear in a rendered
+/// effective configuration. Support-bundle rendering must classify these from
+/// the resolved configuration rather than attempting to discover them in text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SupportBundleIdentifierClass {
+    DataDirectory,
+    FilesystemPath,
+    NetworkAddress,
+    NetworkRange,
+    Hostname,
+    TenantIdentifier,
+    ExportDestination,
+}
+
 impl ConfigurationWarning {
     #[must_use]
     pub const fn message(self) -> &'static str {
@@ -654,6 +668,103 @@ impl EffectiveConfiguration {
     #[must_use]
     pub fn source_for(&self, path: &str) -> Option<SettingSource> {
         setting_for_path(path).and_then(|setting| self.sources.get(setting_index(setting)).copied())
+    }
+
+    /// Renders the effective configuration after applying a caller-owned
+    /// transform to every typed deployment identifier that this rendering can
+    /// disclose. Secret-bearing settings remain redacted by
+    /// [`Self::redacted_effective`].
+    ///
+    /// The transform is deliberately supplied by the export boundary: the
+    /// configuration contract owns classification while a Support Bundle owns
+    /// the ephemeral keyed mapping and its explicit retention policy.
+    pub fn redacted_for_support_bundle<F, E>(&self, mut transform: F) -> Result<String, E>
+    where
+        F: FnMut(SupportBundleIdentifierClass, &str) -> Result<String, E>,
+    {
+        let mut identifiers = Vec::with_capacity(
+            12usize
+                .saturating_add(self.operations_trusted_proxy_cidrs.len())
+                .saturating_add(self.api_cors_allowed_origins.len())
+                .saturating_add(self.api_trusted_proxy_cidrs.len())
+                .saturating_add(self.otlp_grpc_trusted_proxy_cidrs.len())
+                .saturating_add(self.otlp_http_trusted_proxy_cidrs.len())
+                .saturating_add(self.loki_push_trusted_proxy_cidrs.len())
+                .saturating_add(self.export_destinations.len().saturating_mul(2)),
+        );
+        identifiers.push((
+            SupportBundleIdentifierClass::FilesystemPath,
+            self.control_path.clone(),
+        ));
+        for address in [
+            self.operations_bind_address,
+            self.api_bind_address,
+            self.otlp_grpc_bind_address,
+            self.otlp_http_bind_address,
+            self.loki_push_bind_address,
+        ] {
+            identifiers.push((
+                SupportBundleIdentifierClass::NetworkAddress,
+                address.to_string(),
+            ));
+        }
+        for ranges in [
+            &self.operations_trusted_proxy_cidrs,
+            &self.api_trusted_proxy_cidrs,
+            &self.otlp_grpc_trusted_proxy_cidrs,
+            &self.otlp_http_trusted_proxy_cidrs,
+            &self.loki_push_trusted_proxy_cidrs,
+        ] {
+            identifiers.extend(
+                ranges
+                    .iter()
+                    .cloned()
+                    .map(|value| (SupportBundleIdentifierClass::NetworkRange, value)),
+            );
+        }
+        identifiers.extend(
+            self.api_cors_allowed_origins
+                .iter()
+                .cloned()
+                .map(|value| (SupportBundleIdentifierClass::Hostname, value)),
+        );
+        for destination in &self.export_destinations {
+            identifiers.push((
+                SupportBundleIdentifierClass::ExportDestination,
+                destination.name.clone(),
+            ));
+            identifiers.extend(destination.allowed_tenants.iter().map(|tenant| {
+                (
+                    SupportBundleIdentifierClass::TenantIdentifier,
+                    tenant.to_canonical_text(),
+                )
+            }));
+        }
+        identifiers.push((
+            SupportBundleIdentifierClass::DataDirectory,
+            self.data_directory.clone(),
+        ));
+        identifiers.push((
+            SupportBundleIdentifierClass::FilesystemPath,
+            self.secrets_directory.clone(),
+        ));
+        identifiers.sort_by(|left, right| {
+            right
+                .1
+                .len()
+                .cmp(&left.1.len())
+                .then_with(|| left.1.cmp(&right.1))
+        });
+
+        let mut rendered = self.redacted_effective();
+        for (class, value) in identifiers {
+            if value.is_empty() {
+                continue;
+            }
+            let replacement = transform(class, &value)?;
+            rendered = rendered.replace(&value, &replacement);
+        }
+        Ok(rendered)
     }
 
     /// Renders the complete effective state with every secret-bearing setting

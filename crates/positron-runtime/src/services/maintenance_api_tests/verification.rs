@@ -35,9 +35,8 @@ fn authenticated_online_verification_uses_one_pinned_scope_and_rejects_a_stale_r
         .verify_online_integrity(&administrator, &request.encode()?)
         .map_err(|failure| format!("online verification: {failure:?}"))?;
     assert_eq!(
-        verified.catalog_generation,
-        generation + 3,
-        "the response names the durable successor after this request's task completion"
+        verified.catalog_generation, generation,
+        "the report names the immutable Catalog generation scanned by this request"
     );
     assert_eq!(verified.outcome, "verified");
     assert!(verified.verification_complete);
@@ -510,7 +509,6 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
         initialized.tenant_segment_key_for_test(scope)?,
     )?
     .seal()?;
-    let generation = catalog.pin()?.number();
     drop(catalog);
     let damaged_segment = fs::read_dir(&sealed_directory)?
         .filter_map(Result::ok)
@@ -519,26 +517,32 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
         .ok_or("newly sealed block-bearing segment")?;
     let damaged_bytes = b"online verification corruption";
     fs::write(&damaged_segment, damaged_bytes)?;
-
-    let report = services
-        .verify_online_integrity(
-            &administrator,
-            &OnlineVerificationRequest::new(
-                initialized.default_tenant_id().to_canonical_text(),
-                "logs".to_owned(),
-                scope.shard_id().value(),
-                None,
-                None,
-            )
-            .encode()?,
-        )
-        .map_err(|failure| format!("online corruption verification: {failure:?}"))?;
+    let report = (0..4)
+        .find_map(|_| {
+            let expected_generation = open_catalog(&initialized).ok()?.pin().ok()?.number();
+            let candidate = services
+                .verify_online_integrity(
+                    &administrator,
+                    &OnlineVerificationRequest::new(
+                        initialized.default_tenant_id().to_canonical_text(),
+                        "logs".to_owned(),
+                        scope.shard_id().value(),
+                        Some(expected_generation),
+                        None,
+                    )
+                    .encode()
+                    .ok()?,
+                )
+                .ok()?;
+            (candidate.outcome != "stale").then_some((candidate, expected_generation))
+        })
+        .ok_or("online quarantine did not acquire a stable G0 basis")?;
 
     assert_eq!(
-        report.catalog_generation,
-        generation + 4,
-        "the report names the terminal durable successor after quarantine and task completion"
+        report.0.catalog_generation, report.1,
+        "the quarantine report names the immutable Catalog generation scanned before publication"
     );
+    let report = report.0;
     assert_eq!(report.outcome, "quarantined");
     assert!(!report.verification_complete);
     assert!(!report.findings.is_empty());

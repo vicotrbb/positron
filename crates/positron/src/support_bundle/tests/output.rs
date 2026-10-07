@@ -33,6 +33,54 @@ fn online_opaque_artifact_report_never_claims_a_verified_instance_signature() {
 }
 
 #[test]
+fn typed_bundle_configuration_redaction_hides_paths_and_listener_addresses()
+-> Result<(), Box<dyn std::error::Error>> {
+    let inputs = positron_config::ConfigurationInputs::try_new(
+        Some(
+            "schema_version = 1\n\
+             [listener]\n\
+             control_path = \"/run/customer/control.sock\"\n\
+             operations_bind_address = \"10.20.30.40:42001\"\n\
+             api_bind_address = \"10.20.30.41:42002\"\n\
+             [storage]\n\
+             data_directory = \"/srv/customer/data\"\n\
+             secrets_directory = \"/srv/customer/data/keys\"\n",
+        ),
+        positron_config::EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])
+            .map_err(|_| "environment overrides")?,
+        positron_config::CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])
+            .map_err(|_| "command-line overrides")?,
+    )
+    .map_err(|_| "configuration inputs")?;
+    let effective = positron_config::resolve(inputs).map_err(|_| "effective configuration")?;
+    let pseudonyms = super::super::privacy::Pseudonymizer::new();
+    let rendered = effective
+        .redacted_for_support_bundle(|class, value| {
+            if class == positron_config::SupportBundleIdentifierClass::DataDirectory {
+                Ok::<_, ()>(value.to_owned())
+            } else {
+                pseudonyms.pseudonymize(value)
+            }
+        })
+        .map_err(|_| "pseudonymize configuration")?;
+
+    for private_identifier in [
+        "/run/customer/control.sock",
+        "10.20.30.40:42001",
+        "10.20.30.41:42002",
+        "/srv/customer/data/keys",
+    ] {
+        assert!(
+            !rendered.contains(private_identifier),
+            "typed bundle rendering must not leak {private_identifier}"
+        );
+    }
+    assert!(rendered.contains("/srv/customer/data"));
+    assert!(rendered.contains("id-"));
+    Ok(())
+}
+
+#[test]
 fn bundle_parser_rejects_elapsed_limits_outside_the_documented_window() {
     for seconds in ["31", "18446744073709551615"] {
         let result = super::super::options::BundleOptions::parse(

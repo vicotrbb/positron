@@ -32,13 +32,16 @@ pub(crate) fn canonical_members_with_crash(
             .map_err(|_| BundleFailure::OutputUnavailable)?,
         IdentifierRetention::DataDirectory => effective.data_directory().to_owned(),
     };
-    let secrets_directory = pseudonyms
-        .pseudonymize(effective.secrets_directory())
-        .map_err(|_| BundleFailure::OutputUnavailable)?;
-    let configuration = effective
-        .redacted_effective()
-        .replace(effective.data_directory(), &data_directory)
-        .replace(effective.secrets_directory(), &secrets_directory);
+    let configuration = effective.redacted_for_support_bundle(|class, value| match class {
+        positron_config::SupportBundleIdentifierClass::DataDirectory
+            if options.identifier_retention == IdentifierRetention::DataDirectory =>
+        {
+            Ok(value.to_owned())
+        },
+        _ => pseudonyms
+            .pseudonymize(value)
+            .map_err(|_| BundleFailure::OutputUnavailable),
+    })?;
     if options.deadline_exceeded(started) {
         return Err(BundleFailure::DeadlineExceeded);
     }
