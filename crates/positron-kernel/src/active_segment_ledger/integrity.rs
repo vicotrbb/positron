@@ -213,6 +213,7 @@ pub struct IntegrityVerificationReport {
     omitted_segments: usize,
     outcome: IntegrityVerificationOutcome,
     quarantined_segment: Option<SegmentId>,
+    localized_finding: Option<IntegrityQuarantineFinding>,
     continuation: Option<IntegrityScrubContinuation>,
 }
 
@@ -252,6 +253,20 @@ impl IntegrityVerificationReport {
     #[must_use]
     pub const fn quarantined_segment(self) -> Option<SegmentId> {
         self.quarantined_segment
+    }
+    /// Read-only localized evidence from the exact authenticated Catalog
+    /// snapshot scanned by this pass. Its presence never claims that an
+    /// offline inspection published a durable quarantine.
+    #[must_use]
+    pub const fn localized_finding(self) -> Option<IntegrityQuarantineFinding> {
+        self.localized_finding
+    }
+    pub(super) const fn with_localized_finding(
+        mut self,
+        finding: IntegrityQuarantineFinding,
+    ) -> Self {
+        self.localized_finding = Some(finding);
+        self
     }
     #[must_use]
     pub fn finding(self) -> Option<IntegrityFinding> {
@@ -310,6 +325,23 @@ impl IntegrityVerificationReport {
             },
             None => digest.update([0]),
         }
+        match self.localized_finding {
+            Some(finding) => {
+                digest.update([1]);
+                digest.update(finding.scope().tenant_id().to_bytes());
+                digest.update([match finding.scope().signal_kind() {
+                    positron_domain::routing::SignalKind::Logs => 1,
+                    positron_domain::routing::SignalKind::Traces => 2,
+                }]);
+                digest.update(finding.scope().shard_id().value().to_be_bytes());
+                digest.update(finding.segment().to_bytes());
+                digest.update(finding.base_position().to_be_bytes());
+                digest.update(finding.sealed_frontier().value().to_be_bytes());
+                update_event_range_checksum(&mut digest, finding.event_range());
+                update_ingest_range_checksum(&mut digest, finding.ingest_range());
+            },
+            None => digest.update([0]),
+        }
         match self.continuation {
             Some(continuation) => {
                 digest.update([1]);
@@ -318,6 +350,35 @@ impl IntegrityVerificationReport {
             None => digest.update([0]),
         }
         digest.finalize().into()
+    }
+}
+
+fn update_event_range_checksum(digest: &mut Sha256, range: super::AuthenticatedEventRange) {
+    match range {
+        super::AuthenticatedEventRange::Known { earliest, latest } => {
+            digest.update([1]);
+            digest.update(earliest.value().to_be_bytes());
+            digest.update(latest.value().to_be_bytes());
+        },
+        super::AuthenticatedEventRange::Unavailable(reason) => {
+            digest.update([2]);
+            digest.update([match reason {
+                super::EventRangeUnavailable::MissingSourceTime => 1,
+                super::EventRangeUnavailable::InvalidSourceTime => 2,
+                super::EventRangeUnavailable::LegacyFormat => 3,
+            }]);
+        },
+    }
+}
+
+fn update_ingest_range_checksum(digest: &mut Sha256, range: super::AuthenticatedIngestRange) {
+    match range {
+        super::AuthenticatedIngestRange::Known { earliest, latest } => {
+            digest.update([1]);
+            digest.update(earliest.value().to_be_bytes());
+            digest.update(latest.value().to_be_bytes());
+        },
+        super::AuthenticatedIngestRange::Unavailable => digest.update([2]),
     }
 }
 
@@ -404,6 +465,20 @@ pub(super) fn can_localize_quarantine(metadata: super::format::SegmentMetadata) 
             metadata.ingest_range,
             super::AuthenticatedIngestRange::Known { .. }
         )
+}
+
+pub(super) fn localized_finding(
+    scope: SegmentScope,
+    metadata: super::format::SegmentMetadata,
+) -> Option<IntegrityQuarantineFinding> {
+    Some(IntegrityQuarantineFinding {
+        scope,
+        segment: metadata.id,
+        base_position: metadata.base_position.value(),
+        sealed_frontier: metadata.sealed_frontier?,
+        event_range: metadata.event_range,
+        ingest_range: metadata.ingest_range,
+    })
 }
 
 #[cfg(fuzzing)]

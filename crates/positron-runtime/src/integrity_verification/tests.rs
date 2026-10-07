@@ -75,10 +75,16 @@ fn selected_terminal_scope_does_not_claim_whole_instance_completion()
 }
 
 #[test]
-fn offline_corruption_report_preserves_damaged_bytes_without_quarantine()
+fn offline_sealed_corruption_is_localized_without_publishing_a_quarantine()
 -> Result<(), Box<dyn std::error::Error>> {
-    use positron_domain::routing::SignalKind;
-    use positron_kernel::{ActiveSegmentLedger, Catalog, SegmentScope};
+    use positron_domain::{routing::SignalKind, value::ValueLimitProfile};
+    use positron_kernel::{
+        ActiveSegmentLedger, Catalog, ResourceDimension, SegmentScope, StoreBlockIdentity, WorkKind,
+    };
+    use positron_policy::{
+        IngestPolicy, LogMetadata, NativeLogCandidate, PolicyEvaluation, PolicyReceiver,
+    };
+    use positron_signals::{LogRecord as StoredLogRecord, LogStore};
 
     let root = temporary_root()?;
     let paths = BootstrapPaths::new(
@@ -97,27 +103,83 @@ fn offline_corruption_report_preserves_damaged_bytes_without_quarantine()
     let identity = positron_governance::Identity::open(&catalog.pin()?)?;
     let key = crate::services::tenant_segment_key(&instance, &identity, scope)
         .map_err(|failure| format!("segment key unavailable: {failure:?}"))?;
-    ActiveSegmentLedger::open(&instance._authority, &catalog, scope, key)?.seal()?;
+    let ledger = ActiveSegmentLedger::open_with_retention_time(
+        &instance._authority,
+        &instance.retention_time,
+        &catalog,
+        scope,
+        key,
+    )?;
+    let PolicyEvaluation::Accepted(evaluated) = IngestPolicy::preserving(1)?.evaluate(
+        NativeLogCandidate::new(Some(10), None, None, Vec::new(), LogMetadata::empty()),
+        PolicyReceiver::OtlpGrpc,
+    )?
+    else {
+        return Err("fixture policy rejected an immutable log".into());
+    };
+    let capacity = instance._authority.governor().reserve(WorkClaim::tenant(
+        instance.tenant,
+        WorkKind::Ingest,
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, 1_048_576)?,
+    )?)?;
+    ledger.append(
+        LogStore::new()
+            .prepare(
+                ledger.begin_store_block(capacity, StoreBlockIdentity::new([0x82; 16])?)?,
+                vec![StoredLogRecord::checked_evaluated(
+                    ValueLimitProfile::release_1_system_maximum(),
+                    *evaluated,
+                )?],
+            )?
+            .into_store_block(),
+    )?;
+    let sealed_receipt = ledger.seal()?;
     drop(catalog);
     drop(instance);
 
-    let sealed = fs::read_dir(root.join("data/segments/sealed"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .next()
-        .ok_or("sealed segment")?;
-    fs::write(sealed, b"corrupt")?;
+    let sealed_name = sealed_receipt
+        .segment_id()
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let sealed = root
+        .join("data/segments/sealed")
+        .join(format!("{sealed_name}.segment"));
+    let mut damaged = fs::read(&sealed)?;
+    let byte = damaged.last_mut().ok_or("sealed segment bytes")?;
+    *byte ^= 0xa5;
+    fs::write(sealed, damaged)?;
     let before = file_tree(&root)?;
     let report = verify_offline_integrity(&paths, 2)
         .map_err(|failure| format!("offline verification failed: {failure:?}"))?;
     assert!(!report.is_verified());
-    assert!(
-        report
-            .reports()
-            .iter()
-            .any(|item| item.outcome() == positron_kernel::IntegrityVerificationOutcome::Fenced),
-        "offline corruption is a non-mutating fenced fact, never a quarantine publication"
+    assert_eq!(
+        report.aggregate_outcome(),
+        crate::OfflineIntegrityAggregateOutcome::Quarantined,
+        "isolated sealed corruption is localized even though offline inspection cannot publish it: {:?}",
+        report.reports()
     );
+    assert!(report.reports().iter().any(|item| {
+        item.outcome() == positron_kernel::IntegrityVerificationOutcome::Quarantined
+            && item.quarantined_segment() == Some(sealed_receipt.segment_id())
+    }));
+    let finding = report
+        .reports()
+        .iter()
+        .copied()
+        .find_map(positron_kernel::IntegrityVerificationReport::localized_finding)
+        .ok_or("missing read-only localized offline finding")?;
+    assert_eq!(finding.scope(), scope);
+    assert_eq!(finding.segment(), sealed_receipt.segment_id());
+    assert!(matches!(
+        finding.event_range(),
+        positron_kernel::AuthenticatedEventRange::Known { .. }
+    ));
+    assert!(matches!(
+        finding.ingest_range(),
+        positron_kernel::AuthenticatedIngestRange::Known { .. }
+    ));
     assert_eq!(file_tree(&root)?, before);
     fs::remove_dir_all(root)?;
     Ok(())

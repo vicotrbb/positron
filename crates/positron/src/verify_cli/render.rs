@@ -72,8 +72,9 @@ pub(super) fn render_report(report: positron_kernel::IntegrityVerificationReport
         .continuation()
         .map(|cursor| hex(&cursor.encode()))
         .unwrap_or_else(|| "none".to_owned());
+    let localized = render_localized_observation(report.localized_finding());
     format!(
-        "report_scope_tenant={} report_scope_signal={signal} report_scope_shard={} catalog_generation={} examined_segments={} examined_bytes={} omitted_segments={} outcome={outcome} continuation={continuation} quarantined_segment={quarantined} report_checksum={}\n",
+        "report_scope_tenant={} report_scope_signal={signal} report_scope_shard={} catalog_generation={} examined_segments={} examined_bytes={} omitted_segments={} outcome={outcome} continuation={continuation} quarantined_segment={quarantined} {localized} report_checksum={}\n",
         scope.tenant_id(),
         scope.shard_id().value(),
         report.catalog_generation(),
@@ -81,6 +82,29 @@ pub(super) fn render_report(report: positron_kernel::IntegrityVerificationReport
         report.examined_bytes(),
         report.omitted_segments(),
         hex(&report.checksum()),
+    )
+}
+
+fn render_localized_observation(
+    finding: Option<positron_kernel::IntegrityQuarantineFinding>,
+) -> String {
+    let Some(finding) = finding else {
+        return "localized_observation=none localized_publication=none".to_owned();
+    };
+    let scope = finding.scope();
+    let signal = match scope.signal_kind() {
+        positron_domain::routing::SignalKind::Logs => "logs",
+        positron_domain::routing::SignalKind::Traces => "traces",
+    };
+    let (event_provenance, event_earliest, event_latest) = event_range(finding.event_range());
+    let (ingest_provenance, ingest_earliest, ingest_latest) = ingest_range(finding.ingest_range());
+    format!(
+        "localized_observation=observed localized_publication=not_published localized_tenant={} localized_signal={signal} localized_shard={} localized_segment={} localized_base_position={} localized_sealed_frontier={} localized_event_provenance={event_provenance} localized_event_earliest_unix_nanos={event_earliest} localized_event_latest_unix_nanos={event_latest} localized_ingest_provenance={ingest_provenance} localized_ingest_earliest_unix_nanos={ingest_earliest} localized_ingest_latest_unix_nanos={ingest_latest}",
+        scope.tenant_id(),
+        scope.shard_id().value(),
+        hex(&finding.segment().to_bytes()),
+        finding.base_position(),
+        finding.sealed_frontier().value(),
     )
 }
 

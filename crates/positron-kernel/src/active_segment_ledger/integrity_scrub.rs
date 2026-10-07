@@ -11,8 +11,8 @@ use super::{
     IntegrityCancellationProbe, IntegrityFailure, IntegrityFailureCode, IntegrityScrubBudget,
     IntegrityScrubContinuation, IntegrityVerificationMode, IntegrityVerificationOutcome,
     IntegrityVerificationReport, IntegrityVerificationScope, can_localize_quarantine,
-    is_isolated_corruption, map_catalog_failure, map_ledger_failure, publish_quarantine,
-    quarantined_segment_ids,
+    is_isolated_corruption, localized_finding, map_catalog_failure, map_ledger_failure,
+    publish_quarantine, quarantined_segment_ids,
 };
 
 impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
@@ -439,11 +439,14 @@ fn verify_integrity_against_snapshot(
                 .map_err(|_| IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?,
             Ok(None) => 0,
             Err(failure)
-                if mode == IntegrityVerificationMode::Online
-                    && online_publication
+                if candidate.state == SegmentState::Sealed
+                    && matches!(
+                        mode,
+                        IntegrityVerificationMode::Online | IntegrityVerificationMode::Offline
+                    )
                     && is_isolated_corruption(failure.code()) =>
             {
-                let Some(catalog) = catalog else {
+                let Some(catalog) = online_publication.then_some(catalog).flatten() else {
                     if can_localize_quarantine(*candidate) {
                         return Ok(report(
                             mode,
@@ -455,6 +458,11 @@ fn verify_integrity_against_snapshot(
                             IntegrityVerificationOutcome::Quarantined,
                             Some(candidate.id),
                             None,
+                        )
+                        .with_localized_finding(
+                            localized_finding(scope, *candidate).ok_or(IntegrityFailure(
+                                IntegrityFailureCode::AmbiguousIntegrity,
+                            ))?,
                         ));
                     }
                     return Ok(report(
@@ -500,6 +508,10 @@ fn verify_integrity_against_snapshot(
                     IntegrityVerificationOutcome::Quarantined,
                     Some(candidate.id),
                     None,
+                )
+                .with_localized_finding(
+                    localized_finding(scope, *candidate)
+                        .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?,
                 ));
             },
             Err(_) => {
@@ -543,11 +555,14 @@ fn verify_integrity_against_snapshot(
                 last_segment = Some(candidate.id);
             },
             Err(failure)
-                if mode == IntegrityVerificationMode::Online
-                    && online_publication
+                if candidate.state == SegmentState::Sealed
+                    && matches!(
+                        mode,
+                        IntegrityVerificationMode::Online | IntegrityVerificationMode::Offline
+                    )
                     && is_isolated_corruption(failure.code()) =>
             {
-                let Some(catalog) = catalog else {
+                let Some(catalog) = online_publication.then_some(catalog).flatten() else {
                     if can_localize_quarantine(*candidate) {
                         return Ok(report(
                             mode,
@@ -559,6 +574,11 @@ fn verify_integrity_against_snapshot(
                             IntegrityVerificationOutcome::Quarantined,
                             Some(candidate.id),
                             None,
+                        )
+                        .with_localized_finding(
+                            localized_finding(scope, *candidate).ok_or(IntegrityFailure(
+                                IntegrityFailureCode::AmbiguousIntegrity,
+                            ))?,
                         ));
                     }
                     return Ok(report(
@@ -604,6 +624,10 @@ fn verify_integrity_against_snapshot(
                     IntegrityVerificationOutcome::Quarantined,
                     Some(candidate.id),
                     None,
+                )
+                .with_localized_finding(
+                    localized_finding(scope, *candidate)
+                        .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?,
                 ));
             },
             Err(_) => {
@@ -675,6 +699,7 @@ fn report(
         omitted_segments,
         outcome,
         quarantined_segment,
+        localized_finding: None,
         continuation,
     }
 }
