@@ -284,6 +284,10 @@ fn aggregate_verification_bounds_valid_multi_scope_bytes_and_resumes_with_a_fres
         .continuation()
         .cloned()
         .ok_or("missing aggregate byte-bound continuation")?;
+    assert!(
+        continuation.encoded().len().saturating_mul(2) > 2_048,
+        "the real bounded aggregate token must exceed the obsolete CLI hex limit"
+    );
     assert_eq!(file_tree(&root)?, before);
 
     let resumed = resume_offline_integrity(&paths, 2, continuation)

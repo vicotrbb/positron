@@ -218,6 +218,32 @@ fn offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_
 
 #[cfg(unix)]
 #[test]
+fn compiled_offline_verify_reaches_authentication_for_a_runtime_sized_continuation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let (root, _roots, config) = initialized_doctor_fixture("runtime-sized-continuation")?;
+    let continuation = "ab".repeat(1_038);
+    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["verify", "--offline", "--config"])
+        .arg(&config)
+        .args(["--continuation", &continuation])
+        .output()?;
+    let stdout = String::from_utf8(output.stdout)?;
+
+    assert_eq!(output.status.code(), Some(3), "{stdout}");
+    assert!(
+        stdout
+            .contains("mode=offline\nstatus=fenced\nverification_complete=false\nreport_count=0\n"),
+        "the compiled CLI must authenticate, then reject, an opaque continuation: {stdout}"
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn offline_doctor_refuses_a_volume_owned_by_another_process()
 -> Result<(), Box<dyn std::error::Error>> {
     let _serial = PROCESS_TEST
@@ -1026,7 +1052,7 @@ fn write_sanitized_crash_record(
     fs::write(
         &path,
         format!(
-            "record_version=1\nproduct=positron\nbuild_identity=0.0.0\nphase=serving\ncomponent=runtime\nfinding_code={finding}\nbacktrace_identity=sha256-0123456789abcdef\ncatalog_generation=7\noperation_generation=unavailable\n"
+            "record_version=1\nproduct=positron\nbuild_identity={finding}\nphase=serving\ncomponent=runtime\nfinding_code=runtime_startup_failed\nbacktrace_identity=sha256-0123456789abcdef\ncatalog_generation=7\noperation_generation=unavailable\n"
         ),
     )?;
     std::fs::File::open(&path)?.set_times(std::fs::FileTimes::new().set_modified(modified))?;

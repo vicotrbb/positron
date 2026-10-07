@@ -39,6 +39,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "offline_integrity_continuation_hex"
+path = "fuzz_targets/offline_integrity_continuation_hex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "crash_record_decoder"
 path = "fuzz_targets/crash_record_decoder.rs"
 test = false

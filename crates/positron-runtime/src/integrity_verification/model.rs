@@ -75,12 +75,18 @@ impl OfflineIntegrityEvidence {
 pub struct OfflineIntegrityContinuation(pub(crate) Vec<u8>);
 
 impl OfflineIntegrityContinuation {
+    /// Maximum protected continuation bytes admitted by the canonical runtime
+    /// format. The v4 format reserves enough room for all 1,024 terminal
+    /// evidence records while remaining within the portable CLI argument cap
+    /// once rendered as hexadecimal.
+    pub const MAX_ENCODED_BYTES: usize = 65_536;
+
     #[must_use]
     pub fn encoded(&self) -> &[u8] {
         &self.0
     }
     pub fn from_encoded(encoded: Vec<u8>) -> Result<Self, OfflineIntegrityFailure> {
-        (!encoded.is_empty() && encoded.len() <= 65_536)
+        (!encoded.is_empty() && encoded.len() <= Self::MAX_ENCODED_BYTES)
             .then_some(Self(encoded))
             .ok_or(OfflineIntegrityFailure::CorruptState)
     }

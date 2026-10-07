@@ -33,6 +33,17 @@ mod verify_cli;
 #[doc(hidden)]
 pub use support_bundle::{fuzz_live_bundle_request, fuzz_support_bundle_options};
 
+/// Exercises the bounded, untrusted hexadecimal continuation boundary used
+/// by `positron verify --offline` before any storage is opened.
+#[doc(hidden)]
+#[allow(dead_code, reason = "called by the external cargo-fuzz target")]
+pub fn fuzz_offline_integrity_continuation_hex(bytes: &[u8]) {
+    let Ok(value) = std::str::from_utf8(bytes) else {
+        return;
+    };
+    verify_cli::fuzz_offline_continuation_hex(value);
+}
+
 const EXIT_OK: u8 = 0;
 const EXIT_CONFIGURATION: u8 = 2;
 const EXIT_STARTUP: u8 = 3;

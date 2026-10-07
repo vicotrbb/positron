@@ -35,6 +35,11 @@ use online::online_request;
 use options::{VerifyFailure, VerifyOptions};
 use render::{hex, render_aggregate_evidence, render_finding, render_report};
 
+#[doc(hidden)]
+pub(super) fn fuzz_offline_continuation_hex(value: &str) {
+    let _ = decode_offline_continuation(value);
+}
+
 pub(super) fn run(
     arguments: impl Iterator<Item = String>,
     environment: impl IntoIterator<Item = (String, String)>,

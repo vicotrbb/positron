@@ -126,6 +126,9 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
             ResourceGeneration::new(2)?,
             AdministrativeIdempotencyKey::new([0x83; 16])?,
         )?;
+        let checkpoint = instance.queue_governance_audit_checkpoint_for_test()?;
+        instance.complete_queued_governance_audit_checkpoint_for_test(checkpoint)?;
+        let _queued_checkpoint = instance.queue_governance_audit_checkpoint_for_test()?;
         (secret, identity)
     };
     let host = NativeHost::new(NativeBindings::from_effective(&effective)?)
@@ -181,6 +184,10 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
         "clock_uncertain=",
         "running_no_durable_progress_slo_breaches=",
         "running_no_durable_progress_slo_unknown=",
+        "queued_tasks=",
+        "running_tasks=",
+        "deferred_tasks=",
+        "terminal_tasks=",
         "checkpointed_tasks=",
         "paused_tasks=",
         "conflicted_tasks=",
@@ -193,6 +200,22 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
             "missing {required} from {archive}"
         );
     }
+    assert!(
+        archive.lines().any(|line| {
+            line.strip_prefix("queued_tasks=")
+                .and_then(|value| value.parse::<u32>().ok())
+                .is_some_and(|count| count > 0)
+        }),
+        "the public serving bundle must expose a nonzero canonical queued maintenance count: {archive}"
+    );
+    assert!(
+        archive.lines().any(|line| {
+            line.strip_prefix("terminal_tasks=")
+                .and_then(|value| value.parse::<u32>().ok())
+                .is_some_and(|count| count > 0)
+        }),
+        "the public serving bundle must expose a nonzero canonical terminal maintenance count: {archive}"
+    );
     assert!(!archive.contains("status=not_exported_by_current_diagnostics_contract"));
     process
         .services()

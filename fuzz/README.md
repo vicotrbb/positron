@@ -14,6 +14,14 @@ exercise. Applicable targets include parsers, protocol decoders, public request
 bodies, persistent formats, recovery inputs, cryptographic envelopes, and
 state-machine transitions.
 
+The offline integrity continuation target drives arbitrary bytes through the
+public CLI's bounded hexadecimal decoder before it allocates a decoded token or
+opens storage:
+
+```console
+cargo +nightly fuzz run offline_integrity_continuation_hex -- -runs=1000
+```
+
 Keep useful seed inputs and promote every fixed crash to the regression corpus.
 Run a target with:
 

@@ -429,7 +429,7 @@ impl InitializedInstance {
             conflicts = conflicts.saturating_add(u32::from(status.conflict_owner().is_some()));
         }
         Ok(format!(
-            "maintenance_inventory=coordinator_and_governance_audit\ncheckpointed_tasks={checkpoints}\npaused_tasks={pauses}\nconflicted_tasks={conflicts}\ndurable_operations={}\nactive_durable_operations={}\nsnapshot_leases={}\n",
+            "maintenance_inventory=coordinator_and_governance_audit\nqueued_tasks={queued}\nrunning_tasks={running}\ndeferred_tasks={deferred}\nterminal_tasks={terminal}\ncheckpointed_tasks={checkpoints}\npaused_tasks={pauses}\nconflicted_tasks={conflicts}\ndurable_operations={}\nactive_durable_operations={}\nsnapshot_leases={}\n",
             facts.durable_operations(),
             facts.active_durable_operations(),
             facts.snapshot_leases(),
