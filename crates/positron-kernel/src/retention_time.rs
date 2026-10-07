@@ -138,6 +138,11 @@ pub(crate) struct LifecycleClockSafety {
 #[derive(Clone, Copy)]
 struct LifecycleAnchorCheckpoint(LifecycleClockSafety);
 
+/// One authenticated Catalog lifecycle-anchor record proved to subsume a
+/// retention-publication frontier. It is intentionally opaque so exact
+/// recovery can only use the record decoded by the authority.
+pub(crate) struct VerifiedCatalogAnchor(LifecycleClockSafety);
+
 /// A candidate lifecycle observation which becomes authoritative only with
 /// the Catalog generation that carries its anchor.  Dropping an unpublished
 /// candidate restores its predecessor when no later local observation has
@@ -573,25 +578,15 @@ impl RetentionTimeAuthority {
             .lock()
             .map_err(|_| LifecycleClockFailure::Unavailable)?;
         let local = advance_global(*safety, elapsed)?;
-        if record.anchor >= local {
-            // The durable anchor is the comparison baseline. A newly observed wall
-            // value must never replace it before reconciliation: doing so would
-            // turn a restart-time forward jump into a zero offset.
-            safety.anchor = record.anchor;
-            safety.anchor_elapsed = elapsed;
-            safety.last_wall_clock = record.last_wall_clock;
-            safety.observed_offset_nanoseconds = record.observed_offset_nanoseconds;
-            safety.wall_clock_correction_nanoseconds = record.wall_clock_correction_nanoseconds;
-            safety.state = record.state;
-            safety.revision = safety
-                .revision
-                .checked_add(1)
-                .ok_or(LifecycleClockFailure::OutOfRange)?;
+        if safety.revision == 0 || safety.anchor_elapsed == 0 || record.anchor >= local {
+            // A newly established authority has not yet made a live
+            // observation since its authenticated baseline, so the Catalog
+            // anchor must become that baseline before the first wall-clock
+            // reconciliation. A later ordinary ledger open keeps the
+            // already-observed monotonic authority when its Catalog anchor
+            // is only an older lower bound.
+            install_catalog_anchor(&mut safety, record, elapsed)?;
         }
-        // A Catalog snapshot can legitimately carry an older anchor than an
-        // already-running process. It authenticates a lower bound, not
-        // permission to discard elapsed monotonic progress before the next
-        // durable lifecycle publication.
         drop(safety);
         self.reconcile_while_acceptance_held(record.anchor, elapsed)
     }
@@ -629,7 +624,7 @@ impl RetentionTimeAuthority {
         &self,
         snapshot: &CatalogSnapshot,
         observed: IngestTime,
-    ) -> Result<bool, LifecycleClockFailure> {
+    ) -> Result<Option<VerifiedCatalogAnchor>, LifecycleClockFailure> {
         let mut durable = None;
         for bytes in snapshot.plaintext_objects() {
             let Some(record) = decode_catalog_anchor(bytes)? else {
@@ -639,7 +634,32 @@ impl RetentionTimeAuthority {
                 return Err(LifecycleClockFailure::OutOfRange);
             }
         }
-        Ok(durable.is_some_and(|record| record.anchor >= observed.instant()))
+        Ok(durable
+            .filter(|record| record.anchor >= observed.instant())
+            .map(VerifiedCatalogAnchor))
+    }
+
+    /// Reinstalls an exact authenticated anchor only after a caller has proved
+    /// the matching durable Publication/Reclamation terminal pair and its
+    /// metadata/frontier bindings. Ordinary ledger opens must use
+    /// `recover_catalog_anchor`, which preserves later local progress.
+    pub(crate) fn recover_verified_catalog_anchor(
+        &self,
+        verified: VerifiedCatalogAnchor,
+    ) -> Result<(), LifecycleClockFailure> {
+        let _acceptance = self
+            .acceptance
+            .lock()
+            .map_err(|_| LifecycleClockFailure::Unavailable)?;
+        let elapsed = self.elapsed.nanoseconds()?;
+        let mut safety = self
+            .safety
+            .lock()
+            .map_err(|_| LifecycleClockFailure::Unavailable)?;
+        install_catalog_anchor(&mut safety, verified.0, elapsed)?;
+        let anchor = verified.0.anchor;
+        drop(safety);
+        self.reconcile_while_acceptance_held(anchor, elapsed)
     }
 
     fn abandon_catalog_anchor(
@@ -892,6 +912,24 @@ impl RetentionTimeAuthority {
         };
         Ok(())
     }
+}
+
+fn install_catalog_anchor(
+    safety: &mut LifecycleClockSafety,
+    record: LifecycleClockSafety,
+    elapsed: u64,
+) -> Result<(), LifecycleClockFailure> {
+    safety.anchor = record.anchor;
+    safety.anchor_elapsed = elapsed;
+    safety.last_wall_clock = record.last_wall_clock;
+    safety.observed_offset_nanoseconds = record.observed_offset_nanoseconds;
+    safety.wall_clock_correction_nanoseconds = record.wall_clock_correction_nanoseconds;
+    safety.state = record.state;
+    safety.revision = safety
+        .revision
+        .checked_add(1)
+        .ok_or(LifecycleClockFailure::OutOfRange)?;
+    Ok(())
 }
 
 fn advance_global(
