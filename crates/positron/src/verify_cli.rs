@@ -34,7 +34,10 @@ use offline::{decode_offline_continuation, failure_status, offline_scope};
 #[cfg(test)]
 use online::online_request;
 use options::{VerifyFailure, VerifyOptions};
-use render::{hex, render_aggregate_evidence, render_finding, render_report};
+use render::{
+    hex, render_aggregate_evidence, render_finding, render_report,
+    render_retained_localized_observation,
+};
 
 #[doc(hidden)]
 pub(super) fn fuzz_offline_continuation_hex(value: &str) {
