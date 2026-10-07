@@ -2,6 +2,7 @@
 //! closed vocabulary fields; it never receives panic payloads or backtraces.
 
 use std::{
+    fmt::Write as _,
     fs::{self, File},
     io::{Read, Write},
     time::{Duration, SystemTime},
@@ -15,6 +16,7 @@ use crate::{OwnedPrimaryDataVolume, StorageKernelResourceAuthority};
 const MAX_RECORD_BYTES: usize = 384;
 const MAX_RECORDS: usize = 32;
 const MAX_ENUMERATED_ENTRIES: usize = 64;
+const MAX_BACKTRACE_FINGERPRINT_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CrashRecordFailure {
@@ -55,14 +57,7 @@ impl CrashRecord {
     }
     #[must_use]
     pub fn with_backtrace(mut self, backtrace: &std::backtrace::Backtrace) -> Self {
-        self.backtrace_identity = match backtrace.status() {
-            std::backtrace::BacktraceStatus::Captured => {
-                let digest = Sha256::digest(format!("{backtrace:?}").as_bytes());
-                format!("sha256-{}", hex(&digest[..8]))
-            },
-            std::backtrace::BacktraceStatus::Disabled => "disabled".to_owned(),
-            _ => "unavailable".to_owned(),
-        };
+        self.backtrace_identity = backtrace_identity(backtrace);
         self
     }
     pub fn render(&self) -> String {
@@ -76,6 +71,51 @@ impl CrashRecord {
             self.catalog_generation
                 .map_or_else(|| "unavailable".to_owned(), |value| value.to_string())
         )
+    }
+}
+
+fn backtrace_identity(backtrace: &std::backtrace::Backtrace) -> String {
+    match backtrace.status() {
+        std::backtrace::BacktraceStatus::Captured => {
+            let mut rendered = String::with_capacity(MAX_BACKTRACE_FINGERPRINT_BYTES);
+            let mut writer = BoundedBacktraceWriter {
+                rendered: &mut rendered,
+            };
+            // The writer returns an error once its fixed input budget is exhausted. That is an
+            // expected truncation boundary: only the bounded, sanitized prefix is fingerprinted.
+            let _ = write!(&mut writer, "{backtrace:?}");
+            if rendered.is_empty() {
+                return "unavailable".to_owned();
+            }
+            let digest = Sha256::digest(rendered.as_bytes());
+            format!("sha256-{}", hex(&digest[..8]))
+        },
+        std::backtrace::BacktraceStatus::Disabled => "disabled".to_owned(),
+        _ => "unavailable".to_owned(),
+    }
+}
+
+struct BoundedBacktraceWriter<'a> {
+    rendered: &'a mut String,
+}
+
+impl std::fmt::Write for BoundedBacktraceWriter<'_> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let remaining = MAX_BACKTRACE_FINGERPRINT_BYTES.saturating_sub(self.rendered.len());
+        let mut end = 0;
+        for character in value.chars() {
+            let next = end + character.len_utf8();
+            if next > remaining {
+                break;
+            }
+            end = next;
+        }
+        self.rendered.push_str(&value[..end]);
+        if end == value.len() {
+            Ok(())
+        } else {
+            Err(std::fmt::Error)
+        }
     }
 }
 

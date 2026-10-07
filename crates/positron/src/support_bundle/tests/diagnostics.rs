@@ -44,15 +44,32 @@ fn sanitized_crash_record_excludes_panic_payload_and_caps_backtrace_identity() {
 #[test]
 fn captured_backtrace_is_persisted_only_as_a_safe_fingerprint()
 -> Result<(), Box<dyn std::error::Error>> {
+    const MAX_FINGERPRINT_BYTES: usize = 256;
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    let backtrace_rendering = format!("{backtrace:?}");
+    assert!(backtrace_rendering.len() > MAX_FINGERPRINT_BYTES);
+    let mut prefix_length = 0;
+    for character in backtrace_rendering.chars() {
+        let next = prefix_length + character.len_utf8();
+        if next > MAX_FINGERPRINT_BYTES {
+            break;
+        }
+        prefix_length = next;
+    }
+    let digest = sha2::Sha256::digest(&backtrace_rendering.as_bytes()[..prefix_length]);
+    let expected = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let record = super::crash_record::SanitizedCrashRecord::new(
         "draining",
         "joined_task_panic",
         "serving_loop",
     )
     .map_err(|_| "typed crash record")?
-    .with_backtrace(&std::backtrace::Backtrace::force_capture());
+    .with_backtrace(&backtrace);
     let rendered = record.render();
-    assert!(rendered.contains("backtrace_identity=sha256-"));
+    assert!(rendered.contains(&format!("backtrace_identity=sha256-{expected}")));
     assert!(!rendered.contains("backtrace::"));
     assert!(!rendered.contains("joined task panic payload"));
     Ok(())
