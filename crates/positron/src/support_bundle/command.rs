@@ -7,11 +7,11 @@ use std::{
 };
 
 use positron_config::{ConfigurationInputs, resolve};
-use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
+use positron_governance::PresentedCredential;
 use positron_kernel::{
     DiskPressureState, MountQualification, ResourceAmounts, ResourceSnapshot, WorkClaim,
 };
-use positron_runtime::{BootstrapPaths, DoctorRuntimeFacts, InstanceBootstrap};
+use positron_runtime::{BootstrapPaths, InstanceBootstrap};
 use zeroize::Zeroizing;
 
 use super::archive::{encode_bytes, hex};
@@ -156,6 +156,7 @@ fn execute(
     } else {
         authenticated_inspection(
             &paths,
+            effective.max_registered_tenants(),
             options.output_limit,
             |signer, operational, report, crash_records| {
                 let crash = crash_records

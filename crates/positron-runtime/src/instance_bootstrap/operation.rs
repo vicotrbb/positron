@@ -302,6 +302,90 @@ pub(super) fn reopen(
     )
 }
 
+/// Opens exactly the immutable bootstrap and Catalog authorities required for
+/// an offline support bundle. Unlike `reopen`, this path never restores
+/// runtime state or creates missing Catalog directories.
+pub(super) fn inspect_offline_support_bundle(
+    paths: &BootstrapPaths,
+    max_registered_tenants: u16,
+    credential: positron_governance::PresentedCredential,
+    claim: WorkClaim,
+) -> Result<super::OfflineSupportBundleInspection, super::OfflineSupportBundleFailure> {
+    use super::OfflineSupportBundleFailure::{AuthenticationRejected, Unavailable};
+
+    let (volume, access) = paths.storage.acquire().map_err(|_| Unavailable)?;
+    if storage::classify_with(&access).map_err(|_| Unavailable)? != BootstrapState::Initialized {
+        return Err(Unavailable);
+    }
+    let key = access.open_key().map_err(|_| Unavailable)?;
+    let encoded =
+        storage::read(&access, BootstrapArtifact::Initialized).map_err(|_| Unavailable)?;
+    let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)
+        .map_err(|_| Unavailable)?;
+    require_key_identity(&record, key.identity()).map_err(|_| Unavailable)?;
+    let authority = resources::establish_system_diagnostics(volume, max_registered_tenants)
+        .map_err(|_| Unavailable)?;
+    let inspection = Catalog::reserve_offline_integrity_inspection(&authority, claim)
+        .map_err(|_| Unavailable)?;
+    let resources = inspection
+        .authority()
+        .governor()
+        .inspect()
+        .map_err(|_| Unavailable)?;
+    let view = inspection
+        .read_current_view(
+            record.instance,
+            key.catalog_secret(record.instance)
+                .map_err(|_| Unavailable)?,
+        )
+        .map_err(|_| Unavailable)?;
+    let snapshot = view.snapshot();
+    if snapshot.number() == 0 {
+        return Err(Unavailable);
+    }
+    let identity = Identity::open(snapshot).map_err(|_| Unavailable)?;
+    let retention_time = RetentionTimeAuthority::establish().map_err(|_| Unavailable)?;
+    let actor = identity
+        .attribute_with_expiry_time(
+            &key,
+            credential,
+            positron_governance::RequestedIntent::SystemAdministration,
+            positron_governance::CompatibilityHints::none(),
+            || {
+                retention_time
+                    .security_time_seconds()
+                    .map_err(|_| positron_governance::AttributionFailure)
+            },
+        )
+        .map_err(|_| AuthenticationRejected)?;
+    if actor.principal_id() != record.administrator {
+        return Err(AuthenticationRejected);
+    }
+    let (_, governance) = snapshot.governance_object().map_err(|_| Unavailable)?;
+    if governance.integrity_key_fingerprint() != record.integrity_fingerprint {
+        return Err(Unavailable);
+    }
+    let signer = key
+        .export_manifest_signer(record.instance, governance.protected_integrity_key())
+        .map_err(|_| Unavailable)?;
+    if signer.identity().public_key() != governance.integrity_public_key() {
+        return Err(Unavailable);
+    }
+    view.verify_audit_chain(governance.integrity_public_key(), None)
+        .map_err(|_| Unavailable)?;
+    let backup_repository = super::BackupRepositoryInspection::from_authenticated_catalog(snapshot)
+        .map_err(|_| Unavailable)?;
+    let crash_records =
+        positron_kernel::CrashRecordStore::from_authority(&authority).map_err(|_| Unavailable)?;
+    Ok(super::OfflineSupportBundleInspection {
+        signer,
+        catalog_generation: snapshot.number(),
+        backup_repository,
+        resources,
+        crash_records,
+    })
+}
+
 pub(super) fn claim(paths: &BootstrapPaths) -> Result<BootstrapClaim, BootstrapFailure> {
     let (_volume, access) = acquire(paths)?;
     if storage::classify_with(&access)? != BootstrapState::Initialized

@@ -345,20 +345,17 @@ fn verify_integrity_against_snapshot(
     let metadata = storage
         .catalog_segments_observed(basis, scope)
         .map_err(map_ledger_failure)?;
-    let immutable_scope = !matches!(mode, IntegrityVerificationMode::Startup);
+    let immutable_scope = matches!(mode, IntegrityVerificationMode::Online);
     let quarantined = quarantined_segment_ids(basis, scope)?;
     let retained_quarantine = immutable_scope
         .then(|| quarantined.first().copied())
         .flatten();
     let targets = metadata
         .iter()
-        .filter(|candidate| {
-            candidate.state
-                == if immutable_scope {
-                    SegmentState::Sealed
-                } else {
-                    SegmentState::Active
-                }
+        .filter(|candidate| match mode {
+            IntegrityVerificationMode::Startup => candidate.state == SegmentState::Active,
+            IntegrityVerificationMode::Online => candidate.state == SegmentState::Sealed,
+            IntegrityVerificationMode::Offline => true,
         })
         .filter(|candidate| !immutable_scope || !quarantined.contains(&candidate.id))
         .collect::<Vec<_>>();
@@ -430,7 +427,7 @@ fn verify_integrity_against_snapshot(
                 continuation_for(source_identity, last_segment),
             ));
         }
-        let physical = match if immutable_scope {
+        let physical = match if candidate.state == SegmentState::Sealed {
             storage.sealed_compaction_source_bound(*candidate, protection, instance)
         } else {
             Ok(None)
@@ -661,8 +658,11 @@ fn report(
         mode,
         verification_scope: match mode {
             IntegrityVerificationMode::Startup => IntegrityVerificationScope::StartupFrontiers,
-            IntegrityVerificationMode::Online | IntegrityVerificationMode::Offline => {
+            IntegrityVerificationMode::Online => {
                 IntegrityVerificationScope::ReachableImmutableSegments
+            },
+            IntegrityVerificationMode::Offline => {
+                IntegrityVerificationScope::ReachableDurableSegments
             },
         },
         scope,

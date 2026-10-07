@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn authenticated_inspection<T>(
     paths: &BootstrapPaths,
+    max_registered_tenants: u16,
     output_limit: usize,
     collect: impl FnOnce(
         positron_kernel::ExportManifestSigner,
@@ -25,51 +26,29 @@ pub(super) fn authenticated_inspection<T>(
     }
     let credential =
         PresentedCredential::parse(bearer).map_err(|_| BundleFailure::AuthenticationRejected)?;
-    let instance =
-        InstanceBootstrap::reopen(paths).map_err(|_| BundleFailure::InspectionUnavailable)?;
-    let actor = instance
-        .attribute(
-            credential,
-            RequestedIntent::SystemAdministration,
-            CompatibilityHints::none(),
-        )
-        .map_err(|_| BundleFailure::AuthenticationRejected)?;
-    let reservation = instance
-        .resource_governor()
-        .reserve(diagnostics_claim(output_limit)?)
-        .map_err(|_| BundleFailure::InspectionUnavailable)?;
-    let facts = instance
-        .doctor_runtime_facts(actor)
-        .map_err(|_| BundleFailure::InspectionUnavailable)?;
-    let owned_report = owned_bundle_doctor_report(
-        facts,
-        instance
-            .resource_governor()
-            .inspect()
-            .map_err(|_| BundleFailure::InspectionUnavailable)?,
-    );
-    let signer = instance
-        .support_bundle_manifest_signer(actor)
-        .map_err(|_| BundleFailure::InspectionUnavailable)?;
+    let inspection = InstanceBootstrap::inspect_offline_support_bundle(
+        paths,
+        max_registered_tenants,
+        credential,
+        diagnostics_claim(output_limit)?,
+    )
+    .map_err(|failure| match failure {
+        positron_runtime::OfflineSupportBundleFailure::AuthenticationRejected => {
+            BundleFailure::AuthenticationRejected
+        },
+        positron_runtime::OfflineSupportBundleFailure::Unavailable => {
+            BundleFailure::InspectionUnavailable
+        },
+    })?;
+    let (signer, catalog_generation, backup_repository, resources, crash_records) =
+        inspection.into_parts();
+    let owned_report = owned_bundle_doctor_report(catalog_generation, backup_repository, resources);
     let operational = format!(
         "inspection_mode=offline\nkey_custody={}\ncatalog_bootstrap={}\ncatalog_generation={}\nbackup_repository={}\n",
-        if facts.key_custody_verified() {
-            "verified"
-        } else {
-            "unavailable"
-        },
-        if facts.catalog_bootstrap_verified() {
-            "verified"
-        } else {
-            "unavailable"
-        },
-        facts.catalog_generation(),
-        facts.backup_repository().label(),
+        "verified",
+        "verified",
+        catalog_generation,
+        backup_repository.label(),
     );
-    let crash_records = instance
-        .crash_records()
-        .map_err(|_| BundleFailure::InspectionUnavailable)?;
-    let collected = collect(signer, operational, owned_report, crash_records);
-    drop(reservation);
-    collected
+    collect(signer, operational, owned_report, crash_records)
 }

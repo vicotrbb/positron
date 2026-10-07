@@ -97,6 +97,75 @@ fn persisted_crash_record_reopens_as_bounded_sanitized_support_input()
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn crash_store_retains_the_owned_root_after_path_replacement()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::symlink;
+
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-crash-owned-root-{nonce}"));
+    let retained = root.with_extension("retained");
+    let outside = root.with_extension("outside");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(outside.join("diagnostics/crash-records"))?;
+    let store =
+        super::crash_record::CrashRecordStore::under_data_directory(&root).map_err(|_| "store")?;
+    store
+        .persist(
+            &super::crash_record::SanitizedCrashRecord::new(
+                "starting",
+                "runtime_startup_failed",
+                "runtime",
+            )
+            .map_err(|_| "record")?,
+        )
+        .map_err(|_| "initial persist")?;
+    let outside_record = outside.join("diagnostics/crash-records/record-00000000000000000000.txt");
+    fs::write(
+        &outside_record,
+        b"record_version=1\nproduct=positron\nbuild_identity=0.0.0\nphase=starting\ncomponent=runtime\nfinding_code=catalog_unavailable\nbacktrace_identity=unavailable\ncatalog_generation=unavailable\noperation_generation=unavailable\n",
+    )?;
+    let outside_before = fs::read(&outside_record)?;
+
+    fs::rename(&root, &retained)?;
+    symlink(&outside, &root)?;
+
+    let readout = store
+        .read_recent(
+            std::time::Duration::from_secs(60),
+            4,
+            1_536,
+            SystemTime::now(),
+        )
+        .map_err(|_| "readout")?
+        .render();
+    assert!(readout.contains("runtime_startup_failed"));
+    assert!(!readout.contains("catalog_unavailable"));
+    store
+        .persist(
+            &super::crash_record::SanitizedCrashRecord::new(
+                "serving",
+                "runtime_poll_panicked",
+                "runtime",
+            )
+            .map_err(|_| "record")?,
+        )
+        .map_err(|_| "retained persist")?;
+    assert_eq!(fs::read(&outside_record)?, outside_before);
+    assert_eq!(
+        fs::read_dir(retained.join("diagnostics/crash-records"))?.count(),
+        2,
+        "writes remain under the originally owned root"
+    );
+
+    drop(store);
+    fs::remove_file(&root)?;
+    fs::remove_dir_all(&retained)?;
+    fs::remove_dir_all(&outside)?;
+    Ok(())
+}
+
 #[test]
 fn persisted_noncanonical_crash_record_is_omitted_before_a_support_bundle_can_export_a_secret()
 -> Result<(), Box<dyn std::error::Error>> {

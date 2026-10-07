@@ -33,7 +33,8 @@ pub use instance_bootstrap::GovernanceTestFixture;
 pub use instance_bootstrap::{
     BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
     BootstrapPaths, BootstrapState, DoctorRuntimeFacts, InitializationPlan, InitializedInstance,
-    InstanceBootstrap, TenantRetentionImpactPreview,
+    InstanceBootstrap, OfflineSupportBundleFailure, OfflineSupportBundleInspection,
+    TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
     OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityContinuation,

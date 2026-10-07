@@ -6,7 +6,7 @@ use std::{
 use super::privacy::IdentifierRetention;
 use super::{
     DEFAULT_ELAPSED_LIMIT, DEFAULT_LOG_WINDOW, DEFAULT_OUTPUT_LIMIT, DEFAULT_SOURCE_FILES,
-    EXIT_FAILURE, EXIT_USAGE, MAX_OUTPUT_LIMIT, TAR_RECORD,
+    EXIT_FAILURE, EXIT_USAGE, MAX_ELAPSED_LIMIT, MAX_OUTPUT_LIMIT, TAR_RECORD,
 };
 
 /// Validated command-line choices for one bounded support-bundle invocation.
@@ -83,13 +83,12 @@ impl BundleOptions {
                         .map_err(|_| BundleFailure::Arguments)?
                 },
                 "--max-elapsed-seconds" => {
-                    elapsed_limit = Duration::from_secs(
-                        arguments
-                            .next()
-                            .ok_or(BundleFailure::Arguments)?
-                            .parse()
-                            .map_err(|_| BundleFailure::Arguments)?,
-                    )
+                    let seconds: u64 = arguments
+                        .next()
+                        .ok_or(BundleFailure::Arguments)?
+                        .parse()
+                        .map_err(|_| BundleFailure::Arguments)?;
+                    elapsed_limit = Duration::from_secs(seconds);
                 },
                 "--log-window-seconds" => {
                     log_window = Duration::from_secs(
@@ -114,6 +113,9 @@ impl BundleOptions {
         let output = output.ok_or(BundleFailure::Arguments)?;
         if !(TAR_RECORD..=MAX_OUTPUT_LIMIT).contains(&output_limit) {
             return Err(BundleFailure::OutputLimitExceeded);
+        }
+        if elapsed_limit > MAX_ELAPSED_LIMIT {
+            return Err(BundleFailure::Arguments);
         }
         if (control_path.is_some() || credential_stdin || !offline_key_unavailable)
             && (!credential_stdin || offline_key_unavailable)

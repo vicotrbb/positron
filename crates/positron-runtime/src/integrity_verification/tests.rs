@@ -124,6 +124,85 @@ fn offline_corruption_report_preserves_damaged_bytes_without_quarantine()
 }
 
 #[test]
+fn offline_verification_fences_corruption_at_an_active_durability_frontier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = temporary_root()?;
+    let paths = BootstrapPaths::new(
+        &root.join("data"),
+        &root.join("secrets"),
+        MountQualification::LocalHost,
+    )?;
+    InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    let active = fs::read_dir(root.join("data/segments/active"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .next()
+        .ok_or("active segment")?;
+    fs::write(&active, b"corrupt at acknowledged frontier")?;
+    let before = file_tree(&root)?;
+
+    let report = verify_offline_integrity(&paths, 2)
+        .map_err(|failure| format!("offline verification failed: {failure:?}"))?;
+
+    assert!(
+        report.is_complete(),
+        "a fenced terminal result still covers every reachable scope"
+    );
+    assert!(!report.is_verified());
+    assert!(
+        report
+            .reports()
+            .iter()
+            .any(|item| item.outcome() == positron_kernel::IntegrityVerificationOutcome::Fenced),
+        "offline inspection must authenticate a reachable active durability frontier"
+    );
+    assert_eq!(
+        file_tree(&root)?,
+        before,
+        "offline inspection never repairs source bytes"
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn offline_verification_leaves_an_active_nondurable_tail_untouched()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+
+    let root = temporary_root()?;
+    let paths = BootstrapPaths::new(
+        &root.join("data"),
+        &root.join("secrets"),
+        MountQualification::LocalHost,
+    )?;
+    InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    let active = fs::read_dir(root.join("data/segments/active"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .next()
+        .ok_or("active segment")?;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&active)?
+        .write_all(b"uncommitted active tail")?;
+    let before = file_tree(&root)?;
+
+    let report = verify_offline_integrity(&paths, 2)
+        .map_err(|failure| format!("offline verification failed: {failure:?}"))?;
+
+    assert!(report.is_complete());
+    assert!(report.is_verified());
+    assert_eq!(
+        file_tree(&root)?,
+        before,
+        "offline inspection must not truncate an active tail"
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn selected_scope_verification_returns_a_bound_cursor_and_resumes_without_global_claim()
 -> Result<(), Box<dyn std::error::Error>> {
     use positron_domain::routing::SignalKind;

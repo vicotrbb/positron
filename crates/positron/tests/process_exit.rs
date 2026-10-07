@@ -341,6 +341,46 @@ fn offline_doctor_reports_corrupt_bootstrap_as_fenced_without_repairing_it()
 
 #[cfg(unix)]
 #[test]
+fn compiled_support_bundle_rejects_deadlines_above_the_documented_limit_before_configuration()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let root = std::env::temp_dir().join(format!(
+        "positron-support-deadline-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    fs::create_dir(&root)?;
+    let output = root.join("must-not-exist.age");
+    let recipient = age::x25519::Identity::generate().to_public().to_string();
+
+    for seconds in ["31", "18446744073709551615"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_positron"))
+            .args(["support", "bundle", "create", "--config"])
+            .arg(root.join("missing.toml"))
+            .args(["--output"])
+            .arg(&output)
+            .args([
+                "--recipient",
+                &recipient,
+                "--credential-stdin",
+                "--max-elapsed-seconds",
+                seconds,
+            ])
+            .output()?;
+        assert_eq!(result.status.code(), Some(2));
+        assert_eq!(
+            String::from_utf8(result.stdout)?,
+            "report_version=1\nstatus=invalid_arguments\nfinding_code=SUPPORT_BUNDLE_ARGUMENTS_INVALID\nseverity=error\n"
+        );
+        assert!(!output.exists());
+    }
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn encrypted_support_bundle_is_signed_decryptable_collision_safe_and_read_only()
 -> Result<(), Box<dyn std::error::Error>> {
     use age::{Decryptor, Identity};
@@ -577,12 +617,22 @@ fn live_control_support_bundle_is_signed_encrypted_and_reports_serving_facts()
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&server_output.stderr),
     );
-    assert!(String::from_utf8(result.stdout)?.contains("signature=signed"));
+    let report = String::from_utf8(result.stdout)?;
+    assert!(report.contains("artifact_authentication=unverified_control_response\n"));
+    assert!(report.contains("signature=unverified\n"));
     let encrypted = fs::read(&output)?;
     let decryptor = Decryptor::new(&encrypted[..])?;
     let mut reader = decryptor.decrypt(std::iter::once(&identity as &dyn Identity))?;
     let mut archive = Vec::new();
     reader.read_to_end(&mut archive)?;
+    let instance = InstanceBootstrap::reopen(&paths)?;
+    let actor = instance.attribute(
+        positron_governance::PresentedCredential::parse(claim.secret())?,
+        positron_governance::RequestedIntent::SystemAdministration,
+        positron_governance::CompatibilityHints::none(),
+    )?;
+    let expected_identity = instance.support_bundle_manifest_signer(actor)?.identity();
+    verify_authenticated_bundle_archive(&archive, expected_identity)?;
     assert!(
         archive
             .windows(b"manifest-signature.txt".len())
@@ -877,6 +927,45 @@ fn offline_key_unavailable_support_bundle_is_unsigned_and_never_auth_fallback()
 
 #[cfg(unix)]
 #[test]
+fn offline_support_bundle_does_not_recreate_missing_catalog_storage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let (root, roots, config) = initialized_support_bundle_fixture("readonly-catalog")?;
+    let credential = InstanceBootstrap::claim(&BootstrapPaths::new(
+        &roots.data,
+        &roots.secrets,
+        MountQualification::LocalHost,
+    )?)?
+    .secret()
+    .to_owned();
+    fs::remove_dir_all(roots.data.join("catalog/staging"))?;
+    let before_data = volume_bytes(&roots.data)?;
+    let before_secrets = volume_bytes(&roots.secrets)?;
+    let output = root.join("support.age");
+    let (result, _) = invoke_support_bundle(
+        &config,
+        &output,
+        SupportBundleOutput::SignedEncrypted,
+        Some(&credential),
+        std::iter::empty::<&str>(),
+    )?;
+
+    assert_eq!(result.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8(result.stdout)?,
+        "report_version=1\nstatus=inspection_unavailable\nfinding_code=SUPPORT_BUNDLE_INSPECTION_UNAVAILABLE\nseverity=error\n"
+    );
+    assert!(!output.exists());
+    assert_eq!(volume_bytes(&roots.data)?, before_data);
+    assert_eq!(volume_bytes(&roots.secrets)?, before_secrets);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn compiled_support_bundle_declares_collection_bounds_in_every_canonical_output_mode()
 -> Result<(), Box<dyn std::error::Error>> {
     let _serial = PROCESS_TEST
@@ -1151,6 +1240,111 @@ fn archive_member(archive: &[u8], wanted: &str) -> Result<String, Box<dyn std::e
         archive_bytes
     )
     .into())
+}
+
+#[cfg(unix)]
+fn verify_authenticated_bundle_archive(
+    archive: &[u8],
+    expected: positron_kernel::BootstrapIntegrityIdentity,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use sha2::{Digest, Sha256};
+
+    let mut entries = tar::Archive::new(archive);
+    let mut members = std::collections::BTreeMap::new();
+    for entry in entries.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let path = path.to_str().ok_or("non-utf8 bundle member")?.to_owned();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        if members.insert(path, bytes).is_some() {
+            return Err("duplicate bundle member".into());
+        }
+    }
+    let manifest = members.remove("manifest.txt").ok_or("missing manifest")?;
+    let signature = members
+        .remove("manifest-signature.txt")
+        .ok_or("missing manifest signature")?;
+    let signature = std::str::from_utf8(&signature)?;
+    let mut signature_fields = signature.lines();
+    let public_key = signature_fields
+        .next()
+        .and_then(|line| line.strip_prefix("integrity_identity="))
+        .ok_or("missing signature identity")?;
+    let signature_bytes = signature_fields
+        .next()
+        .and_then(|line| line.strip_prefix("signature="))
+        .ok_or("missing signature bytes")?;
+    if signature_fields.next().is_some() || public_key != hex_bytes(&expected.public_key()) {
+        return Err("signature identity differs from current instance identity".into());
+    }
+    let signature = positron_kernel::ExportManifestSignature::new(
+        expected,
+        decode_fixed_hex::<64>(signature_bytes)?,
+    )?;
+    signature.verify(expected, &manifest)?;
+
+    let manifest = std::str::from_utf8(&manifest)?;
+    let mut expected_members = std::collections::BTreeSet::new();
+    let mut redaction_digest = None;
+    for line in manifest.lines() {
+        if let Some(record) = line.strip_prefix("member=") {
+            let mut fields = record.split_whitespace();
+            let path = fields.next().ok_or("manifest member path")?;
+            let byte_count = fields
+                .next()
+                .and_then(|field| field.strip_prefix("bytes="))
+                .ok_or("manifest member size")?
+                .parse::<usize>()?;
+            let digest = fields
+                .next()
+                .and_then(|field| field.strip_prefix("sha256="))
+                .ok_or("manifest member digest")?;
+            if fields.next().is_some() || !expected_members.insert(path.to_owned()) {
+                return Err("malformed or duplicate manifest member".into());
+            }
+            let actual = members
+                .get(path)
+                .ok_or("manifest member absent from archive")?;
+            if actual.len() != byte_count || hex_bytes(&Sha256::digest(actual)) != digest {
+                return Err("manifest member digest mismatch".into());
+            }
+        } else if let Some(digest) = line.strip_prefix("redaction_report_sha256=") {
+            redaction_digest = Some(digest);
+        }
+    }
+    let redaction = members
+        .get("redaction-report.txt")
+        .ok_or("missing redaction report")?;
+    let actual_redaction_digest = hex_bytes(&Sha256::digest(redaction));
+    if redaction_digest != Some(actual_redaction_digest.as_str()) {
+        return Err("redaction report digest mismatch".into());
+    }
+    if members
+        .keys()
+        .any(|path| path != "redaction-report.txt" && !expected_members.contains(path))
+    {
+        return Err("archive member omitted from signed manifest".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(unix)]
+fn decode_fixed_hex<const N: usize>(encoded: &str) -> Result<[u8; N], Box<dyn std::error::Error>> {
+    if encoded.len() != N.saturating_mul(2) {
+        return Err("invalid hex length".into());
+    }
+    let mut bytes = [0_u8; N];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        let offset = index.checked_mul(2).ok_or("hex offset")?;
+        *byte = u8::from_str_radix(encoded.get(offset..offset + 2).ok_or("hex slice")?, 16)?;
+    }
+    Ok(bytes)
 }
 
 #[cfg(unix)]

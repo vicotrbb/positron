@@ -33,6 +33,33 @@ fn online_opaque_artifact_report_never_claims_a_verified_instance_signature() {
 }
 
 #[test]
+fn bundle_parser_rejects_elapsed_limits_outside_the_documented_window() {
+    for seconds in ["31", "18446744073709551615"] {
+        let result = super::super::options::BundleOptions::parse(
+            [
+                "bundle",
+                "create",
+                "--config",
+                "positron.toml",
+                "--output",
+                "bundle.age",
+                "--recipient",
+                "age1example",
+                "--credential-stdin",
+                "--max-elapsed-seconds",
+                seconds,
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert!(
+            matches!(result, Err(super::super::options::BundleFailure::Arguments)),
+            "elapsed limit {seconds} must be rejected before credential, source, or output work"
+        );
+    }
+}
+
+#[test]
 fn identifier_retention_is_closed_and_never_available_to_key_unavailable_exports() {
     let retained = BundleOptions::parse(
         [

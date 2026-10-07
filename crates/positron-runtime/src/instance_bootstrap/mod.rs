@@ -20,7 +20,7 @@ pub(crate) use types::TenantRetentionPreviewConfirmation;
 pub use types::{
     BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
     BootstrapPaths, BootstrapState, DoctorRuntimeFacts, InitializationPlan, InitializedInstance,
-    TenantRetentionImpactPreview,
+    OfflineSupportBundleFailure, OfflineSupportBundleInspection, TenantRetentionImpactPreview,
 };
 
 /// The sole Application Runtime authority for classifying and initializing an instance.
@@ -123,6 +123,17 @@ impl InstanceBootstrap {
             claim,
             operation,
         )
+    }
+
+    /// Opens an initialized instance for a bounded, authenticated support
+    /// bundle without creating or synchronizing any source storage.
+    pub fn inspect_offline_support_bundle(
+        paths: &BootstrapPaths,
+        max_registered_tenants: u16,
+        credential: positron_governance::PresentedCredential,
+        claim: positron_kernel::WorkClaim,
+    ) -> Result<OfflineSupportBundleInspection, OfflineSupportBundleFailure> {
+        operation::inspect_offline_support_bundle(paths, max_registered_tenants, credential, claim)
     }
 
     pub fn claim(paths: &BootstrapPaths) -> Result<BootstrapClaim, BootstrapFailure> {

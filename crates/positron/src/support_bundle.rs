@@ -34,6 +34,9 @@ const DEFAULT_OUTPUT_LIMIT: usize = 1_048_576;
 /// use this one transport ceiling. CLI input must not exceed it.
 const MAX_OUTPUT_LIMIT: usize = DEFAULT_OUTPUT_LIMIT;
 const DEFAULT_ELAPSED_LIMIT: Duration = Duration::from_secs(30);
+/// Support-bundle collection is bounded diagnostics work. Callers may shorten
+/// the deadline but cannot extend it beyond the documented default.
+const MAX_ELAPSED_LIMIT: Duration = DEFAULT_ELAPSED_LIMIT;
 const DEFAULT_LOG_WINDOW: Duration = Duration::from_secs(300);
 const DEFAULT_SOURCE_FILES: usize = 32;
 const EXIT_USAGE: u8 = 2;

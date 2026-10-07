@@ -167,7 +167,8 @@ fn report_field<'a>(report: &'a str, key: &str) -> Option<&'a str> {
 /// uses only the already-opened authenticated bootstrap, Catalog, and
 /// governor authorities.
 pub(super) fn owned_bundle_doctor_report(
-    facts: DoctorRuntimeFacts,
+    catalog_generation: u64,
+    backup_repository: positron_runtime::BackupRepositoryInspection,
     resources: ResourceSnapshot,
 ) -> String {
     let pressure = match resources.disk_pressure() {
@@ -175,26 +176,9 @@ pub(super) fn owned_bundle_doctor_report(
         DiskPressureState::SoftPressure => "soft",
         DiskPressureState::HardPressure => "hard",
     };
-    let verified = facts.key_custody_verified() && facts.catalog_bootstrap_verified();
     let mut report = format!(
         "report_version=1\nmode=offline_owned_bundle\nstatus=inspection_partial\nfinding_code=DOCTOR_BUNDLE_OWNER_VERIFIED\nseverity={}\nevidence_scope=exclusive_primary_data_volume_ownership\nkey_custody={}\ncatalog_bootstrap={}\ncatalog_generation={}\nsafe_command={}\n",
-        if verified { "info" } else { "error" },
-        if facts.key_custody_verified() {
-            "verified"
-        } else {
-            "unavailable"
-        },
-        if facts.catalog_bootstrap_verified() {
-            "verified"
-        } else {
-            "unavailable"
-        },
-        facts.catalog_generation(),
-        if verified {
-            "none"
-        } else {
-            "inspect_storage_without_mutation"
-        },
+        "info", "verified", "verified", catalog_generation, "none",
     );
     report.push_str("finding_code=DOCTOR_CONFIGURATION_RESOLVED\nseverity=info\nevidence_scope=effective_configuration\nsafe_command=none\n");
     report.push_str("finding_code=DOCTOR_INTEGRITY_FRONTIERS_UNAVAILABLE_OWNED_BUNDLE\nseverity=info\nevidence_scope=offline_integrity_verifier\ninspection_state=not_run_while_bundle_ownership_is_held\nsafe_command=positron_doctor_offline_after_bundle\n");
@@ -224,7 +208,7 @@ pub(super) fn owned_bundle_doctor_report(
     ] {
         report.push_str(&format!("finding_code={code}\nseverity=info\nevidence_scope={owner}\nruntime_state=not_observable_offline\nsafe_command={command}\n"));
     }
-    let backup = facts.backup_repository().label();
+    let backup = backup_repository.label();
     report.push_str(&format!("finding_code=DOCTOR_BACKUP_REPOSITORY_NOT_CONFIGURED\nseverity=warning\nevidence_scope=authenticated_catalog_backup_binding\nbackup_repository={backup}\nsafe_command=configure_backup_repository\n"));
     report
 }

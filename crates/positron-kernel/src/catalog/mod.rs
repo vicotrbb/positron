@@ -93,6 +93,17 @@ impl OfflineIntegrityCatalogInspection<'_> {
     ) -> Result<CatalogSnapshot, CatalogFailure> {
         Ok(Catalog::read_current_view_admitted(self.authority, instance, secret)?.snapshot)
     }
+
+    /// Reads the authenticated immutable Catalog view under this inspection's
+    /// single system-diagnostics reservation. The returned view does not
+    /// acquire a writer lease or create Catalog storage.
+    pub fn read_current_view(
+        &self,
+        instance: InstanceId,
+        secret: CatalogSecret,
+    ) -> Result<CatalogReadView, CatalogFailure> {
+        Catalog::read_current_view_admitted(self.authority, instance, secret)
+    }
 }
 
 #[cfg(any(test, fuzzing))]

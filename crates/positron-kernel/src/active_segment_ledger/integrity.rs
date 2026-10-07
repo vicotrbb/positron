@@ -91,6 +91,7 @@ pub enum IntegrityVerificationMode {
 pub enum IntegrityVerificationScope {
     StartupFrontiers,
     ReachableImmutableSegments,
+    ReachableDurableSegments,
 }
 
 /// The terminal truth of one bounded verification pass.
@@ -332,6 +333,7 @@ const fn verification_scope_code(scope: IntegrityVerificationScope) -> u8 {
     match scope {
         IntegrityVerificationScope::StartupFrontiers => 1,
         IntegrityVerificationScope::ReachableImmutableSegments => 2,
+        IntegrityVerificationScope::ReachableDurableSegments => 3,
     }
 }
 

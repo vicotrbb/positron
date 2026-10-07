@@ -10,9 +10,10 @@ use positron_domain::lifecycle::TenantLifecycleState;
 use positron_domain::routing::SignalKind;
 use positron_kernel::{
     AuditIntent, BootstrapKeyCustody, Catalog, CatalogFailureCode, CatalogProposal,
-    CommittedLedgerReader, FormatEpoch, InstanceBootstrapStorage, InstanceId, MaintenanceFailure,
-    MaintenanceTaskId, MaintenanceTaskPhase, MountQualification, OwnedPrimaryDataVolume,
-    ResourceAmounts, RetentionImpactPreview, RetentionReclamationEstimate, RetentionTimeAuthority,
+    CommittedLedgerReader, CrashRecordStore, ExportManifestSigner, FormatEpoch,
+    InstanceBootstrapStorage, InstanceId, MaintenanceFailure, MaintenanceTaskId,
+    MaintenanceTaskPhase, MountQualification, OwnedPrimaryDataVolume, ResourceAmounts,
+    ResourceSnapshot, RetentionImpactPreview, RetentionReclamationEstimate, RetentionTimeAuthority,
     StorageKernelResourceAuthority, TransactionId,
 };
 use sha2::{Digest, Sha256};
@@ -62,6 +63,46 @@ impl BackupRepositoryInspection {
             Self::NotConfigured => "not_configured",
         }
     }
+}
+
+/// One authenticated, read-only support-bundle inspection. It owns only
+/// opaque signing and sanitized diagnostic capabilities derived from the
+/// durable bootstrap and Catalog view.
+pub struct OfflineSupportBundleInspection {
+    pub(in crate::instance_bootstrap) signer: ExportManifestSigner,
+    pub(in crate::instance_bootstrap) catalog_generation: u64,
+    pub(in crate::instance_bootstrap) backup_repository: BackupRepositoryInspection,
+    pub(in crate::instance_bootstrap) resources: ResourceSnapshot,
+    pub(in crate::instance_bootstrap) crash_records: CrashRecordStore,
+}
+
+impl OfflineSupportBundleInspection {
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ExportManifestSigner,
+        u64,
+        BackupRepositoryInspection,
+        ResourceSnapshot,
+        CrashRecordStore,
+    ) {
+        (
+            self.signer,
+            self.catalog_generation,
+            self.backup_repository,
+            self.resources,
+            self.crash_records,
+        )
+    }
+}
+
+/// The read-only support-bundle boundary intentionally distinguishes a
+/// rejected presented credential from unavailable local diagnostic state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineSupportBundleFailure {
+    AuthenticationRejected,
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -301,7 +301,6 @@ const PRIMARY_DATA_VOLUME_BOOTSTRAP_BOUNDS: PrimaryDataVolumeBootstrapBounds =
 /// A process-lifetime ownership claim over one Primary Data Volume.
 pub struct OwnedPrimaryDataVolume {
     _root: File,
-    root_path: std::path::PathBuf,
     _ownership_lock: File,
     _root_identity: VolumeRootIdentity,
     qualification: MountQualification,
@@ -830,7 +829,6 @@ impl PrimaryDataVolume {
 
         Ok(OwnedPrimaryDataVolume {
             _root: root_file,
-            root_path: root.to_path_buf(),
             _ownership_lock: ownership_lock,
             _root_identity: handle_identity,
             qualification,

@@ -177,11 +177,9 @@ impl InitializedInstance {
             .key
             .catalog_secret(self.instance)
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
-        let catalog = Catalog::open(&self._authority, self.instance, secret)
+        let view = Catalog::read_current_view(&self._authority, self.instance, secret)
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
-        let snapshot = catalog
-            .pin()
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let snapshot = view.snapshot();
         let (_, governance) = snapshot
             .governance_object()
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;

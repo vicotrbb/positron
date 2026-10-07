@@ -2,12 +2,12 @@
 //! closed vocabulary fields; it never receives panic payloads or backtraces.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
-    path::PathBuf,
     time::{Duration, SystemTime},
 };
 
+use rustix::fs::{self as unix_fs, Dir, Mode, OFlags};
 use sha2::{Digest, Sha256};
 
 use crate::{OwnedPrimaryDataVolume, StorageKernelResourceAuthority};
@@ -83,8 +83,7 @@ impl CrashRecord {
 /// be built from an application path, and therefore remains valid only while
 /// the Storage Kernel owns the Primary Data Volume.
 pub struct CrashRecordStore {
-    _root: File,
-    root_path: PathBuf,
+    root: File,
 }
 
 impl CrashRecordStore {
@@ -100,37 +99,32 @@ impl CrashRecordStore {
         volume
             ._root
             .try_clone()
-            .map(|root| Self {
-                _root: root,
-                root_path: volume.root_path.clone(),
-            })
+            .map(|root| Self { root })
             .map_err(|_| CrashRecordFailure::Unavailable)
     }
-    fn directory(&self) -> PathBuf {
-        self.root_path.join("diagnostics").join("crash-records")
-    }
     pub fn persist(&self, record: &CrashRecord) -> Result<(), CrashRecordFailure> {
-        let directory = self.directory();
-        fs::create_dir_all(&directory).map_err(|_| CrashRecordFailure::Unavailable)?;
-        let metadata =
-            fs::symlink_metadata(&directory).map_err(|_| CrashRecordFailure::Unavailable)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(CrashRecordFailure::Unavailable);
-        }
+        let diagnostics = open_directory(&self.root, "diagnostics", true)?;
+        let directory = open_directory(&diagnostics, "crash-records", true)?;
         let bytes = record.render().into_bytes();
         if bytes.len() > MAX_RECORD_BYTES {
             return Err(CrashRecordFailure::Invalid);
         }
         for sequence in 0..MAX_RECORDS {
-            let path = directory.join(format!("record-{sequence:020}.txt"));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
+            let name = format!("record-{sequence:020}.txt");
+            match unix_fs::openat(
+                &directory,
+                &name,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            ) {
+                Ok(file) => {
+                    let mut file = File::from(file);
                     set_owner_only(&file)?;
                     file.write_all(&bytes)
                         .map_err(|_| CrashRecordFailure::Unavailable)?;
                     return file.sync_all().map_err(|_| CrashRecordFailure::Unavailable);
                 },
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(rustix::io::Errno::EXIST) => continue,
                 Err(_) => return Err(CrashRecordFailure::Unavailable),
             }
         }
@@ -143,13 +137,12 @@ impl CrashRecordStore {
         maximum_bytes: usize,
         now: SystemTime,
     ) -> Result<CrashReadout, CrashRecordFailure> {
-        let mut entries = match fs::read_dir(self.directory()) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(CrashReadout::empty());
-            },
-            Err(_) => return Err(CrashRecordFailure::Unavailable),
+        let directory = match open_crash_directory(&self.root)? {
+            Some(directory) => directory,
+            None => return Ok(CrashReadout::empty()),
         };
+        let mut entries =
+            Dir::read_from(&directory).map_err(|_| CrashRecordFailure::Unavailable)?;
         let mut records = Vec::new();
         let mut omissions = Vec::new();
         let mut total = 0usize;
@@ -159,23 +152,22 @@ impl CrashRecordStore {
                 omit_once(&mut omissions, "crash_record_file_limit");
                 break;
             }
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|_| CrashRecordFailure::Unavailable)?;
-            if file_type.is_symlink() || !file_type.is_file() {
-                omit_once(&mut omissions, "unsafe_crash_record_file");
+            let Ok(name) = entry.file_name().to_str() else {
+                omit_once(&mut omissions, "unknown_crash_record_file");
                 continue;
-            }
-            if !path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("record-") && name.ends_with(".txt"))
-            {
+            };
+            if !name.starts_with("record-") || !name.ends_with(".txt") {
                 omit_once(&mut omissions, "unknown_crash_record_file");
                 continue;
             }
-            let metadata = entry
+            let file = match open_record(&directory, name) {
+                Ok(file) => file,
+                Err(()) => {
+                    omit_once(&mut omissions, "unsafe_crash_record_file");
+                    continue;
+                },
+            };
+            let metadata = file
                 .metadata()
                 .map_err(|_| CrashRecordFailure::Unavailable)?;
             let fresh = metadata
@@ -192,9 +184,7 @@ impl CrashRecordStore {
                 continue;
             }
             let mut bytes = Vec::new();
-            File::open(path)
-                .map_err(|_| CrashRecordFailure::Unavailable)?
-                .take((MAX_RECORD_BYTES + 1) as u64)
+            file.take((MAX_RECORD_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)
                 .map_err(|_| CrashRecordFailure::Unavailable)?;
             if bytes.len() > MAX_RECORD_BYTES || !valid_rendered(&bytes) {
@@ -225,6 +215,76 @@ impl CrashRecordStore {
         records.sort();
         Ok(CrashReadout { records, omissions })
     }
+}
+
+fn open_crash_directory(root: &File) -> Result<Option<File>, CrashRecordFailure> {
+    let diagnostics = match open_directory(root, "diagnostics", false) {
+        Ok(directory) => directory,
+        Err(CrashRecordFailure::Invalid) => return Ok(None),
+        Err(failure) => return Err(failure),
+    };
+    match open_directory(&diagnostics, "crash-records", false) {
+        Ok(directory) => Ok(Some(directory)),
+        Err(CrashRecordFailure::Invalid) => Ok(None),
+        Err(failure) => Err(failure),
+    }
+}
+
+fn open_directory(parent: &File, name: &str, create: bool) -> Result<File, CrashRecordFailure> {
+    if create {
+        match unix_fs::mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {},
+            Err(_) => return Err(CrashRecordFailure::Unavailable),
+        }
+    }
+    let directory = unix_fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| {
+        if !create && matches!(error, rustix::io::Errno::NOENT) {
+            CrashRecordFailure::Invalid
+        } else {
+            CrashRecordFailure::Unavailable
+        }
+    })?;
+    let metadata = directory
+        .metadata()
+        .map_err(|_| CrashRecordFailure::Unavailable)?;
+    let parent_metadata = parent
+        .metadata()
+        .map_err(|_| CrashRecordFailure::Unavailable)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.file_type().is_dir() || metadata.dev() != parent_metadata.dev() {
+            return Err(CrashRecordFailure::Unavailable);
+        }
+    }
+    Ok(directory)
+}
+
+fn open_record(directory: &File, name: &str) -> Result<File, ()> {
+    let file = unix_fs::openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|_| ())?;
+    let metadata = file.metadata().map_err(|_| ())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+            return Err(());
+        }
+    }
+    Ok(file)
 }
 
 pub struct CrashReadout {
