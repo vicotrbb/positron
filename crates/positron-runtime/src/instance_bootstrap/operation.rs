@@ -376,8 +376,12 @@ pub(super) fn inspect_offline_support_bundle(
         .map_err(|_| Unavailable)?;
     let backup_repository = super::BackupRepositoryInspection::from_authenticated_catalog(snapshot)
         .map_err(|_| Unavailable)?;
-    let crash_records =
-        positron_kernel::CrashRecordStore::from_authority(&authority).map_err(|_| Unavailable)?;
+    let crash_records = positron_kernel::CrashRecordStore::from_authenticated_authority(
+        &authority,
+        &key,
+        record.instance,
+    )
+    .map_err(|_| Unavailable)?;
     Ok(super::OfflineSupportBundleInspection {
         signer,
         catalog_generation: snapshot.number(),
@@ -554,7 +558,7 @@ pub(super) fn with_offline_key_unavailable_diagnostics<T>(
         .governor()
         .reserve(claim)
         .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
-    let crash_records = positron_kernel::CrashRecordStore::from_authority(&authority)
+    let crash_records = positron_kernel::CrashRecordStore::from_authority_without_key(&authority)
         .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
     Ok(operation(crash_records))
 }

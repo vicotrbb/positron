@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use super::{
     OfflineIntegrityFailure, resume_offline_integrity, verify_offline_integrity,
@@ -689,15 +690,30 @@ fn key_unavailable_diagnostics_reserve_before_collection_and_release_after_outpu
         24_576, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0,
     ]))?;
 
-    let collected =
-        InstanceBootstrap::with_offline_key_unavailable_diagnostics(&paths, 2, claim, |_| {
+    let collected = InstanceBootstrap::with_offline_key_unavailable_diagnostics(
+        &paths,
+        2,
+        claim,
+        |crash_records| {
             assert!(
                 paths.retain_volume_for_test().is_err(),
                 "the diagnostics reservation must hold exclusive ownership through collection"
             );
+            let readout = crash_records
+                .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+                .map_err(|failure| {
+                    std::io::Error::other(format!("crash record read failed: {failure:?}"))
+                })?;
+            assert_eq!(readout.render(), "record_count=0\n");
+            assert!(
+                readout
+                    .omissions()
+                    .contains(&"crash_record_key_unavailable")
+            );
             file_tree(&root)
-        })
-        .map_err(|failure| format!("offline diagnostics failed: {failure:?}"))?;
+        },
+    )
+    .map_err(|failure| format!("offline diagnostics failed: {failure:?}"))?;
     assert_eq!(collected?, before);
     let retained = paths.retain_volume_for_test()?;
     drop(retained);

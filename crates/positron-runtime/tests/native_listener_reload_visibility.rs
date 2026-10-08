@@ -16,7 +16,6 @@ use positron_governance::{
     AdministrativeIdempotencyKey, CompatibilityHints, ConfigurationAuditOutcome,
     PresentedCredential, RequestedIntent, ResourceGeneration,
 };
-use positron_kernel::CrashRecordStore;
 use positron_runtime::{
     ApplicationRuntime, ConfigurationReloadOutcome, ConfigurationRuntimeFailure, HealthWarning,
     HostInputs, InitializationMode, InstanceBootstrap, ListenerRole, NativeBindings, NativeHost,
@@ -31,11 +30,12 @@ fn assert_graceful_shutdown(
         return Ok(());
     }
 
-    let volume = roots
-        .acquire_volume_again()
-        .map_err(|_| "forced native shutdown; bounded crash-record read unavailable")?;
-    let crash_records = CrashRecordStore::from_volume(&volume)
-        .map_err(|_| "forced native shutdown; bounded crash-record store unavailable")?;
+    let paths = roots.bootstrap_paths()?;
+    let reopened = InstanceBootstrap::reopen(&paths)
+        .map_err(|_| "forced native shutdown; authenticated crash-record read unavailable")?;
+    let crash_records = reopened
+        .crash_records()
+        .map_err(|_| "forced native shutdown; authenticated crash-record store unavailable")?;
     let rendered = crash_records
         .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
         .map_err(|_| "forced native shutdown; bounded crash-record read unavailable")?

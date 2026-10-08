@@ -83,7 +83,7 @@ fn persisted_crash_record_reopens_as_bounded_sanitized_support_input()
     fs::create_dir_all(&root)?;
     super::capture_process_failure(&root, "starting", "runtime_startup_failed", "runtime")
         .map_err(|_| "capture failed")?;
-    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+    let readout = super::crash_record::CrashRecordStore::under_test_root(&root)
         .map_err(|_| "store")?
         .read_recent(
             std::time::Duration::from_secs(60),
@@ -100,7 +100,8 @@ fn persisted_crash_record_reopens_as_bounded_sanitized_support_input()
     assert_eq!(
         std::os::unix::fs::PermissionsExt::mode(
             &fs::metadata(
-                root.join("diagnostics/crash-records")
+                super::crash_record::data_directory(&root)
+                    .join("diagnostics/crash-records")
                     .read_dir()?
                     .next()
                     .ok_or("record missing")??
@@ -125,9 +126,11 @@ fn crash_store_retains_the_owned_root_after_path_replacement()
     let retained = root.with_extension("retained");
     let outside = root.with_extension("outside");
     fs::create_dir_all(&root)?;
-    fs::create_dir_all(outside.join("diagnostics/crash-records"))?;
+    fs::create_dir_all(
+        super::crash_record::data_directory(&outside).join("diagnostics/crash-records"),
+    )?;
     let store =
-        super::crash_record::CrashRecordStore::under_data_directory(&root).map_err(|_| "store")?;
+        super::crash_record::CrashRecordStore::under_test_root(&root).map_err(|_| "store")?;
     store
         .persist(
             &super::crash_record::SanitizedCrashRecord::new(
@@ -138,7 +141,8 @@ fn crash_store_retains_the_owned_root_after_path_replacement()
             .map_err(|_| "record")?,
         )
         .map_err(|_| "initial persist")?;
-    let outside_record = outside.join("diagnostics/crash-records/record-00000000000000000000.txt");
+    let outside_record = super::crash_record::data_directory(&outside)
+        .join("diagnostics/crash-records/record-00000000000000000000.txt");
     fs::write(
         &outside_record,
         b"record_version=1\nproduct=positron\nbuild_identity=0.0.0\nphase=starting\ncomponent=runtime\nfinding_code=catalog_unavailable\nbacktrace_identity=unavailable\ncatalog_generation=unavailable\noperation_generation=unavailable\n",
@@ -171,7 +175,10 @@ fn crash_store_retains_the_owned_root_after_path_replacement()
         .map_err(|_| "retained persist")?;
     assert_eq!(fs::read(&outside_record)?, outside_before);
     assert_eq!(
-        fs::read_dir(retained.join("diagnostics/crash-records"))?.count(),
+        fs::read_dir(
+            super::crash_record::data_directory(&retained).join("diagnostics/crash-records")
+        )?
+        .count(),
         2,
         "writes remain under the originally owned root"
     );
@@ -191,7 +198,7 @@ fn persisted_noncanonical_crash_record_is_omitted_before_a_support_bundle_can_ex
     fs::create_dir_all(&root)?;
     super::capture_process_failure(&root, "starting", "runtime_startup_failed", "runtime")
         .map_err(|_| "capture failed")?;
-    let record = root
+    let record = super::crash_record::data_directory(&root)
         .join("diagnostics/crash-records")
         .read_dir()?
         .next()
@@ -201,7 +208,7 @@ fn persisted_noncanonical_crash_record_is_omitted_before_a_support_bundle_can_ex
         record,
         b"record_version=1\nproduct=positron\nbuild_identity=0.0.0\nphase=starting\ncomponent=runtime\nfinding_code=runtime_startup_failed\nbacktrace_identity=unavailable\ncatalog_generation=unavailable\noperation_generation=unavailable\nauthorization=api_key_secret_canary\n",
     )?;
-    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+    let readout = super::crash_record::CrashRecordStore::under_test_root(&root)
         .map_err(|_| "store")?
         .read_recent(
             std::time::Duration::from_secs(60),
@@ -211,7 +218,11 @@ fn persisted_noncanonical_crash_record_is_omitted_before_a_support_bundle_can_ex
         )
         .map_err(|_| "readout failed")?;
     assert_eq!(readout.render(), "record_count=0\n");
-    assert!(readout.omissions().contains(&"malformed_crash_record"));
+    assert!(
+        readout
+            .omissions()
+            .contains(&"unauthenticated_crash_record")
+    );
     assert!(!readout.render().contains("api_key_secret_canary"));
     fs::remove_dir_all(root)?;
     Ok(())
@@ -232,7 +243,7 @@ fn joined_task_panic_capture_reopens_only_owned_safe_identity()
         Some(7),
     )
     .map_err(|_| "capture failed")?;
-    let rendered = super::crash_record::CrashRecordStore::under_data_directory(&root)
+    let rendered = super::crash_record::CrashRecordStore::under_test_root(&root)
         .map_err(|_| "store")?
         .read_recent(
             std::time::Duration::from_secs(60),
@@ -262,7 +273,7 @@ fn crash_readout_declares_file_count_truncation_without_exporting_unread_records
         .map_err(|_| "first capture")?;
     super::capture_process_failure(&root, "starting", "catalog_unavailable", "runtime")
         .map_err(|_| "second capture")?;
-    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+    let readout = super::crash_record::CrashRecordStore::under_test_root(&root)
         .map_err(|_| "store")?
         .read_recent(
             std::time::Duration::from_secs(60),
@@ -291,7 +302,7 @@ fn crash_readout_declares_records_outside_the_log_window() -> Result<(), Box<dyn
     let later = SystemTime::now()
         .checked_add(std::time::Duration::from_secs(60))
         .ok_or("clock")?;
-    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+    let readout = super::crash_record::CrashRecordStore::under_test_root(&root)
         .map_err(|_| "store")?
         .read_recent(std::time::Duration::from_secs(1), 4, 512, later)
         .map_err(|_| "readout")?;
@@ -306,7 +317,10 @@ fn crash_readout_bounds_invalid_directory_entries_and_declares_unknown_omissions
 -> Result<(), Box<dyn std::error::Error>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let root = std::env::temp_dir().join(format!("positron-crash-invalid-bound-{nonce}"));
-    let records = root.join("diagnostics/crash-records");
+    fs::create_dir_all(&root)?;
+    let store =
+        super::crash_record::CrashRecordStore::under_test_root(&root).map_err(|_| "store")?;
+    let records = super::crash_record::data_directory(&root).join("diagnostics/crash-records");
     fs::create_dir_all(&records)?;
     for index in 0..65 {
         fs::write(
@@ -315,8 +329,7 @@ fn crash_readout_bounds_invalid_directory_entries_and_declares_unknown_omissions
         )?;
     }
 
-    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
-        .map_err(|_| "store")?
+    let readout = store
         .read_recent(
             std::time::Duration::from_secs(60),
             32,
@@ -369,7 +382,7 @@ fn controlled_process_restart_preserves_each_crash_record() -> Result<(), Box<dy
             return Err(format!("{phase} process failed to capture its crash record").into());
         }
     }
-    let readout = super::crash_record::CrashRecordStore::under_data_directory(&root)
+    let readout = super::crash_record::CrashRecordStore::under_test_root(&root)
         .map_err(|_| "store")?
         .read_recent(
             std::time::Duration::from_secs(60),

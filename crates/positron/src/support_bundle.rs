@@ -58,7 +58,7 @@ pub(crate) fn capture_process_failure(
 ) -> Result<(), ()> {
     let record =
         crash_record::SanitizedCrashRecord::new(phase, finding_code, component).map_err(|_| ())?;
-    crash_record::CrashRecordStore::under_data_directory(data_directory)?.persist(&record)
+    crash_record::CrashRecordStore::under_test_root(data_directory)?.persist(&record)
 }
 
 #[cfg(test)]
@@ -77,7 +77,7 @@ pub(crate) fn capture_process_failure_with_catalog_generation(
         None => record,
     }
     .with_backtrace(&std::backtrace::Backtrace::capture());
-    crash_record::CrashRecordStore::under_data_directory(data_directory)?.persist(&record)
+    crash_record::CrashRecordStore::under_test_root(data_directory)?.persist(&record)
 }
 
 /// Bounded public fuzz seam for the unauthenticated Control request body.

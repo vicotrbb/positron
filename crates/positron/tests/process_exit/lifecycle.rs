@@ -84,7 +84,7 @@ fn first_os_signal_drains_and_exits_successfully() -> Result<(), Box<dyn std::er
         Some(0),
         "first termination must drain gracefully; stderr={:?}; {}",
         bounded_child_stderr(&mut child, &authorization),
-        bounded_crash_record_observation(&data, &authorization),
+        bounded_crash_record_observation(&data, &secrets, &authorization),
     );
     fs::remove_dir_all(root)?;
     Ok(())
@@ -638,16 +638,21 @@ fn bounded_child_stderr(child: &mut std::process::Child, authorization: &str) ->
 }
 
 #[cfg(unix)]
-fn bounded_crash_record_observation(data: &std::path::Path, authorization: &str) -> String {
+fn bounded_crash_record_observation(
+    data: &std::path::Path,
+    secrets: &std::path::Path,
+    authorization: &str,
+) -> String {
     const MAX_CRASH_RECORD_FILES: usize = 4;
     const MAX_CRASH_RECORD_BYTES: usize = 1_536;
 
-    let Ok(volume) =
-        positron_kernel::PrimaryDataVolume::acquire(data, MountQualification::LocalHost)
-    else {
+    let Ok(paths) = BootstrapPaths::new(data, secrets, MountQualification::LocalHost) else {
         return "crash_records=unavailable".to_owned();
     };
-    let Ok(records) = positron_kernel::CrashRecordStore::from_volume(&volume) else {
+    let Ok(instance) = InstanceBootstrap::reopen(&paths) else {
+        return "crash_records=unavailable".to_owned();
+    };
+    let Ok(records) = instance.crash_records() else {
         return "crash_records=unavailable".to_owned();
     };
     let Ok(readout) = records.read_recent(

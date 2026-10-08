@@ -4,8 +4,12 @@ impl InitializedInstance {
     /// Opens the kernel-owned sanitized crash-record boundary while this
     /// initialized instance still retains Primary Data Volume ownership.
     pub fn crash_records(&self) -> Result<positron_kernel::CrashRecordStore, BootstrapFailure> {
-        positron_kernel::CrashRecordStore::from_authority(&self._authority)
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
+        positron_kernel::CrashRecordStore::from_authenticated_authority(
+            &self._authority,
+            &self.key,
+            self.instance,
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
     }
 
     /// Verifies the current authenticated bootstrap, Catalog, and opaque key

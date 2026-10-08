@@ -51,6 +51,7 @@ use key_envelope::{
     segment_context_encoding_with_route, verify_segment_wrapped_key_payload_with_route,
     verify_wrapped_key_payload,
 };
+pub(crate) use local_key::CrashRecordProtector;
 pub use local_key::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose,
@@ -68,6 +69,18 @@ const FRAME_HEADER_BYTES: u32 = 52;
 const MINIMUM_ENCODED_FRAME_BYTES: u32 = FRAME_HEADER_BYTES + AES_256_GCM_TAG_BYTES;
 const FRAME_AAD_DOMAIN: &[u8] = b"positron-frame-aad-v1";
 const FRAME_NONCE_DOMAIN: [u8; 4] = [0x50, 0x46, 0x52, 0x01];
+
+pub(crate) fn crash_record_frame_parts(encoded: &[u8]) -> Option<([u8; 16], &[u8])> {
+    if encoded.get(..4) != Some(b"PCR1".as_slice()) {
+        return None;
+    }
+    let object_id: [u8; 16] = encoded.get(4..20)?.try_into().ok()?;
+    if object_id.iter().all(|byte| *byte == 0) {
+        return None;
+    }
+    let frame = encoded.get(20..)?;
+    (!frame.is_empty()).then_some((object_id, frame))
+}
 
 #[cfg(fuzzing)]
 #[doc(hidden)]

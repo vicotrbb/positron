@@ -102,6 +102,8 @@ pub(crate) enum SystemObjectKind {
     BackupMetadata,
     /// Kernel-owned durable Query export payload.
     ExportOutput,
+    /// Kernel-owned bounded, sanitized crash evidence.
+    CrashRecord,
 }
 
 impl SystemObjectKind {
@@ -113,6 +115,7 @@ impl SystemObjectKind {
             Self::BackupMetadata => 5,
             Self::InstanceBootstrap => 6,
             Self::ExportOutput => 7,
+            Self::CrashRecord => 8,
         }
     }
 
@@ -124,6 +127,7 @@ impl SystemObjectKind {
             Self::BackupMetadata => 8,
             Self::InstanceBootstrap => 9,
             Self::ExportOutput => 10,
+            Self::CrashRecord => 11,
         }
     }
 }

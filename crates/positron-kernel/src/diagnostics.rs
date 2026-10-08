@@ -11,9 +11,11 @@ use std::{
 use rustix::fs::{self as unix_fs, Dir, Mode, OFlags};
 use sha2::{Digest, Sha256};
 
-use crate::{OwnedPrimaryDataVolume, StorageKernelResourceAuthority};
+use crate::data_protection::FrameLimits;
+use crate::{BootstrapKeyCustody, InstanceId, StorageKernelResourceAuthority};
 
 const MAX_RECORD_BYTES: usize = 384;
+const MAX_ENCODED_RECORD_BYTES: usize = MAX_RECORD_BYTES + 68 + 20;
 const MAX_RECORDS: usize = 32;
 const MAX_ENUMERATED_ENTRIES: usize = 64;
 const MAX_BACKTRACE_FINGERPRINT_BYTES: usize = 256;
@@ -124,33 +126,69 @@ impl std::fmt::Write for BoundedBacktraceWriter<'_> {
 /// the Storage Kernel owns the Primary Data Volume.
 pub struct CrashRecordStore {
     root: File,
+    protection: Option<crate::data_protection::CrashRecordProtector>,
 }
 
 impl CrashRecordStore {
-    pub fn from_authority(
+    /// Opens crash records with the existing instance custody boundary.
+    pub fn from_authenticated_authority(
+        authority: &StorageKernelResourceAuthority,
+        custody: &BootstrapKeyCustody,
+        instance: InstanceId,
+    ) -> Result<Self, CrashRecordFailure> {
+        let volume = authority
+            .primary_data_volume()
+            .ok_or(CrashRecordFailure::Unavailable)?;
+        let root = volume
+            ._root
+            .try_clone()
+            .map_err(|_| CrashRecordFailure::Unavailable)?;
+        let protection = custody
+            .crash_record_protector(instance)
+            .map_err(|_| CrashRecordFailure::Unavailable)?;
+        Ok(Self {
+            root,
+            protection: Some(protection),
+        })
+    }
+
+    /// Opens the bounded diagnostic location when custody is unavailable.
+    /// Persisted records remain unreadable rather than falling back to plaintext.
+    pub fn from_authority_without_key(
         authority: &StorageKernelResourceAuthority,
     ) -> Result<Self, CrashRecordFailure> {
         let volume = authority
             .primary_data_volume()
             .ok_or(CrashRecordFailure::Unavailable)?;
-        Self::from_volume(volume)
-    }
-    pub fn from_volume(volume: &OwnedPrimaryDataVolume) -> Result<Self, CrashRecordFailure> {
         volume
             ._root
             .try_clone()
-            .map(|root| Self { root })
+            .map(|root| Self {
+                root,
+                protection: None,
+            })
             .map_err(|_| CrashRecordFailure::Unavailable)
     }
+
     pub fn persist(&self, record: &CrashRecord) -> Result<(), CrashRecordFailure> {
-        let diagnostics = open_directory(&self.root, "diagnostics", true)?;
-        let directory = open_directory(&diagnostics, "crash-records", true)?;
-        let bytes = record.render().into_bytes();
-        if bytes.len() > MAX_RECORD_BYTES {
+        let protection = self
+            .protection
+            .as_ref()
+            .ok_or(CrashRecordFailure::Unavailable)?;
+        let plaintext = record.render().into_bytes();
+        if plaintext.len() > MAX_RECORD_BYTES {
             return Err(CrashRecordFailure::Invalid);
         }
+        let diagnostics = open_directory(&self.root, "diagnostics", true)?;
+        let directory = open_directory(&diagnostics, "crash-records", true)?;
         for sequence in 0..MAX_RECORDS {
-            let name = format!("record-{sequence:020}.txt");
+            let protected = protection
+                .protect(sequence as u64, &plaintext, record_frame_limits()?)
+                .map_err(|_| CrashRecordFailure::Unavailable)?;
+            if protected.len() > MAX_ENCODED_RECORD_BYTES {
+                return Err(CrashRecordFailure::Unavailable);
+            }
+            let name = format!("record-{sequence:020}.frame");
             match unix_fs::openat(
                 &directory,
                 &name,
@@ -160,7 +198,7 @@ impl CrashRecordStore {
                 Ok(file) => {
                     let mut file = File::from(file);
                     set_owner_only(&file)?;
-                    file.write_all(&bytes)
+                    file.write_all(&protected)
                         .map_err(|_| CrashRecordFailure::Unavailable)?;
                     return file.sync_all().map_err(|_| CrashRecordFailure::Unavailable);
                 },
@@ -177,6 +215,12 @@ impl CrashRecordStore {
         maximum_bytes: usize,
         now: SystemTime,
     ) -> Result<CrashReadout, CrashRecordFailure> {
+        let Some(protection) = self.protection.as_ref() else {
+            return Ok(CrashReadout {
+                records: Vec::new(),
+                omissions: vec!["crash_record_key_unavailable"],
+            });
+        };
         let directory = match open_crash_directory(&self.root)? {
             Some(directory) => directory,
             None => return Ok(CrashReadout::empty()),
@@ -196,7 +240,15 @@ impl CrashRecordStore {
                 omit_once(&mut omissions, "unknown_crash_record_file");
                 continue;
             };
-            if !name.starts_with("record-") || !name.ends_with(".txt") {
+            let Some(sequence) = record_sequence(name, ".frame") else {
+                if record_sequence(name, ".txt").is_some() {
+                    omit_once(&mut omissions, "unauthenticated_legacy_crash_record");
+                } else {
+                    omit_once(&mut omissions, "unknown_crash_record_file");
+                }
+                continue;
+            };
+            if sequence >= MAX_RECORDS as u64 {
                 omit_once(&mut omissions, "unknown_crash_record_file");
                 continue;
             }
@@ -219,27 +271,38 @@ impl CrashRecordStore {
                 omit_once(&mut omissions, "crash_record_log_window");
                 continue;
             }
-            if metadata.len() > MAX_RECORD_BYTES as u64 {
+            if metadata.len() > MAX_ENCODED_RECORD_BYTES as u64 {
                 omit_once(&mut omissions, "oversize_crash_record");
                 continue;
             }
             let mut bytes = Vec::new();
-            file.take((MAX_RECORD_BYTES + 1) as u64)
+            file.take((MAX_ENCODED_RECORD_BYTES + 1) as u64)
                 .read_to_end(&mut bytes)
                 .map_err(|_| CrashRecordFailure::Unavailable)?;
-            if bytes.len() > MAX_RECORD_BYTES || !valid_rendered(&bytes) {
+            if bytes.len() > MAX_ENCODED_RECORD_BYTES {
+                omit_once(&mut omissions, "oversize_crash_record");
+                continue;
+            }
+            let plaintext = match protection.open(sequence, &bytes, record_frame_limits()?) {
+                Ok(plaintext) => plaintext,
+                Err(_) => {
+                    omit_once(&mut omissions, "unauthenticated_crash_record");
+                    continue;
+                },
+            };
+            if plaintext.len() > MAX_RECORD_BYTES || !valid_rendered(&plaintext) {
                 omit_once(&mut omissions, "malformed_crash_record");
                 continue;
             }
             let next = total
-                .checked_add(bytes.len())
+                .checked_add(plaintext.len())
                 .ok_or(CrashRecordFailure::Unavailable)?;
             if next > maximum_bytes {
                 omit_once(&mut omissions, "crash_record_byte_limit");
                 break;
             }
             total = next;
-            records.push(bytes);
+            records.push(plaintext.to_vec());
         }
         // Reading one additional directory entry proves that the bounded
         // inspection intentionally omitted an unknown number of entries. It
@@ -255,6 +318,20 @@ impl CrashRecordStore {
         records.sort();
         Ok(CrashReadout { records, omissions })
     }
+}
+
+fn record_frame_limits() -> Result<FrameLimits, CrashRecordFailure> {
+    u32::try_from(MAX_ENCODED_RECORD_BYTES)
+        .ok()
+        .and_then(|limit| FrameLimits::new(limit).ok())
+        .ok_or(CrashRecordFailure::Invalid)
+}
+
+fn record_sequence(name: &str, extension: &str) -> Option<u64> {
+    let sequence = name.strip_prefix("record-")?.strip_suffix(extension)?;
+    (sequence.len() == 20 && sequence.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| sequence.parse().ok())
+        .flatten()
 }
 
 fn open_crash_directory(root: &File) -> Result<Option<File>, CrashRecordFailure> {
@@ -441,10 +518,12 @@ fn set_owner_only(file: &File) -> Result<(), CrashRecordFailure> {
         .map_err(|_| CrashRecordFailure::Unavailable)
 }
 
-/// Exercises the exact bounded decoder applied to untrusted persisted crash
-/// records after their file-size limit has been enforced by `read_recent`.
+/// Exercises the bounded, unauthenticated crash-record container boundary.
+/// Authentication and plaintext parsing remain separate: `encrypted_frame_open`
+/// fuzzes PFRM/AEAD decoding, while production reaches `valid_rendered` only
+/// after `CrashRecordProtector::open` authenticates a frame.
 #[cfg(fuzzing)]
 pub fn fuzz_crash_record_decoder(data: &[u8]) {
-    let bounded = &data[..data.len().min(MAX_RECORD_BYTES + 1)];
-    let _ = valid_rendered(bounded);
+    let bounded = &data[..data.len().min(MAX_ENCODED_RECORD_BYTES + 1)];
+    let _ = crate::data_protection::crash_record_frame_parts(bounded);
 }

@@ -1,15 +1,15 @@
 //! Forced-shutdown contract.
 
+use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use positron_kernel::CrashRecordStore;
 use positron_runtime::{
     ApplicationRuntime, BoundEndpoint, BoundListener, HostInputs, InitializationMode,
-    ListenerFactory, ListenerFailure, ListenerRequest, ListenerRole, RegisteredTask, RunningTask,
-    ServeConfiguration, ShutdownTrigger, TaskCancellation, TaskFailure, TaskJoinOutcome,
-    TaskRegistrar, TaskRole,
+    InstanceBootstrap, ListenerFactory, ListenerFailure, ListenerRequest, ListenerRole,
+    RegisteredTask, RunningTask, ServeConfiguration, ShutdownTrigger, TaskCancellation,
+    TaskFailure, TaskJoinOutcome, TaskRegistrar, TaskRole,
 };
 
 #[path = "support/process_roots.rs"]
@@ -165,14 +165,12 @@ fn deadline_escalates_without_calling_a_blocking_join() -> Result<(), Box<dyn st
 fn late_join_failure_persists_a_bounded_drain_record_without_changing_forced_shutdown()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("late-join-drain-record")?;
+    let paths = roots.bootstrap_paths()?;
     let host = Host {
         late_join_failure: true,
     };
     let process = ApplicationRuntime::start(
-        ServeConfiguration::new(
-            roots.bootstrap_paths()?,
-            InitializationMode::InitializeIfEmpty,
-        ),
+        ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
     )?;
 
@@ -186,8 +184,9 @@ fn late_join_failure_persists_a_bounded_drain_record_without_changing_forced_shu
         positron_runtime::ExitOutcome::Forced
     );
 
-    let volume = roots.acquire_volume_again()?;
-    let readout = CrashRecordStore::from_volume(&volume)
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    let readout = reopened
+        .crash_records()
         .map_err(|failure| format!("open crash records: {failure:?}"))?
         .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
         .map_err(|failure| format!("read crash records: {failure:?}"))?
@@ -202,14 +201,12 @@ fn late_join_failure_persists_a_bounded_drain_record_without_changing_forced_shu
 fn graceful_shutdown_without_a_task_failure_does_not_persist_a_drain_record()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("graceful-drain-record")?;
+    let paths = roots.bootstrap_paths()?;
     let host = Host {
         late_join_failure: false,
     };
     let process = ApplicationRuntime::start(
-        ServeConfiguration::new(
-            roots.bootstrap_paths()?,
-            InitializationMode::InitializeIfEmpty,
-        ),
+        ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
     )?;
     assert_eq!(
@@ -217,15 +214,245 @@ fn graceful_shutdown_without_a_task_failure_does_not_persist_a_drain_record()
         positron_runtime::ExitOutcome::Graceful
     );
 
-    let volume = roots.acquire_volume_again()?;
+    let reopened = InstanceBootstrap::reopen(&paths)?;
     assert_eq!(
-        CrashRecordStore::from_volume(&volume)
+        reopened
+            .crash_records()
             .map_err(|failure| format!("open crash records: {failure:?}"))?
             .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
             .map_err(|failure| format!("read crash records: {failure:?}"))?
             .render(),
         "record_count=0\n"
     );
+    Ok(())
+}
+
+#[test]
+fn crash_record_storage_never_exposes_sanitized_record_plaintext()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("encrypted-crash-record")?;
+    let paths = roots.bootstrap_paths()?;
+    let host = Host {
+        late_join_failure: false,
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
+        HostInputs::new(&host, &host),
+    )?;
+    process
+        .persist_crash_record("draining", "runtime_drain_failed", "runtime")
+        .map_err(|failure| format!("persist crash record: {failure:?}"))?;
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+
+    let crash_directory = roots.data.join("diagnostics").join("crash-records");
+    let persisted = fs::read_dir(&crash_directory)?
+        .next()
+        .transpose()?
+        .ok_or("crash record was not persisted")?;
+    let bytes = fs::read(persisted.path())?;
+    assert!(
+        !bytes
+            .windows(b"finding_code=runtime_drain_failed".len())
+            .any(|window| { window == b"finding_code=runtime_drain_failed" }),
+        "managed crash-record storage exposed sanitized plaintext"
+    );
+
+    let reopened = positron_runtime::InstanceBootstrap::reopen(&paths)?;
+    let rendered = reopened
+        .crash_records()?
+        .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+        .map_err(|failure| format!("read crash records: {failure:?}"))?
+        .render();
+    assert!(rendered.contains("finding_code=runtime_drain_failed"));
+    Ok(())
+}
+
+#[test]
+fn tampered_crash_record_is_omitted_before_trusted_rendering()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("tampered-crash-record")?;
+    let paths = roots.bootstrap_paths()?;
+    let host = Host {
+        late_join_failure: false,
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
+        HostInputs::new(&host, &host),
+    )?;
+    process
+        .persist_crash_record("draining", "runtime_drain_failed", "runtime")
+        .map_err(|failure| format!("persist crash record: {failure:?}"))?;
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+
+    let crash_directory = roots.data.join("diagnostics").join("crash-records");
+    let record = fs::read_dir(&crash_directory)?
+        .next()
+        .transpose()?
+        .ok_or("crash record was not persisted")?;
+    let mut bytes = fs::read(record.path())?;
+    let byte = bytes.last_mut().ok_or("persisted crash record was empty")?;
+    *byte ^= 1;
+    fs::write(record.path(), bytes)?;
+
+    let readout = InstanceBootstrap::reopen(&paths)?
+        .crash_records()?
+        .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+        .map_err(|failure| format!("read crash records: {failure:?}"))?;
+    assert_eq!(readout.render(), "record_count=0\n");
+    assert!(
+        readout
+            .omissions()
+            .contains(&"unauthenticated_crash_record")
+    );
+    Ok(())
+}
+
+#[test]
+fn foreign_instance_crash_record_is_omitted_before_trusted_rendering()
+-> Result<(), Box<dyn std::error::Error>> {
+    let source_roots = TestRoots::new("source-crash-record")?;
+    let source_paths = source_roots.bootstrap_paths()?;
+    let host = Host {
+        late_join_failure: false,
+    };
+    let source = ApplicationRuntime::start(
+        ServeConfiguration::new(source_paths, InitializationMode::InitializeIfEmpty),
+        HostInputs::new(&host, &host),
+    )?;
+    source
+        .persist_crash_record("draining", "runtime_drain_failed", "runtime")
+        .map_err(|failure| format!("persist source crash record: {failure:?}"))?;
+    assert_eq!(
+        source.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    let source_record = fs::read_dir(source_roots.data.join("diagnostics").join("crash-records"))?
+        .next()
+        .transpose()?
+        .ok_or("source crash record was not persisted")?
+        .path();
+
+    let target_roots = TestRoots::new("foreign-crash-record")?;
+    let target_paths = target_roots.bootstrap_paths()?;
+    let target = ApplicationRuntime::start(
+        ServeConfiguration::new(target_paths.clone(), InitializationMode::InitializeIfEmpty),
+        HostInputs::new(&host, &host),
+    )?;
+    assert_eq!(
+        target.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    let target_directory = target_roots.data.join("diagnostics").join("crash-records");
+    fs::create_dir_all(&target_directory)?;
+    fs::copy(
+        source_record,
+        target_directory.join("record-00000000000000000000.frame"),
+    )?;
+
+    let readout = InstanceBootstrap::reopen(&target_paths)?
+        .crash_records()?
+        .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+        .map_err(|failure| format!("read crash records: {failure:?}"))?;
+    assert_eq!(readout.render(), "record_count=0\n");
+    assert!(
+        readout
+            .omissions()
+            .contains(&"unauthenticated_crash_record")
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_plaintext_crash_record_is_an_explicit_omission() -> Result<(), Box<dyn std::error::Error>>
+{
+    let roots = TestRoots::new("legacy-crash-record")?;
+    let paths = roots.bootstrap_paths()?;
+    let host = Host {
+        late_join_failure: false,
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
+        HostInputs::new(&host, &host),
+    )?;
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    let crash_directory = roots.data.join("diagnostics").join("crash-records");
+    fs::create_dir_all(&crash_directory)?;
+    fs::write(
+        crash_directory.join("record-00000000000000000000.txt"),
+        b"record_version=1\nproduct=positron\nbuild_identity=unavailable\nphase=draining\ncomponent=runtime\nfinding_code=runtime_drain_failed\nbacktrace_identity=unavailable\ncatalog_generation=unavailable\noperation_generation=unavailable\n",
+    )?;
+
+    let readout = InstanceBootstrap::reopen(&paths)?
+        .crash_records()?
+        .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+        .map_err(|failure| format!("read crash records: {failure:?}"))?;
+    assert_eq!(readout.render(), "record_count=0\n");
+    assert!(
+        readout
+            .omissions()
+            .contains(&"unauthenticated_legacy_crash_record")
+    );
+    Ok(())
+}
+
+#[test]
+fn deleted_crash_record_is_replaced_with_fresh_authenticated_ciphertext()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("replaced-crash-record")?;
+    let paths = roots.bootstrap_paths()?;
+    let host = Host {
+        late_join_failure: false,
+    };
+    let first = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
+        HostInputs::new(&host, &host),
+    )?;
+    first
+        .persist_crash_record("draining", "runtime_drain_failed", "runtime")
+        .map_err(|failure| format!("persist first crash record: {failure:?}"))?;
+    assert_eq!(
+        first.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    let record = roots
+        .data
+        .join("diagnostics")
+        .join("crash-records")
+        .join("record-00000000000000000000.frame");
+    let first_bytes = fs::read(&record)?;
+    fs::remove_file(&record)?;
+
+    let second = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
+        HostInputs::new(&host, &host),
+    )?;
+    second
+        .persist_crash_record("draining", "runtime_drain_failed", "runtime")
+        .map_err(|failure| format!("persist replacement crash record: {failure:?}"))?;
+    assert_eq!(
+        second.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    let replacement = fs::read(&record)?;
+    assert_ne!(
+        first_bytes, replacement,
+        "a deleted record must not reuse an authenticated frame context"
+    );
+    let rendered = InstanceBootstrap::reopen(&paths)?
+        .crash_records()?
+        .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+        .map_err(|failure| format!("read crash records: {failure:?}"))?
+        .render();
+    assert!(rendered.contains("finding_code=runtime_drain_failed"));
     Ok(())
 }
 
