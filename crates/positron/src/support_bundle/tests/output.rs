@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 #[test]
 fn plaintext_bundle_uses_the_canonical_explicit_warning_flag() {
@@ -21,6 +22,31 @@ fn plaintext_bundle_uses_the_canonical_explicit_warning_flag() {
     };
     assert!(options.plaintext_warning);
     assert!(options.recipients.is_empty());
+}
+
+#[test]
+fn output_preparation_refuses_a_managed_root_before_descending_to_the_output_parent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-support-root-output-{nonce}"));
+    let secrets = root.join("secrets");
+    let external = root.join("external");
+    fs::create_dir_all(&secrets)?;
+    fs::create_dir_all(&external)?;
+    let output = external.join("bundle.age");
+
+    for (data_root, secrets_root) in [
+        (Path::new("/"), secrets.as_path()),
+        (secrets.as_path(), Path::new("/")),
+    ] {
+        assert!(matches!(
+            super::super::output::prepare_destination(&output, data_root, secrets_root),
+            Err(super::super::output::OutputPreparationFailure::InvalidDestination)
+        ));
+    }
+    assert!(!output.exists());
+    fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]

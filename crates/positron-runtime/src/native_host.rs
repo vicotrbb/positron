@@ -1984,22 +1984,32 @@ fn serve_http(
                     if !can_serve_accepted_connection(&admission, &cancellation) {
                         continue;
                     }
-                    let Some(_lease) = admission.accept_connection(IpAddr::V4(Ipv4Addr::LOCALHOST))
+                    let Some(lease) = admission.accept_connection(IpAddr::V4(Ipv4Addr::LOCALHOST))
                     else {
                         continue;
                     };
-                    let _ = native_http::serve_connection(
-                        &mut stream,
-                        ListenerRole::Control,
-                        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                        None,
-                        &health,
-                        native_http::RouteDependencies::new(
-                            services.as_ref(),
-                            admission.control_diagnostics.as_deref(),
-                        ),
-                        admission.connection_protection(),
-                    );
+                    let disposition =
+                        control_connection_disposition(native_http::serve_connection(
+                            &mut stream,
+                            ListenerRole::Control,
+                            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                            None,
+                            &health,
+                            native_http::RouteDependencies::new(
+                                services.as_ref(),
+                                admission.control_diagnostics.as_deref(),
+                            ),
+                            admission.connection_protection(),
+                        ));
+                    match disposition {
+                        ControlConnectionDisposition::Completed => drop(lease),
+                        // A client can close after the request is accepted and
+                        // before its response is written. That peer-local
+                        // outcome must release this generation's admission
+                        // lease and leave the listener available to its next
+                        // authenticated request.
+                        ControlConnectionDisposition::PeerUnavailable => drop(lease),
+                    }
                     continue;
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2148,6 +2158,21 @@ fn serve_http(
         }
     }
     join_http_handlers(&mut handlers, &force)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlConnectionDisposition {
+    Completed,
+    PeerUnavailable,
+}
+
+fn control_connection_disposition(
+    result: Result<(), native_http::ConnectionFailure>,
+) -> ControlConnectionDisposition {
+    match result {
+        Ok(()) => ControlConnectionDisposition::Completed,
+        Err(_) => ControlConnectionDisposition::PeerUnavailable,
+    }
 }
 
 fn complete_tls_handshake(

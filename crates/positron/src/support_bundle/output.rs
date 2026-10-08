@@ -207,6 +207,9 @@ fn open_directory_without_symlinks(
     forbidden: &[DirectoryIdentity],
 ) -> Result<File, OutputPreparationFailure> {
     let mut current = File::open("/").map_err(classify_io_failure)?;
+    if forbidden.contains(&directory_identity(&current)?) {
+        return Err(OutputPreparationFailure::InvalidDestination);
+    }
     for component in path.components() {
         match component {
             Component::RootDir => {},

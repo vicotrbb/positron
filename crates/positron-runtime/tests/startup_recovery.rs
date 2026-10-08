@@ -501,6 +501,50 @@ fn online_integrity_fence_closes_native_data_routes_and_reauthenticates_control(
 }
 
 #[cfg(unix)]
+#[test]
+fn closed_control_peer_releases_admission_for_the_next_authenticated_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("closed-control-peer")?;
+    let paths = roots.bootstrap_paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
+    let control = std::env::temp_dir().join(format!(
+        "positron-closed-control-peer-{}.sock",
+        std::process::id()
+    ));
+    let loopback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    let host = NativeHost::new(NativeBindings::new(
+        control.clone(),
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+    )?);
+    let mut process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let services = process.services().ok_or("runtime services missing")?;
+    services.request_integrity_fence();
+    drop(services);
+    assert!(process.apply_pending_integrity_fence());
+
+    close_control_before_response(&control, &administrator)?;
+    let response = control_response(&control, Some(&administrator), "/control/fenced/inspection")?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
 fn tcp_response(
     address: SocketAddr,
     method: &str,
@@ -547,6 +591,29 @@ fn control_response(
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     Ok(response)
+}
+
+#[cfg(unix)]
+fn close_control_before_response(
+    control: &std::path::Path,
+    bearer: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = (0..100)
+        .find_map(|_| match UnixStream::connect(control) {
+            Ok(stream) => Some(Ok(stream)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::thread::sleep(Duration::from_millis(5));
+                None
+            },
+            Err(error) => Some(Err(error)),
+        })
+        .ok_or("Control socket did not become available")??;
+    let request = format!(
+        "GET /control/fenced/inspection HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {bearer}\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.shutdown(std::net::Shutdown::Both)?;
+    Ok(())
 }
 
 #[test]
