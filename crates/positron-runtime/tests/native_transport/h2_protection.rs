@@ -250,7 +250,7 @@ impl GrpcHarness {
 
     fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let process = self.process.take().ok_or("runtime process missing")?;
-        super::shutdown_gracefully(process)
+        super::shutdown_gracefully(process, &self._roots)
     }
 }
 
