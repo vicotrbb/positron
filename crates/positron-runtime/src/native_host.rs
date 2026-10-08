@@ -1359,28 +1359,10 @@ impl RegisteredTask for NativeRegisteredTask {
     }
 }
 
-const fn maintenance_failure_category(failure: crate::ServiceFailure) -> Option<&'static str> {
-    match failure {
-        crate::ServiceFailure::Unauthorized => Some("unauthorized"),
-        crate::ServiceFailure::CapacityUnavailable => Some("capacity_unavailable"),
-        crate::ServiceFailure::RequestTooLarge => Some("request_too_large"),
-        crate::ServiceFailure::InvalidRequest => Some("invalid_request"),
-        crate::ServiceFailure::InvalidRequestWithLimit(_) => Some("invalid_request_with_limit"),
-        crate::ServiceFailure::KeyUnavailable => Some("key_unavailable"),
-        crate::ServiceFailure::CatalogBusy => Some("catalog_busy"),
-        crate::ServiceFailure::CatalogUnavailable => Some("catalog_unavailable"),
-        crate::ServiceFailure::LedgerUnavailable => Some("ledger_unavailable"),
-        crate::ServiceFailure::StorageUnavailable => Some("storage_unavailable"),
-        crate::ServiceFailure::CorruptState => Some("corrupt_state"),
-        crate::ServiceFailure::Internal => Some("internal"),
-        crate::ServiceFailure::Cancelled => None,
-    }
-}
-
 fn report_maintenance_failure(failure: crate::ServiceFailure) {
     use std::io::Write;
 
-    let Some(category) = maintenance_failure_category(failure) else {
+    let Some(category) = crate::services::maintenance_failure_category(failure) else {
         return;
     };
     let _diagnostic_write_failed = writeln!(

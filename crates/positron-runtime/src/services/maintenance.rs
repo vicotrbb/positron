@@ -20,7 +20,69 @@ use positron_signals::{
     TraceStoreFailureCode,
 };
 
-use super::{ServiceFailure, classify_catalog_failure_code};
+use super::{ServiceFailure, classify_catalog_failure_code, maintenance_failure_category};
+
+#[derive(Clone, Copy)]
+enum MaintenanceWorkerOperation {
+    StartDispatch,
+    CompleteInFlight,
+    IntegrityDiscovery,
+    RetentionDiscovery,
+}
+
+impl MaintenanceWorkerOperation {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::StartDispatch => "start_dispatch",
+            Self::CompleteInFlight => "complete_in_flight",
+            Self::IntegrityDiscovery => "integrity_discovery",
+            Self::RetentionDiscovery => "retention_discovery",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MaintenanceWorkerFailureContext {
+    operation: MaintenanceWorkerOperation,
+    task_class: Option<MaintenanceTaskClass>,
+}
+
+impl MaintenanceWorkerFailureContext {
+    const fn new(operation: MaintenanceWorkerOperation) -> Self {
+        Self {
+            operation,
+            task_class: None,
+        }
+    }
+
+    const fn with_task_class(mut self, task_class: MaintenanceTaskClass) -> Self {
+        self.task_class = Some(task_class);
+        self
+    }
+
+    fn report(self, failure: ServiceFailure) {
+        use std::io::Write;
+
+        let Some(category) = maintenance_failure_category(failure) else {
+            return;
+        };
+        let mut stderr = std::io::stderr().lock();
+        let _diagnostic_write_failed = match self.task_class {
+            Some(task_class) => writeln!(
+                stderr,
+                "positron: maintenance worker failure operation={} task={} category={category}",
+                self.operation.token(),
+                maintenance_task_class_token(task_class),
+            ),
+            None => writeln!(
+                stderr,
+                "positron: maintenance worker failure operation={} category={category}",
+                self.operation.token(),
+            ),
+        }
+        .is_err();
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct MaintenanceWake {
@@ -207,6 +269,7 @@ pub(super) fn wake_runtime_maintenance(
     discover_after_completed_maintenance(services, cancellation, completed)
 }
 
+#[cfg(test)]
 fn discover_after_completed_maintenance(
     services: &super::ServiceHandle,
     cancellation: Option<&crate::TaskCancellation>,
@@ -250,6 +313,47 @@ enum InstalledMaintenanceExecution<'authority> {
         execution: MaintenanceExecution<'authority>,
         scope: SegmentScope,
     },
+}
+
+fn installed_task_class(execution: &InstalledMaintenanceExecution<'_>) -> MaintenanceTaskClass {
+    match execution {
+        InstalledMaintenanceExecution::Compaction { execution, .. }
+        | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { execution }
+        | InstalledMaintenanceExecution::SnapshotLeaseExpiry { execution, .. }
+        | InstalledMaintenanceExecution::RetentionPublication { execution, .. }
+        | InstalledMaintenanceExecution::RetentionReclamation { execution, .. }
+        | InstalledMaintenanceExecution::CatalogReclamation { execution }
+        | InstalledMaintenanceExecution::IntegrityScrub { execution, .. } => {
+            execution.task().class()
+        },
+    }
+}
+
+const fn maintenance_task_class_token(task_class: MaintenanceTaskClass) -> &'static str {
+    match task_class {
+        MaintenanceTaskClass::ActiveSegmentRoll => "active_segment_roll",
+        MaintenanceTaskClass::Compaction => "compaction",
+        MaintenanceTaskClass::SnapshotLeaseExpiry => "snapshot_lease_expiry",
+        MaintenanceTaskClass::RetentionPublication => "retention_publication",
+        MaintenanceTaskClass::RetentionReclamation => "retention_reclamation",
+        MaintenanceTaskClass::CatalogReclamation => "catalog_reclamation",
+        MaintenanceTaskClass::OrphanReclamation => "orphan_reclamation",
+        MaintenanceTaskClass::IntegrityScrub => "integrity_scrub",
+        MaintenanceTaskClass::QuarantineFollowUp => "quarantine_follow_up",
+        MaintenanceTaskClass::SchemaStatistics => "schema_statistics",
+        MaintenanceTaskClass::SchemaPromotion => "schema_promotion",
+        MaintenanceTaskClass::SchemaDemotion => "schema_demotion",
+        MaintenanceTaskClass::GovernanceAuditCheckpoint => "governance_audit_checkpoint",
+        MaintenanceTaskClass::KeyRewrap => "key_rewrap",
+        MaintenanceTaskClass::EnvelopeVerification => "envelope_verification",
+        MaintenanceTaskClass::Migration => "migration",
+        MaintenanceTaskClass::RepositoryVerification => "repository_verification",
+        MaintenanceTaskClass::RepositoryCleanup => "repository_cleanup",
+        MaintenanceTaskClass::BackupSnapshot => "backup_snapshot",
+        MaintenanceTaskClass::DurableExport => "durable_export",
+        MaintenanceTaskClass::CompletedOperationExpiry => "completed_operation_expiry",
+        MaintenanceTaskClass::TenantPurge => "tenant_purge",
+    }
 }
 
 fn start_installed_maintenance<'authority>(
@@ -787,6 +891,7 @@ fn complete_integrity_scrub(
     }
 }
 
+#[cfg(test)]
 fn discover_retention_publications(
     services: &super::ServiceHandle,
     cancellation: Option<&crate::TaskCancellation>,
@@ -795,6 +900,14 @@ fn discover_retention_publications(
         return Err(ServiceFailure::Cancelled);
     }
     let integrity_discovered = discover_integrity_scrubs(services, cancellation)?;
+    discover_retention_publications_after_integrity(services, cancellation, integrity_discovered)
+}
+
+fn discover_retention_publications_after_integrity(
+    services: &super::ServiceHandle,
+    cancellation: Option<&crate::TaskCancellation>,
+    integrity_discovered: bool,
+) -> Result<bool, ServiceFailure> {
     // Do not let retention open a newly discovered damaged source before its
     // higher-priority scrub has authenticated it. The next worker turn will
     // dispatch this durable descriptor and either quarantine localized damage
@@ -894,6 +1007,33 @@ fn discover_retention_publications(
         }
     }
     Ok(submitted)
+}
+
+fn discover_runtime_maintenance(
+    services: &super::ServiceHandle,
+    cancellation: Option<&crate::TaskCancellation>,
+) -> (
+    MaintenanceWorkerFailureContext,
+    Result<bool, ServiceFailure>,
+) {
+    let integrity_context =
+        MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::IntegrityDiscovery);
+    if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
+        return (integrity_context, Err(ServiceFailure::Cancelled));
+    }
+    let integrity_discovered = match discover_integrity_scrubs(services, cancellation) {
+        Ok(discovered) => discovered,
+        Err(failure) => return (integrity_context, Err(failure)),
+    };
+    if integrity_discovered {
+        return (integrity_context, Ok(true));
+    }
+    let retention_context =
+        MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::RetentionDiscovery);
+    (
+        retention_context,
+        discover_retention_publications_after_integrity(services, cancellation, false),
+    )
 }
 
 fn discover_integrity_scrubs(
@@ -1061,36 +1201,53 @@ pub(super) fn run_runtime_maintenance_worker(
     let mut in_flight = None;
     while !cancellation.is_cancelled() {
         let mut completed_integrity = false;
-        let result = match in_flight.take() {
+        let (failure_context, result) = match in_flight.take() {
             Some(execution) => {
                 completed_integrity = matches!(
                     execution,
                     InstalledMaintenanceExecution::IntegrityScrub { .. }
                 );
+                let completion_context = MaintenanceWorkerFailureContext::new(
+                    MaintenanceWorkerOperation::CompleteInFlight,
+                )
+                .with_task_class(installed_task_class(&execution));
                 match complete_installed_maintenance(services, Some(cancellation), &execution) {
                     Ok(completed) => {
                         let continues_integrity_scrub = match &execution {
                             InstalledMaintenanceExecution::IntegrityScrub { execution, .. } => {
-                                services
+                                match services
                                     .instance
                                     .maintenance_coordinator()
                                     .status(execution.task().identity())
-                                    .map_err(map_failure)?
-                                    .phase()
-                                    == positron_kernel::MaintenanceTaskPhase::Running
+                                    .map_err(map_failure)
+                                {
+                                    Ok(status) => {
+                                        status.phase()
+                                            == positron_kernel::MaintenanceTaskPhase::Running
+                                    },
+                                    Err(failure) => {
+                                        completion_context.report(failure);
+                                        return Err(failure);
+                                    },
+                                }
                             },
                             _ => false,
                         };
                         if continues_integrity_scrub {
                             in_flight = Some(execution);
-                            Ok(completed)
+                            (completion_context, Ok(completed))
                         } else {
                             drop(execution);
-                            discover_after_completed_maintenance(
-                                services,
-                                Some(cancellation),
-                                completed,
-                            )
+                            let (discovery_context, discovery) =
+                                discover_runtime_maintenance(services, Some(cancellation));
+                            let result = match discovery {
+                                Ok(discovered) => Ok(completed || discovered),
+                                // Completion is already durable. A cancellation observed before
+                                // the next bounded discovery must stop the worker normally.
+                                Err(ServiceFailure::Cancelled) if completed => Ok(true),
+                                Err(failure) => Err(failure),
+                            };
+                            (discovery_context, result)
                         }
                     },
                     Err(ServiceFailure::Cancelled) => break,
@@ -1100,7 +1257,7 @@ pub(super) fn run_runtime_maintenance_worker(
                         // execution and reservation so the loop's existing
                         // bounded retry policy can reconcile that exact task.
                         in_flight = Some(execution);
-                        Err(failure)
+                        (completion_context, Err(failure))
                     },
                 }
             },
@@ -1109,23 +1266,35 @@ pub(super) fn run_runtime_maintenance_worker(
                     in_flight = Some(execution);
                     continue;
                 },
-                Ok(None) => match discover_retention_publications(services, Some(cancellation)) {
-                    Ok(discovered) => {
-                        match start_installed_maintenance(services, Some(cancellation)) {
-                            Ok(Some(execution)) => {
-                                in_flight = Some(execution);
-                                continue;
-                            },
-                            Ok(None) => Ok(discovered),
-                            Err(ServiceFailure::Cancelled) => break,
-                            Err(failure) => Err(failure),
-                        }
-                    },
-                    Err(ServiceFailure::Cancelled) => break,
-                    Err(failure) => Err(failure),
+                Ok(None) => {
+                    let (discovery_context, discovery) =
+                        discover_runtime_maintenance(services, Some(cancellation));
+                    match discovery {
+                        Ok(discovered) => {
+                            match start_installed_maintenance(services, Some(cancellation)) {
+                                Ok(Some(execution)) => {
+                                    in_flight = Some(execution);
+                                    continue;
+                                },
+                                Ok(None) => (discovery_context, Ok(discovered)),
+                                Err(ServiceFailure::Cancelled) => break,
+                                Err(failure) => (
+                                    MaintenanceWorkerFailureContext::new(
+                                        MaintenanceWorkerOperation::StartDispatch,
+                                    ),
+                                    Err(failure),
+                                ),
+                            }
+                        },
+                        Err(ServiceFailure::Cancelled) => break,
+                        Err(failure) => (discovery_context, Err(failure)),
+                    }
                 },
                 Err(ServiceFailure::Cancelled) => break,
-                Err(failure) => Err(failure),
+                Err(failure) => (
+                    MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::StartDispatch),
+                    Err(failure),
+                ),
             },
         };
         let delay = match result {
@@ -1158,7 +1327,10 @@ pub(super) fn run_runtime_maintenance_worker(
                 retry_delay = retry_delay.saturating_mul(2).min(MAX_TRANSIENT_BACKOFF);
                 retry_delay
             },
-            Err(failure) => return Err(failure),
+            Err(failure) => {
+                failure_context.report(failure);
+                return Err(failure);
+            },
         };
         wake_signal.wait(&mut observed, delay);
     }
@@ -1188,6 +1360,43 @@ fn map_failure(failure: MaintenanceFailure) -> ServiceFailure {
         | MaintenanceFailure::InvalidTransition
         | MaintenanceFailure::PreconditionFailed
         | MaintenanceFailure::Paused => ServiceFailure::Internal,
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::{MaintenanceWorkerFailureContext, MaintenanceWorkerOperation, ServiceFailure};
+    use positron_kernel::MaintenanceTaskClass;
+
+    const DIAGNOSTIC_CHILD: &str = "POSITRON_MAINTENANCE_DIAGNOSTIC_CHILD";
+
+    #[test]
+    fn worker_failure_diagnostic_emits_closed_operation_and_task_class()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os(DIAGNOSTIC_CHILD).is_some() {
+            MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::CompleteInFlight)
+                .with_task_class(MaintenanceTaskClass::IntegrityScrub)
+                .report(ServiceFailure::CorruptState);
+            return Ok(());
+        }
+
+        let executable = std::env::current_exe()?;
+        let output = std::process::Command::new(executable)
+            .env(DIAGNOSTIC_CHILD, "1")
+            .arg("--exact")
+            .arg("services::maintenance::diagnostic_tests::worker_failure_diagnostic_emits_closed_operation_and_task_class")
+            .arg("--nocapture")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "diagnostic child exited with {:?}",
+            output.status.code()
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr)?,
+            "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub category=corrupt_state\n"
+        );
+        Ok(())
     }
 }
 

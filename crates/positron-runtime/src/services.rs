@@ -80,6 +80,24 @@ pub(crate) use maintenance_api::MaintenanceServiceFailure;
 #[cfg(test)]
 mod tests;
 
+pub(crate) const fn maintenance_failure_category(failure: ServiceFailure) -> Option<&'static str> {
+    match failure {
+        ServiceFailure::Unauthorized => Some("unauthorized"),
+        ServiceFailure::CapacityUnavailable => Some("capacity_unavailable"),
+        ServiceFailure::RequestTooLarge => Some("request_too_large"),
+        ServiceFailure::InvalidRequest => Some("invalid_request"),
+        ServiceFailure::InvalidRequestWithLimit(_) => Some("invalid_request_with_limit"),
+        ServiceFailure::KeyUnavailable => Some("key_unavailable"),
+        ServiceFailure::CatalogBusy => Some("catalog_busy"),
+        ServiceFailure::CatalogUnavailable => Some("catalog_unavailable"),
+        ServiceFailure::LedgerUnavailable => Some("ledger_unavailable"),
+        ServiceFailure::StorageUnavailable => Some("storage_unavailable"),
+        ServiceFailure::CorruptState => Some("corrupt_state"),
+        ServiceFailure::Internal => Some("internal"),
+        ServiceFailure::Cancelled => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct ServiceHandle {
     schema_sessions: TenantSchemaRegistry,
