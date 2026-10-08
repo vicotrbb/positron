@@ -5,7 +5,7 @@ mod roots;
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use positron_api::maintenance::{
     MaintenanceExplainRequest, MaintenanceServiceClient, MaintenanceStatusRequest,
@@ -16,11 +16,32 @@ use positron_governance::{
     AdministrativeIdempotencyKey, CompatibilityHints, ConfigurationAuditOutcome,
     PresentedCredential, RequestedIntent, ResourceGeneration,
 };
+use positron_kernel::CrashRecordStore;
 use positron_runtime::{
     ApplicationRuntime, ConfigurationReloadOutcome, ConfigurationRuntimeFailure, HealthWarning,
     HostInputs, InitializationMode, InstanceBootstrap, ListenerRole, NativeBindings, NativeHost,
-    ProcessPhase, Readiness, ServeConfiguration, ShutdownTrigger,
+    ProcessPhase, Readiness, RunningProcess, ServeConfiguration, ShutdownTrigger,
 };
+
+fn assert_graceful_shutdown(
+    process: RunningProcess,
+    roots: &roots::TestRoots,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if process.shutdown(ShutdownTrigger::FirstSignal) == positron_runtime::ExitOutcome::Graceful {
+        return Ok(());
+    }
+
+    let volume = roots
+        .acquire_volume_again()
+        .map_err(|_| "forced native shutdown; bounded crash-record read unavailable")?;
+    let crash_records = CrashRecordStore::from_volume(&volume)
+        .map_err(|_| "forced native shutdown; bounded crash-record store unavailable")?;
+    let rendered = crash_records
+        .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+        .map_err(|_| "forced native shutdown; bounded crash-record read unavailable")?
+        .render();
+    Err(format!("forced native shutdown; bounded crash records:\n{rendered}").into())
+}
 
 #[test]
 fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_plaintext_generation()
@@ -98,10 +119,7 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
     );
     assert_eq!(process.health().phase(), ProcessPhase::Serving);
     assert_eq!(process.health().readiness(), Readiness::Ready);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    assert_graceful_shutdown(process, &roots)?;
     drop(roots.acquire_volume_again()?);
     let claim = InstanceBootstrap::claim(&paths)?;
     let reopened = InstanceBootstrap::reopen(&paths)?;
@@ -369,10 +387,7 @@ fn failed_joint_plaintext_publication_keeps_the_tls_generation_and_no_role_recei
     assert!(process.health().security_warnings().is_empty());
     assert_eq!(process.health().phase(), ProcessPhase::Serving);
     assert_eq!(process.health().readiness(), Readiness::Ready);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    assert_graceful_shutdown(process, &roots)?;
     drop(roots.acquire_volume_again()?);
     let claim = InstanceBootstrap::claim(&paths)?;
     let reopened = InstanceBootstrap::reopen(&paths)?;
