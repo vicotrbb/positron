@@ -8,6 +8,7 @@ pub struct OfflineIntegrityVerification {
     reports: Vec<IntegrityVerificationReport>,
     findings: Vec<IntegrityQuarantineFinding>,
     facts: OfflineInspectionFacts,
+    report_scope: OfflineIntegrityReportScope,
     continuation: Option<OfflineIntegrityContinuation>,
     covered_scope_count: usize,
     all_covered_scopes_verified: bool,
@@ -26,6 +27,18 @@ pub enum OfflineIntegrityAggregateOutcome {
     Incomplete,
     Quarantined,
     Fenced,
+}
+
+/// Authenticated scope authority for an offline verification report.
+///
+/// A resumed verification receives this value only after the runtime has
+/// authenticated and validated the continuation. Renderers must not infer it
+/// from the command-line arguments, which intentionally contain no scope when
+/// resuming an opaque continuation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineIntegrityReportScope {
+    AllReachable,
+    SelectedScope,
 }
 
 /// Terminal, secret-free evidence for one scope in an aggregate offline run.
@@ -212,6 +225,7 @@ impl OfflineIntegrityVerification {
         reports: Vec<IntegrityVerificationReport>,
         findings: Vec<IntegrityQuarantineFinding>,
         facts: OfflineInspectionFacts,
+        report_scope: OfflineIntegrityReportScope,
         continuation: Option<OfflineIntegrityContinuation>,
         covered_scope_count: usize,
         all_covered_scopes_verified: bool,
@@ -224,6 +238,7 @@ impl OfflineIntegrityVerification {
             reports,
             findings,
             facts,
+            report_scope,
             continuation,
             covered_scope_count,
             all_covered_scopes_verified,
@@ -255,6 +270,12 @@ impl OfflineIntegrityVerification {
     #[must_use]
     pub const fn facts(&self) -> OfflineInspectionFacts {
         self.facts
+    }
+
+    /// The authenticated scope selection that produced this report.
+    #[must_use]
+    pub const fn report_scope(&self) -> OfflineIntegrityReportScope {
+        self.report_scope
     }
 
     /// Authenticated aggregate progress for the next bounded invocation.

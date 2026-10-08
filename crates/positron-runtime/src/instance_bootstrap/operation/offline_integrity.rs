@@ -177,6 +177,14 @@ pub(in super::super) fn verify(
             cursor: None,
         }
     };
+    let report_scope = match mode {
+        OfflineIntegrityContinuationMode::Aggregate => {
+            crate::OfflineIntegrityReportScope::AllReachable
+        },
+        OfflineIntegrityContinuationMode::Scope(_) => {
+            crate::OfflineIntegrityReportScope::SelectedScope
+        },
+    };
     let aggregate = matches!(mode, OfflineIntegrityContinuationMode::Aggregate);
     if aggregate && (scope_index > scopes.len() || covered_scope_count > scopes.len()) {
         return Err(crate::OfflineIntegrityFailure::CorruptState);
@@ -389,6 +397,7 @@ pub(in super::super) fn verify(
         reports,
         findings,
         facts,
+        report_scope,
         continuation,
         covered_scope_count,
         all_verified,

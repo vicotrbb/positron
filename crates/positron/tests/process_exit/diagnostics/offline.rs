@@ -70,6 +70,10 @@ fn offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_
     assert!(verify_stdout.contains(
         "mode=offline\nstatus=verified\naggregate_outcome=verified\nverification_complete=true\n"
     ));
+    assert!(
+        verify_stdout.contains("aggregate_scope=all_reachable\n"),
+        "an aggregate command must retain its authenticated all-reachable scope: {verify_stdout}"
+    );
     assert!(verify_stdout.contains("report_count=2\n"));
     let selected = verify_stdout
         .lines()

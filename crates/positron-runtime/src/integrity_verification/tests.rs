@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::{
-    OfflineIntegrityFailure, resume_offline_integrity, verify_offline_integrity,
-    verify_offline_integrity_scope,
+    OfflineIntegrityFailure, OfflineIntegrityReportScope, resume_offline_integrity,
+    verify_offline_integrity, verify_offline_integrity_scope,
 };
 use crate::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
 use positron_kernel::{IntegrityCancellation, MountQualification, ResourceAmounts, WorkClaim};
@@ -26,6 +26,10 @@ fn offline_verification_aggregates_healthy_reachable_scopes_without_changing_any
 
     assert!(report.is_complete());
     assert!(report.is_verified());
+    assert_eq!(
+        report.report_scope(),
+        OfflineIntegrityReportScope::AllReachable
+    );
     let facts = report.facts();
     assert!(facts.catalog_generation() > 0);
     assert_eq!(facts.registered_tenant_count(), 1);
@@ -330,6 +334,10 @@ fn selected_scope_verification_returns_a_bound_cursor_and_resumes_without_global
     assert!(!first.is_complete());
     assert!(!first.is_verified());
     assert_eq!(first.reports().len(), 1);
+    assert_eq!(
+        first.report_scope(),
+        OfflineIntegrityReportScope::SelectedScope
+    );
     let partial = first
         .reports()
         .iter()
@@ -361,6 +369,11 @@ fn selected_scope_verification_returns_a_bound_cursor_and_resumes_without_global
     assert!(!resumed.is_verified());
     assert!(resumed.continuation().is_none());
     assert_eq!(resumed.reports().len(), 1);
+    assert_eq!(
+        resumed.report_scope(),
+        OfflineIntegrityReportScope::SelectedScope,
+        "the authenticated continuation must retain its selected report scope"
+    );
     assert_eq!(resumed.reports()[0].scope(), scope);
     assert_eq!(resumed.reports()[0].examined_segments(), 1);
     assert_eq!(file_tree(&root)?, before);

@@ -17,8 +17,8 @@ use positron_domain::{
 use positron_kernel::{MountQualification, SegmentScope};
 use positron_runtime::{
     BootstrapPaths, OfflineIntegrityAggregateOutcome, OfflineIntegrityContinuation,
-    OfflineIntegrityFailure, resume_offline_integrity, verify_offline_integrity,
-    verify_offline_integrity_scope,
+    OfflineIntegrityFailure, OfflineIntegrityReportScope, resume_offline_integrity,
+    verify_offline_integrity, verify_offline_integrity_scope,
 };
 use zeroize::Zeroizing;
 
@@ -126,7 +126,7 @@ fn execute(
     match offline {
         Ok(report) => {
             let status = offline_status(report.aggregate_outcome());
-            let aggregate_scope = offline_scope_label(offline_scope.is_some());
+            let aggregate_scope = offline_scope_label(report.report_scope());
             let mut output = format!(
                 "mode=offline\nstatus={status}\naggregate_outcome={status}\nverification_complete={}\nreport_count={}\naggregate_scope={aggregate_scope}\naggregate_catalog_generation={}\naggregate_covered_scopes={}\naggregate_reachable_scopes={}\naggregate_examined_segments={}\naggregate_examined_bytes={}\naggregate_omitted_segments={}\naggregate_omitted_segments_semantics=cumulative_deferred_observations\naggregate_evidence_count={}\n",
                 report.is_complete(),
@@ -180,11 +180,10 @@ const fn offline_status(outcome: OfflineIntegrityAggregateOutcome) -> &'static s
     }
 }
 
-const fn offline_scope_label(selected_scope: bool) -> &'static str {
-    if selected_scope {
-        "selected_scope"
-    } else {
-        "all_reachable"
+const fn offline_scope_label(scope: OfflineIntegrityReportScope) -> &'static str {
+    match scope {
+        OfflineIntegrityReportScope::AllReachable => "all_reachable",
+        OfflineIntegrityReportScope::SelectedScope => "selected_scope",
     }
 }
 
@@ -194,7 +193,7 @@ mod tests {
     use std::net::TcpListener;
 
     use positron_api::maintenance::OnlineVerificationReport;
-    use positron_runtime::OfflineIntegrityAggregateOutcome;
+    use positron_runtime::{OfflineIntegrityAggregateOutcome, OfflineIntegrityReportScope};
 
     use super::{
         VerifyFailure, VerifyOptions, offline_scope_label, offline_status, online_request,
@@ -219,8 +218,14 @@ mod tests {
 
     #[test]
     fn scoped_offline_rendering_never_claims_all_reachable_scopes() {
-        assert_eq!(offline_scope_label(true), "selected_scope");
-        assert_eq!(offline_scope_label(false), "all_reachable");
+        assert_eq!(
+            offline_scope_label(OfflineIntegrityReportScope::SelectedScope),
+            "selected_scope"
+        );
+        assert_eq!(
+            offline_scope_label(OfflineIntegrityReportScope::AllReachable),
+            "all_reachable"
+        );
     }
 
     #[test]
