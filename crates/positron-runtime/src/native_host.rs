@@ -1359,13 +1359,45 @@ impl RegisteredTask for NativeRegisteredTask {
     }
 }
 
+const fn maintenance_failure_category(failure: crate::ServiceFailure) -> Option<&'static str> {
+    match failure {
+        crate::ServiceFailure::Unauthorized => Some("unauthorized"),
+        crate::ServiceFailure::CapacityUnavailable => Some("capacity_unavailable"),
+        crate::ServiceFailure::RequestTooLarge => Some("request_too_large"),
+        crate::ServiceFailure::InvalidRequest => Some("invalid_request"),
+        crate::ServiceFailure::InvalidRequestWithLimit(_) => Some("invalid_request_with_limit"),
+        crate::ServiceFailure::KeyUnavailable => Some("key_unavailable"),
+        crate::ServiceFailure::CatalogBusy => Some("catalog_busy"),
+        crate::ServiceFailure::CatalogUnavailable => Some("catalog_unavailable"),
+        crate::ServiceFailure::LedgerUnavailable => Some("ledger_unavailable"),
+        crate::ServiceFailure::StorageUnavailable => Some("storage_unavailable"),
+        crate::ServiceFailure::CorruptState => Some("corrupt_state"),
+        crate::ServiceFailure::Internal => Some("internal"),
+        crate::ServiceFailure::Cancelled => None,
+    }
+}
+
+fn report_maintenance_failure(failure: crate::ServiceFailure) {
+    use std::io::Write;
+
+    let Some(category) = maintenance_failure_category(failure) else {
+        return;
+    };
+    let _diagnostic_write_failed = writeln!(
+        std::io::stderr().lock(),
+        "positron: maintenance worker failure category={category}"
+    )
+    .is_err();
+}
+
 fn complete_maintenance_worker(
     services: &ServiceHandle,
     worker: impl FnOnce() -> Result<(), crate::ServiceFailure>,
 ) -> Result<(), TaskFailure> {
     match worker() {
         Ok(()) => Ok(()),
-        Err(_) => {
+        Err(failure) => {
+            report_maintenance_failure(failure);
             services.request_integrity_fence();
             Err(TaskFailure::JoinUnavailable)
         },
@@ -2204,6 +2236,7 @@ mod tests {
     use std::fs;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::path::PathBuf;
+    use std::process::Command;
     use std::time::Duration;
 
     use super::{
@@ -2323,6 +2356,30 @@ mod tests {
             crate::ExitOutcome::Graceful
         );
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_failure_diagnostic_reports_a_closed_category()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "native_host::tests::failed_native_maintenance_task_requests_process_owned_fence_before_join_error",
+                "--nocapture",
+            ])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "maintenance failure child failed with status {:?}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(
+            stderr.contains("positron: maintenance worker failure category=corrupt_state"),
+            "maintenance failure did not emit its closed category: {stderr}"
+        );
         Ok(())
     }
 

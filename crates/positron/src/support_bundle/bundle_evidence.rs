@@ -45,8 +45,10 @@ pub(crate) fn canonical_members_with_crash(
     if options.deadline_exceeded(started) {
         return Err(BundleFailure::DeadlineExceeded);
     }
-    let metadata = std::fs::metadata(effective.data_directory()).ok();
-    let data_directory_metadata_bytes = metadata.map_or(0, |value| value.len());
+    let environment = environment_evidence(
+        std::path::Path::new(effective.data_directory()),
+        &data_directory,
+    );
     let config_digest =
         hex(configuration.as_bytes()).map_err(|_| BundleFailure::OutputUnavailable)?;
     let health = format!(
@@ -76,16 +78,70 @@ pub(crate) fn canonical_members_with_crash(
         ),
         BundleMember::health_state(health.as_bytes()),
         BundleMember::operational_telemetry(operational.as_bytes()),
-        BundleMember::operational_logs_with_omission(b"inspection_owner=operational_log_runtime\navailability=not_persisted\n", "operational_log_owner_unavailable"),
+        BundleMember::operational_logs_with_omission(
+            b"inspection_owner=operational_log_runtime\navailability=not_persisted\n",
+            "operational_log_owner_unavailable",
+        ),
         BundleMember::catalog_summary(catalog.as_bytes()),
         BundleMember::resource_status(resource.as_bytes()),
         BundleMember::maintenance_status(maintenance.as_bytes()),
         BundleMember::listener_status(listeners.as_bytes()),
         BundleMember::backup_repository_status(backup.as_bytes()),
-        BundleMember::environment(format!("os={}\narch={}\ndata_directory_identity={}\ndata_directory_metadata_bytes={data_directory_metadata_bytes}\n", std::env::consts::OS, std::env::consts::ARCH, data_directory).as_bytes()),
+        BundleMember::environment(environment.as_bytes()),
         BundleMember::doctor_report(doctor.as_bytes()),
-        BundleMember::sanitized_crash_records_with_omissions(crash.render().as_bytes(), crash.omissions()),
+        BundleMember::sanitized_crash_records_with_omissions(
+            crash.render().as_bytes(),
+            crash.omissions(),
+        ),
     ])
+}
+
+fn environment_evidence(
+    data_directory_path: &std::path::Path,
+    data_directory_identity: &str,
+) -> String {
+    let data_directory_metadata_bytes = match std::fs::metadata(data_directory_path) {
+        Ok(metadata) => metadata.len().to_string(),
+        Err(_) => "unavailable".to_owned(),
+    };
+    format!(
+        "os={}\narch={}\ndata_directory_identity={data_directory_identity}\ndata_directory_metadata_bytes={data_directory_metadata_bytes}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
+#[cfg(test)]
+mod environment_evidence_tests {
+    use super::environment_evidence;
+
+    #[test]
+    fn unreadable_metadata_is_truthfully_unavailable_in_environment_artifact() {
+        let missing = std::env::temp_dir().join(format!(
+            "positron-bundle-metadata-missing-{}",
+            std::process::id()
+        ));
+        let rendered = environment_evidence(&missing, "id-redacted");
+        assert!(
+            rendered.contains("data_directory_metadata_bytes=unavailable\n"),
+            "environment artifact must not fabricate zero bytes after metadata failure: {rendered}"
+        );
+    }
+
+    #[test]
+    fn healthy_metadata_remains_numeric_in_environment_artifact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "positron-bundle-metadata-healthy-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let rendered = environment_evidence(&root, "id-redacted");
+        std::fs::remove_dir_all(&root)?;
+        assert!(rendered.contains("data_directory_metadata_bytes="));
+        assert!(!rendered.contains("data_directory_metadata_bytes=unavailable"));
+        Ok(())
+    }
 }
 
 const COMPATIBILITY_INPUTS_SCOPE: &str = "Cargo.lock,Cargo.toml,crates/positron/Cargo.toml,api/positron/v1/positron.proto,api/positron/v1/http.json,configuration/schema.json";
