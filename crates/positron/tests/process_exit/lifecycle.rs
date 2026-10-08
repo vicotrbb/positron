@@ -736,6 +736,7 @@ fn sighup_during_recovery_does_not_interrupt_native_startup()
     let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
         .args(["serve", "--init-if-empty", "--config"])
         .arg(&config_path)
+        .stderr(Stdio::piped())
         .spawn()?;
 
     wait_for_readiness(operations_port, "HTTP/1.1 503 ")?;
@@ -755,7 +756,23 @@ fn sighup_during_recovery_does_not_interrupt_native_startup()
             .status()?
             .success()
     );
-    assert_eq!(child.wait()?.code(), Some(0));
+    let status = child.wait()?;
+    if status.code() != Some(0) {
+        let authorization = BootstrapPaths::new(&data, &secrets, MountQualification::LocalHost)
+            .and_then(|paths| InstanceBootstrap::claim(&paths))
+            .map(|credential| format!("Bearer {}", credential.secret()))
+            .map_err(|failure| format!("reopen failure context unavailable: {failure:?}"));
+        let context = match authorization {
+            Ok(authorization) => format!(
+                "stderr={:?}; {}",
+                bounded_child_stderr(&mut child, &authorization),
+                bounded_crash_record_observation(&data, &secrets, &authorization),
+            ),
+            Err(failure) => failure,
+        };
+        return Err(format!("recovery SIGHUP shutdown exited {status}; {context}").into());
+    }
+    assert_eq!(status.code(), Some(0));
     fs::remove_dir_all(root)?;
     Ok(())
 }
