@@ -352,6 +352,36 @@ fn task_join_failure_reconciles_with_abort_and_forced_exit()
 }
 
 #[test]
+fn task_poll_join_failure_reconciles_with_forced_exit_and_releases_ownership()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("poll-join-fault")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks {
+        fail_join: Some(TaskRole::Api),
+        ..ObservingTasks::default()
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&listeners, &tasks),
+    )?;
+
+    let mut draining = process.begin_shutdown();
+    assert_eq!(
+        draining.poll(),
+        Err(positron_runtime::TaskFailure::JoinUnavailable)
+    );
+    assert_eq!(
+        draining.finish(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Forced
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
+}
+
+#[test]
 fn missing_instance_is_a_typed_dependency_outage_without_data_admission()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("missing")?;

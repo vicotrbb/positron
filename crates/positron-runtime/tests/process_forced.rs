@@ -3,6 +3,7 @@
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use positron_runtime::{
@@ -16,8 +17,10 @@ use positron_runtime::{
 mod process_roots;
 use process_roots::TestRoots;
 
+#[derive(Default)]
 struct Host {
     late_join_failure: bool,
+    poll_join_failure: bool,
 }
 
 impl ListenerFactory for Host {
@@ -44,8 +47,13 @@ impl BoundListener for Listener {
 
 impl TaskRegistrar for Host {
     fn register(&self, role: TaskRole) -> Result<Box<dyn RegisteredTask>, TaskFailure> {
-        if self.late_join_failure && role == TaskRole::Control {
-            return Ok(Box::new(LateJoinFailureTask));
+        if role == TaskRole::Control {
+            if self.poll_join_failure {
+                return Ok(Box::new(PollJoinFailureTask));
+            }
+            if self.late_join_failure {
+                return Ok(Box::new(LateJoinFailureTask));
+            }
         }
         Ok(Box::new(Task))
     }
@@ -114,12 +122,40 @@ impl RunningTask for LateJoinFailureTask {
     }
 }
 
+struct PollJoinFailureTask;
+
+impl RegisteredTask for PollJoinFailureTask {
+    fn spawn(
+        self: Box<Self>,
+        _cancellation: TaskCancellation,
+        _health: positron_runtime::HealthState,
+        _services: Option<positron_runtime::ServiceHandle>,
+    ) -> Result<Box<dyn RunningTask>, TaskFailure> {
+        Ok(Box::new(PollJoinFailureTask))
+    }
+}
+
+impl RunningTask for PollJoinFailureTask {
+    fn poll_join(&mut self) -> Result<Option<TaskJoinOutcome>, TaskFailure> {
+        Err(TaskFailure::JoinUnavailable)
+    }
+
+    fn join_within(
+        &mut self,
+        _remaining: std::time::Duration,
+    ) -> Result<TaskJoinOutcome, TaskFailure> {
+        Err(TaskFailure::JoinUnavailable)
+    }
+
+    fn abort(&mut self) -> Result<(), TaskFailure> {
+        Ok(())
+    }
+}
+
 #[test]
 fn second_signal_forces_abort_and_releases_ownership() -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("second-signal")?;
-    let host = Host {
-        late_join_failure: false,
-    };
+    let host = Host::default();
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(
             roots.bootstrap_paths()?,
@@ -138,9 +174,7 @@ fn second_signal_forces_abort_and_releases_ownership() -> Result<(), Box<dyn std
 #[test]
 fn deadline_escalates_without_calling_a_blocking_join() -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("deadline-preempt")?;
-    let host = Host {
-        late_join_failure: false,
-    };
+    let host = Host::default();
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(
             roots.bootstrap_paths()?,
@@ -168,6 +202,7 @@ fn late_join_failure_persists_a_bounded_drain_record_without_changing_forced_shu
     let paths = roots.bootstrap_paths()?;
     let host = Host {
         late_join_failure: true,
+        ..Host::default()
     };
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
@@ -202,9 +237,7 @@ fn graceful_shutdown_without_a_task_failure_does_not_persist_a_drain_record()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("graceful-drain-record")?;
     let paths = roots.bootstrap_paths()?;
-    let host = Host {
-        late_join_failure: false,
-    };
+    let host = Host::default();
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
@@ -232,9 +265,7 @@ fn crash_record_storage_never_exposes_sanitized_record_plaintext()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("encrypted-crash-record")?;
     let paths = roots.bootstrap_paths()?;
-    let host = Host {
-        late_join_failure: false,
-    };
+    let host = Host::default();
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
@@ -275,9 +306,7 @@ fn tampered_crash_record_is_omitted_before_trusted_rendering()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("tampered-crash-record")?;
     let paths = roots.bootstrap_paths()?;
-    let host = Host {
-        late_join_failure: false,
-    };
+    let host = Host::default();
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
@@ -318,9 +347,7 @@ fn foreign_instance_crash_record_is_omitted_before_trusted_rendering()
 -> Result<(), Box<dyn std::error::Error>> {
     let source_roots = TestRoots::new("source-crash-record")?;
     let source_paths = source_roots.bootstrap_paths()?;
-    let host = Host {
-        late_join_failure: false,
-    };
+    let host = Host::default();
     let source = ApplicationRuntime::start(
         ServeConfiguration::new(source_paths, InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
@@ -373,9 +400,7 @@ fn legacy_plaintext_crash_record_is_an_explicit_omission() -> Result<(), Box<dyn
 {
     let roots = TestRoots::new("legacy-crash-record")?;
     let paths = roots.bootstrap_paths()?;
-    let host = Host {
-        late_join_failure: false,
-    };
+    let host = Host::default();
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
@@ -409,9 +434,7 @@ fn deleted_crash_record_is_replaced_with_fresh_authenticated_ciphertext()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("replaced-crash-record")?;
     let paths = roots.bootstrap_paths()?;
-    let host = Host {
-        late_join_failure: false,
-    };
+    let host = Host::default();
     let first = ApplicationRuntime::start(
         ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
         HostInputs::new(&host, &host),
@@ -462,6 +485,7 @@ fn full_crash_record_store_does_not_change_a_late_join_forced_shutdown()
     let roots = TestRoots::new("late-join-full-crash-store")?;
     let host = Host {
         late_join_failure: true,
+        ..Host::default()
     };
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(
@@ -492,5 +516,114 @@ fn full_crash_record_store_does_not_change_a_late_join_forced_shutdown()
         positron_runtime::ExitOutcome::Forced
     );
     assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
+}
+
+const DRAIN_DIAGNOSTIC_CHILD_MODE: &str = "POSITRON_DRAIN_DIAGNOSTIC_CHILD_MODE";
+
+#[test]
+fn drain_diagnostic_child_reports_late_join_failure() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os(DRAIN_DIAGNOSTIC_CHILD_MODE).as_deref()
+        != Some(std::ffi::OsStr::new("late_join"))
+    {
+        return Ok(());
+    }
+
+    let roots = TestRoots::new("drain-diagnostic-late-child")?;
+    let host = Host {
+        late_join_failure: true,
+        ..Host::default()
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&host, &host),
+    )?;
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Forced
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
+}
+
+#[test]
+fn drain_diagnostic_child_reports_poll_join_failure() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os(DRAIN_DIAGNOSTIC_CHILD_MODE).as_deref()
+        != Some(std::ffi::OsStr::new("poll_join"))
+    {
+        return Ok(());
+    }
+
+    let roots = TestRoots::new("drain-diagnostic-poll-child")?;
+    let host = Host {
+        poll_join_failure: true,
+        ..Host::default()
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&host, &host),
+    )?;
+    let mut draining = process.begin_shutdown();
+    assert_eq!(draining.poll(), Err(TaskFailure::JoinUnavailable));
+    assert_eq!(
+        draining.finish(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Forced
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
+}
+
+fn child_drain_diagnostic(
+    mode: &str,
+    test_name: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new(std::env::current_exe()?)
+        .args(["--exact", test_name, "--nocapture"])
+        .env(DRAIN_DIAGNOSTIC_CHILD_MODE, mode)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "diagnostic child {test_name} failed with status {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stderr)?)
+}
+
+#[test]
+fn drain_diagnostic_reports_closed_late_join_context_to_stderr()
+-> Result<(), Box<dyn std::error::Error>> {
+    let stderr = child_drain_diagnostic(
+        "late_join",
+        "drain_diagnostic_child_reports_late_join_failure",
+    )?;
+    assert!(
+        stderr.contains(
+            "positron: runtime drain task failure site=join_within role=control category=join_unavailable"
+        ),
+        "late-join drain failure did not emit its closed diagnostic: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn drain_diagnostic_reports_closed_poll_join_context_to_stderr()
+-> Result<(), Box<dyn std::error::Error>> {
+    let stderr = child_drain_diagnostic(
+        "poll_join",
+        "drain_diagnostic_child_reports_poll_join_failure",
+    )?;
+    assert!(
+        stderr.contains(
+            "positron: runtime drain task failure site=poll_join role=control category=join_unavailable"
+        ),
+        "poll-join drain failure did not emit its closed diagnostic: {stderr}"
+    );
     Ok(())
 }

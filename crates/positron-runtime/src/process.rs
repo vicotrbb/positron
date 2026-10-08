@@ -1091,6 +1091,130 @@ mod retirement_tests {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DrainFailureSite {
+    PollJoin,
+    JoinWithin,
+}
+
+impl DrainFailureSite {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::PollJoin => "poll_join",
+            Self::JoinWithin => "join_within",
+        }
+    }
+}
+
+struct DrainTaskFailureDiagnostic {
+    site: DrainFailureSite,
+    role: TaskRole,
+    failure: TaskFailure,
+}
+
+impl std::fmt::Display for DrainTaskFailureDiagnostic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "positron: runtime drain task failure site={} role={} category={}",
+            self.site.token(),
+            drain_task_role_token(self.role),
+            drain_task_failure_token(self.failure),
+        )
+    }
+}
+
+const fn drain_task_role_token(role: TaskRole) -> &'static str {
+    match role {
+        TaskRole::Control => "control",
+        TaskRole::Operations => "operations",
+        TaskRole::Maintenance => "maintenance",
+        TaskRole::Api => "api",
+        TaskRole::OtlpGrpc => "otlp_grpc",
+        TaskRole::OtlpHttp => "otlp_http",
+        TaskRole::LokiPush => "loki_push",
+    }
+}
+
+const fn drain_task_failure_token(failure: TaskFailure) -> &'static str {
+    match failure {
+        TaskFailure::RegistrationUnavailable => "registration_unavailable",
+        TaskFailure::SpawnUnavailable => "spawn_unavailable",
+        TaskFailure::JoinUnavailable => "join_unavailable",
+        TaskFailure::JoinPanicked => "join_panicked",
+        TaskFailure::AbortUnavailable => "abort_unavailable",
+    }
+}
+
+fn report_drain_task_failure(
+    site: DrainFailureSite,
+    role: TaskRole,
+    failure: TaskFailure,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        DrainTaskFailureDiagnostic {
+            site,
+            role,
+            failure,
+        }
+    )
+}
+
+#[cfg(test)]
+mod drain_failure_diagnostic_tests {
+    use super::{DrainFailureSite, DrainTaskFailureDiagnostic};
+    use crate::{TaskFailure, TaskRole};
+
+    #[test]
+    fn drain_failure_diagnostic_uses_every_closed_token() {
+        let roles = [
+            (TaskRole::Control, "control"),
+            (TaskRole::Operations, "operations"),
+            (TaskRole::Maintenance, "maintenance"),
+            (TaskRole::Api, "api"),
+            (TaskRole::OtlpGrpc, "otlp_grpc"),
+            (TaskRole::OtlpHttp, "otlp_http"),
+            (TaskRole::LokiPush, "loki_push"),
+        ];
+        let failures = [
+            (
+                TaskFailure::RegistrationUnavailable,
+                "registration_unavailable",
+            ),
+            (TaskFailure::SpawnUnavailable, "spawn_unavailable"),
+            (TaskFailure::JoinUnavailable, "join_unavailable"),
+            (TaskFailure::JoinPanicked, "join_panicked"),
+            (TaskFailure::AbortUnavailable, "abort_unavailable"),
+        ];
+        let sites = [
+            (DrainFailureSite::PollJoin, "poll_join"),
+            (DrainFailureSite::JoinWithin, "join_within"),
+        ];
+
+        for (site, site_token) in sites {
+            for (role, role_token) in roles {
+                for (failure, failure_token) in failures {
+                    assert_eq!(
+                        DrainTaskFailureDiagnostic {
+                            site,
+                            role,
+                            failure,
+                        }
+                        .to_string(),
+                        format!(
+                            "positron: runtime drain task failure site={site_token} role={role_token} category={failure_token}"
+                        )
+                    );
+                }
+            }
+        }
+    }
+}
+
 impl DrainingProcess {
     #[must_use]
     pub fn crash_inspection(&self) -> CrashInspection {
@@ -1115,8 +1239,19 @@ impl DrainingProcess {
             .tasks
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (_, task) in &mut *tasks {
-            match task.poll_join()? {
+        for (role, task) in &mut *tasks {
+            let joined = match task.poll_join() {
+                Ok(joined) => joined,
+                Err(failure) => {
+                    if report_drain_task_failure(DrainFailureSite::PollJoin, *role, failure)
+                        .is_err()
+                    {
+                        return Err(failure);
+                    }
+                    return Err(failure);
+                },
+            };
+            match joined {
                 Some(TaskJoinOutcome::Joined) => {},
                 Some(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal) => {
                     return Ok(false);
@@ -1143,7 +1278,7 @@ impl DrainingProcess {
                     .get_mut()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let mut late_failure = None;
-                for (_, task) in &mut *tasks {
+                for (role, task) in &mut *tasks {
                     let Some(remaining) =
                         deadline.checked_duration_since(std::time::Instant::now())
                     else {
@@ -1155,6 +1290,12 @@ impl DrainingProcess {
                             return self.0.abort_shutdown();
                         },
                         Err(failure) => {
+                            let _diagnostic_write_failed = report_drain_task_failure(
+                                DrainFailureSite::JoinWithin,
+                                *role,
+                                failure,
+                            )
+                            .is_err();
                             late_failure = Some(failure);
                             break;
                         },
