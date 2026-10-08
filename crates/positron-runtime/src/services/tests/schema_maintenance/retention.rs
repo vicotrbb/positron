@@ -226,8 +226,9 @@ fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_rete
 fn pending_integrity_scrub_blocks_retention_only_for_its_own_scope() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let (mut initialized, ingest, _, administrator_secret) = fixture.initialized_with_admin()?;
-    let (retention_time, elapsed) =
-        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
+    let (retention_time, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(
+        UnixNanoseconds::new(86_397_000_000_000),
+    );
     Arc::get_mut(&mut initialized)
         .ok_or("sole initialized instance")?
         .install_retention_time_for_test(retention_time)?;
@@ -341,7 +342,7 @@ fn pending_integrity_scrub_blocks_retention_only_for_its_own_scope() -> Result<(
         services.wake_maintenance_worker()?,
         "the healthy scope receives its own persisted integrity descriptor"
     );
-    let trace_scrub_due = initialized
+    let trace_scrub = initialized
         .maintenance_coordinator()
         .statuses()
         .map_err(|_| "healthy scrub status")?
@@ -349,22 +350,35 @@ fn pending_integrity_scrub_blocks_retention_only_for_its_own_scope() -> Result<(
         .find(|status| {
             status.task().class() == MaintenanceTaskClass::IntegrityScrub
                 && status.task().scope() == traces_maintenance_scope
-                && status.phase() == MaintenanceTaskPhase::Queued
         })
-        .ok_or("queued healthy scrub")?
-        .task()
-        .not_before();
+        .ok_or("healthy scrub status")?;
+    let trace_scrub_due = trace_scrub.task().not_before();
+    let current_seconds = initialized
+        .retention_time
+        .governance_now_seconds()
+        .map_err(|failure| format!("current lifecycle clock: {failure:?}"))?;
+    const INTEGRITY_SCRUB_CADENCE_SECONDS: u64 = 86_400;
+    const INTEGRITY_SCRUB_JITTER_SECONDS: u64 = 900;
+    let epoch_start = current_seconds
+        .checked_div(INTEGRITY_SCRUB_CADENCE_SECONDS)
+        .and_then(|epoch| epoch.checked_mul(INTEGRITY_SCRUB_CADENCE_SECONDS))
+        .ok_or("current integrity scrub epoch")?;
+    let epoch_end = epoch_start
+        .checked_add(INTEGRITY_SCRUB_JITTER_SECONDS)
+        .ok_or("current integrity scrub jitter window")?;
     assert!(
-        (12..900).contains(&trace_scrub_due),
-        "the healthy scope's persisted scrub is eligible in the current lifecycle epoch"
+        (epoch_start..epoch_end).contains(&trace_scrub_due),
+        "the healthy scope's persisted scrub belongs to the current lifecycle epoch"
     );
-    elapsed.advance(
-        trace_scrub_due
-            .checked_sub(12)
-            .ok_or("healthy scrub due delta")?
-            .checked_mul(1_000_000_000)
-            .ok_or("healthy scrub due nanoseconds")?,
-    )?;
+    assert!(
+        trace_scrub_due <= current_seconds,
+        "the end-of-epoch healthy scrub is due in the same discovery turn"
+    );
+    assert_eq!(
+        trace_scrub.phase(),
+        MaintenanceTaskPhase::Succeeded,
+        "the due healthy scrub completes without stranding the unrelated scope"
+    );
     let mut healthy_scope_completed = false;
     for _ in 0..8 {
         let _ = services.wake_maintenance_worker()?;

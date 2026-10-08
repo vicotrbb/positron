@@ -51,10 +51,7 @@ async fn api_global_accepted_socket_cap_closes_another_peer_then_releases_after_
     drop(holder);
     let accepted = request_from(Ipv4Addr::LOCALHOST, api).await?;
     assert_status(accepted, 405);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process)?;
     Ok(())
 }
 
@@ -82,10 +79,7 @@ async fn api_per_address_accepted_socket_cap_closes_the_second_socket_from_one_p
     assert_closed(connect_from(Ipv4Addr::LOCALHOST, api).await?).await?;
     drop(holder);
     assert_status(request_from(Ipv4Addr::LOCALHOST, api).await?, 405);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process)?;
     Ok(())
 }
 
@@ -122,10 +116,7 @@ async fn api_preauthentication_rate_refuses_by_peer_and_global_window_then_recov
         .await
         .map_err(|error| format!("recovered request: {error}"))?;
     assert_status(recovered, 405);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process)?;
     Ok(())
 }
 

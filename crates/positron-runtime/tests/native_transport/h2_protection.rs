@@ -250,17 +250,7 @@ impl GrpcHarness {
 
     fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let process = self.process.take().ok_or("runtime process missing")?;
-        let mut draining = process.begin_shutdown();
-        if let Err(failure) = draining.poll() {
-            return Err(
-                format!("gRPC runtime task failed before graceful drain: {failure:?}").into(),
-            );
-        }
-        assert_eq!(
-            draining.finish(ShutdownTrigger::FirstSignal),
-            positron_runtime::ExitOutcome::Graceful
-        );
-        Ok(())
+        super::shutdown_gracefully(process)
     }
 }
 

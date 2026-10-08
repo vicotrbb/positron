@@ -14,6 +14,22 @@ pub(super) async fn live_async_test_guard() -> MutexGuard<'static, ()> {
     LIVE_NATIVE_TEST.lock().await
 }
 
+pub(super) fn shutdown_gracefully(
+    process: positron_runtime::RunningProcess,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut draining = process.begin_shutdown();
+    if let Err(failure) = draining.poll() {
+        return Err(
+            format!("native runtime task failed before graceful drain: {failure:?}").into(),
+        );
+    }
+    assert_eq!(
+        draining.finish(positron_runtime::ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
 pub(super) fn bindings(
     roots: &TestRoots,
     label: &str,

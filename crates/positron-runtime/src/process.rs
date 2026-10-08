@@ -1136,21 +1136,45 @@ impl DrainingProcess {
         }
         if trigger == ShutdownTrigger::FirstSignal {
             let deadline = std::time::Instant::now() + self.0.drain_deadline;
-            let tasks = self
-                .0
-                .tasks
-                .get_mut()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for (_, task) in &mut *tasks {
-                let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
-                else {
-                    return self.0.abort_shutdown();
-                };
-                match task.join_within(remaining) {
-                    Ok(TaskJoinOutcome::Joined) => {},
-                    Ok(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal)
-                    | Err(_) => return self.0.abort_shutdown(),
+            let late_failure = {
+                let tasks = self
+                    .0
+                    .tasks
+                    .get_mut()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut late_failure = None;
+                for (_, task) in &mut *tasks {
+                    let Some(remaining) =
+                        deadline.checked_duration_since(std::time::Instant::now())
+                    else {
+                        return self.0.abort_shutdown();
+                    };
+                    match task.join_within(remaining) {
+                        Ok(TaskJoinOutcome::Joined) => {},
+                        Ok(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal) => {
+                            return self.0.abort_shutdown();
+                        },
+                        Err(failure) => {
+                            late_failure = Some(failure);
+                            break;
+                        },
+                    }
                 }
+                late_failure
+            };
+            if let Some(failure) = late_failure {
+                let finding_code = if failure == TaskFailure::JoinPanicked {
+                    "joined_task_panicked"
+                } else {
+                    "runtime_drain_failed"
+                };
+                if self
+                    .persist_crash_record("draining", finding_code, "runtime")
+                    .is_err()
+                {
+                    eprintln!("positron: unable to persist sanitized runtime crash record");
+                }
+                return self.0.abort_shutdown();
             }
         }
         self.0
