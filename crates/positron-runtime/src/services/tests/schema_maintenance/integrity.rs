@@ -51,6 +51,79 @@ fn runtime_maintenance_worker_verifies_a_durable_integrity_scrub_task() -> Resul
 }
 
 #[test]
+fn cancellation_before_the_first_integrity_candidate_preserves_normal_worker_drain()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _) = fixture.initialized()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let scope = SegmentScope::new(
+        initialized.tenant,
+        positron_domain::routing::SignalKind::Logs,
+        initialized.logs_shard,
+    );
+    let catalog = open_catalog(&initialized)?;
+    let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+    let key = super::super::super::tenant_segment_key(&initialized, &identity, scope)?;
+    ActiveSegmentLedger::open(&initialized._authority, &catalog, scope, key)?.seal()?;
+    let snapshot = catalog.pin()?;
+    let generation = snapshot.number();
+    let source_manifest = snapshot.integrity_scope_source_identity(scope)?;
+    let task = MaintenanceTask::integrity_scrub(
+        MaintenanceTaskId::new([0xdb; 16]).map_err(|_| "invalid task id")?,
+        positron_kernel::MaintenanceScope::segment(
+            scope.tenant_id(),
+            scope.signal_kind(),
+            scope.shard_id(),
+        ),
+        MaintenanceTrigger::Event,
+        MaintenancePreconditions::new(generation, 1).map_err(|_| "invalid preconditions")?,
+        source_manifest,
+        0,
+    )
+    .map_err(|_| "invalid integrity scrub task")?;
+    let task_id = task.identity();
+    initialized
+        .maintenance_coordinator()
+        .submit_and_persist(&catalog, task, 0)
+        .map_err(|_| "submit integrity scrub task")?;
+    drop(catalog);
+
+    // The configured poll is the verifier's first candidate boundary: the
+    // task has been durably admitted, but no immutable source was examined.
+    // A process drain must preserve that task for recovery instead of turning
+    // a missing resume cursor into an integrity failure.
+    let cancellation = crate::TaskCancellation::new();
+    cancellation.cancel_after_polls(6);
+    assert_eq!(services.run_maintenance_worker(&cancellation), Ok(()));
+    let status = initialized
+        .maintenance_coordinator()
+        .status(task_id)
+        .map_err(|_| "cancelled integrity scrub status")?;
+    assert_eq!(
+        status.phase(),
+        MaintenanceTaskPhase::Running,
+        "the cancelled task stays durably recoverable rather than forcing the worker"
+    );
+    assert!(
+        status.checkpoint().is_none(),
+        "a cancellation before the first candidate must not invent an unusable cursor"
+    );
+    drop(services);
+    let recovered = ServiceHandle::new(Arc::clone(&initialized))?;
+    assert_eq!(
+        initialized
+            .maintenance_coordinator()
+            .status(task_id)
+            .map_err(|_| "recovered integrity scrub status")?
+            .phase(),
+        MaintenanceTaskPhase::Queued,
+        "restart recovery requeues the unexamined durable task"
+    );
+    drop(recovered);
+    Ok(())
+}
+
+#[test]
 fn continuously_admitted_compaction_does_not_starve_due_integrity_scrub_discovery()
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;

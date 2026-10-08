@@ -66,6 +66,25 @@ struct MaintenanceWorkerFailureContext {
     task_class: Option<MaintenanceTaskClass>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticDelivery {
+    Delivered,
+    Unavailable,
+}
+
+fn preserve_primary_failure(
+    delivery: DiagnosticDelivery,
+    primary: ServiceFailure,
+) -> ServiceFailure {
+    match delivery {
+        DiagnosticDelivery::Delivered => primary,
+        // The worker's existing typed failure reaches the Native Host, which
+        // fences and persists its bounded crash outcome. A failed stderr sink
+        // must not replace that primary integrity failure or skip the fence.
+        DiagnosticDelivery::Unavailable => primary,
+    }
+}
+
 impl MaintenanceWorkerFailureContext {
     const fn new(operation: MaintenanceWorkerOperation) -> Self {
         Self {
@@ -79,46 +98,66 @@ impl MaintenanceWorkerFailureContext {
         self
     }
 
-    fn report(self, failure: ServiceFailure) {
-        use std::io::Write;
-
-        let Some(category) = maintenance_failure_category(failure) else {
-            return;
-        };
+    fn report(self, failure: ServiceFailure) -> ServiceFailure {
         let mut stderr = std::io::stderr().lock();
-        let _diagnostic_write_failed = match self.task_class {
+        preserve_primary_failure(self.report_to(&mut stderr, failure), failure)
+    }
+
+    fn report_to(
+        self,
+        sink: &mut impl std::io::Write,
+        failure: ServiceFailure,
+    ) -> DiagnosticDelivery {
+        let Some(category) = maintenance_failure_category(failure) else {
+            return DiagnosticDelivery::Delivered;
+        };
+        let write = match self.task_class {
             Some(task_class) => writeln!(
-                stderr,
+                sink,
                 "positron: maintenance worker failure operation={} task={} category={category}",
                 self.operation.token(),
                 maintenance_task_class_token(task_class),
             ),
             None => writeln!(
-                stderr,
+                sink,
                 "positron: maintenance worker failure operation={} category={category}",
                 self.operation.token(),
             ),
+        };
+        match write {
+            Ok(()) => DiagnosticDelivery::Delivered,
+            Err(_) => DiagnosticDelivery::Unavailable,
         }
-        .is_err();
     }
 }
 
 fn report_integrity_scrub_failure_stage(
     stage: IntegrityScrubFailureStage,
     failure: ServiceFailure,
-) {
-    use std::io::Write;
-
-    let Some(category) = maintenance_failure_category(failure) else {
-        return;
-    };
+) -> ServiceFailure {
     let mut stderr = std::io::stderr().lock();
-    let _diagnostic_write_failed = writeln!(
-        stderr,
+    preserve_primary_failure(
+        report_integrity_scrub_failure_stage_to(&mut stderr, stage, failure),
+        failure,
+    )
+}
+
+fn report_integrity_scrub_failure_stage_to(
+    sink: &mut impl std::io::Write,
+    stage: IntegrityScrubFailureStage,
+    failure: ServiceFailure,
+) -> DiagnosticDelivery {
+    let Some(category) = maintenance_failure_category(failure) else {
+        return DiagnosticDelivery::Delivered;
+    };
+    match writeln!(
+        sink,
         "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub stage={} category={category}",
         stage.token(),
-    )
-    .is_err();
+    ) {
+        Ok(()) => DiagnosticDelivery::Delivered,
+        Err(_) => DiagnosticDelivery::Unavailable,
+    }
 }
 
 #[derive(Clone)]
@@ -788,8 +827,7 @@ fn complete_integrity_scrub(
             report_integrity_scrub_failure_stage(
                 IntegrityScrubFailureStage::PreVerification,
                 failure,
-            );
-            failure
+            )
         })?;
     let continuation = status
         .checkpoint()
@@ -799,15 +837,13 @@ fn complete_integrity_scrub(
                     report_integrity_scrub_failure_stage(
                         IntegrityScrubFailureStage::PreVerification,
                         ServiceFailure::CorruptState,
-                    );
-                    ServiceFailure::CorruptState
+                    )
                 })
         })
         .transpose()?;
     let snapshot = catalog.pin().map_err(|failure| {
         let failure = classify_catalog_failure_code(failure.code());
-        report_integrity_scrub_failure_stage(IntegrityScrubFailureStage::PreVerification, failure);
-        failure
+        report_integrity_scrub_failure_stage(IntegrityScrubFailureStage::PreVerification, failure)
     })?;
     let Some(source_binding) = execution.task().source_binding() else {
         // A record written before source binding existed is never allowed to
@@ -842,11 +878,10 @@ fn complete_integrity_scrub(
         report_integrity_scrub_failure_stage(
             IntegrityScrubFailureStage::PreVerification,
             ServiceFailure::CorruptState,
-        );
-        ServiceFailure::CorruptState
+        )
     })?;
-    let key = super::tenant_segment_key(instance, &identity, scope).inspect_err(|failure| {
-        report_integrity_scrub_failure_stage(IntegrityScrubFailureStage::PreVerification, *failure);
+    let key = super::tenant_segment_key(instance, &identity, scope).map_err(|failure| {
+        report_integrity_scrub_failure_stage(IntegrityScrubFailureStage::PreVerification, failure)
     })?;
     let transaction = TransactionId::new(execution.task().identity().to_bytes())
         .map_err(|_| ServiceFailure::Internal)?;
@@ -862,8 +897,9 @@ fn complete_integrity_scrub(
         },
     )
     .map_err(|_| ServiceFailure::Internal)?;
+    let runtime_cancellation = cancellation;
     let uncancelled = IntegrityCancellation::new();
-    let cancellation: &dyn positron_kernel::IntegrityCancellationProbe = cancellation
+    let cancellation: &dyn positron_kernel::IntegrityCancellationProbe = runtime_cancellation
         .map(|current| current as &dyn positron_kernel::IntegrityCancellationProbe)
         .unwrap_or(&uncancelled);
     let report = ActiveSegmentLedger::verify_catalog_integrity_with_audit(
@@ -897,8 +933,7 @@ fn complete_integrity_scrub(
         report_integrity_scrub_failure_stage(
             IntegrityScrubFailureStage::VerificationFailure,
             failure,
-        );
-        failure
+        )
     })?;
     match report.outcome() {
         IntegrityVerificationOutcome::Verified => {
@@ -909,11 +944,13 @@ fn complete_integrity_scrub(
         },
         IntegrityVerificationOutcome::Incomplete => {
             let continuation = report.continuation().ok_or_else(|| {
+                if runtime_cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
+                    return ServiceFailure::Cancelled;
+                }
                 report_integrity_scrub_failure_stage(
                     IntegrityScrubFailureStage::IncompleteInvalid,
                     ServiceFailure::CorruptState,
-                );
-                ServiceFailure::CorruptState
+                )
             })?;
             let sequence = status
                 .checkpoint()
@@ -960,11 +997,10 @@ fn complete_integrity_scrub(
             execution
                 .complete_and_persist(coordinator, catalog, false)
                 .map_err(map_failure)?;
-            report_integrity_scrub_failure_stage(
+            Err(report_integrity_scrub_failure_stage(
                 IntegrityScrubFailureStage::VerificationOutcomeFenced,
                 ServiceFailure::CorruptState,
-            );
-            Err(ServiceFailure::CorruptState)
+            ))
         },
     }
 }
@@ -1304,7 +1340,7 @@ pub(super) fn run_runtime_maintenance_worker(
                                             == positron_kernel::MaintenanceTaskPhase::Running
                                     },
                                     Err(failure) => {
-                                        completion_context.report(failure);
+                                        let failure = completion_context.report(failure);
                                         return Err(failure);
                                     },
                                 }
@@ -1406,7 +1442,7 @@ pub(super) fn run_runtime_maintenance_worker(
                 retry_delay
             },
             Err(failure) => {
-                failure_context.report(failure);
+                let failure = failure_context.report(failure);
                 return Err(failure);
             },
         };
@@ -1455,12 +1491,18 @@ mod diagnostic_tests {
     fn worker_failure_diagnostic_emits_closed_operation_and_task_class()
     -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os(DIAGNOSTIC_CHILD).is_some() {
-            MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::CompleteInFlight)
-                .with_task_class(MaintenanceTaskClass::IntegrityScrub)
-                .report(ServiceFailure::CorruptState);
-            report_integrity_scrub_failure_stage(
-                IntegrityScrubFailureStage::VerificationOutcomeFenced,
-                ServiceFailure::CorruptState,
+            assert_eq!(
+                MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::CompleteInFlight)
+                    .with_task_class(MaintenanceTaskClass::IntegrityScrub)
+                    .report(ServiceFailure::CorruptState),
+                ServiceFailure::CorruptState
+            );
+            assert_eq!(
+                report_integrity_scrub_failure_stage(
+                    IntegrityScrubFailureStage::VerificationOutcomeFenced,
+                    ServiceFailure::CorruptState,
+                ),
+                ServiceFailure::CorruptState
             );
             return Ok(());
         }

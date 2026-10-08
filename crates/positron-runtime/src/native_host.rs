@@ -1359,17 +1359,31 @@ impl RegisteredTask for NativeRegisteredTask {
     }
 }
 
-fn report_maintenance_failure(failure: crate::ServiceFailure) {
-    use std::io::Write;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaintenanceDiagnosticDelivery {
+    Delivered,
+    Unavailable,
+}
 
+fn report_maintenance_failure(failure: crate::ServiceFailure) -> MaintenanceDiagnosticDelivery {
+    let mut stderr = std::io::stderr().lock();
+    report_maintenance_failure_to(&mut stderr, failure)
+}
+
+fn report_maintenance_failure_to(
+    sink: &mut impl std::io::Write,
+    failure: crate::ServiceFailure,
+) -> MaintenanceDiagnosticDelivery {
     let Some(category) = crate::services::maintenance_failure_category(failure) else {
-        return;
+        return MaintenanceDiagnosticDelivery::Delivered;
     };
-    let _diagnostic_write_failed = writeln!(
-        std::io::stderr().lock(),
+    match writeln!(
+        sink,
         "positron: maintenance worker failure category={category}"
-    )
-    .is_err();
+    ) {
+        Ok(()) => MaintenanceDiagnosticDelivery::Delivered,
+        Err(_) => MaintenanceDiagnosticDelivery::Unavailable,
+    }
 }
 
 fn complete_maintenance_worker(
@@ -1378,11 +1392,21 @@ fn complete_maintenance_worker(
 ) -> Result<(), TaskFailure> {
     match worker() {
         Ok(()) => Ok(()),
-        Err(failure) => {
-            report_maintenance_failure(failure);
-            services.request_integrity_fence();
-            Err(TaskFailure::JoinUnavailable)
-        },
+        Err(failure) => complete_maintenance_failure(services, report_maintenance_failure(failure)),
+    }
+}
+
+fn complete_maintenance_failure(
+    services: &ServiceHandle,
+    delivery: MaintenanceDiagnosticDelivery,
+) -> Result<(), TaskFailure> {
+    services.request_integrity_fence();
+    match delivery {
+        MaintenanceDiagnosticDelivery::Delivered => Err(TaskFailure::JoinUnavailable),
+        // A terminal primary worker failure has already reached this
+        // process-owned authority. Fence it even if stderr is closed; the
+        // existing JoinUnavailable path retains that outcome.
+        MaintenanceDiagnosticDelivery::Unavailable => Err(TaskFailure::JoinUnavailable),
     }
 }
 
@@ -2222,8 +2246,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        NativeBindings, NativeHost, NativeHostFailure, NativeRunningTask,
-        complete_maintenance_worker,
+        MaintenanceDiagnosticDelivery, NativeBindings, NativeHost, NativeHostFailure,
+        NativeRunningTask, complete_maintenance_failure, complete_maintenance_worker,
+        report_maintenance_failure_to,
     };
     use crate::{
         ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, InitializationPlan,
@@ -2268,6 +2293,18 @@ mod tests {
     #[test]
     fn failed_native_maintenance_task_requests_process_owned_fence_before_join_error()
     -> Result<(), Box<dyn std::error::Error>> {
+        struct ClosedDiagnosticSink;
+
+        impl std::io::Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "positron-native-maintenance-fence-{}-{}",
@@ -2304,6 +2341,14 @@ mod tests {
             HostInputs::new(&host, &host),
         )?;
         let services = process.services().ok_or("runtime services")?;
+        let mut closed_sink = ClosedDiagnosticSink;
+        let delivery =
+            report_maintenance_failure_to(&mut closed_sink, crate::ServiceFailure::CorruptState);
+        assert_eq!(delivery, MaintenanceDiagnosticDelivery::Unavailable);
+        assert!(matches!(
+            complete_maintenance_failure(&services, delivery),
+            Err(TaskFailure::JoinUnavailable)
+        ));
         let worker_services = services.clone();
         let mut task = NativeRunningTask {
             force: TaskCancellation::new(),
