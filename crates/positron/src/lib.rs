@@ -529,7 +529,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use super::{
         ExitOutcome, LaunchFailure, NativeRecovery, RecoveryAttemptHost, RecoveryDecision,
@@ -539,9 +539,9 @@ mod tests {
     use positron_runtime::{
         ApplicationRuntime, BootstrapFailureCode, BootstrapPaths, BoundEndpoint, BoundListener,
         ConfigurationReloadOutcome, ConfigurationRuntimeFailure, HostInputs, InitializationMode,
-        ListenerFactory, ListenerFailure, ListenerRequest, ListenerRole, RecoveryAttempt,
-        RegisteredTask, RunningTask, ServeConfiguration, TaskCancellation, TaskFailure,
-        TaskJoinOutcome, TaskRegistrar, TaskRole,
+        InstanceBootstrap, ListenerFactory, ListenerFailure, ListenerRequest, ListenerRole,
+        RecoveryAttempt, RegisteredTask, RunningTask, ServeConfiguration, TaskCancellation,
+        TaskFailure, TaskJoinOutcome, TaskRegistrar, TaskRole,
     };
     use signal_hook::iterator::Signals;
 
@@ -709,7 +709,7 @@ mod tests {
             positron_kernel::MountQualification::LocalHost,
         )?;
         let process = ApplicationRuntime::start(
-            ServeConfiguration::new(paths, InitializationMode::InitializeIfEmpty),
+            ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
             HostInputs::new(&host, &host),
         )
         .map_err(|failure| format!("start owner loop: {failure:?}"))?;
@@ -776,7 +776,7 @@ mod tests {
             positron_kernel::MountQualification::LocalHost,
         )?;
         let process = ApplicationRuntime::start(
-            ServeConfiguration::new(paths, InitializationMode::InitializeIfEmpty),
+            ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
             HostInputs::new(&host, &host),
         )
         .map_err(|failure| format!("start owner loop: {failure:?}"))?;
@@ -797,8 +797,12 @@ mod tests {
         assert_ne!(outcome, ExitOutcome::Graceful);
         let records = std::fs::read_dir(data.join("diagnostics/crash-records"))?
             .collect::<Result<Vec<_>, _>>()?;
-        let record = records.first().ok_or("joined panic record missing")?;
-        let rendered = std::fs::read_to_string(record.path())?;
+        assert_eq!(records.len(), 1, "joined panic record missing");
+        let rendered = InstanceBootstrap::reopen(&paths)?
+            .crash_records()?
+            .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+            .map_err(|failure| format!("authenticated crash records: {failure:?}"))?
+            .render();
         assert!(rendered.contains("phase=draining"));
         assert!(rendered.contains("finding_code=joined_task_panicked"));
         let catalog_generation = rendered
@@ -843,7 +847,7 @@ mod tests {
             positron_kernel::MountQualification::LocalHost,
         )?;
         let process = ApplicationRuntime::start(
-            ServeConfiguration::new(paths, InitializationMode::InitializeIfEmpty),
+            ServeConfiguration::new(paths.clone(), InitializationMode::InitializeIfEmpty),
             HostInputs::new(&host, &host),
         )
         .map_err(|failure| format!("start serving owner: {failure:?}"))?;
@@ -876,7 +880,11 @@ mod tests {
             std::fs::metadata(record.path())?.permissions().mode() & 0o777,
             0o600
         );
-        let rendered = std::fs::read_to_string(record.path())?;
+        let rendered = InstanceBootstrap::reopen(&paths)?
+            .crash_records()?
+            .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+            .map_err(|failure| format!("authenticated crash records: {failure:?}"))?
+            .render();
         assert!(rendered.contains("phase=serving"));
         assert!(rendered.contains("finding_code=runtime_serving_loop_panicked"));
         assert!(
