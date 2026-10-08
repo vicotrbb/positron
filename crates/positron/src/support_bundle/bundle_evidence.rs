@@ -111,39 +111,6 @@ fn environment_evidence(
     )
 }
 
-#[cfg(test)]
-mod environment_evidence_tests {
-    use super::environment_evidence;
-
-    #[test]
-    fn unreadable_metadata_is_truthfully_unavailable_in_environment_artifact() {
-        let missing = std::env::temp_dir().join(format!(
-            "positron-bundle-metadata-missing-{}",
-            std::process::id()
-        ));
-        let rendered = environment_evidence(&missing, "id-redacted");
-        assert!(
-            rendered.contains("data_directory_metadata_bytes=unavailable\n"),
-            "environment artifact must not fabricate zero bytes after metadata failure: {rendered}"
-        );
-    }
-
-    #[test]
-    fn healthy_metadata_remains_numeric_in_environment_artifact()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "positron-bundle-metadata-healthy-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root)?;
-        let rendered = environment_evidence(&root, "id-redacted");
-        std::fs::remove_dir_all(&root)?;
-        assert!(rendered.contains("data_directory_metadata_bytes="));
-        assert!(!rendered.contains("data_directory_metadata_bytes=unavailable"));
-        Ok(())
-    }
-}
-
 const COMPATIBILITY_INPUTS_SCOPE: &str = "Cargo.lock,Cargo.toml,crates/positron/Cargo.toml,api/positron/v1/positron.proto,api/positron/v1/http.json,configuration/schema.json";
 pub(crate) const COMPATIBILITY_INPUTS: [(&str, &[u8]); 6] = [
     ("Cargo.lock", include_bytes!("../../../../Cargo.lock")),
@@ -295,4 +262,37 @@ pub(crate) fn diagnostics_claim(output_limit: usize) -> Result<WorkClaim, Bundle
         0,
     ]))
     .map_err(|_| BundleFailure::Arguments)
+}
+
+#[cfg(test)]
+mod environment_evidence_tests {
+    use super::environment_evidence;
+
+    #[test]
+    fn unreadable_metadata_is_truthfully_unavailable_in_environment_artifact() {
+        let missing = std::env::temp_dir().join(format!(
+            "positron-bundle-metadata-missing-{}",
+            std::process::id()
+        ));
+        let rendered = environment_evidence(&missing, "id-redacted");
+        assert!(
+            rendered.contains("data_directory_metadata_bytes=unavailable\n"),
+            "environment artifact must not fabricate zero bytes after metadata failure: {rendered}"
+        );
+    }
+
+    #[test]
+    fn healthy_metadata_remains_numeric_in_environment_artifact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "positron-bundle-metadata-healthy-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let rendered = environment_evidence(&root, "id-redacted");
+        std::fs::remove_dir_all(&root)?;
+        assert!(rendered.contains("data_directory_metadata_bytes="));
+        assert!(!rendered.contains("data_directory_metadata_bytes=unavailable"));
+        Ok(())
+    }
 }
