@@ -30,6 +30,25 @@ enum MaintenanceWorkerOperation {
     RetentionDiscovery,
 }
 
+#[derive(Clone, Copy)]
+enum IntegrityScrubFailureStage {
+    PreVerification,
+    VerificationFailure,
+    IncompleteInvalid,
+    VerificationOutcomeFenced,
+}
+
+impl IntegrityScrubFailureStage {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::PreVerification => "pre_verification",
+            Self::VerificationFailure => "verification_failure",
+            Self::IncompleteInvalid => "incomplete_invalid",
+            Self::VerificationOutcomeFenced => "verification_outcome_fenced",
+        }
+    }
+}
+
 impl MaintenanceWorkerOperation {
     const fn token(self) -> &'static str {
         match self {
@@ -82,6 +101,24 @@ impl MaintenanceWorkerFailureContext {
         }
         .is_err();
     }
+}
+
+fn report_integrity_scrub_failure_stage(
+    stage: IntegrityScrubFailureStage,
+    failure: ServiceFailure,
+) {
+    use std::io::Write;
+
+    let Some(category) = maintenance_failure_category(failure) else {
+        return;
+    };
+    let mut stderr = std::io::stderr().lock();
+    let _diagnostic_write_failed = writeln!(
+        stderr,
+        "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub stage={} category={category}",
+        stage.token(),
+    )
+    .is_err();
 }
 
 #[derive(Clone)]
@@ -746,17 +783,32 @@ fn complete_integrity_scrub(
 ) -> Result<bool, ServiceFailure> {
     let status = coordinator
         .status(execution.task().identity())
-        .map_err(map_failure)?;
+        .map_err(|failure| {
+            let failure = map_failure(failure);
+            report_integrity_scrub_failure_stage(
+                IntegrityScrubFailureStage::PreVerification,
+                failure,
+            );
+            failure
+        })?;
     let continuation = status
         .checkpoint()
         .map(|checkpoint| {
             positron_kernel::IntegrityScrubContinuation::decode(checkpoint.opaque_progress())
-                .map_err(|_| ServiceFailure::CorruptState)
+                .map_err(|_| {
+                    report_integrity_scrub_failure_stage(
+                        IntegrityScrubFailureStage::PreVerification,
+                        ServiceFailure::CorruptState,
+                    );
+                    ServiceFailure::CorruptState
+                })
         })
         .transpose()?;
-    let snapshot = catalog
-        .pin()
-        .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
+    let snapshot = catalog.pin().map_err(|failure| {
+        let failure = classify_catalog_failure_code(failure.code());
+        report_integrity_scrub_failure_stage(IntegrityScrubFailureStage::PreVerification, failure);
+        failure
+    })?;
     let Some(source_binding) = execution.task().source_binding() else {
         // A record written before source binding existed is never allowed to
         // authenticate a mutable current scope by implication. Completing it
@@ -786,9 +838,16 @@ fn complete_integrity_scrub(
             .map_err(map_failure)?;
         return Ok(true);
     }
-    let identity =
-        positron_governance::Identity::open(&snapshot).map_err(|_| ServiceFailure::CorruptState)?;
-    let key = super::tenant_segment_key(instance, &identity, scope)?;
+    let identity = positron_governance::Identity::open(&snapshot).map_err(|_| {
+        report_integrity_scrub_failure_stage(
+            IntegrityScrubFailureStage::PreVerification,
+            ServiceFailure::CorruptState,
+        );
+        ServiceFailure::CorruptState
+    })?;
+    let key = super::tenant_segment_key(instance, &identity, scope).inspect_err(|failure| {
+        report_integrity_scrub_failure_stage(IntegrityScrubFailureStage::PreVerification, *failure);
+    })?;
     let transaction = TransactionId::new(execution.task().identity().to_bytes())
         .map_err(|_| ServiceFailure::Internal)?;
     let quarantine_audit = positron_governance::integrity_quarantine_audit_intent(
@@ -823,14 +882,23 @@ fn complete_integrity_scrub(
         )
         .with_quarantine_audit(quarantine_audit),
     )
-    .map_err(|failure| match failure.code() {
-        positron_kernel::IntegrityFailureCode::StorageUnavailable => {
-            ServiceFailure::StorageUnavailable
-        },
-        positron_kernel::IntegrityFailureCode::Cancelled => ServiceFailure::Cancelled,
-        positron_kernel::IntegrityFailureCode::InvalidInput
-        | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
-        | positron_kernel::IntegrityFailureCode::FindingCapacity => ServiceFailure::CorruptState,
+    .map_err(|failure| {
+        let failure = match failure.code() {
+            positron_kernel::IntegrityFailureCode::StorageUnavailable => {
+                ServiceFailure::StorageUnavailable
+            },
+            positron_kernel::IntegrityFailureCode::Cancelled => ServiceFailure::Cancelled,
+            positron_kernel::IntegrityFailureCode::InvalidInput
+            | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
+            | positron_kernel::IntegrityFailureCode::FindingCapacity => {
+                ServiceFailure::CorruptState
+            },
+        };
+        report_integrity_scrub_failure_stage(
+            IntegrityScrubFailureStage::VerificationFailure,
+            failure,
+        );
+        failure
     })?;
     match report.outcome() {
         IntegrityVerificationOutcome::Verified => {
@@ -840,7 +908,13 @@ fn complete_integrity_scrub(
             Ok(true)
         },
         IntegrityVerificationOutcome::Incomplete => {
-            let continuation = report.continuation().ok_or(ServiceFailure::CorruptState)?;
+            let continuation = report.continuation().ok_or_else(|| {
+                report_integrity_scrub_failure_stage(
+                    IntegrityScrubFailureStage::IncompleteInvalid,
+                    ServiceFailure::CorruptState,
+                );
+                ServiceFailure::CorruptState
+            })?;
             let sequence = status
                 .checkpoint()
                 .map_or(1, |checkpoint| checkpoint.sequence().saturating_add(1));
@@ -886,6 +960,10 @@ fn complete_integrity_scrub(
             execution
                 .complete_and_persist(coordinator, catalog, false)
                 .map_err(map_failure)?;
+            report_integrity_scrub_failure_stage(
+                IntegrityScrubFailureStage::VerificationOutcomeFenced,
+                ServiceFailure::CorruptState,
+            );
             Err(ServiceFailure::CorruptState)
         },
     }
@@ -1365,7 +1443,10 @@ fn map_failure(failure: MaintenanceFailure) -> ServiceFailure {
 
 #[cfg(test)]
 mod diagnostic_tests {
-    use super::{MaintenanceWorkerFailureContext, MaintenanceWorkerOperation, ServiceFailure};
+    use super::{
+        IntegrityScrubFailureStage, MaintenanceWorkerFailureContext, MaintenanceWorkerOperation,
+        ServiceFailure, report_integrity_scrub_failure_stage,
+    };
     use positron_kernel::MaintenanceTaskClass;
 
     const DIAGNOSTIC_CHILD: &str = "POSITRON_MAINTENANCE_DIAGNOSTIC_CHILD";
@@ -1377,6 +1458,10 @@ mod diagnostic_tests {
             MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::CompleteInFlight)
                 .with_task_class(MaintenanceTaskClass::IntegrityScrub)
                 .report(ServiceFailure::CorruptState);
+            report_integrity_scrub_failure_stage(
+                IntegrityScrubFailureStage::VerificationOutcomeFenced,
+                ServiceFailure::CorruptState,
+            );
             return Ok(());
         }
 
@@ -1394,7 +1479,10 @@ mod diagnostic_tests {
         );
         assert_eq!(
             String::from_utf8(output.stderr)?,
-            "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub category=corrupt_state\n"
+            concat!(
+                "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub category=corrupt_state\n",
+                "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub stage=verification_outcome_fenced category=corrupt_state\n",
+            )
         );
         Ok(())
     }
