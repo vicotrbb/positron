@@ -344,19 +344,19 @@ pub(in super::super) fn verify(
         positron_kernel::DiskPressureState::SoftPressure => crate::OfflineDiskPressure::Soft,
         positron_kernel::DiskPressureState::HardPressure => crate::OfflineDiskPressure::Hard,
     };
-    let facts = crate::OfflineInspectionFacts::new(
-        snapshot.number(),
-        tenants.len(),
+    let facts = crate::OfflineInspectionFacts {
+        catalog_generation: snapshot.number(),
+        registered_tenant_count: tenants.len(),
         reachable_scope_count,
         verified_envelope_count,
-        findings.len(),
+        quarantine_finding_count: findings.len(),
         verified_scope_count,
         fenced_scope_count,
         incomplete_scope_count,
-        resource_snapshot.usable_disk_bytes(),
+        usable_disk_bytes: resource_snapshot.usable_disk_bytes(),
         disk_pressure,
         backup_repository,
-    );
+    };
     let needs_continuation = if aggregate {
         covered_scope_count < reachable_scope_count
     } else {
@@ -393,19 +393,19 @@ pub(in super::super) fn verify(
     } else {
         None
     };
-    Ok(crate::OfflineIntegrityVerification::new(
+    Ok(crate::OfflineIntegrityVerification {
         reports,
         findings,
         facts,
         report_scope,
         continuation,
         covered_scope_count,
-        all_verified,
+        all_covered_scopes_verified: all_verified,
         examined_segments,
         examined_bytes,
         omitted_segments,
         aggregate_evidence,
-    ))
+    })
 }
 
 // The canonical scope manifest admits at most 1,024 scopes. Its complete

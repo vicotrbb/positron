@@ -76,6 +76,36 @@ impl<'a> CatalogIntegrityVerificationRequest<'a> {
     }
 }
 
+struct IntegrityVerificationTraversal<'a> {
+    scope: SegmentScope,
+    protection: &'a SegmentProtectionKey,
+    budget: IntegrityScrubBudget,
+    cancellation: &'a dyn IntegrityCancellationProbe,
+    transaction: TransactionId,
+    continuation: Option<IntegrityScrubContinuation>,
+}
+
+impl<'a> IntegrityVerificationTraversal<'a> {
+    const fn from_request(request: &'a IntegrityVerificationRequest<'_>) -> Self {
+        Self {
+            scope: request.scope,
+            protection: &request.protection,
+            budget: request.budget,
+            cancellation: request.cancellation,
+            transaction: request.transaction,
+            continuation: request.continuation,
+        }
+    }
+}
+
+struct IntegrityVerificationSnapshot<'a, 'kernel> {
+    authority: &'kernel crate::StorageKernelResourceAuthority,
+    storage: &'a LedgerStorage,
+    basis: &'a crate::CatalogSnapshot,
+    instance: InstanceId,
+    catalog: Option<&'a crate::Catalog<'kernel>>,
+}
+
 /// The short, serialized publication boundary for a localized online finding.
 /// The allowlist names only the authenticated durable task lineage permitted to
 /// have advanced the catalog since the immutable scan began.
@@ -121,13 +151,15 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             self.authority,
             &self.storage,
             self.catalog,
-            self.scope,
-            &self.protection,
+            IntegrityVerificationTraversal {
+                scope: self.scope,
+                protection: &self.protection,
+                budget,
+                cancellation,
+                transaction,
+                continuation: None,
+            },
             mode,
-            budget,
-            cancellation,
-            transaction,
-            None,
             None,
         )
     }
@@ -146,13 +178,15 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             self.authority,
             &self.storage,
             self.catalog,
-            self.scope,
-            &self.protection,
+            IntegrityVerificationTraversal {
+                scope: self.scope,
+                protection: &self.protection,
+                budget,
+                cancellation,
+                transaction,
+                continuation: Some(continuation),
+            },
             mode,
-            budget,
-            cancellation,
-            transaction,
-            Some(continuation),
             None,
         )
     }
@@ -183,13 +217,8 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             authority,
             &storage,
             catalog,
-            request.verification.scope,
-            &request.verification.protection,
+            IntegrityVerificationTraversal::from_request(&request.verification),
             request.mode,
-            request.verification.budget,
-            request.verification.cancellation,
-            request.verification.transaction,
-            request.verification.continuation,
             request.quarantine_audit,
         )
     }
@@ -209,18 +238,15 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
         let storage = LedgerStorage::open(volume).map_err(map_ledger_failure)?;
         verify_integrity_against_snapshot(
-            authority,
-            &storage,
-            snapshot,
-            catalog.instance(),
-            Some(catalog),
-            request.scope,
-            &request.protection,
+            IntegrityVerificationSnapshot {
+                authority,
+                storage: &storage,
+                basis: snapshot,
+                instance: catalog.instance(),
+                catalog: Some(catalog),
+            },
+            IntegrityVerificationTraversal::from_request(&request),
             IntegrityVerificationMode::Online,
-            request.budget,
-            request.cancellation,
-            request.transaction,
-            request.continuation,
             None,
         )
     }
@@ -239,18 +265,15 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
         let storage = LedgerStorage::open_observed(volume).map_err(map_ledger_failure)?;
         verify_integrity_against_snapshot(
-            authority,
-            &storage,
-            snapshot,
-            instance,
-            None,
-            request.scope,
-            &request.protection,
+            IntegrityVerificationSnapshot {
+                authority,
+                storage: &storage,
+                basis: snapshot,
+                instance,
+                catalog: None,
+            },
+            IntegrityVerificationTraversal::from_request(&request),
             IntegrityVerificationMode::Offline,
-            request.budget,
-            request.cancellation,
-            request.transaction,
-            request.continuation,
             None,
         )
     }
@@ -270,18 +293,15 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .ok_or(IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?;
         let storage = LedgerStorage::open_observed(volume).map_err(map_ledger_failure)?;
         verify_integrity_against_snapshot(
-            authority,
-            &storage,
-            snapshot,
-            instance,
-            None,
-            request.scope,
-            &request.protection,
+            IntegrityVerificationSnapshot {
+                authority,
+                storage: &storage,
+                basis: snapshot,
+                instance,
+                catalog: None,
+            },
+            IntegrityVerificationTraversal::from_request(&request),
             IntegrityVerificationMode::Online,
-            request.budget,
-            request.cancellation,
-            request.transaction,
-            request.continuation,
             None,
         )
     }
@@ -337,54 +357,50 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn verify_integrity_from(
     authority: &crate::StorageKernelResourceAuthority,
     storage: &LedgerStorage,
     catalog: &crate::Catalog<'_>,
-    scope: SegmentScope,
-    protection: &SegmentProtectionKey,
+    traversal: IntegrityVerificationTraversal<'_>,
     mode: IntegrityVerificationMode,
-    budget: IntegrityScrubBudget,
-    cancellation: &dyn IntegrityCancellationProbe,
-    transaction: TransactionId,
-    continuation: Option<IntegrityScrubContinuation>,
     quarantine_audit: Option<crate::AuditIntent>,
 ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
     let basis = catalog.pin().map_err(map_catalog_failure)?;
     verify_integrity_against_snapshot(
-        authority,
-        storage,
-        &basis,
-        catalog.instance(),
-        Some(catalog),
-        scope,
-        protection,
+        IntegrityVerificationSnapshot {
+            authority,
+            storage,
+            basis: &basis,
+            instance: catalog.instance(),
+            catalog: Some(catalog),
+        },
+        traversal,
         mode,
-        budget,
-        cancellation,
-        transaction,
-        continuation,
         quarantine_audit,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn verify_integrity_against_snapshot(
-    authority: &crate::StorageKernelResourceAuthority,
-    storage: &LedgerStorage,
-    basis: &crate::CatalogSnapshot,
-    instance: InstanceId,
-    catalog: Option<&crate::Catalog<'_>>,
-    scope: SegmentScope,
-    protection: &SegmentProtectionKey,
+    snapshot: IntegrityVerificationSnapshot<'_, '_>,
+    traversal: IntegrityVerificationTraversal<'_>,
     mode: IntegrityVerificationMode,
-    budget: IntegrityScrubBudget,
-    cancellation: &dyn IntegrityCancellationProbe,
-    transaction: TransactionId,
-    continuation: Option<IntegrityScrubContinuation>,
     quarantine_audit: Option<crate::AuditIntent>,
 ) -> Result<IntegrityVerificationReport, IntegrityFailure> {
+    let IntegrityVerificationSnapshot {
+        authority,
+        storage,
+        basis,
+        instance,
+        catalog,
+    } = snapshot;
+    let IntegrityVerificationTraversal {
+        scope,
+        protection,
+        budget,
+        cancellation,
+        transaction,
+        continuation,
+    } = traversal;
     let metadata = storage
         .catalog_segments_observed(basis, scope)
         .map_err(map_ledger_failure)?;
@@ -423,17 +439,17 @@ fn verify_integrity_against_snapshot(
         .map_err(map_ledger_failure)?;
     let start = match continuation {
         Some(continuation) if continuation.source_identity != source_identity => {
-            return Ok(report(
+            return Ok(report(IntegrityReport {
                 mode,
                 scope,
-                basis.number(),
-                0,
-                0,
-                target_count,
-                IntegrityVerificationOutcome::Stale,
-                None,
-                None,
-            ));
+                catalog_generation: basis.number(),
+                examined_segments: 0,
+                examined_bytes: 0,
+                omitted_segments: target_count,
+                outcome: IntegrityVerificationOutcome::Stale,
+                quarantined_segment: None,
+                continuation: None,
+            }));
         },
         Some(continuation) => match targets
             .iter()
@@ -441,17 +457,17 @@ fn verify_integrity_against_snapshot(
         {
             Some(position) => position.saturating_add(1),
             None => {
-                return Ok(report(
+                return Ok(report(IntegrityReport {
                     mode,
                     scope,
-                    basis.number(),
-                    0,
-                    0,
-                    target_count,
-                    IntegrityVerificationOutcome::Stale,
-                    None,
-                    None,
-                ));
+                    catalog_generation: basis.number(),
+                    examined_segments: 0,
+                    examined_bytes: 0,
+                    omitted_segments: target_count,
+                    outcome: IntegrityVerificationOutcome::Stale,
+                    quarantined_segment: None,
+                    continuation: None,
+                }));
             },
         },
         None => 0,
@@ -461,17 +477,18 @@ fn verify_integrity_against_snapshot(
     let mut last_segment = continuation.map(|cursor| cursor.last_segment);
     for candidate in targets.into_iter().skip(start).take(budget.0) {
         if cancellation.is_cancelled() {
-            return Ok(report(
+            return Ok(report(IntegrityReport {
                 mode,
                 scope,
-                basis.number(),
+                catalog_generation: basis.number(),
                 examined_segments,
                 examined_bytes,
-                target_count.saturating_sub(start.saturating_add(examined_segments)),
-                IntegrityVerificationOutcome::Incomplete,
-                None,
-                continuation_for(source_identity, last_segment),
-            ));
+                omitted_segments: target_count
+                    .saturating_sub(start.saturating_add(examined_segments)),
+                outcome: IntegrityVerificationOutcome::Incomplete,
+                quarantined_segment: None,
+                continuation: continuation_for(source_identity, last_segment),
+            }));
         }
         let physical = match if candidate.state == SegmentState::Sealed {
             storage.sealed_compaction_source_bound(*candidate, protection, instance)
@@ -491,53 +508,57 @@ fn verify_integrity_against_snapshot(
             {
                 let Some(catalog) = online_publication.then_some(catalog).flatten() else {
                     if can_localize_quarantine(*candidate) {
-                        return Ok(report(
+                        return Ok(report(IntegrityReport {
                             mode,
                             scope,
-                            basis.number(),
-                            examined_segments.saturating_add(1),
+                            catalog_generation: basis.number(),
+                            examined_segments: examined_segments.saturating_add(1),
                             examined_bytes,
-                            target_count.saturating_sub(
+                            omitted_segments: target_count.saturating_sub(
                                 start.saturating_add(examined_segments.saturating_add(1)),
                             ),
-                            IntegrityVerificationOutcome::Quarantined,
-                            Some(candidate.id),
-                            continuation_for(source_identity, Some(candidate.id)).filter(|_| {
-                                mode == IntegrityVerificationMode::Offline
-                                    && target_count
-                                        > start.saturating_add(examined_segments.saturating_add(1))
-                            }),
-                        )
+                            outcome: IntegrityVerificationOutcome::Quarantined,
+                            quarantined_segment: Some(candidate.id),
+                            continuation: continuation_for(source_identity, Some(candidate.id))
+                                .filter(|_| {
+                                    mode == IntegrityVerificationMode::Offline
+                                        && target_count
+                                            > start
+                                                .saturating_add(examined_segments.saturating_add(1))
+                                }),
+                        })
                         .with_localized_finding(
                             localized_finding(scope, *candidate).ok_or(IntegrityFailure(
                                 IntegrityFailureCode::AmbiguousIntegrity,
                             ))?,
                         ));
                     }
-                    return Ok(report(
+                    return Ok(report(IntegrityReport {
                         mode,
                         scope,
-                        basis.number(),
+                        catalog_generation: basis.number(),
                         examined_segments,
                         examined_bytes,
-                        target_count.saturating_sub(start.saturating_add(examined_segments)),
-                        IntegrityVerificationOutcome::Fenced,
-                        None,
-                        None,
-                    ));
+                        omitted_segments: target_count
+                            .saturating_sub(start.saturating_add(examined_segments)),
+                        outcome: IntegrityVerificationOutcome::Fenced,
+                        quarantined_segment: None,
+                        continuation: None,
+                    }));
                 };
                 if !can_localize_quarantine(*candidate) {
-                    return Ok(report(
+                    return Ok(report(IntegrityReport {
                         mode,
                         scope,
-                        basis.number(),
+                        catalog_generation: basis.number(),
                         examined_segments,
                         examined_bytes,
-                        target_count.saturating_sub(start.saturating_add(examined_segments)),
-                        IntegrityVerificationOutcome::Fenced,
-                        None,
-                        None,
-                    ));
+                        omitted_segments: target_count
+                            .saturating_sub(start.saturating_add(examined_segments)),
+                        outcome: IntegrityVerificationOutcome::Fenced,
+                        quarantined_segment: None,
+                        continuation: None,
+                    }));
                 }
                 publish_quarantine(
                     catalog,
@@ -547,48 +568,51 @@ fn verify_integrity_against_snapshot(
                     transaction,
                     quarantine_audit.clone(),
                 )?;
-                return Ok(report(
+                return Ok(report(IntegrityReport {
                     mode,
                     scope,
-                    basis.number(),
+                    catalog_generation: basis.number(),
                     examined_segments,
                     examined_bytes,
-                    target_count.saturating_sub(start.saturating_add(examined_segments)),
-                    IntegrityVerificationOutcome::Quarantined,
-                    Some(candidate.id),
-                    None,
-                )
+                    omitted_segments: target_count
+                        .saturating_sub(start.saturating_add(examined_segments)),
+                    outcome: IntegrityVerificationOutcome::Quarantined,
+                    quarantined_segment: Some(candidate.id),
+                    continuation: None,
+                })
                 .with_localized_finding(
                     localized_finding(scope, *candidate)
                         .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?,
                 ));
             },
             Err(_) => {
-                return Ok(report(
+                return Ok(report(IntegrityReport {
                     mode,
                     scope,
-                    basis.number(),
+                    catalog_generation: basis.number(),
                     examined_segments,
                     examined_bytes,
-                    target_count.saturating_sub(start.saturating_add(examined_segments)),
-                    IntegrityVerificationOutcome::Fenced,
-                    None,
-                    None,
-                ));
+                    omitted_segments: target_count
+                        .saturating_sub(start.saturating_add(examined_segments)),
+                    outcome: IntegrityVerificationOutcome::Fenced,
+                    quarantined_segment: None,
+                    continuation: None,
+                }));
             },
         };
         if physical > integrity_bytes_remaining(examined_bytes, budget.1) {
-            return Ok(report(
+            return Ok(report(IntegrityReport {
                 mode,
                 scope,
-                basis.number(),
+                catalog_generation: basis.number(),
                 examined_segments,
                 examined_bytes,
-                target_count.saturating_sub(start.saturating_add(examined_segments)),
-                IntegrityVerificationOutcome::Incomplete,
-                None,
-                continuation_for(source_identity, last_segment),
-            ));
+                omitted_segments: target_count
+                    .saturating_sub(start.saturating_add(examined_segments)),
+                outcome: IntegrityVerificationOutcome::Incomplete,
+                quarantined_segment: None,
+                continuation: continuation_for(source_identity, last_segment),
+            }));
         }
         match storage.recover_segment_with_mode(
             *candidate,
@@ -624,47 +648,49 @@ fn verify_integrity_against_snapshot(
                     });
                 let Some(catalog) = online_publication.then_some(catalog).flatten() else {
                     if can_localize_quarantine(*candidate) {
-                        return Ok(report(
+                        return Ok(report(IntegrityReport {
                             mode,
                             scope,
-                            basis.number(),
-                            localized_examined_segments,
-                            localized_examined_bytes,
-                            localized_omitted_segments,
-                            IntegrityVerificationOutcome::Quarantined,
-                            Some(candidate.id),
-                            localized_continuation,
-                        )
+                            catalog_generation: basis.number(),
+                            examined_segments: localized_examined_segments,
+                            examined_bytes: localized_examined_bytes,
+                            omitted_segments: localized_omitted_segments,
+                            outcome: IntegrityVerificationOutcome::Quarantined,
+                            quarantined_segment: Some(candidate.id),
+                            continuation: localized_continuation,
+                        })
                         .with_localized_finding(
                             localized_finding(scope, *candidate).ok_or(IntegrityFailure(
                                 IntegrityFailureCode::AmbiguousIntegrity,
                             ))?,
                         ));
                     }
-                    return Ok(report(
+                    return Ok(report(IntegrityReport {
                         mode,
                         scope,
-                        basis.number(),
+                        catalog_generation: basis.number(),
                         examined_segments,
                         examined_bytes,
-                        target_count.saturating_sub(start.saturating_add(examined_segments)),
-                        IntegrityVerificationOutcome::Fenced,
-                        None,
-                        None,
-                    ));
+                        omitted_segments: target_count
+                            .saturating_sub(start.saturating_add(examined_segments)),
+                        outcome: IntegrityVerificationOutcome::Fenced,
+                        quarantined_segment: None,
+                        continuation: None,
+                    }));
                 };
                 if !can_localize_quarantine(*candidate) {
-                    return Ok(report(
+                    return Ok(report(IntegrityReport {
                         mode,
                         scope,
-                        basis.number(),
+                        catalog_generation: basis.number(),
                         examined_segments,
                         examined_bytes,
-                        target_count.saturating_sub(start.saturating_add(examined_segments)),
-                        IntegrityVerificationOutcome::Fenced,
-                        None,
-                        None,
-                    ));
+                        omitted_segments: target_count
+                            .saturating_sub(start.saturating_add(examined_segments)),
+                        outcome: IntegrityVerificationOutcome::Fenced,
+                        quarantined_segment: None,
+                        continuation: None,
+                    }));
                 }
                 publish_quarantine(
                     catalog,
@@ -674,63 +700,64 @@ fn verify_integrity_against_snapshot(
                     transaction,
                     quarantine_audit.clone(),
                 )?;
-                return Ok(report(
+                return Ok(report(IntegrityReport {
                     mode,
                     scope,
-                    basis.number(),
+                    catalog_generation: basis.number(),
                     examined_segments,
                     examined_bytes,
-                    target_count.saturating_sub(start.saturating_add(examined_segments)),
-                    IntegrityVerificationOutcome::Quarantined,
-                    Some(candidate.id),
-                    None,
-                )
+                    omitted_segments: target_count
+                        .saturating_sub(start.saturating_add(examined_segments)),
+                    outcome: IntegrityVerificationOutcome::Quarantined,
+                    quarantined_segment: Some(candidate.id),
+                    continuation: None,
+                })
                 .with_localized_finding(
                     localized_finding(scope, *candidate)
                         .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?,
                 ));
             },
             Err(_) => {
-                return Ok(report(
+                return Ok(report(IntegrityReport {
                     mode,
                     scope,
-                    basis.number(),
+                    catalog_generation: basis.number(),
                     examined_segments,
                     examined_bytes,
-                    target_count.saturating_sub(start.saturating_add(examined_segments)),
-                    IntegrityVerificationOutcome::Fenced,
-                    None,
-                    None,
-                ));
+                    omitted_segments: target_count
+                        .saturating_sub(start.saturating_add(examined_segments)),
+                    outcome: IntegrityVerificationOutcome::Fenced,
+                    quarantined_segment: None,
+                    continuation: None,
+                }));
             },
         }
     }
     let omitted = target_count.saturating_sub(start.saturating_add(examined_segments));
-    Ok(report(
+    Ok(report(IntegrityReport {
         mode,
         scope,
-        basis.number(),
+        catalog_generation: basis.number(),
         examined_segments,
         examined_bytes,
-        omitted,
-        if omitted != 0 {
+        omitted_segments: omitted,
+        outcome: if omitted != 0 {
             IntegrityVerificationOutcome::Incomplete
         } else if retained_quarantine.is_some() {
             IntegrityVerificationOutcome::Quarantined
         } else {
             IntegrityVerificationOutcome::Verified
         },
-        retained_quarantine,
-        continuation_for(source_identity, last_segment).filter(|_| omitted != 0),
-    ))
+        quarantined_segment: retained_quarantine,
+        continuation: continuation_for(source_identity, last_segment).filter(|_| omitted != 0),
+    }))
 }
 
 fn integrity_bytes_remaining(examined: u64, budget: u64) -> u64 {
     budget.saturating_sub(examined)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn report(
+struct IntegrityReport {
     mode: IntegrityVerificationMode,
     scope: SegmentScope,
     catalog_generation: u64,
@@ -740,7 +767,20 @@ fn report(
     outcome: IntegrityVerificationOutcome,
     quarantined_segment: Option<SegmentId>,
     continuation: Option<IntegrityScrubContinuation>,
-) -> IntegrityVerificationReport {
+}
+
+fn report(parts: IntegrityReport) -> IntegrityVerificationReport {
+    let IntegrityReport {
+        mode,
+        scope,
+        catalog_generation,
+        examined_segments,
+        examined_bytes,
+        omitted_segments,
+        outcome,
+        quarantined_segment,
+        continuation,
+    } = parts;
     IntegrityVerificationReport {
         mode,
         verification_scope: match mode {

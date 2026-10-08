@@ -5,17 +5,17 @@ use positron_kernel::{
 /// Bounded, machine-renderable evidence from one offline verification pass.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OfflineIntegrityVerification {
-    reports: Vec<IntegrityVerificationReport>,
-    findings: Vec<IntegrityQuarantineFinding>,
-    facts: OfflineInspectionFacts,
-    report_scope: OfflineIntegrityReportScope,
-    continuation: Option<OfflineIntegrityContinuation>,
-    covered_scope_count: usize,
-    all_covered_scopes_verified: bool,
-    examined_segments: u64,
-    examined_bytes: u64,
-    omitted_segments: u64,
-    aggregate_evidence: Vec<OfflineIntegrityEvidence>,
+    pub(crate) reports: Vec<IntegrityVerificationReport>,
+    pub(crate) findings: Vec<IntegrityQuarantineFinding>,
+    pub(crate) facts: OfflineInspectionFacts,
+    pub(crate) report_scope: OfflineIntegrityReportScope,
+    pub(crate) continuation: Option<OfflineIntegrityContinuation>,
+    pub(crate) covered_scope_count: usize,
+    pub(crate) all_covered_scopes_verified: bool,
+    pub(crate) examined_segments: u64,
+    pub(crate) examined_bytes: u64,
+    pub(crate) omitted_segments: u64,
+    pub(crate) aggregate_evidence: Vec<OfflineIntegrityEvidence>,
 }
 
 /// The only aggregate truth an offline verification may publish after it has
@@ -120,17 +120,17 @@ impl OfflineIntegrityContinuation {
 /// lock. They describe only authorities opened by the offline pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OfflineInspectionFacts {
-    catalog_generation: u64,
-    registered_tenant_count: usize,
-    reachable_scope_count: usize,
-    verified_envelope_count: usize,
-    quarantine_finding_count: usize,
-    verified_scope_count: usize,
-    fenced_scope_count: usize,
-    incomplete_scope_count: usize,
-    usable_disk_bytes: u64,
-    disk_pressure: OfflineDiskPressure,
-    backup_repository: crate::BackupRepositoryInspection,
+    pub(crate) catalog_generation: u64,
+    pub(crate) registered_tenant_count: usize,
+    pub(crate) reachable_scope_count: usize,
+    pub(crate) verified_envelope_count: usize,
+    pub(crate) quarantine_finding_count: usize,
+    pub(crate) verified_scope_count: usize,
+    pub(crate) fenced_scope_count: usize,
+    pub(crate) incomplete_scope_count: usize,
+    pub(crate) usable_disk_bytes: u64,
+    pub(crate) disk_pressure: OfflineDiskPressure,
+    pub(crate) backup_repository: crate::BackupRepositoryInspection,
 }
 
 /// Primary Data Volume pressure observed by the temporary offline governor.
@@ -142,34 +142,6 @@ pub enum OfflineDiskPressure {
 }
 
 impl OfflineInspectionFacts {
-    #[allow(clippy::too_many_arguments, reason = "one closed inspection snapshot")]
-    pub(crate) const fn new(
-        catalog_generation: u64,
-        registered_tenant_count: usize,
-        reachable_scope_count: usize,
-        verified_envelope_count: usize,
-        quarantine_finding_count: usize,
-        verified_scope_count: usize,
-        fenced_scope_count: usize,
-        incomplete_scope_count: usize,
-        usable_disk_bytes: u64,
-        disk_pressure: OfflineDiskPressure,
-        backup_repository: crate::BackupRepositoryInspection,
-    ) -> Self {
-        Self {
-            catalog_generation,
-            registered_tenant_count,
-            reachable_scope_count,
-            verified_envelope_count,
-            quarantine_finding_count,
-            verified_scope_count,
-            fenced_scope_count,
-            incomplete_scope_count,
-            usable_disk_bytes,
-            disk_pressure,
-            backup_repository,
-        }
-    }
     #[must_use]
     pub const fn catalog_generation(self) -> u64 {
         self.catalog_generation
@@ -217,38 +189,6 @@ impl OfflineInspectionFacts {
 }
 
 impl OfflineIntegrityVerification {
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one immutable aggregate inspection result"
-    )]
-    pub(crate) fn new(
-        reports: Vec<IntegrityVerificationReport>,
-        findings: Vec<IntegrityQuarantineFinding>,
-        facts: OfflineInspectionFacts,
-        report_scope: OfflineIntegrityReportScope,
-        continuation: Option<OfflineIntegrityContinuation>,
-        covered_scope_count: usize,
-        all_covered_scopes_verified: bool,
-        examined_segments: u64,
-        examined_bytes: u64,
-        omitted_segments: u64,
-        aggregate_evidence: Vec<OfflineIntegrityEvidence>,
-    ) -> Self {
-        Self {
-            reports,
-            findings,
-            facts,
-            report_scope,
-            continuation,
-            covered_scope_count,
-            all_covered_scopes_verified,
-            examined_segments,
-            examined_bytes,
-            omitted_segments,
-            aggregate_evidence,
-        }
-    }
-
     #[must_use]
     pub fn reports(&self) -> &[IntegrityVerificationReport] {
         &self.reports
