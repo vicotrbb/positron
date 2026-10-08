@@ -46,7 +46,7 @@ impl PolicyPreviewServiceClient {{
                     return Err(PolicyPreviewServiceClientFailure::Transport);
                 }}
                 let authority = match identity {{ Ok(std::net::IpAddr::V6(_)) => format!("[{{server_name}}]"), _ => server_name.clone() }};
-                let trust = std::fs::read(trust_file).map_err(|_| PolicyPreviewServiceClientFailure::Transport)?;
+                let trust = crate::api_keys::read_bounded_trust_file(&trust_file).map_err(|_| PolicyPreviewServiceClientFailure::Transport)?;
                 let certificate = reqwest::Certificate::from_pem(&trust).map_err(|_| PolicyPreviewServiceClientFailure::Transport)?;
                 (format!("https://{{authority}}:{{}}", endpoint.port()), reqwest::blocking::Client::builder().add_root_certificate(certificate).resolve(&server_name, endpoint))
             }},

@@ -60,19 +60,60 @@ fn trusted_endpoint(path: &Path) -> io::Result<Metadata> {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs, io,
         os::unix::{fs::PermissionsExt, net::UnixListener},
         panic::{AssertUnwindSafe, catch_unwind},
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
     };
 
     use super::connect_owner_control;
 
+    const MAX_SOCKET_ROOT_ATTEMPTS: u64 = 32;
+    static NEXT_SOCKET_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    /// An owned directory prevents this test's socket from colliding with a
+    /// retained endpoint from another test process. It is removed only after
+    /// the listener has dropped, including on an early `?` return.
+    struct SocketRoot(PathBuf);
+
+    impl SocketRoot {
+        fn create() -> io::Result<Self> {
+            let first = NEXT_SOCKET_ROOT.fetch_add(MAX_SOCKET_ROOT_ATTEMPTS, Ordering::Relaxed);
+            for offset in 0..MAX_SOCKET_ROOT_ATTEMPTS {
+                let sequence = first
+                    .checked_add(offset)
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists))?;
+                let path = std::env::temp_dir().join(format!(
+                    "positron-owner-control-{}-{sequence}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Ok(Self(path)),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {},
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(io::Error::from(io::ErrorKind::AlreadyExists))
+        }
+
+        fn socket_path(&self) -> PathBuf {
+            self.0.join("control.sock")
+        }
+    }
+
+    impl Drop for SocketRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn owner_control_connect_fails_closed_inside_an_existing_runtime()
     -> Result<(), Box<dyn std::error::Error>> {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path =
-            std::path::Path::new("/tmp").join(format!("poc-{}-{nonce}.sock", std::process::id()));
+        let root = SocketRoot::create()?;
+        let path = root.socket_path();
         let _listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -83,7 +124,6 @@ mod tests {
                 connect_owner_control(&path, Duration::from_millis(1))
             }))
         });
-        std::fs::remove_file(&path)?;
         let result = result.expect("owner control transport must not panic inside a runtime");
         assert!(result.is_err());
         Ok(())
@@ -92,15 +132,13 @@ mod tests {
     #[test]
     fn owner_control_connect_enables_timers_in_its_owned_runtime()
     -> Result<(), Box<dyn std::error::Error>> {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-        let path =
-            std::path::Path::new("/tmp").join(format!("poc-{}-{nonce}.sock", std::process::id()));
+        let root = SocketRoot::create()?;
+        let path = root.socket_path();
         let _listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let result = catch_unwind(AssertUnwindSafe(|| {
             connect_owner_control(&path, Duration::from_millis(100))
         }));
-        std::fs::remove_file(&path)?;
         let stream =
             result.expect("owner control transport must not panic in its owned runtime")?;
         drop(stream);

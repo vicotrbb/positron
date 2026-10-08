@@ -826,7 +826,7 @@ fn maintenance_tls_rejects_oversized_symlinked_and_nonregular_trust_files()
         include_bytes!("../../positron-runtime/tests/native_transport/fixtures/api-test-cert.pem"),
     )?;
     let endpoint = "127.0.0.1:443".parse()?;
-    let client_for = |trust_file| {
+    let client_for = move |trust_file| {
         MaintenanceServiceClient::new(MaintenanceTransport::Tls {
             endpoint,
             server_name: "127.0.0.1".to_owned(),
