@@ -96,7 +96,10 @@ fn execute(
         Path::new(effective.data_directory()),
         Path::new(effective.secrets_directory()),
     )
-    .map_err(|_| BundleFailure::Arguments)?;
+    .map_err(|failure| match failure {
+        output::OutputPreparationFailure::InvalidDestination => BundleFailure::Arguments,
+        output::OutputPreparationFailure::Unavailable => BundleFailure::OutputUnavailable,
+    })?;
     let limits = BundleLimits::new(14, options.output_limit)
         .map_err(|_| BundleFailure::Arguments)?
         .with_elapsed_limit(options.elapsed_limit);

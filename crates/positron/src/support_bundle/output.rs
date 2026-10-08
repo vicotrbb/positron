@@ -25,6 +25,12 @@ pub(super) enum PublicationFailure {
     DeadlineExceeded,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OutputPreparationFailure {
+    InvalidDestination,
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct DirectoryIdentity {
     device: u64,
@@ -35,7 +41,7 @@ pub(super) fn prepare_destination(
     output: &Path,
     data_root: &Path,
     secrets_root: &Path,
-) -> Result<OutputDestination, ()> {
+) -> Result<OutputDestination, OutputPreparationFailure> {
     prepare_destination_after_managed_roots(output, data_root, secrets_root, || {})
 }
 
@@ -45,7 +51,7 @@ pub(super) fn prepare_destination_with_after_managed_root_hook(
     data_root: &Path,
     secrets_root: &Path,
     hook: impl FnOnce(),
-) -> Result<OutputDestination, ()> {
+) -> Result<OutputDestination, OutputPreparationFailure> {
     prepare_destination_after_managed_roots(output, data_root, secrets_root, hook)
 }
 
@@ -54,16 +60,21 @@ fn prepare_destination_after_managed_roots(
     data_root: &Path,
     secrets_root: &Path,
     after_managed_roots: impl FnOnce(),
-) -> Result<OutputDestination, ()> {
+) -> Result<OutputDestination, OutputPreparationFailure> {
     let output = absolute_path(output)?;
-    let parent = output.parent().ok_or(())?;
+    let parent = output
+        .parent()
+        .ok_or(OutputPreparationFailure::InvalidDestination)?;
     // Canonicalization supplies a stable, absolute component sequence, but it
     // is not a security decision. Each path is then opened with NOFOLLOW and
     // identities are compared after all handles are bound.
-    let data_root = std::fs::canonicalize(data_root).map_err(|_| ())?;
-    let secrets_root = std::fs::canonicalize(secrets_root).map_err(|_| ())?;
-    let canonical_parent = std::fs::canonicalize(parent).map_err(|_| ())?;
-    let name = output.file_name().ok_or(())?.to_os_string();
+    let data_root = std::fs::canonicalize(data_root).map_err(classify_io_failure)?;
+    let secrets_root = std::fs::canonicalize(secrets_root).map_err(classify_io_failure)?;
+    let canonical_parent = std::fs::canonicalize(parent).map_err(classify_io_failure)?;
+    let name = output
+        .file_name()
+        .ok_or(OutputPreparationFailure::InvalidDestination)?
+        .to_os_string();
     let data_root = open_directory_without_symlinks(&data_root, &[])?;
     let secrets_root = open_directory_without_symlinks(&secrets_root, &[])?;
     let forbidden = [
@@ -181,12 +192,12 @@ fn write_new_owner_only_after_close_with_publication(
     Ok(())
 }
 
-fn absolute_path(path: &Path) -> Result<PathBuf, ()> {
+fn absolute_path(path: &Path) -> Result<PathBuf, OutputPreparationFailure> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {
         std::env::current_dir()
-            .map_err(|_| ())
+            .map_err(|_| OutputPreparationFailure::Unavailable)
             .map(|cwd| cwd.join(path))
     }
 }
@@ -194,8 +205,8 @@ fn absolute_path(path: &Path) -> Result<PathBuf, ()> {
 fn open_directory_without_symlinks(
     path: &Path,
     forbidden: &[DirectoryIdentity],
-) -> Result<File, ()> {
-    let mut current = File::open("/").map_err(|_| ())?;
+) -> Result<File, OutputPreparationFailure> {
+    let mut current = File::open("/").map_err(classify_io_failure)?;
     for component in path.components() {
         match component {
             Component::RootDir => {},
@@ -207,23 +218,43 @@ fn open_directory_without_symlinks(
                     Mode::empty(),
                 )
                 .map(File::from)
-                .map_err(|_| ())?;
+                .map_err(classify_errno)?;
                 if forbidden.contains(&directory_identity(&current)?) {
-                    return Err(());
+                    return Err(OutputPreparationFailure::InvalidDestination);
                 }
             },
-            Component::CurDir | Component::ParentDir | Component::Prefix(_) => return Err(()),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(OutputPreparationFailure::InvalidDestination);
+            },
         }
     }
     Ok(current)
 }
 
-fn directory_identity(directory: &File) -> Result<DirectoryIdentity, ()> {
-    let metadata = directory.metadata().map_err(|_| ())?;
+fn directory_identity(directory: &File) -> Result<DirectoryIdentity, OutputPreparationFailure> {
+    let metadata = directory.metadata().map_err(classify_io_failure)?;
     Ok(DirectoryIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
     })
+}
+
+fn classify_io_failure(error: std::io::Error) -> OutputPreparationFailure {
+    match error.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::NotADirectory
+        | std::io::ErrorKind::InvalidInput => OutputPreparationFailure::InvalidDestination,
+        _ => OutputPreparationFailure::Unavailable,
+    }
+}
+
+fn classify_errno(error: rustix::io::Errno) -> OutputPreparationFailure {
+    match error {
+        rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR | rustix::io::Errno::LOOP => {
+            OutputPreparationFailure::InvalidDestination
+        },
+        _ => OutputPreparationFailure::Unavailable,
+    }
 }
 
 struct PrivateTemporaryDirectory {

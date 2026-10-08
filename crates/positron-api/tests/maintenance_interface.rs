@@ -861,9 +861,8 @@ fn maintenance_tls_rejects_oversized_symlinked_and_nonregular_trust_files()
         std::thread::spawn(move || {
             let _ = sender.send(client_for(fifo).is_err());
         });
-        assert_eq!(
+        assert!(
             receiver.recv_timeout(Duration::from_millis(250))?,
-            true,
             "FIFO trust path must reject without waiting for a writer"
         );
     }

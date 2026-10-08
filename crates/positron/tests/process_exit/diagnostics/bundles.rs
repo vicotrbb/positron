@@ -101,6 +101,66 @@ fn compiled_support_bundle_enforces_the_bounded_log_window_before_inspection()
 
 #[cfg(unix)]
 #[test]
+fn compiled_support_bundle_reports_an_unavailable_output_directory()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let (root, roots, config) = initialized_support_bundle_fixture("output-unavailable")?;
+    let unavailable = root.join("unavailable");
+    fs::create_dir(&unavailable)?;
+    let original_permissions = fs::metadata(&unavailable)?.permissions();
+    fs::set_permissions(&unavailable, fs::Permissions::from_mode(0o000))?;
+
+    struct RestorePermissions {
+        path: std::path::PathBuf,
+        permissions: fs::Permissions,
+    }
+
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.path, self.permissions.clone());
+        }
+    }
+
+    let _restore = RestorePermissions {
+        path: unavailable.clone(),
+        permissions: original_permissions,
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["support", "bundle", "create", "--config"])
+        .arg(&config)
+        .args(["--output"])
+        .arg(unavailable.join("bundle.age"))
+        .args(["--allow-plaintext-bundle", "--offline-key-unavailable"])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "report_version=1\nstatus=output_unavailable\nfinding_code=SUPPORT_BUNDLE_OUTPUT_UNAVAILABLE\nseverity=error\n"
+    );
+    assert!(!unavailable.join("bundle.age").exists());
+
+    let unsafe_output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["support", "bundle", "create", "--config"])
+        .arg(&config)
+        .args(["--output"])
+        .arg(roots.data.join("bundle.age"))
+        .args(["--allow-plaintext-bundle", "--offline-key-unavailable"])
+        .output()?;
+    assert_eq!(unsafe_output.status.code(), Some(2));
+    assert!(String::from_utf8(unsafe_output.stdout)?.contains("SUPPORT_BUNDLE_ARGUMENTS_INVALID"));
+    assert!(!roots.data.join("bundle.age").exists());
+    drop(_restore);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn compiled_support_bundle_rejects_deadlines_above_the_documented_limit_before_configuration()
 -> Result<(), Box<dyn std::error::Error>> {
     let _serial = PROCESS_TEST
