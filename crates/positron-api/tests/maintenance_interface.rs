@@ -801,3 +801,73 @@ fn maintenance_control_client_uses_the_canonical_bounded_routes()
     server.join().map_err(|_| "server panicked")??;
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn maintenance_tls_rejects_oversized_symlinked_and_nonregular_trust_files()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    const MAX_TRUST_FILE_BYTES: usize = 65_536;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "positron-maintenance-trust-{}-{nonce}",
+        process::id()
+    ));
+    fs::create_dir_all(&root)?;
+    let certificate = root.join("certificate.pem");
+    fs::write(
+        &certificate,
+        include_bytes!("../../positron-runtime/tests/native_transport/fixtures/api-test-cert.pem"),
+    )?;
+    let endpoint = "127.0.0.1:443".parse()?;
+    let client_for = |trust_file| {
+        MaintenanceServiceClient::new(MaintenanceTransport::Tls {
+            endpoint,
+            server_name: "127.0.0.1".to_owned(),
+            trust_file,
+        })
+    };
+
+    let oversized = root.join("oversized.pem");
+    let mut bytes = fs::read(&certificate)?;
+    bytes.resize(MAX_TRUST_FILE_BYTES + 1, b'\n');
+    fs::write(&oversized, bytes)?;
+    assert!(
+        client_for(oversized).is_err(),
+        "oversized trust file was accepted"
+    );
+
+    let symlinked = root.join("symlinked.pem");
+    symlink(&certificate, &symlinked)?;
+    assert!(
+        client_for(symlinked).is_err(),
+        "symlinked trust file was accepted"
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        use rustix::fs::{self as unix_fs, CWD, Mode};
+        use std::{sync::mpsc, time::Duration};
+
+        let fifo = root.join("trust.fifo");
+        unix_fs::mkfifoat(CWD, &fifo, Mode::RUSR | Mode::WUSR)?;
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(client_for(fifo).is_err());
+        });
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_millis(250))?,
+            true,
+            "FIFO trust path must reject without waiting for a writer"
+        );
+    }
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

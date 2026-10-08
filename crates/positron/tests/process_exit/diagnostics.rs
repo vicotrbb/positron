@@ -63,23 +63,26 @@ impl SupportBundleOutput {
 }
 
 #[cfg(unix)]
-fn write_sanitized_crash_record(
+fn persist_sanitized_crash_record(
+    paths: &BootstrapPaths,
     data_directory: &std::path::Path,
-    name: &str,
-    finding: &str,
-    modified: SystemTime,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let records = data_directory.join("diagnostics/crash-records");
-    fs::create_dir_all(&records)?;
-    let path = records.join(name);
-    fs::write(
-        &path,
-        format!(
-            "record_version=1\nproduct=positron\nbuild_identity={finding}\nphase=serving\ncomponent=runtime\nfinding_code=runtime_startup_failed\nbacktrace_identity=sha256-0123456789abcdef\ncatalog_generation=7\noperation_generation=unavailable\n"
-        ),
-    )?;
-    std::fs::File::open(&path)?.set_times(std::fs::FileTimes::new().set_modified(modified))?;
-    Ok(())
+    finding_code: &'static str,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let instance = InstanceBootstrap::reopen(paths)?;
+    let record = positron_kernel::CrashRecord::new("serving", finding_code, "runtime")
+        .map_err(|failure| format!("crash record: {failure:?}"))?;
+    instance
+        .crash_records()?
+        .persist(&record)
+        .map_err(|failure| format!("persist crash record: {failure:?}"))?;
+    data_directory
+        .join("diagnostics/crash-records")
+        .read_dir()?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .max_by_key(|entry| entry.file_name())
+        .map(|entry| entry.path())
+        .ok_or_else(|| "persisted crash record missing".into())
 }
 
 #[cfg(unix)]

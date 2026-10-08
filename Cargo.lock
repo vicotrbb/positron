@@ -1610,6 +1610,7 @@ dependencies = [
  "prost-types 0.14.3",
  "protoc-bin-vendored",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",

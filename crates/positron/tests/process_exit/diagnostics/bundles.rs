@@ -538,33 +538,17 @@ fn compiled_support_bundle_declares_collection_bounds_in_every_canonical_output_
         SupportBundleOutput::UnsignedKeyUnavailableEncrypted,
     ] {
         let (root, roots, config) = initialized_support_bundle_fixture(mode.label())?;
+        let paths =
+            BootstrapPaths::new(&roots.data, &roots.secrets, MountQualification::LocalHost)?;
+        persist_sanitized_crash_record(&paths, &roots.data, "runtime_startup_failed")?;
+        persist_sanitized_crash_record(&paths, &roots.data, "catalog_unavailable")?;
         let credential = if mode.requires_credential() {
-            Some(
-                InstanceBootstrap::claim(&BootstrapPaths::new(
-                    &roots.data,
-                    &roots.secrets,
-                    MountQualification::LocalHost,
-                )?)?
-                .secret()
-                .to_owned(),
-            )
+            Some(InstanceBootstrap::claim(&paths)?.secret().to_owned())
         } else {
             fs::remove_file(roots.secrets.join("local-root-key.v1"))?;
             None
         };
 
-        write_sanitized_crash_record(
-            &roots.data,
-            "record-00000000000000000001.txt",
-            "source_one_canary",
-            SystemTime::now(),
-        )?;
-        write_sanitized_crash_record(
-            &roots.data,
-            "record-00000000000000000002.txt",
-            "source_two_canary",
-            SystemTime::now(),
-        )?;
         let source_limited = root.join("source-limited.bundle");
         let (result, archive) = invoke_support_bundle(
             &config,
@@ -581,35 +565,46 @@ fn compiled_support_bundle_declares_collection_bounds_in_every_canonical_output_
         );
         let records = archive_member(&archive, "sanitized-crash-records.txt")?;
         let redaction = archive_member(&archive, "redaction-report.txt")?;
-        assert!(
-            records.contains("record_index=0\n") && !records.contains("record_index=1\n"),
-            "{} must preserve exactly one bounded source: {records}",
-            mode.label()
-        );
-        assert_eq!(
-            usize::from(records.contains("source_one_canary"))
-                + usize::from(records.contains("source_two_canary")),
-            1,
-            "{} must omit an unread crash source rather than concatenate both: {records}",
-            mode.label()
-        );
-        assert!(
-            redaction.contains("crash_record_file_limit"),
-            "{} must declare the source-file bound: {redaction}",
-            mode.label()
-        );
+        if mode.requires_credential() {
+            assert!(
+                records.contains("record_index=0\n") && !records.contains("record_index=1\n"),
+                "{} must preserve exactly one bounded source: {records}",
+                mode.label()
+            );
+            assert_eq!(
+                usize::from(records.contains("finding_code=runtime_startup_failed"))
+                    + usize::from(records.contains("finding_code=catalog_unavailable")),
+                1,
+                "{} must omit an unread crash source rather than concatenate both: {records}",
+                mode.label()
+            );
+            assert!(
+                redaction.contains("crash_record_file_limit"),
+                "{} must declare the source-file bound: {redaction}",
+                mode.label()
+            );
+        } else {
+            assert_eq!(records, "record_count=0\n");
+            assert!(
+                redaction.contains("crash_record_key_unavailable"),
+                "{} must declare the unavailable-key omission: {redaction}",
+                mode.label()
+            );
+        }
         assert!(source_limited.is_file());
 
         fs::remove_dir_all(roots.data.join("diagnostics"))?;
-        let stale = SystemTime::now()
-            .checked_sub(Duration::from_secs(2))
-            .ok_or("system clock before unix epoch")?;
-        write_sanitized_crash_record(
-            &roots.data,
-            "record-00000000000000000003.txt",
-            "stale_source_canary",
-            stale,
-        )?;
+        let stale_record = mode
+            .requires_credential()
+            .then(|| persist_sanitized_crash_record(&paths, &roots.data, "runtime_startup_failed"))
+            .transpose()?;
+        if let Some(record) = stale_record {
+            let stale = SystemTime::now()
+                .checked_sub(Duration::from_secs(2))
+                .ok_or("system clock before unix epoch")?;
+            std::fs::File::open(record)?
+                .set_times(std::fs::FileTimes::new().set_modified(stale))?;
+        }
         let log_limited = root.join("log-limited.bundle");
         let (result, archive) = invoke_support_bundle(
             &config,
@@ -627,12 +622,19 @@ fn compiled_support_bundle_declares_collection_bounds_in_every_canonical_output_
         let records = archive_member(&archive, "sanitized-crash-records.txt")?;
         let redaction = archive_member(&archive, "redaction-report.txt")?;
         assert_eq!(records, "record_count=0\n");
-        assert!(!records.contains("stale_source_canary"));
-        assert!(
-            redaction.contains("crash_record_log_window"),
-            "{} must declare the input-log-window omission: {redaction}",
-            mode.label()
-        );
+        if mode.requires_credential() {
+            assert!(
+                redaction.contains("crash_record_log_window"),
+                "{} must declare the input-log-window omission: {redaction}",
+                mode.label()
+            );
+        } else {
+            assert!(
+                redaction.contains("crash_record_key_unavailable"),
+                "{} must declare the unavailable-key omission: {redaction}",
+                mode.label()
+            );
+        }
         assert!(log_limited.is_file());
 
         let deadline_output = root.join("deadline.bundle");
