@@ -322,16 +322,6 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
             _ => std::thread::yield_now(),
         }
     }
-    let statuses =
-        maintenance_client.status(claim.secret(), &MaintenanceStatusRequest::default())?;
-    assert!(
-        statuses.tasks.iter().any(|candidate| {
-            candidate.class == "retention_publication"
-                && candidate.phase == "failed"
-                && candidate.terminal_failure_class.as_deref() == Some("stale_generation")
-        }),
-        "the current policy-derived plan terminalizes its stale predecessor before the released claim admits reclamation"
-    );
     assert_eq!(
         resumed.shutdown(ShutdownTrigger::FirstSignal),
         positron_runtime::ExitOutcome::Graceful

@@ -1,6 +1,166 @@
 use super::*;
 
 #[test]
+fn runtime_worker_terminalizes_a_policy_stale_retention_publication_before_reclamation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (mut initialized, ingest, _, administrator_secret) = fixture.initialized_with_admin()?;
+    let (retention_time, elapsed) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
+    Arc::get_mut(&mut initialized)
+        .ok_or("sole initialized instance")?
+        .install_retention_time_for_test(retention_time)?;
+    let tenant = initialized.default_tenant_id();
+    let system = initialized.attribute(
+        PresentedCredential::parse(&administrator_secret)?,
+        RequestedIntent::SystemAdministration,
+        CompatibilityHints::none(),
+    )?;
+    let expired_retention = std::num::NonZeroU64::new(1).ok_or("one-second retention")?;
+    let preview = initialized.inspect_tenant_retention_impact(system, tenant, expired_retention)?;
+    let first_update = initialized.update_tenant_retention(
+        system,
+        tenant,
+        expired_retention,
+        ResourceGeneration::new(1)?,
+        Some(&preview),
+        AdministrativeIdempotencyKey::new([0xb1; 16])?,
+    )?;
+    assert_eq!(
+        first_update.retention_generation(),
+        ResourceGeneration::new(2)?
+    );
+
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    assert_eq!(
+        services
+            .ingest_otlp_logs(
+                &ingest,
+                request("policy-stale retention source").encode_to_vec()
+            )?
+            .accepted_records(),
+        1,
+        "the public OTLP path provides the sealed retention source"
+    );
+    let catalog = open_catalog(&initialized)?;
+    let scope = catalog
+        .pin()?
+        .reachable_ledger_scopes(tenant, SignalKind::Logs)?
+        .into_iter()
+        .next()
+        .ok_or("log ledger scope")?;
+    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        initialized.tenant_segment_key_for_test(scope)?,
+    )?
+    .seal()?;
+    drop(catalog);
+    elapsed.advance(2_000_000_000)?;
+
+    let catalog = open_catalog(&initialized)?;
+    let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        initialized.tenant_segment_key_for_test(scope)?,
+    )?;
+    let preparation = ledger.prepare_retention_publication()?;
+    let identity = preparation.task().identity();
+    preparation.submit_and_persist(initialized.maintenance_coordinator(), &catalog, 12)?;
+    drop(ledger);
+    drop(catalog);
+    assert_eq!(
+        initialized
+            .maintenance_coordinator()
+            .status(identity)
+            .map_err(|failure| format!("queued retention publication: {failure:?}"))?
+            .phase(),
+        MaintenanceTaskPhase::Queued,
+        "the original expired-source descriptor is durable before its policy changes"
+    );
+
+    let current_policy = std::num::NonZeroU64::new(60).ok_or("expanded retention")?;
+    let second_update = initialized.update_tenant_retention(
+        system,
+        tenant,
+        current_policy,
+        ResourceGeneration::new(2)?,
+        None,
+        AdministrativeIdempotencyKey::new([0xb2; 16])?,
+    )?;
+    assert_eq!(
+        second_update.retention_generation(),
+        ResourceGeneration::new(3)?
+    );
+    let reservation_baseline = initialized
+        .resource_governor()
+        .inspect()?
+        .outstanding_total();
+
+    assert!(
+        services.wake_maintenance_worker()?,
+        "the public worker must terminalize its admitted stale descriptor instead of retaining its claim"
+    );
+    let status = initialized
+        .maintenance_coordinator()
+        .status(identity)
+        .map_err(|failure| format!("terminal stale publication: {failure:?}"))?;
+    assert_eq!(status.phase(), MaintenanceTaskPhase::Failed);
+    assert_eq!(
+        status.terminal_failure(),
+        Some(positron_kernel::MaintenanceTerminalFailure::StaleGeneration),
+        "the stale policy binding must be explicit rather than retried as a transient catalog failure"
+    );
+    assert_eq!(
+        initialized
+            .resource_governor()
+            .inspect()?
+            .outstanding_total(),
+        reservation_baseline,
+        "a rejected-before-mutation publication releases its admitted Recovery claim"
+    );
+    let public_status = services
+        .maintenance_status(&administrator_secret, br"{}")
+        .map_err(|failure| format!("public stale publication status: {failure:?}"))?;
+    assert_eq!(
+        public_status
+            .tasks
+            .iter()
+            .find(|task| task.class == "retention_publication")
+            .ok_or("public retention publication")?
+            .terminal_failure_class
+            .as_deref(),
+        Some("stale_generation")
+    );
+    assert!(
+        !public_status
+            .tasks
+            .iter()
+            .any(|task| task.class == "retention_reclamation"),
+        "the stale pre-mutation publication produces no successor reclamation"
+    );
+    let catalog = open_catalog(&initialized)?;
+    let snapshot = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        &initialized._authority,
+        &initialized.retention_time,
+        &catalog,
+        scope,
+        initialized.tenant_segment_key_for_test(scope)?,
+    )?
+    .snapshot()?;
+    assert_eq!(
+        snapshot.blocks().len(),
+        1,
+        "the newly authoritative longer policy preserves the sealed source and publishes no reclamation"
+    );
+    Ok(())
+}
+
+#[test]
 fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_retention()
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
