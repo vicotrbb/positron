@@ -69,7 +69,7 @@ fn captured_backtrace_is_persisted_only_as_a_safe_fingerprint()
     .map_err(|_| "typed crash record")?
     .with_backtrace(&backtrace);
     let rendered = record.render();
-    assert!(rendered.contains(&format!("backtrace_identity=sha256-{expected}")));
+    assert!(rendered.contains(&format!("backtrace_identity=truncated-sha256-{expected}")));
     assert!(!rendered.contains("backtrace::"));
     assert!(!rendered.contains("joined task panic payload"));
     Ok(())
