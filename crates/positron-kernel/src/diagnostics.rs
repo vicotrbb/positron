@@ -83,17 +83,35 @@ fn backtrace_identity(backtrace: &std::backtrace::Backtrace) -> String {
             let mut writer = BoundedBacktraceWriter {
                 rendered: &mut rendered,
             };
-            // The writer returns an error once its fixed input budget is exhausted. That is an
-            // expected truncation boundary: only the bounded, sanitized prefix is fingerprinted.
-            let _ = write!(&mut writer, "{backtrace:?}");
+            let outcome = match write!(&mut writer, "{backtrace:?}") {
+                Ok(()) => BacktraceFingerprint::Complete,
+                // The fixed input budget was exhausted. Only the bounded, sanitized prefix is
+                // fingerprinted, and the rendered record must say that it was truncated.
+                Err(_) => BacktraceFingerprint::Truncated,
+            };
             if rendered.is_empty() {
                 return "unavailable".to_owned();
             }
             let digest = Sha256::digest(rendered.as_bytes());
-            format!("sha256-{}", hex(&digest[..8]))
+            format!("{}sha256-{}", outcome.prefix(), hex(&digest[..8]))
         },
         std::backtrace::BacktraceStatus::Disabled => "disabled".to_owned(),
         _ => "unavailable".to_owned(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BacktraceFingerprint {
+    Complete,
+    Truncated,
+}
+
+impl BacktraceFingerprint {
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Complete => "",
+            Self::Truncated => "truncated-",
+        }
     }
 }
 
@@ -489,6 +507,9 @@ fn canonical_crash_value(key: &str, value: &str) -> bool {
                 || (value.len() == 23
                     && value.starts_with("sha256-")
                     && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit()))
+                || (value.len() == 33
+                    && value.starts_with("truncated-sha256-")
+                    && value[17..].bytes().all(|byte| byte.is_ascii_hexdigit()))
         },
         "catalog_generation" => value == "unavailable" || value.parse::<u64>().is_ok(),
         _ => false,
@@ -526,4 +547,24 @@ fn set_owner_only(file: &File) -> Result<(), CrashRecordFailure> {
 pub fn fuzz_crash_record_decoder(data: &[u8]) {
     let bounded = &data[..data.len().min(MAX_ENCODED_RECORD_BYTES + 1)];
     let _ = crate::data_protection::crash_record_frame_parts(bounded);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CrashRecord, valid_rendered};
+
+    #[test]
+    fn captured_backtrace_artifact_marks_a_bounded_fingerprint_as_truncated() {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let Ok(record) = CrashRecord::new("draining", "runtime_drain_failed", "runtime") else {
+            panic!("closed crash record fields must be accepted");
+        };
+        let rendered = record.with_backtrace(&backtrace).render();
+        let identity = rendered
+            .lines()
+            .find_map(|line| line.strip_prefix("backtrace_identity="));
+
+        assert!(identity.is_some_and(|value| value.starts_with("truncated-sha256-")));
+        assert!(valid_rendered(rendered.as_bytes()));
+    }
 }

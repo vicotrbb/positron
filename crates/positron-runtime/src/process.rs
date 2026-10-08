@@ -1112,6 +1112,25 @@ struct DrainTaskFailureDiagnostic {
     failure: TaskFailure,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrainDiagnosticDelivery {
+    Delivered,
+    Unavailable,
+}
+
+fn preserve_drain_task_failure(
+    delivery: DrainDiagnosticDelivery,
+    primary: TaskFailure,
+) -> TaskFailure {
+    match delivery {
+        DrainDiagnosticDelivery::Delivered => primary,
+        // The existing task failure still drives process shutdown and its
+        // bounded crash record. A closed stderr sink must not replace that
+        // primary failure or skip the forced shutdown path.
+        DrainDiagnosticDelivery::Unavailable => primary,
+    }
+}
+
 impl std::fmt::Display for DrainTaskFailureDiagnostic {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -1150,23 +1169,37 @@ fn report_drain_task_failure(
     site: DrainFailureSite,
     role: TaskRole,
     failure: TaskFailure,
-) -> std::io::Result<()> {
-    use std::io::Write;
+) -> DrainDiagnosticDelivery {
+    let mut stderr = std::io::stderr().lock();
+    report_drain_task_failure_to(&mut stderr, site, role, failure)
+}
 
-    writeln!(
-        std::io::stderr().lock(),
+fn report_drain_task_failure_to(
+    sink: &mut impl std::io::Write,
+    site: DrainFailureSite,
+    role: TaskRole,
+    failure: TaskFailure,
+) -> DrainDiagnosticDelivery {
+    match writeln!(
+        sink,
         "{}",
         DrainTaskFailureDiagnostic {
             site,
             role,
             failure,
         }
-    )
+    ) {
+        Ok(()) => DrainDiagnosticDelivery::Delivered,
+        Err(_) => DrainDiagnosticDelivery::Unavailable,
+    }
 }
 
 #[cfg(test)]
 mod drain_failure_diagnostic_tests {
-    use super::{DrainFailureSite, DrainTaskFailureDiagnostic};
+    use super::{
+        DrainDiagnosticDelivery, DrainFailureSite, DrainTaskFailureDiagnostic,
+        preserve_drain_task_failure, report_drain_task_failure_to,
+    };
     use crate::{TaskFailure, TaskRole};
 
     #[test]
@@ -1213,6 +1246,35 @@ mod drain_failure_diagnostic_tests {
             }
         }
     }
+
+    #[test]
+    fn unavailable_drain_diagnostic_preserves_the_primary_task_failure() {
+        struct ClosedDiagnosticSink;
+
+        impl std::io::Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut sink = ClosedDiagnosticSink;
+        let delivery = report_drain_task_failure_to(
+            &mut sink,
+            DrainFailureSite::JoinWithin,
+            TaskRole::Maintenance,
+            TaskFailure::JoinUnavailable,
+        );
+
+        assert_eq!(delivery, DrainDiagnosticDelivery::Unavailable);
+        assert_eq!(
+            preserve_drain_task_failure(delivery, TaskFailure::JoinUnavailable),
+            TaskFailure::JoinUnavailable
+        );
+    }
 }
 
 impl DrainingProcess {
@@ -1243,12 +1305,10 @@ impl DrainingProcess {
             let joined = match task.poll_join() {
                 Ok(joined) => joined,
                 Err(failure) => {
-                    if report_drain_task_failure(DrainFailureSite::PollJoin, *role, failure)
-                        .is_err()
-                    {
-                        return Err(failure);
-                    }
-                    return Err(failure);
+                    return Err(preserve_drain_task_failure(
+                        report_drain_task_failure(DrainFailureSite::PollJoin, *role, failure),
+                        failure,
+                    ));
                 },
             };
             match joined {
@@ -1290,13 +1350,14 @@ impl DrainingProcess {
                             return self.0.abort_shutdown();
                         },
                         Err(failure) => {
-                            let _diagnostic_write_failed = report_drain_task_failure(
-                                DrainFailureSite::JoinWithin,
-                                *role,
+                            late_failure = Some(preserve_drain_task_failure(
+                                report_drain_task_failure(
+                                    DrainFailureSite::JoinWithin,
+                                    *role,
+                                    failure,
+                                ),
                                 failure,
-                            )
-                            .is_err();
-                            late_failure = Some(failure);
+                            ));
                             break;
                         },
                     }
