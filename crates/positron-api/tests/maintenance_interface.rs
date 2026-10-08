@@ -1,11 +1,237 @@
 use positron_api::maintenance::{
+    AuthenticatedTimeRangeDescriptor, IntegrityQuarantineDescriptor, MAX_INTEGRITY_FINDINGS,
     MAX_PAUSE_DURATION_SECONDS, MAX_TASKS, MAX_WINDOW_REQUEST_BYTES, MaintenanceExplainResponse,
     MaintenancePauseRequest, MaintenanceResourceReservations, MaintenanceResumeRequest,
     MaintenanceRunRequest, MaintenanceRunResponse, MaintenanceServiceClient,
     MaintenanceStatusRequest, MaintenanceStatusResponse, MaintenanceTaskAcknowledgement,
     MaintenanceTaskStatus, MaintenanceTransport, MaintenanceWindowRequest,
-    MaintenanceWindowResponse,
+    MaintenanceWindowResponse, OnlineVerificationReport, OnlineVerificationRequest,
 };
+
+#[test]
+fn online_verification_wire_requires_an_explicit_scope_and_never_marks_partial_work_complete() {
+    // The continuation is the 136-byte authenticated online wrapper: version,
+    // pass, immutable Catalog identity/generation, kernel cursor, and MAC.
+    let continuation = "ab".repeat(136);
+    let request = OnlineVerificationRequest::new(
+        "00000000-0000-0000-0000-000000000001".to_owned(),
+        "logs".to_owned(),
+        1,
+        Some(7),
+        Some(continuation.clone()),
+    );
+    assert_eq!(
+        OnlineVerificationRequest::decode(&request.encode().expect("request")),
+        Ok(request)
+    );
+    assert!(
+        OnlineVerificationRequest::new(
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+            "logs".to_owned(),
+            1,
+            None,
+            Some(continuation),
+        )
+        .encode()
+        .is_err()
+    );
+    let partial = OnlineVerificationReport {
+        report_version: 1,
+        tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+        signal: "logs".to_owned(),
+        shard: 1,
+        catalog_generation: 7,
+        examined_segments: 1,
+        examined_bytes: 42,
+        omitted_segments: 1,
+        outcome: "incomplete".to_owned(),
+        verification_complete: true,
+        report_checksum: "0".repeat(64),
+        continuation: Some("ab".repeat(136)),
+        findings: Vec::new(),
+    };
+    assert!(partial.encode().is_err());
+}
+
+#[test]
+fn generated_client_sends_a_bounded_authenticated_online_resume()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = listener.local_addr()?;
+    let continuation = "ab".repeat(136);
+    let mut response = OnlineVerificationReport {
+        report_version: 1,
+        tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+        signal: "logs".to_owned(),
+        shard: 1,
+        catalog_generation: 7,
+        examined_segments: 1,
+        examined_bytes: 42,
+        omitted_segments: 0,
+        outcome: "verified".to_owned(),
+        verification_complete: true,
+        report_checksum: String::new(),
+        continuation: None,
+        findings: Vec::new(),
+    };
+    response.report_checksum = response.checksum();
+    let body = String::from_utf8(response.encode()?)?;
+    let server = std::thread::spawn(move || -> Result<bool, std::io::Error> {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        };
+        let mut request = [0_u8; 2_048];
+        let read = stream.read(&mut request)?;
+        let request = String::from_utf8_lossy(&request[..read]);
+        stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )?;
+        Ok(request.starts_with("POST /v1/maintenance:verify HTTP/1.1\r\n"))
+    });
+
+    let client = MaintenanceServiceClient::new(MaintenanceTransport::PlaintextOptOut { endpoint })?;
+    let result = client.verify(
+        "system-administrator",
+        &OnlineVerificationRequest::new(
+            "00000000-0000-0000-0000-000000000001".to_owned(),
+            "logs".to_owned(),
+            1,
+            Some(7),
+            Some(continuation),
+        ),
+    );
+    let reached = server
+        .join()
+        .map_err(|_| "verification server panicked")??;
+    assert!(
+        reached,
+        "a valid authenticated online continuation must reach the generated route"
+    );
+    assert_eq!(result?.catalog_generation, 7);
+    Ok(())
+}
+
+#[test]
+fn online_verification_contract_artifacts_publish_the_authenticated_wrapper_boundary() {
+    let mapping: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/http.json"))
+            .expect("canonical HTTP mapping");
+    let verify = mapping["mappings"]
+        .as_array()
+        .expect("mapping routes")
+        .iter()
+        .find(|route| route["rpc"] == "positron.v1.MaintenanceService/Verify")
+        .expect("online verification route");
+    assert_eq!(verify["max_request_bytes"], 512);
+
+    let openapi: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/openapi.json"))
+            .expect("canonical OpenAPI document");
+    assert_eq!(
+        openapi["paths"]["/v1/maintenance:verify"]["post"]["x-positron-max-request-bytes"],
+        512
+    );
+    for continuation in [
+        &openapi["components"]["schemas"]["OnlineVerificationRequest"]["properties"]["continuation"],
+        &openapi["components"]["schemas"]["OnlineVerificationReport"]["properties"]["continuation"],
+    ] {
+        assert_eq!(continuation["pattern"], "^[0-9A-Fa-f]{272}$");
+        assert_eq!(continuation["minLength"], 272);
+        assert_eq!(continuation["maxLength"], 272);
+    }
+}
+
+#[test]
+fn online_verification_report_checksum_is_deterministic_and_rejects_tampering() {
+    let mut report = OnlineVerificationReport {
+        report_version: 1,
+        tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+        signal: "logs".to_owned(),
+        shard: 1,
+        catalog_generation: 7,
+        examined_segments: 1,
+        examined_bytes: 42,
+        omitted_segments: 0,
+        outcome: "verified".to_owned(),
+        verification_complete: true,
+        report_checksum: String::new(),
+        continuation: None,
+        findings: Vec::new(),
+    };
+    report.report_checksum = report.checksum();
+    let first = report.encode().expect("checksummed report encodes");
+    let second = report
+        .encode()
+        .expect("canonical checksum is deterministic");
+    assert_eq!(first, second);
+    report.examined_bytes = 43;
+    assert!(
+        report.encode().is_err(),
+        "covered report facts cannot be altered"
+    );
+}
+
+#[test]
+fn integrity_findings_preserve_provenance_and_enforce_the_catalog_bound() {
+    let finding = IntegrityQuarantineDescriptor {
+        tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+        signal: "logs".to_owned(),
+        shard: 1,
+        segment: "00000000000000000000000000000001".to_owned(),
+        base_position: 0,
+        event_range: AuthenticatedTimeRangeDescriptor {
+            provenance: "missing_source_time".to_owned(),
+            earliest_unix_nanos: None,
+            latest_unix_nanos: None,
+        },
+        ingest_range: AuthenticatedTimeRangeDescriptor {
+            provenance: "known".to_owned(),
+            earliest_unix_nanos: Some(10),
+            latest_unix_nanos: Some(10),
+        },
+    };
+    let response = |integrity_findings| MaintenanceStatusResponse {
+        tasks: Vec::new(),
+        returned: 0,
+        total: 0,
+        next_cursor: None,
+        queued: 0,
+        running: 0,
+        deferred: 0,
+        terminal: 0,
+        integrity_findings,
+    };
+    assert!(
+        response(vec![finding.clone(); MAX_INTEGRITY_FINDINGS])
+            .encode()
+            .is_ok()
+    );
+    assert!(
+        response(vec![finding; MAX_INTEGRITY_FINDINGS + 1])
+            .encode()
+            .is_err()
+    );
+}
 
 #[test]
 fn maintenance_window_contract_accepts_only_optional_classes_and_server_derived_expiry() {
@@ -350,6 +576,7 @@ fn full_valid_maintenance_registry_page_fits_the_bounded_response() {
             running: MAX_TASKS as u32,
             deferred: 0,
             terminal: 0,
+            integrity_findings: Vec::new(),
         }
         .encode()
         .is_ok(),
@@ -572,5 +799,74 @@ fn maintenance_control_client_uses_the_canonical_bounded_routes()
     assert_eq!(resumed.resource_generation, None);
     assert_eq!(resumed.audit_position, 4);
     server.join().map_err(|_| "server panicked")??;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn maintenance_tls_rejects_oversized_symlinked_and_nonregular_trust_files()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    const MAX_TRUST_FILE_BYTES: usize = 65_536;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "positron-maintenance-trust-{}-{nonce}",
+        process::id()
+    ));
+    fs::create_dir_all(&root)?;
+    let certificate = root.join("certificate.pem");
+    fs::write(
+        &certificate,
+        include_bytes!("../../positron-runtime/tests/native_transport/fixtures/api-test-cert.pem"),
+    )?;
+    let endpoint = "127.0.0.1:443".parse()?;
+    let client_for = move |trust_file| {
+        MaintenanceServiceClient::new(MaintenanceTransport::Tls {
+            endpoint,
+            server_name: "127.0.0.1".to_owned(),
+            trust_file,
+        })
+    };
+
+    let oversized = root.join("oversized.pem");
+    let mut bytes = fs::read(&certificate)?;
+    bytes.resize(MAX_TRUST_FILE_BYTES + 1, b'\n');
+    fs::write(&oversized, bytes)?;
+    assert!(
+        client_for(oversized).is_err(),
+        "oversized trust file was accepted"
+    );
+
+    let symlinked = root.join("symlinked.pem");
+    symlink(&certificate, &symlinked)?;
+    assert!(
+        client_for(symlinked).is_err(),
+        "symlinked trust file was accepted"
+    );
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        use rustix::fs::{self as unix_fs, CWD, Mode};
+        use std::{sync::mpsc, time::Duration};
+
+        let fifo = root.join("trust.fifo");
+        unix_fs::mkfifoat(CWD, &fifo, Mode::RUSR | Mode::WUSR)?;
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(client_for(fifo).is_err());
+        });
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(250))?,
+            "FIFO trust path must reject without waiting for a writer"
+        );
+    }
+
+    fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -207,10 +207,7 @@ fn api_cors_preflight_and_actual_responses_are_exact_origin_scoped()
         "unexpected CORS permission for duplicate preflight method: {duplicate_preflight_method}"
     );
 
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -248,10 +245,7 @@ fn api_cors_is_off_for_unconfigured_native_bindings() -> Result<(), Box<dyn std:
             .to_ascii_lowercase()
             .contains("access-control-allow-origin")
     );
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -354,9 +348,6 @@ async fn api_cors_applies_the_same_policy_over_http2() -> Result<(), Box<dyn std
     drop(client);
     connection.abort();
     let _ = connection.await;
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }

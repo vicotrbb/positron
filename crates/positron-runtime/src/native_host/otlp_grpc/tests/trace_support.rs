@@ -307,14 +307,21 @@ impl ReceiverHarness {
             connection_protection: None,
             http2_profile: compiled_http2_profile(NetworkListenerRole::OtlpGrpc)?,
             cors_allowed_origins: Vec::new(),
+            control_diagnostics: None,
         });
         let cancellation = TaskCancellation::new();
         let serve_cancellation = cancellation.clone();
         let force = TaskCancellation::new();
         let serve_force = force.clone();
         let server = std::thread::spawn(move || {
-            serve(admission, serve_cancellation, serve_force, Some(services))
-                .expect("test OTLP gRPC server");
+            serve(
+                admission,
+                serve_cancellation,
+                serve_force,
+                Some(services),
+                None,
+            )
+            .expect("test OTLP gRPC server");
         });
         Ok(SpawnedServer {
             endpoint,

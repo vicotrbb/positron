@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroU8;
 use std::num::NonZeroU16;
 use std::path::PathBuf;
@@ -647,6 +647,46 @@ pub struct NativeHost {
     bindings: NativeBindings,
     admissions: AdmissionRegistry,
     staged_admissions: Option<StagedAdmissions>,
+    control_diagnostics: Option<Arc<dyn ControlDiagnosticsHandler>>,
+}
+
+/// The composition root may provide the single binary's support-bundle
+/// collector to the owner-only Control listener.  NativeHost owns transport;
+/// the handler must obtain current authority from `HealthState` itself.
+pub trait ControlDiagnosticsHandler: Send + Sync {
+    fn collect(
+        &self,
+        bearer: &str,
+        request: &[u8],
+        health: &HealthState,
+    ) -> Result<ControlDiagnosticsResponse, ControlDiagnosticsFailure>;
+}
+
+/// Bounded diagnostic bytes plus the governor reservation that remains owned
+/// until the Control listener has written the response or abandoned it.
+pub struct ControlDiagnosticsResponse {
+    body: Vec<u8>,
+    reservation: positron_kernel::TransferredResourceReservation,
+}
+
+impl ControlDiagnosticsResponse {
+    #[must_use]
+    pub fn new(
+        body: Vec<u8>,
+        reservation: positron_kernel::TransferredResourceReservation,
+    ) -> Self {
+        Self { body, reservation }
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<u8>, positron_kernel::TransferredResourceReservation) {
+        (self.body, self.reservation)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlDiagnosticsFailure {
+    AuthenticationRejected,
+    Unavailable,
 }
 
 impl Clone for NativeHost {
@@ -655,6 +695,7 @@ impl Clone for NativeHost {
             bindings: self.bindings.clone(),
             admissions: Arc::clone(&self.admissions),
             staged_admissions: self.staged_admissions.as_ref().map(Arc::clone),
+            control_diagnostics: self.control_diagnostics.as_ref().map(Arc::clone),
         }
     }
 }
@@ -708,7 +749,14 @@ impl NativeHost {
             bindings,
             admissions: Arc::new(Mutex::new(Vec::with_capacity(6))),
             staged_admissions: None,
+            control_diagnostics: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_control_diagnostics(mut self, handler: Arc<dyn ControlDiagnosticsHandler>) -> Self {
+        self.control_diagnostics = Some(handler);
+        self
     }
 }
 
@@ -746,6 +794,7 @@ struct Admission {
     connection_protection: Option<ConnectionProtection>,
     http2_profile: Option<Http2Profile>,
     cors_allowed_origins: Vec<String>,
+    control_diagnostics: Option<Arc<dyn ControlDiagnosticsHandler>>,
 }
 
 type AdmissionRegistry = Arc<Mutex<Vec<(ListenerRole, Arc<Admission>)>>>;
@@ -1065,6 +1114,7 @@ impl ListenerFactory for NativeHost {
             connection_protection,
             http2_profile: self.bindings.http2_profile(role),
             cors_allowed_origins: self.bindings.cors_allowed_origins(role),
+            control_diagnostics: self.control_diagnostics.as_ref().map(Arc::clone),
         });
         self.admissions
             .lock()
@@ -1126,6 +1176,7 @@ impl ListenerGenerationFactory for NativeHost {
             bindings,
             admissions: Arc::clone(&self.admissions),
             staged_admissions: Some(Arc::clone(&staged_admissions)),
+            control_diagnostics: self.control_diagnostics.as_ref().map(Arc::clone),
         };
         let profiles = ListenerRole::all().map(|role| {
             self.staged_profile(&configured, role)
@@ -1249,19 +1300,23 @@ impl RegisteredTask for NativeRegisteredTask {
         if self.role == TaskRole::Maintenance {
             let services = services.ok_or(TaskFailure::SpawnUnavailable)?;
             let wake_services = services.clone();
-            let task_cancellation = cancellation.clone();
+            // Maintenance has no listener. Give it a task-local cancellation
+            // capability so an integrity fence can retire maintenance without
+            // cancelling the retained Control and Operations tasks.
+            let task_cancellation = TaskCancellation::new();
+            let worker_cancellation = task_cancellation.clone();
             let handle = std::thread::Builder::new()
                 .name("positron-maintenance".to_owned())
                 .spawn(move || {
-                    services
-                        .run_maintenance_worker(&task_cancellation)
-                        .map_err(|_| TaskFailure::JoinUnavailable)
+                    complete_maintenance_worker(&services, || {
+                        services.run_maintenance_worker(&worker_cancellation)
+                    })
                 })
                 .map_err(|_| TaskFailure::SpawnUnavailable)?;
             return Ok(Box::new(NativeRunningTask {
-                cancellation,
-                force: TaskCancellation::new(),
+                force: task_cancellation,
                 maintenance_wake: Some(wake_services),
+                shutdown_cancellation: Some(cancellation),
                 handle: Some(handle),
             }));
         }
@@ -1296,11 +1351,62 @@ impl RegisteredTask for NativeRegisteredTask {
             })
             .map_err(|_| TaskFailure::SpawnUnavailable)?;
         Ok(Box::new(NativeRunningTask {
-            cancellation,
             force,
             maintenance_wake: None,
+            shutdown_cancellation: None,
             handle: Some(handle),
         }))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaintenanceDiagnosticDelivery {
+    Delivered,
+    Unavailable,
+}
+
+fn report_maintenance_failure(failure: crate::ServiceFailure) -> MaintenanceDiagnosticDelivery {
+    let mut stderr = std::io::stderr().lock();
+    report_maintenance_failure_to(&mut stderr, failure)
+}
+
+fn report_maintenance_failure_to(
+    sink: &mut impl std::io::Write,
+    failure: crate::ServiceFailure,
+) -> MaintenanceDiagnosticDelivery {
+    let Some(category) = crate::services::maintenance_failure_category(failure) else {
+        return MaintenanceDiagnosticDelivery::Delivered;
+    };
+    match writeln!(
+        sink,
+        "positron: maintenance worker failure category={category}"
+    ) {
+        Ok(()) => MaintenanceDiagnosticDelivery::Delivered,
+        Err(_) => MaintenanceDiagnosticDelivery::Unavailable,
+    }
+}
+
+fn complete_maintenance_worker(
+    services: &ServiceHandle,
+    worker: impl FnOnce() -> Result<(), crate::ServiceFailure>,
+) -> Result<(), TaskFailure> {
+    match worker() {
+        Ok(()) => Ok(()),
+        Err(failure) => complete_maintenance_failure(services, report_maintenance_failure(failure)),
+    }
+}
+
+fn complete_maintenance_failure(
+    services: &ServiceHandle,
+    delivery: MaintenanceDiagnosticDelivery,
+) -> Result<(), TaskFailure> {
+    services.request_integrity_fence();
+    match delivery {
+        MaintenanceDiagnosticDelivery::Delivered => Err(TaskFailure::JoinUnavailable),
+        // A terminal primary worker failure has already reached this
+        // process-owned authority. Fence it even if stderr is closed; the
+        // existing JoinUnavailable path retains that outcome.
+        MaintenanceDiagnosticDelivery::Unavailable => Err(TaskFailure::JoinUnavailable),
     }
 }
 
@@ -1338,8 +1444,12 @@ fn serve_exact_listener_role(
 ) -> Result<(), TaskFailure> {
     let prepared_grpc = if role == ListenerRole::OtlpGrpc {
         Some(
-            otlp_grpc::prepare(Arc::clone(&admission), services.clone())
-                .map_err(|_| TaskFailure::SpawnUnavailable)?,
+            otlp_grpc::prepare(
+                Arc::clone(&admission),
+                services.clone(),
+                Some(health.clone()),
+            )
+            .map_err(|_| TaskFailure::SpawnUnavailable)?,
         )
     } else {
         None
@@ -1391,6 +1501,7 @@ fn serve_listener_role(
             cancellation.clone(),
             force.clone(),
             services.clone(),
+            Some(health),
         )
         .map_err(|_| TaskFailure::JoinUnavailable)?;
     } else {
@@ -1434,14 +1545,15 @@ fn latest_admission(
 }
 
 struct NativeRunningTask {
-    cancellation: TaskCancellation,
     force: TaskCancellation,
     maintenance_wake: Option<ServiceHandle>,
+    shutdown_cancellation: Option<TaskCancellation>,
     handle: Option<JoinHandle<Result<(), TaskFailure>>>,
 }
 
 impl RunningTask for NativeRunningTask {
     fn poll_join(&mut self) -> Result<Option<TaskJoinOutcome>, TaskFailure> {
+        self.cancel_maintenance_for_global_shutdown();
         if self.handle.as_ref().is_none_or(JoinHandle::is_finished) {
             join_thread(&mut self.handle)?;
             Ok(Some(TaskJoinOutcome::Joined))
@@ -1451,6 +1563,7 @@ impl RunningTask for NativeRunningTask {
     }
 
     fn join_within(&mut self, remaining: Duration) -> Result<TaskJoinOutcome, TaskFailure> {
+        self.cancel_maintenance_for_global_shutdown();
         if join_thread_within(&mut self.handle, remaining)? {
             Ok(TaskJoinOutcome::Joined)
         } else {
@@ -1459,7 +1572,6 @@ impl RunningTask for NativeRunningTask {
     }
 
     fn abort(&mut self) -> Result<(), TaskFailure> {
-        self.cancellation.cancel();
         if let Some(services) = self.maintenance_wake.as_ref() {
             services.notify_maintenance_worker();
         }
@@ -1468,6 +1580,21 @@ impl RunningTask for NativeRunningTask {
             Ok(())
         } else {
             Err(TaskFailure::AbortUnavailable)
+        }
+    }
+}
+
+impl NativeRunningTask {
+    fn cancel_maintenance_for_global_shutdown(&self) {
+        if self
+            .shutdown_cancellation
+            .as_ref()
+            .is_some_and(TaskCancellation::is_cancelled)
+        {
+            if let Some(services) = self.maintenance_wake.as_ref() {
+                services.notify_maintenance_worker();
+            }
+            self.force.cancel();
         }
     }
 }
@@ -1491,7 +1618,7 @@ fn join_thread(
     handle: &mut Option<JoinHandle<Result<(), TaskFailure>>>,
 ) -> Result<(), TaskFailure> {
     if let Some(handle) = handle.take() {
-        return handle.join().map_err(|_| TaskFailure::JoinUnavailable)?;
+        return handle.join().map_err(|_| TaskFailure::JoinPanicked)?;
     }
     Ok(())
 }
@@ -1657,6 +1784,7 @@ mod listener_generation_tests {
             connection_protection: None,
             http2_profile: None,
             cors_allowed_origins: Vec::new(),
+            control_diagnostics: None,
         });
         let gate = Arc::new(ActivationGate::new());
         let cancellation = crate::TaskCancellation::new();
@@ -1693,6 +1821,7 @@ mod listener_generation_tests {
             connection_protection: None,
             http2_profile: None,
             cors_allowed_origins: Vec::new(),
+            control_diagnostics: None,
         };
         let cancellation = crate::TaskCancellation::new();
         admission.stop();
@@ -1849,10 +1978,39 @@ fn serve_http(
             #[cfg(unix)]
             NativeListener::Unix(listener) => match listener.accept() {
                 Ok((mut stream, _)) => {
-                    match std::io::Write::write_all(&mut stream, b"positron-control-v1\n") {
-                        Ok(()) => continue,
-                        Err(_) => break,
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
                     }
+                    if !can_serve_accepted_connection(&admission, &cancellation) {
+                        continue;
+                    }
+                    let Some(lease) = admission.accept_connection(IpAddr::V4(Ipv4Addr::LOCALHOST))
+                    else {
+                        continue;
+                    };
+                    let disposition =
+                        control_connection_disposition(native_http::serve_connection(
+                            &mut stream,
+                            ListenerRole::Control,
+                            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                            None,
+                            &health,
+                            native_http::RouteDependencies::new(
+                                services.as_ref(),
+                                admission.control_diagnostics.as_deref(),
+                            ),
+                            admission.connection_protection(),
+                        ));
+                    match disposition {
+                        ControlConnectionDisposition::Completed => drop(lease),
+                        // A client can close after the request is accepted and
+                        // before its response is written. That peer-local
+                        // outcome must release this generation's admission
+                        // lease and leave the listener available to its next
+                        // authenticated request.
+                        ControlConnectionDisposition::PeerUnavailable => drop(lease),
+                    }
+                    continue;
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(5));
@@ -1887,6 +2045,8 @@ fn serve_http(
                 let trusted_proxy = admission.trusted_proxy.clone();
                 let connection_health = health.clone();
                 let connection_services = services.clone();
+                let connection_control_diagnostics =
+                    admission.control_diagnostics.as_ref().map(Arc::clone);
                 let connection_admission = Arc::clone(&admission);
                 let connection_cancellation = cancellation.clone();
                 let Ok(interrupt) = stream.try_clone() else {
@@ -1941,7 +2101,10 @@ fn serve_http(
                                             peer,
                                             trusted_proxy,
                                             &connection_health,
-                                            connection_services.as_ref(),
+                                            native_http::RouteDependencies::new(
+                                                connection_services.as_ref(),
+                                                connection_control_diagnostics.as_deref(),
+                                            ),
                                             connection_protection,
                                         );
                                     }
@@ -1953,7 +2116,10 @@ fn serve_http(
                                     peer,
                                     trusted_proxy,
                                     &connection_health,
-                                    connection_services.as_ref(),
+                                    native_http::RouteDependencies::new(
+                                        connection_services.as_ref(),
+                                        connection_control_diagnostics.as_deref(),
+                                    ),
                                     connection_protection,
                                 );
                             }
@@ -1964,7 +2130,10 @@ fn serve_http(
                                 peer,
                                 trusted_proxy,
                                 &connection_health,
-                                connection_services.as_ref(),
+                                native_http::RouteDependencies::new(
+                                    connection_services.as_ref(),
+                                    connection_control_diagnostics.as_deref(),
+                                ),
                                 connection_protection,
                             );
                         }
@@ -1989,6 +2158,21 @@ fn serve_http(
         }
     }
     join_http_handlers(&mut handlers, &force)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlConnectionDisposition {
+    Completed,
+    PeerUnavailable,
+}
+
+fn control_connection_disposition(
+    result: Result<(), native_http::ConnectionFailure>,
+) -> ControlConnectionDisposition {
+    match result {
+        Ok(()) => ControlConnectionDisposition::Completed,
+        Err(_) => ControlConnectionDisposition::PeerUnavailable,
+    }
 }
 
 fn complete_tls_handshake(
@@ -2080,11 +2264,22 @@ fn wait_for_rate_window(admission: &Admission, cancellation: &TaskCancellation) 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::Duration;
 
-    use super::{NativeBindings, NativeHostFailure};
-    use crate::ListenerRole;
+    use super::{
+        MaintenanceDiagnosticDelivery, NativeBindings, NativeHost, NativeHostFailure,
+        NativeRunningTask, complete_maintenance_failure, complete_maintenance_worker,
+        report_maintenance_failure_to,
+    };
+    use crate::{
+        ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, InitializationPlan,
+        InstanceBootstrap, ListenerRole, ProcessPhase, RunningTask, ServeConfiguration,
+        ShutdownTrigger, TaskCancellation, TaskFailure,
+    };
 
     #[test]
     fn legacy_bindings_refuse_public_data_endpoints_without_a_complete_transport_profile() {
@@ -2118,6 +2313,143 @@ mod tests {
         assert_eq!(limits.global_rate_per_second.get(), 1024);
         assert_eq!(limits.per_address_rate_per_second.get(), 128);
         Ok(())
+    }
+
+    #[test]
+    fn failed_native_maintenance_task_requests_process_owned_fence_before_join_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct ClosedDiagnosticSink;
+
+        impl std::io::Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "positron-native-maintenance-fence-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("data"))?;
+        fs::create_dir_all(root.join("secrets"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(root.join("secrets"), fs::Permissions::from_mode(0o700))?;
+        }
+        let paths = BootstrapPaths::new(
+            &root.join("data"),
+            &root.join("secrets"),
+            positron_kernel::MountQualification::LocalHost,
+        )?;
+        drop(InstanceBootstrap::initialize(
+            &paths,
+            InitializationPlan::non_interactive(),
+        )?);
+        let control = root.join("control.sock");
+        let host = NativeHost::new(NativeBindings::new(
+            control,
+            loopback(0),
+            loopback(0),
+            loopback(0),
+            loopback(0),
+            loopback(0),
+        )?);
+        let mut process = ApplicationRuntime::start(
+            ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+            HostInputs::new(&host, &host),
+        )?;
+        let services = process.services().ok_or("runtime services")?;
+        let mut closed_sink = ClosedDiagnosticSink;
+        let delivery =
+            report_maintenance_failure_to(&mut closed_sink, crate::ServiceFailure::CorruptState);
+        assert_eq!(delivery, MaintenanceDiagnosticDelivery::Unavailable);
+        assert!(matches!(
+            complete_maintenance_failure(&services, delivery),
+            Err(TaskFailure::JoinUnavailable)
+        ));
+        let worker_services = services.clone();
+        let mut task = NativeRunningTask {
+            force: TaskCancellation::new(),
+            maintenance_wake: None,
+            shutdown_cancellation: None,
+            handle: Some(std::thread::spawn(move || {
+                complete_maintenance_worker(&worker_services, || {
+                    Err(crate::ServiceFailure::CorruptState)
+                })
+            })),
+        };
+
+        assert!(matches!(
+            task.join_within(Duration::from_secs(1)),
+            Err(TaskFailure::JoinUnavailable)
+        ));
+        drop(task);
+        drop(services);
+        assert!(process.apply_pending_integrity_fence());
+        assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+        assert_eq!(
+            process
+                .bound_endpoints()
+                .into_iter()
+                .map(|endpoint| endpoint.role())
+                .collect::<Vec<_>>(),
+            [ListenerRole::Control, ListenerRole::Operations]
+        );
+        assert!(process.services().is_none());
+        assert_eq!(
+            process.shutdown(ShutdownTrigger::FirstSignal),
+            crate::ExitOutcome::Graceful
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn maintenance_failure_diagnostic_reports_a_closed_category()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "native_host::tests::failed_native_maintenance_task_requests_process_owned_fence_before_join_error",
+                "--nocapture",
+            ])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "maintenance failure child failed with status {:?}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(
+            stderr.contains("positron: maintenance worker failure category=corrupt_state"),
+            "maintenance failure did not emit its closed category: {stderr}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn actual_native_join_panic_is_typed_without_exposing_the_panic_payload() {
+        let marker = "native-task-panic-secret-canary";
+        let mut task = NativeRunningTask {
+            force: TaskCancellation::new(),
+            maintenance_wake: None,
+            shutdown_cancellation: None,
+            handle: Some(std::thread::spawn(move || -> Result<(), TaskFailure> {
+                panic!("{marker}");
+            })),
+        };
+        assert_eq!(
+            task.join_within(Duration::from_secs(1)),
+            Err(TaskFailure::JoinPanicked)
+        );
     }
 
     const fn loopback(port: u16) -> SocketAddr {

@@ -34,7 +34,7 @@ pub(super) use append::write_segment_bytes;
 #[cfg(test)]
 pub(crate) use catalog::recognized_ledger_name;
 
-const MAX_SEGMENTS: usize = 1_024;
+pub(super) const MAX_SEGMENTS: usize = 1_024;
 const MAX_HEADER_BYTES: usize = 512;
 const MAX_ENCRYPTED_METADATA_BYTES: u32 = 256;
 
@@ -336,11 +336,15 @@ impl LedgerStorage {
         encode_metadata(metadata)
     }
 
-    pub(super) fn retired_recovery_encoded_bytes(
+    /// Returns the bounded bytes required to observe a sealed artifact named
+    /// by an immutable Snapshot Lease generation. A later retention
+    /// publication may relabel the same physical artifact as retired, but
+    /// that later metadata is never an input to snapshot resume.
+    pub(super) fn snapshot_recovery_encoded_bytes(
         &self,
         metadata: SegmentMetadata,
     ) -> Result<usize, LedgerFailure> {
-        if metadata.state != SegmentState::Retired {
+        if !matches!(metadata.state, SegmentState::Sealed | SegmentState::Retired) {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
         [segment_name(metadata.id), frontier_name(metadata.id)]
@@ -367,6 +371,12 @@ impl LedgerStorage {
     ) -> Result<Option<(usize, usize)>, LedgerFailure> {
         if metadata.state != SegmentState::Sealed {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
+        }
+        // The authenticated Catalog may name a sealed source that has since
+        // disappeared. Its absence is an instance-wide availability
+        // ambiguity, not byte-local corruption eligible for quarantine.
+        if !entry_exists(&self.sealed, &segment_name(metadata.id))? {
+            return Err(LedgerFailure::new(LedgerFailureCode::PhysicalScopeMismatch));
         }
         let mut file = open_regular(&self.sealed, &segment_name(metadata.id), false)?;
         let mut header = vec![0_u8; MAX_HEADER_BYTES];

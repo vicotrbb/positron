@@ -1,14 +1,14 @@
 use super::*;
 
 #[cfg(unix)]
-pub(super) struct ChildRoots {
-    pub(super) data: std::path::PathBuf,
-    pub(super) secrets: std::path::PathBuf,
+pub(crate) struct ChildRoots {
+    pub(crate) data: std::path::PathBuf,
+    pub(crate) secrets: std::path::PathBuf,
 }
 
 #[cfg(unix)]
 impl ChildRoots {
-    pub(super) fn new(root: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn new(root: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
 
         let data = root.join("data");
@@ -21,7 +21,7 @@ impl ChildRoots {
 }
 
 #[cfg(unix)]
-pub(super) struct BlockedHost;
+pub(crate) struct BlockedHost;
 
 #[cfg(unix)]
 impl positron_runtime::ListenerFactory for BlockedHost {
@@ -106,12 +106,12 @@ impl positron_runtime::RunningTask for BlockedTaskHandle {
 }
 
 #[cfg(unix)]
-pub(super) fn wait_for_ready(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn wait_for_ready(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     wait_for_readiness(port, "HTTP/1.1 200 ")
 }
 
 #[cfg(unix)]
-pub(super) fn wait_for_configuration_status(
+pub(crate) fn wait_for_configuration_status(
     port: u16,
     authorization: &str,
     expected_fragments: &[&str],
@@ -145,7 +145,7 @@ pub(super) fn wait_for_configuration_status(
 }
 
 #[cfg(unix)]
-pub(super) fn configuration_status(
+pub(crate) fn configuration_status(
     port: u16,
     authorization: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -163,7 +163,7 @@ pub(super) fn configuration_status(
 }
 
 #[cfg(unix)]
-pub(super) fn bounded_redacted_observation(observation: &str, authorization: &str) -> String {
+pub(crate) fn bounded_redacted_observation(observation: &str, authorization: &str) -> String {
     const MAX_STATUS_OBSERVATION_CHARS: usize = 512;
 
     let redacted = observation.replace(authorization, "<redacted>");
@@ -178,7 +178,7 @@ pub(super) fn bounded_redacted_observation(observation: &str, authorization: &st
 }
 
 #[cfg(unix)]
-pub(super) fn wait_for_readiness(
+pub(crate) fn wait_for_readiness(
     port: u16,
     expected_status: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -209,7 +209,7 @@ pub(super) fn wait_for_readiness(
     .into())
 }
 #[cfg(unix)]
-pub(super) fn wait_for_file(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn wait_for_file(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..100 {
         if path.is_file() {
             return Ok(());
@@ -220,7 +220,7 @@ pub(super) fn wait_for_file(path: &std::path::Path) -> Result<(), Box<dyn std::e
 }
 
 #[cfg(unix)]
-pub(super) fn wait_for_child(
+pub(crate) fn wait_for_child(
     child: &mut std::process::Child,
 ) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
     for _ in 0..100 {
@@ -235,7 +235,7 @@ pub(super) fn wait_for_child(
 }
 
 #[cfg(unix)]
-pub(super) fn available_ports() -> Result<[u16; 5], Box<dyn std::error::Error>> {
+pub(crate) fn available_ports() -> Result<[u16; 5], Box<dyn std::error::Error>> {
     let mut probes = Vec::with_capacity(5);
     for _ in 0..5 {
         probes.push(
@@ -254,7 +254,7 @@ pub(super) fn available_ports() -> Result<[u16; 5], Box<dyn std::error::Error>> 
 }
 
 #[cfg(unix)]
-pub(super) fn process_configuration(
+pub(crate) fn process_configuration(
     root: &std::path::Path,
     data: &std::path::Path,
     secrets: &std::path::Path,

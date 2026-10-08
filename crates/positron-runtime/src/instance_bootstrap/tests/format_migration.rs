@@ -416,6 +416,9 @@ fn format_migration_declares_its_irreversible_boundary_before_crossing_it()
             17,
         )?,
     )?;
+    let facts = instance.doctor_runtime_facts(actor)?;
+    assert_eq!(facts.durable_operations(), 1);
+    assert_eq!(facts.active_durable_operations(), 1);
     let preflight =
         DurableOperationAdministration::begin(&catalog, actor, accepted.operation_id(), 18)?;
     let declared_boundary = preflight.declared_irreversible_boundary();

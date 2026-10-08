@@ -3,7 +3,7 @@ use positron_domain::routing::{SignalKind, VirtualShardId};
 use positron_governance::{GovernanceAuditEntry, Identity};
 use positron_kernel::{
     ActiveSegmentLedger, BootstrapArtifact, BootstrapArtifactAccess, BootstrapKeyCustody,
-    BootstrapObjectPurpose, Catalog, RetentionTimeAuthority, SegmentScope,
+    BootstrapObjectPurpose, Catalog, LedgerFailureCode, RetentionTimeAuthority, SegmentScope,
     StorageKernelResourceAuthority,
 };
 use std::sync::Arc;
@@ -20,18 +20,70 @@ pub(super) fn open_initial_ledgers(
     key: &BootstrapKeyCustody,
     record: &BootstrapRecord,
 ) -> Result<(), BootstrapFailure> {
+    recover_ledgers(
+        authority,
+        retention_time,
+        catalog,
+        key,
+        record.instance,
+        record.tenant,
+    )
+}
+
+pub(crate) fn recover_initial_ledgers(
+    instance: &InitializedInstance,
+) -> Result<(), BootstrapFailure> {
+    let catalog = Catalog::open(
+        &instance._authority,
+        instance.instance,
+        instance
+            .key
+            .catalog_secret(instance.instance)
+            .map_err(key_failure)?,
+    )
+    .map_err(catalog_failure)?;
+    // A prepared administrative transaction keeps the prior Catalog generation
+    // authoritative until its owner resolves it. Reopening active ledgers can
+    // publish a successor, so preserve the established startup behavior here.
+    if catalog
+        .has_prepared_transaction()
+        .map_err(catalog_failure)?
+    {
+        return Ok(());
+    }
+    recover_ledgers(
+        &instance._authority,
+        &instance.retention_time,
+        &catalog,
+        &instance.key,
+        instance.instance,
+        instance.tenant,
+    )?;
+    let generation = catalog.pin().map_err(catalog_failure)?.number();
+    instance.record_catalog_generation(generation);
+    Ok(())
+}
+
+fn recover_ledgers(
+    authority: &StorageKernelResourceAuthority,
+    retention_time: &RetentionTimeAuthority,
+    catalog: &Catalog<'_>,
+    key: &BootstrapKeyCustody,
+    instance: positron_kernel::InstanceId,
+    tenant: TenantId,
+) -> Result<(), BootstrapFailure> {
     let shard = VirtualShardId::new(1)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
     let snapshot = catalog.pin().map_err(catalog_failure)?;
     let identity = Identity::open(&snapshot)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
     let envelope = identity
-        .tenant_key_envelope(record.tenant)
+        .tenant_key_envelope(tenant)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
     for signal in [SignalKind::Logs, SignalKind::Traces] {
-        let scope = SegmentScope::new(record.tenant, signal, shard);
+        let scope = SegmentScope::new(tenant, signal, shard);
         let protection = key
-            .segment_key_from_tenant_envelope(record.instance, scope, envelope)
+            .segment_key_from_tenant_envelope(instance, scope, envelope)
             .map_err(key_failure)?;
         let ledger = ActiveSegmentLedger::open_with_retention_time(
             authority,
@@ -40,10 +92,34 @@ pub(super) fn open_initial_ledgers(
             scope,
             protection,
         )
-        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::LedgerUnavailable))?;
+        .map_err(|failure| ledger_open_failure(failure.code()))?;
         drop(ledger);
     }
     Ok(())
+}
+
+const fn ledger_open_failure(code: LedgerFailureCode) -> BootstrapFailure {
+    let bootstrap = match code {
+        LedgerFailureCode::IntegrityCorruption
+        | LedgerFailureCode::Quarantined
+        | LedgerFailureCode::AuthenticationFailed
+        | LedgerFailureCode::UnsupportedFormat
+        | LedgerFailureCode::InvalidInput
+        | LedgerFailureCode::PhysicalScopeMismatch
+        | LedgerFailureCode::RecoveryRequired
+        | LedgerFailureCode::StaleResumeMarker => BootstrapFailureCode::CorruptState,
+        LedgerFailureCode::StorageUnavailable => BootstrapFailureCode::LedgerUnavailable,
+        LedgerFailureCode::ResourceAdmissionRefused
+        | LedgerFailureCode::LimitExceeded
+        | LedgerFailureCode::StorageExhausted
+        | LedgerFailureCode::Cancelled => BootstrapFailureCode::ResourceUnavailable,
+        LedgerFailureCode::StaleGeneration
+        | LedgerFailureCode::ConcurrentWriter
+        | LedgerFailureCode::IdempotencyConflict
+        | LedgerFailureCode::SnapshotExpired
+        | LedgerFailureCode::ClockUncertain => BootstrapFailureCode::CatalogUnavailable,
+    };
+    BootstrapFailure::new(bootstrap)
 }
 
 pub(super) fn ensure_claim(
@@ -144,7 +220,7 @@ pub(super) fn outcome(
         tenant_slug: BootstrapRecord::tenant_slug()?,
         administrator: record.administrator,
         integrity_key_fingerprint: record.integrity_fingerprint,
-        catalog_generation: generation,
+        catalog_generation: std::sync::atomic::AtomicU64::new(generation),
         governance_audit_frontier: audit_frontier,
         claim_available,
     })

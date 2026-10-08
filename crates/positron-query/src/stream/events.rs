@@ -650,6 +650,19 @@ fn read_export_u64(bytes: &[u8], offset: &mut usize) -> Result<u64, QueryFailure
 pub struct QueryIncomplete {
     failure: QueryFailure,
     stats: QueryStats,
+    affected_ranges: Vec<QueryAffectedRange>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryAffectedRange {
+    Known {
+        axis: crate::TemporalAxis,
+        earliest_nanoseconds: i64,
+        latest_nanoseconds: i64,
+    },
+    Unknown {
+        axis: crate::TemporalAxis,
+    },
 }
 
 impl QueryIncomplete {
@@ -657,6 +670,18 @@ impl QueryIncomplete {
         Self {
             stats: stats.with_limiting_budget(failure.limiting_budget()),
             failure,
+            affected_ranges: Vec::new(),
+        }
+    }
+    pub(crate) fn with_affected_ranges(
+        failure: QueryFailure,
+        stats: QueryStats,
+        affected_ranges: Vec<QueryAffectedRange>,
+    ) -> Self {
+        Self {
+            stats: stats.with_limiting_budget(failure.limiting_budget()),
+            failure,
+            affected_ranges,
         }
     }
     #[must_use]
@@ -666,6 +691,10 @@ impl QueryIncomplete {
     #[must_use]
     pub const fn stats(&self) -> QueryStats {
         self.stats
+    }
+    #[must_use]
+    pub fn affected_ranges(&self) -> &[QueryAffectedRange] {
+        &self.affected_ranges
     }
 }
 

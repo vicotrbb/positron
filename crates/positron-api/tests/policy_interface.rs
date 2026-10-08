@@ -9,6 +9,44 @@ use positron_api::policy::{
 };
 
 #[test]
+fn generated_policy_tls_clients_reject_an_oversized_trust_file_before_connecting()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::{
+        fs, process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    const MAX_TRUST_FILE_BYTES: usize = 65_536;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("positron-policy-trust-{}-{nonce}", process::id()));
+    fs::create_dir(&root)?;
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let trust_file = root.join("oversized.pem");
+        let mut pem = include_bytes!(
+            "../../positron-runtime/tests/native_transport/fixtures/api-test-cert.pem"
+        )
+        .to_vec();
+        pem.resize(MAX_TRUST_FILE_BYTES + 1, b'\n');
+        fs::write(&trust_file, pem)?;
+        let endpoint = "127.0.0.1:443".parse()?;
+        let transport = || PolicyPreviewTransport::Tls {
+            endpoint,
+            server_name: "127.0.0.1".to_owned(),
+            trust_file: trust_file.clone(),
+        };
+        assert!(PolicyPreviewServiceClient::new(transport()).is_err());
+        assert!(PolicyActivateServiceClient::new(transport()).is_err());
+        assert!(PolicyDiffServiceClient::new(transport()).is_err());
+        assert!(PolicyExplainServiceClient::new(transport()).is_err());
+        assert!(PolicyTestServiceClient::new(transport()).is_err());
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(root);
+    result
+}
+
+#[test]
 fn generated_policy_activate_client_posts_generation_checked_idempotent_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{Read, Write};

@@ -7,6 +7,15 @@ impl ApplicationRuntime {
     ) -> Result<RunningProcess, ExitOutcome> {
         let state = ProcessState::starting();
         let drain_deadline = configuration.drain_deadline();
+        state
+            .health()
+            .set_fenced_inspection(
+                configuration.paths.clone(),
+                configuration.max_registered_tenants,
+            )
+            .map_err(|_| {
+                ExitOutcome::StartupUnavailable(BootstrapFailureCode::CatalogUnavailable)
+            })?;
         let listener_generation_factory = host.listeners.generation_factory();
         let plaintext_listener_intents =
             configuration.effective_configuration.as_ref().map_or_else(
@@ -34,7 +43,7 @@ impl ApplicationRuntime {
         )?;
         state.transition(ProcessPhase::Recovering);
         let cancellation = TaskCancellation::new();
-        let registered = match register_tasks(host.tasks) {
+        let control_registered = match register_control_tasks(host.tasks) {
             Ok(registered) => registered,
             Err(failure) => {
                 return Err(cleanup_startup(
@@ -45,9 +54,6 @@ impl ApplicationRuntime {
                 ));
             },
         };
-        let (control_registered, data_registered): (RegisteredTasks, RegisteredTasks) = registered
-            .into_iter()
-            .partition(|(role, _)| matches!(role, TaskRole::Control | TaskRole::Operations));
         let mut tasks = match spawn_registered(control_registered, &cancellation, &state, None) {
             Ok(tasks) => tasks,
             Err(failure) => {
@@ -60,7 +66,7 @@ impl ApplicationRuntime {
             },
         };
         let mut attempt = 0_u8;
-        let (_classified, mut instance) = loop {
+        let instance = loop {
             let bootstrap = host
                 .recovery
                 .prerequisite_status()
@@ -70,7 +76,73 @@ impl ApplicationRuntime {
                 })
                 .and_then(|()| bootstrap_once(&configuration));
             let failure = match bootstrap {
-                Ok(ready) => break ready,
+                Ok((_classified, mut candidate)) => {
+                    if let Some(planner) = configuration.admission_group_planner.as_ref() {
+                        candidate.admission_group_planner = Arc::clone(planner);
+                    }
+                    let candidate = Arc::new(candidate);
+                    match crate::services::verify_startup_integrity(&candidate) {
+                        Ok(()) => {
+                            match crate::instance_bootstrap::recover_initial_ledgers(&candidate) {
+                                Ok(()) => break candidate,
+                                Err(failure) if fences(failure.code()) => {
+                                    state
+                                        .set_inspection_authority(Arc::clone(&candidate))
+                                        .map_err(|_| {
+                                            cleanup_startup(
+                                                ExitOutcome::StartupUnavailable(
+                                                    BootstrapFailureCode::CatalogUnavailable,
+                                                ),
+                                                &cancellation,
+                                                &mut listeners,
+                                                &mut tasks,
+                                            )
+                                        })?;
+                                    return restricted_fenced_process(
+                                        state,
+                                        listeners,
+                                        tasks,
+                                        cancellation,
+                                        candidate,
+                                        drain_deadline,
+                                        ExitOutcome::StartupUnavailable(failure.code()),
+                                    );
+                                },
+                                Err(failure) => BootstrapAttemptFailure {
+                                    classified: Some(crate::BootstrapState::Initialized),
+                                    failure,
+                                },
+                            }
+                        },
+                        Err(crate::ServiceFailure::CorruptState) => {
+                            state
+                                .set_inspection_authority(Arc::clone(&candidate))
+                                .map_err(|_| {
+                                    cleanup_startup(
+                                        ExitOutcome::StartupUnavailable(
+                                            BootstrapFailureCode::CatalogUnavailable,
+                                        ),
+                                        &cancellation,
+                                        &mut listeners,
+                                        &mut tasks,
+                                    )
+                                })?;
+                            return restricted_fenced_process(
+                                state,
+                                listeners,
+                                tasks,
+                                cancellation,
+                                candidate,
+                                drain_deadline,
+                                ExitOutcome::StartupUnavailable(BootstrapFailureCode::CorruptState),
+                            );
+                        },
+                        Err(failure) => BootstrapAttemptFailure {
+                            classified: Some(crate::BootstrapState::Initialized),
+                            failure: BootstrapFailure::new(failure.bootstrap_code()),
+                        },
+                    }
+                },
                 Err(failure) => failure,
             };
             if !recoverable(failure.failure.code()) {
@@ -149,9 +221,6 @@ impl ApplicationRuntime {
                 },
             }
         };
-        if let Some(planner) = configuration.admission_group_planner.as_ref() {
-            instance.admission_group_planner = Arc::clone(planner);
-        }
         for intent in &plaintext_listener_intents {
             if let Err(failure) = instance.activate_public_plaintext_api_transport(*intent) {
                 return Err(cleanup_startup(
@@ -162,7 +231,6 @@ impl ApplicationRuntime {
                 ));
             }
         }
-        let instance = Arc::new(instance);
         state
             .set_inspection_authority(Arc::clone(&instance))
             .map_err(|_| {
@@ -242,6 +310,7 @@ impl ApplicationRuntime {
                 ));
             },
         };
+        services.attach_health(state.health());
         state
             .set_catalog_operation(services.catalog_operation_gate())
             .map_err(|_| {
@@ -267,6 +336,17 @@ impl ApplicationRuntime {
                 ));
             }
         }
+        let data_registered = match register_data_tasks(host.tasks) {
+            Ok(registered) => registered,
+            Err(failure) => {
+                return Err(cleanup_startup(
+                    failure,
+                    &cancellation,
+                    &mut listeners,
+                    &mut tasks,
+                ));
+            },
+        };
         match spawn_tasks(
             data_registered,
             &cancellation,
@@ -321,27 +401,37 @@ fn complete_candidate(factory: &dyn ListenerFactory) -> Option<crate::ValidatedL
 
 type RegisteredTasks = Vec<(TaskRole, Box<dyn RegisteredTask>)>;
 
-fn register_tasks(registrar: &dyn TaskRegistrar) -> Result<RegisteredTasks, ExitOutcome> {
-    [
-        TaskRole::Control,
-        TaskRole::Operations,
-        TaskRole::Api,
-        TaskRole::OtlpGrpc,
-        TaskRole::OtlpHttp,
-        TaskRole::LokiPush,
-        // The maintenance worker may immediately probe the Catalog. Bind all
-        // public listener roles first so their startup does not wait behind
-        // that idle probe; the worker is still registered before Serving.
-        TaskRole::Maintenance,
-    ]
-    .into_iter()
-    .map(|role| {
-        registrar
-            .register(role)
-            .map(|registered| (role, registered))
-            .map_err(|_| ExitOutcome::TaskUnavailable(role))
-    })
-    .collect()
+fn register_control_tasks(registrar: &dyn TaskRegistrar) -> Result<RegisteredTasks, ExitOutcome> {
+    register_tasks(registrar, &[TaskRole::Control, TaskRole::Operations])
+}
+
+fn register_data_tasks(registrar: &dyn TaskRegistrar) -> Result<RegisteredTasks, ExitOutcome> {
+    register_tasks(
+        registrar,
+        &[
+            TaskRole::Api,
+            TaskRole::OtlpGrpc,
+            TaskRole::OtlpHttp,
+            TaskRole::LokiPush,
+            TaskRole::Maintenance,
+        ],
+    )
+}
+
+fn register_tasks(
+    registrar: &dyn TaskRegistrar,
+    roles: &[TaskRole],
+) -> Result<RegisteredTasks, ExitOutcome> {
+    roles
+        .iter()
+        .copied()
+        .map(|role| {
+            registrar
+                .register(role)
+                .map(|registered| (role, registered))
+                .map_err(|_| ExitOutcome::TaskUnavailable(role))
+        })
+        .collect()
 }
 
 fn spawn_registered(
@@ -440,7 +530,60 @@ fn bind(
         return Err(ExitOutcome::ListenerUnavailable(role));
     }
     listeners.push(listener);
+    state.record_bound_listener(role);
     Ok(())
+}
+
+/// Keeps only the already-bound owner-only control and minimal operations
+/// planes alive after startup proves an integrity ambiguity. The caller has
+/// not constructed services, published configuration, or admitted a data
+/// listener yet; validate that boundary before retaining the process.
+fn restricted_fenced_process(
+    state: ProcessState,
+    listeners: Vec<Box<dyn BoundListener>>,
+    tasks: RunningTasks,
+    cancellation: TaskCancellation,
+    instance: Arc<crate::InitializedInstance>,
+    drain_deadline: std::time::Duration,
+    failure: ExitOutcome,
+) -> Result<RunningProcess, ExitOutcome> {
+    let approved_listeners = listeners.iter().all(|listener| {
+        matches!(
+            listener.endpoint().role(),
+            ListenerRole::Control | ListenerRole::Operations
+        )
+    });
+    let approved_tasks = tasks
+        .iter()
+        .all(|(role, _)| matches!(role, TaskRole::Control | TaskRole::Operations));
+    if !approved_listeners || !approved_tasks {
+        let mut listeners = listeners;
+        let mut tasks = tasks;
+        return Err(cleanup_startup(
+            failure,
+            &cancellation,
+            &mut listeners,
+            &mut tasks,
+        ));
+    }
+    state.transition(ProcessPhase::Fenced);
+    Ok(RunningProcess {
+        state,
+        listeners: std::sync::Mutex::new(listeners),
+        listener_generation_factory: None,
+        reload_lock: std::sync::Mutex::new(()),
+        tasks: std::sync::Mutex::new(tasks),
+        listener_task_cancellations: std::sync::Mutex::new(Vec::new()),
+        cancellation,
+        instance: Some(instance),
+        fenced_volume: None,
+        services: None,
+        configuration: None,
+        configuration_publication: None,
+        cleanup: CleanupAccumulator::empty(),
+        drain_deadline,
+        terminal_cleanup_complete: false,
+    })
 }
 
 const fn fences(code: BootstrapFailureCode) -> bool {

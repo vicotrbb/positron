@@ -627,6 +627,7 @@ pub enum DurableQueryExportFailureCode {
     StoreUnavailable,
     MalformedPersistentData,
     Internal,
+    IncompleteData,
 }
 
 impl DurableQueryExportFailureCode {
@@ -646,6 +647,7 @@ impl DurableQueryExportFailureCode {
             Self::StoreUnavailable => 12,
             Self::MalformedPersistentData => 13,
             Self::Internal => 14,
+            Self::IncompleteData => 15,
         }
     }
 
@@ -665,6 +667,7 @@ impl DurableQueryExportFailureCode {
             12 => Ok(Self::StoreUnavailable),
             13 => Ok(Self::MalformedPersistentData),
             14 => Ok(Self::Internal),
+            15 => Ok(Self::IncompleteData),
             _ => Err(DurableOperationFailure::PersistenceUnavailable),
         }
     }

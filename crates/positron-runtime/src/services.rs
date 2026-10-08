@@ -19,6 +19,11 @@ mod failure;
 mod ingest;
 mod maintenance;
 mod maintenance_api;
+mod maintenance_control;
+mod maintenance_inspection;
+mod maintenance_status;
+mod maintenance_verification;
+mod maintenance_window;
 mod otlp;
 pub(crate) mod policy;
 mod query;
@@ -53,6 +58,15 @@ pub(super) fn context_tenant(
         .ok_or(ServiceFailure::Unauthorized)
 }
 
+/// Checks only the active authenticated durability frontiers before data
+/// listeners are admitted. Immutable history is deliberately left to the
+/// resumable maintenance scrub.
+pub(crate) fn verify_startup_integrity(
+    instance: &InitializedInstance,
+) -> Result<(), ServiceFailure> {
+    maintenance::verify_startup_integrity(instance)
+}
+
 pub use export_destinations::ConfiguredExportDestinationResolver;
 pub use failure::ServiceFailure;
 #[cfg(test)]
@@ -66,6 +80,24 @@ pub(crate) use maintenance_api::MaintenanceServiceFailure;
 #[cfg(test)]
 mod tests;
 
+pub(crate) const fn maintenance_failure_category(failure: ServiceFailure) -> Option<&'static str> {
+    match failure {
+        ServiceFailure::Unauthorized => Some("unauthorized"),
+        ServiceFailure::CapacityUnavailable => Some("capacity_unavailable"),
+        ServiceFailure::RequestTooLarge => Some("request_too_large"),
+        ServiceFailure::InvalidRequest => Some("invalid_request"),
+        ServiceFailure::InvalidRequestWithLimit(_) => Some("invalid_request_with_limit"),
+        ServiceFailure::KeyUnavailable => Some("key_unavailable"),
+        ServiceFailure::CatalogBusy => Some("catalog_busy"),
+        ServiceFailure::CatalogUnavailable => Some("catalog_unavailable"),
+        ServiceFailure::LedgerUnavailable => Some("ledger_unavailable"),
+        ServiceFailure::StorageUnavailable => Some("storage_unavailable"),
+        ServiceFailure::CorruptState => Some("corrupt_state"),
+        ServiceFailure::Internal => Some("internal"),
+        ServiceFailure::Cancelled => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct ServiceHandle {
     schema_sessions: TenantSchemaRegistry,
@@ -75,6 +107,7 @@ pub struct ServiceHandle {
     // cooperatively instead of racing the lease and surfacing false outages.
     catalog_operation: Arc<Mutex<()>>,
     maintenance_wake: maintenance::MaintenanceWake,
+    integrity_health: Arc<Mutex<Option<crate::HealthState>>>,
     export_destination_resolver: Option<Arc<dyn positron_query::ExportDestinationResolver>>,
     #[cfg(test)]
     receiver_test_backend: Arc<Mutex<Option<Arc<dyn ReceiverTestBackend>>>>,
@@ -82,6 +115,10 @@ pub struct ServiceHandle {
     ingest_policy_snapshot_test_hook: Arc<Mutex<Option<Arc<dyn IngestPolicySnapshotTestHook>>>>,
     #[cfg(test)]
     query_execution_test_hook: Arc<Mutex<Option<Arc<dyn QueryExecutionTestHook>>>>,
+    #[cfg(test)]
+    online_verification_test_hook: Arc<Mutex<Option<Arc<dyn OnlineVerificationTestHook>>>>,
+    #[cfg(test)]
+    integrity_scrub_budget: Arc<Mutex<Option<usize>>>,
     // Keep the authority alive until every governed session and admission
     // capability above has released its transferred reservations.
     instance: Arc<InitializedInstance>,
@@ -116,6 +153,15 @@ pub(crate) trait IngestPolicySnapshotTestHook: Send + Sync {
 #[cfg(test)]
 pub(crate) trait QueryExecutionTestHook: Send + Sync {
     fn after_admission(&self);
+}
+
+/// Test-only synchronization points around online verification's admitted
+/// task and immutable Catalog basis. Production admission has no callback.
+#[cfg(test)]
+pub(crate) trait OnlineVerificationTestHook: Send + Sync {
+    fn after_admission(&self) {}
+
+    fn after_basis_capture(&self);
 }
 
 impl std::fmt::Debug for ServiceHandle {
@@ -169,6 +215,50 @@ impl ServiceHandle {
         self.maintenance_wake.notify();
     }
 
+    pub(crate) fn attach_health(&self, health: crate::HealthState) {
+        if let Ok(mut target) = self.integrity_health.lock() {
+            *target = Some(health);
+        }
+        // Health is reconstructed from durable Catalog evidence at every
+        // runtime start; the in-process notification only advances it sooner.
+        if let Ok(catalog) = positron_kernel::Catalog::open(
+            &self.instance._authority,
+            self.instance.instance,
+            match self.instance.key.catalog_secret(self.instance.instance) {
+                Ok(secret) => secret,
+                Err(_) => return,
+            },
+        ) && let Ok(snapshot) = catalog.pin()
+            && positron_kernel::integrity_quarantine_findings(&snapshot)
+                .is_ok_and(|findings| !findings.is_empty())
+        {
+            self.mark_integrity_degraded();
+        }
+    }
+
+    pub(crate) fn mark_integrity_degraded(&self) {
+        if let Ok(target) = self.integrity_health.lock()
+            && let Some(health) = target.as_ref()
+        {
+            health.degrade_integrity();
+        }
+    }
+
+    pub(crate) fn mark_integrity_fenced(&self) {
+        if let Ok(target) = self.integrity_health.lock()
+            && let Some(health) = target.as_ref()
+        {
+            health.request_integrity_fence(crate::IntegrityFenceReason::AmbiguousIntegrity);
+        }
+    }
+
+    /// Requests process-owned retirement after trusted verification proves an
+    /// integrity ambiguity. This method never changes listeners, tasks, or
+    /// volume ownership itself.
+    pub fn request_integrity_fence(&self) {
+        self.mark_integrity_fenced();
+    }
+
     #[cfg(test)]
     pub(crate) fn maintenance_wake_generation(&self) -> u64 {
         self.maintenance_wake.generation()
@@ -208,6 +298,7 @@ impl ServiceHandle {
             shutdown_schema_capacity: Arc::new(Mutex::new(None)),
             catalog_operation: Arc::new(Mutex::new(())),
             maintenance_wake: maintenance::MaintenanceWake::for_instance(instance.instance),
+            integrity_health: Arc::new(Mutex::new(None)),
             export_destination_resolver,
             #[cfg(test)]
             receiver_test_backend: Arc::new(Mutex::new(None)),
@@ -215,8 +306,40 @@ impl ServiceHandle {
             ingest_policy_snapshot_test_hook: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             query_execution_test_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            online_verification_test_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            integrity_scrub_budget: Arc::new(Mutex::new(None)),
             instance,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_integrity_scrub_budget_for_test(
+        &self,
+        segments: usize,
+    ) -> Result<(), ServiceFailure> {
+        positron_kernel::IntegrityScrubBudget::new(segments)
+            .map_err(|_| ServiceFailure::Internal)?;
+        *self
+            .integrity_scrub_budget
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)? = Some(segments);
+        Ok(())
+    }
+
+    pub(crate) fn maintenance_integrity_scrub_budget(
+        &self,
+    ) -> Result<positron_kernel::IntegrityScrubBudget, ServiceFailure> {
+        #[cfg(test)]
+        let segments = self
+            .integrity_scrub_budget
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?
+            .unwrap_or(positron_kernel::IntegrityScrubBudget::MAX_SEGMENTS);
+        #[cfg(not(test))]
+        let segments = positron_kernel::IntegrityScrubBudget::MAX_SEGMENTS;
+        positron_kernel::IntegrityScrubBudget::new(segments).map_err(|_| ServiceFailure::Internal)
     }
 
     pub(crate) fn prepare_shutdown_schema_checkpoint(&self) -> Result<(), ServiceFailure> {
@@ -269,6 +392,7 @@ impl ServiceHandle {
         bearer: &str,
         protobuf: Vec<u8>,
     ) -> Result<IngestRequestOutcome, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         let context = self.authorize_logs(bearer)?;
         self.revalidate_ingest_context(context)?;
         let instance = &self.instance;
@@ -286,6 +410,7 @@ impl ServiceHandle {
         bearer: &str,
         protobuf: Vec<u8>,
     ) -> Result<IngestRequestOutcome, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         let context = self.authorize_traces(bearer)?;
         self.revalidate_ingest_context(context)?;
         let request = AuthenticatedOtlpTracesRequest::otlp_grpc_protobuf(
@@ -494,10 +619,51 @@ impl ServiceHandle {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_online_verification_test_hook(
+        &self,
+        hook: Arc<dyn OnlineVerificationTestHook>,
+    ) -> Result<(), ServiceFailure> {
+        *self
+            .online_verification_test_hook
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)? = Some(hook);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn await_online_verification_test_hook(&self) -> Result<(), ServiceFailure> {
+        let hook = self
+            .online_verification_test_hook
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?
+            .clone();
+        if let Some(hook) = hook {
+            hook.after_basis_capture();
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn await_online_verification_admission_test_hook(
+        &self,
+    ) -> Result<(), ServiceFailure> {
+        let hook = self
+            .online_verification_test_hook
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?
+            .clone();
+        if let Some(hook) = hook {
+            hook.after_admission();
+        }
+        Ok(())
+    }
+
     pub(crate) fn admit_logs(
         &self,
         context: AuthorizedContext,
     ) -> Result<ReceiverAdmissionLease, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         self.revalidate_ingest_context(context)?;
         let value_limit_profile = self.instance.value_limit_profile;
         let reservation =
@@ -522,6 +688,7 @@ impl ServiceHandle {
         &self,
         context: AuthorizedContext,
     ) -> Result<ReceiverAdmissionLease, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         self.revalidate_ingest_context(context)?;
         let value_limit_profile = self.instance.value_limit_profile;
         let reservation =
@@ -546,6 +713,7 @@ impl ServiceHandle {
         &self,
         context: AuthorizedContext,
     ) -> Result<(), ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         let _catalog_operation = self.catalog_operation()?;
         let identity = self
             .instance
@@ -554,6 +722,20 @@ impl ServiceHandle {
         identity
             .validate_ingest_context(context)
             .map_err(|_| ServiceFailure::Unauthorized)
+    }
+
+    fn require_data_or_mutation_admission(&self) -> Result<(), ServiceFailure> {
+        let health = self
+            .integrity_health
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?;
+        if health
+            .as_ref()
+            .is_some_and(|health| !health.admits_data_or_mutation())
+        {
+            return Err(ServiceFailure::CapacityUnavailable);
+        }
+        Ok(())
     }
 
     /// Runs the generated capability contract without adding a second API authority.
@@ -578,6 +760,7 @@ impl ServiceHandle {
         source: &str,
         budget: QueryBudget,
     ) -> Result<Vec<String>, ServiceFailure> {
+        self.require_data_or_mutation_admission()?;
         query::query_log_bodies(self, bearer, self.instance.logs_shard, source, budget)
     }
 

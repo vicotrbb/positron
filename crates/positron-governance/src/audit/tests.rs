@@ -3,8 +3,9 @@ use positron_kernel::MaintenanceTaskId;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use super::{
-    CatalogRootRotationStage, GovernanceAuditEntry, InitializationAuditEntry,
-    MAINTENANCE_CONTROL_AUDIT_MAGIC, schema_checkpoint_audit_intent,
+    CatalogRootRotationStage, GovernanceAuditEntry, INTEGRITY_QUARANTINE_AUDIT_MAGIC,
+    InitializationAuditEntry, IntegrityQuarantineAuditRequest, MAINTENANCE_CONTROL_AUDIT_MAGIC,
+    integrity_quarantine_audit_intent, schema_checkpoint_audit_intent,
 };
 
 #[test]
@@ -31,6 +32,41 @@ fn maintenance_control_audit_is_closed_bounded_and_backward_safe() {
     }
     let mut malformed = intent;
     malformed[8] = 2;
+    assert!(GovernanceAuditEntry::decode_fields(9, [4; 16], &malformed).is_err());
+}
+
+#[test]
+fn integrity_quarantine_audit_is_typed_bounded_and_rejects_malformed_records() {
+    use positron_domain::routing::SignalKind;
+
+    let request = IntegrityQuarantineAuditRequest {
+        tenant: TenantId::from_bytes([1; 16]).expect("tenant"),
+        signal: SignalKind::Logs,
+        shard: 7,
+        segment: Some([2; 16]),
+    };
+    let intent = integrity_quarantine_audit_intent(request).expect("trusted PQUAR facts");
+    assert!(format!("{intent:?}").contains("encoded_bytes"));
+    let mut encoded = INTEGRITY_QUARANTINE_AUDIT_MAGIC.to_vec();
+    encoded.extend_from_slice(&request.tenant.to_bytes());
+    encoded.push(1);
+    encoded.extend_from_slice(&request.shard.to_be_bytes());
+    encoded.push(1);
+    encoded.extend_from_slice(&request.segment.expect("segment"));
+    let entry = GovernanceAuditEntry::decode_fields(9, [4; 16], &encoded)
+        .expect("typed integrity quarantine audit");
+    let GovernanceAuditEntry::IntegrityQuarantine(entry) = entry else {
+        panic!("integrity quarantine audit entry");
+    };
+    assert_eq!(entry.tenant(), request.tenant);
+    assert_eq!(entry.signal(), SignalKind::Logs);
+    assert_eq!(entry.shard(), 7);
+    assert_eq!(entry.segment(), Some([2; 16]));
+    for length in 0..encoded.len() {
+        assert!(GovernanceAuditEntry::decode_fields(9, [4; 16], &encoded[..length]).is_err());
+    }
+    let mut malformed = encoded;
+    malformed[24] = 0;
     assert!(GovernanceAuditEntry::decode_fields(9, [4; 16], &malformed).is_err());
 }
 

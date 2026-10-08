@@ -1,9 +1,10 @@
 use super::*;
 
-const RECORD_MAGIC: &[u8; 8] = b"PMTC0005";
-const PREVIOUS_RECORD_MAGIC: &[u8; 8] = b"PMTC0004";
-const LEGACY_RECORD_MAGIC: &[u8; 8] = b"PMTC0003";
-const OLDEST_RECORD_MAGIC: &[u8; 8] = b"PMTC0002";
+const RECORD_MAGIC: &[u8; 8] = b"PMTC0006";
+const PREVIOUS_RECORD_MAGIC: &[u8; 8] = b"PMTC0005";
+const LEGACY_RECORD_MAGIC: &[u8; 8] = b"PMTC0004";
+const OLDEST_RECORD_MAGIC: &[u8; 8] = b"PMTC0003";
+const ANCIENT_RECORD_MAGIC: &[u8; 8] = b"PMTC0002";
 
 pub(super) fn encode_record(
     state: &TaskState,
@@ -19,8 +20,12 @@ pub(super) fn encode_record(
         .checkpoint
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.opaque_progress.len());
-    let capacity =
-        encoded_record_capacity(task.inputs.len(), task.outputs.len(), checkpoint_bytes)?;
+    let capacity = encoded_record_capacity(
+        task.class,
+        task.inputs.len(),
+        task.outputs.len(),
+        checkpoint_bytes,
+    )?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(capacity)
@@ -35,6 +40,14 @@ pub(super) fn encode_record(
     push_u64(&mut bytes, task.preconditions.catalog_generation);
     push_u64(&mut bytes, task.preconditions.resource_generation);
     push_u64(&mut bytes, task.not_before);
+    if task.class == MaintenanceTaskClass::IntegrityScrub {
+        let source = task
+            .integrity_scrub_source
+            .ok_or(MaintenanceFailure::InvalidInput)?;
+        bytes.extend_from_slice(&source.to_bytes());
+    } else if task.integrity_scrub_source.is_some() {
+        return Err(MaintenanceFailure::InvalidInput);
+    }
     bytes.push(u8::try_from(task.inputs.len()).map_err(|_| MaintenanceFailure::CapacityExceeded)?);
     for input in &task.inputs {
         bytes.extend_from_slice(&input.to_bytes());
@@ -70,6 +83,7 @@ pub(super) fn encode_record(
 }
 
 pub(super) fn encoded_record_capacity(
+    class: MaintenanceTaskClass,
     inputs: usize,
     outputs: usize,
     checkpoint_bytes: usize,
@@ -80,6 +94,13 @@ pub(super) fn encoded_record_capacity(
     RECORD_MAGIC
         .len()
         .checked_add(16 + 3 + 16 + 6 + 16 + 1 + 1 + 1 + 8 + 8 + 1 + 8)
+        .and_then(|size| {
+            size.checked_add(if class == MaintenanceTaskClass::IntegrityScrub {
+                32
+            } else {
+                0
+            })
+        })
         .and_then(|size| size.checked_add(objects.checked_mul(32)?))
         .and_then(|size| {
             size.checked_add(
@@ -92,18 +113,24 @@ pub(super) fn encoded_record_capacity(
 pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailure> {
     let mut cursor = RecordCursor::new(bytes);
     let magic = cursor.take_exact(RECORD_MAGIC.len())?;
-    let (includes_not_before, includes_terminal_failure, includes_progress_timestamp) =
-        if magic == RECORD_MAGIC {
-            (true, true, true)
-        } else if magic == PREVIOUS_RECORD_MAGIC {
-            (true, true, false)
-        } else if magic == LEGACY_RECORD_MAGIC {
-            (true, false, false)
-        } else if magic == OLDEST_RECORD_MAGIC {
-            (false, false, false)
-        } else {
-            return Err(MaintenanceFailure::InvalidInput);
-        };
+    let (
+        includes_source_binding,
+        includes_not_before,
+        includes_terminal_failure,
+        includes_progress_timestamp,
+    ) = if magic == RECORD_MAGIC {
+        (true, true, true, true)
+    } else if magic == PREVIOUS_RECORD_MAGIC {
+        (false, true, true, true)
+    } else if magic == LEGACY_RECORD_MAGIC {
+        (false, true, true, false)
+    } else if magic == OLDEST_RECORD_MAGIC {
+        (false, true, false, false)
+    } else if magic == ANCIENT_RECORD_MAGIC {
+        (false, false, false, false)
+    } else {
+        return Err(MaintenanceFailure::InvalidInput);
+    };
     let identity = MaintenanceTaskId::new(cursor.array_16()?)?;
     let class = class_from_code(cursor.byte()?)?;
     let scope = decode_scope(&mut cursor)?;
@@ -122,6 +149,12 @@ pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailur
     } else {
         0
     };
+    let integrity_scrub_source =
+        if class == MaintenanceTaskClass::IntegrityScrub && includes_source_binding {
+            Some(IntegrityScrubSourceBinding::new(cursor.array_32()?)?)
+        } else {
+            None
+        };
     let inputs = decode_objects(&mut cursor)?;
     let outputs = decode_objects(&mut cursor)?;
     let mut amounts = [0_u64; 11];
@@ -139,6 +172,7 @@ pub(super) fn decode_record(bytes: &[u8]) -> Result<TaskState, MaintenanceFailur
         ResourceAmounts::new(amounts),
         not_before,
     )?;
+    task.integrity_scrub_source = integrity_scrub_source;
     task.emergency_compaction = emergency_compaction;
     if priority != task.priority() {
         return Err(MaintenanceFailure::InvalidInput);
@@ -466,10 +500,76 @@ pub(super) fn record_identity(
         && !bytes.starts_with(PREVIOUS_RECORD_MAGIC)
         && !bytes.starts_with(LEGACY_RECORD_MAGIC)
         && !bytes.starts_with(OLDEST_RECORD_MAGIC)
+        && !bytes.starts_with(ANCIENT_RECORD_MAGIC)
     {
         return Ok(None);
     }
     decode_record(bytes).map(|state| Some(state.task.identity))
+}
+
+#[cfg(test)]
+mod source_binding_tests {
+    use super::*;
+    use positron_domain::{
+        identity::TenantId,
+        routing::{SignalKind, VirtualShardId},
+    };
+
+    #[test]
+    fn previous_unbound_scrub_record_restores_without_a_source_binding() {
+        let tenant = TenantId::from_bytes([0x31; 16]).expect("tenant");
+        let scope = MaintenanceScope::segment(
+            tenant,
+            SignalKind::Logs,
+            VirtualShardId::new(1).expect("shard"),
+        );
+        let task = MaintenanceTask::integrity_scrub(
+            MaintenanceTaskId::new([0x41; 16]).expect("task"),
+            scope,
+            MaintenanceTrigger::Scheduled,
+            MaintenancePreconditions::new(2, 1).expect("preconditions"),
+            [0x7a; 32],
+            3,
+        )
+        .expect("bound scrub");
+        let identity = task.identity();
+        let coordinator = MaintenanceCoordinator::new();
+        coordinator.submit_at(task, 1).expect("submit");
+        let record = coordinator
+            .durable_records()
+            .expect("durable record")
+            .into_iter()
+            .next()
+            .expect("one record");
+        let mut legacy = record.as_bytes().to_vec();
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(PREVIOUS_RECORD_MAGIC);
+        let source_start = legacy
+            .windows(32)
+            .position(|window| window == [0x7a; 32])
+            .expect("source binding in PMTC0006");
+        legacy.drain(source_start..source_start + 32);
+
+        let restored = MaintenanceCoordinator::restore([MaintenanceTaskRecord(legacy)])
+            .expect("previous PMTC record remains recoverable");
+        assert_eq!(
+            restored
+                .status(identity)
+                .expect("restored task")
+                .task()
+                .source_binding(),
+            None,
+            "a legacy record never acquires authority to scan a source it did not bind"
+        );
+        assert_eq!(
+            restored
+                .status(identity)
+                .expect("restored task")
+                .task()
+                .not_before(),
+            3,
+            "reopen preserves the original scheduled instant rather than deriving a new jitter"
+        );
+    }
 }
 
 const WINDOW_MAGIC: &[u8; 8] = b"PMTW0001";
@@ -598,7 +698,7 @@ mod tests {
         };
         let mut legacy = encode_record(&state).expect("v5 encoding").0;
         legacy.drain(171..180);
-        legacy[..RECORD_MAGIC.len()].copy_from_slice(OLDEST_RECORD_MAGIC);
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(ANCIENT_RECORD_MAGIC);
         // Magic, identity, class, system scope, trigger, emergency, priority,
         // then the two precondition generations precede the v3 due-time field.
         legacy.drain(45..53);
@@ -645,7 +745,7 @@ mod tests {
         );
         let mut legacy = current;
         legacy.drain(171..180);
-        legacy[..RECORD_MAGIC.len()].copy_from_slice(LEGACY_RECORD_MAGIC);
+        legacy[..RECORD_MAGIC.len()].copy_from_slice(OLDEST_RECORD_MAGIC);
         // PMTC0003 used the same layout as PMTC0004 except it had no byte
         // after the phase for the terminal cause.
         legacy.drain(144..145);
@@ -655,6 +755,39 @@ mod tests {
             decoded.terminal_failure,
             Some(MaintenanceTerminalFailure::Unclassified)
         );
+    }
+
+    #[test]
+    fn schema_promotion_replay_keeps_its_catalog_input_and_never_invents_a_scrub_source_binding() {
+        let source = MaintenanceObjectId::new([0x55; 32]).expect("catalog input");
+        let state = TaskState {
+            task: MaintenanceTask::with_contract_not_before(
+                MaintenanceTaskId::new([0x56; 16]).expect("identity"),
+                MaintenanceTaskClass::SchemaPromotion,
+                MaintenanceScope::system(),
+                MaintenanceTrigger::Scheduled,
+                MaintenancePreconditions::new(3, 1).expect("preconditions"),
+                vec![source],
+                Vec::new(),
+                ResourceAmounts::new([1; 11]),
+                99,
+            )
+            .expect("schema promotion task"),
+            phase: MaintenanceTaskPhase::Queued,
+            terminal_failure: None,
+            submitted_at: 7,
+            checkpoint: None,
+            last_progress_at: None,
+            pause_until: None,
+            cancellation_requested: false,
+            dispatches: 0,
+            terminal_order: None,
+            active_dispatch: None,
+        };
+        let decoded = decode_record(&encode_record(&state).expect("record").0)
+            .expect("schema promotion replay");
+        assert_eq!(decoded.task.inputs(), [source]);
+        assert_eq!(decoded.task.source_binding(), None);
     }
 
     #[test]

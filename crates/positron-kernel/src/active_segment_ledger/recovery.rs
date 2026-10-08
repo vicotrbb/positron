@@ -24,11 +24,12 @@ const FRONTIER_PREFIX_BYTES: usize = 8 + 2 + 2 + 4;
 const FRONTIER_V1_PLAINTEXT_BYTES: usize = 8 + 8 + 8;
 const FRONTIER_V2_PLAINTEXT_BYTES: usize = FRONTIER_V1_PLAINTEXT_BYTES + 1 + 8;
 const FRONTIER_V3_PLAINTEXT_BYTES: usize = 2 + FRONTIER_V2_PLAINTEXT_BYTES;
+const FRONTIER_V4_PLAINTEXT_BYTES: usize = FRONTIER_V3_PLAINTEXT_BYTES + 1 + 8 + 8;
 const MAX_FRONTIER_FRAME_BYTES: u32 = 512;
 const MAX_RECOVERED_BLOCKS: usize = 1_024;
 
 mod publication;
-pub(super) use publication::publish_frontier;
+pub(super) use publication::{FrontierPublication, publish_frontier};
 
 pub(super) struct RecoveryState {
     pub(super) frontier: CommitPosition,
@@ -46,12 +47,14 @@ struct PublishedFrontier {
     next_sequence: u64,
     position: CommitPosition,
     segment_retention: SegmentRetention,
+    segment_event_range: super::AuthenticatedEventRange,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct BlockRecoveryFormat {
     pub(super) version: u16,
     pub(super) segment_retention: SegmentRetention,
+    pub(super) segment_event_range: super::AuthenticatedEventRange,
 }
 
 #[cfg(test)]
@@ -95,6 +98,7 @@ pub(super) fn recover_with_mode(
         next_sequence,
         position,
         segment_retention,
+        segment_event_range,
     }) = frontier
     else {
         if file_length < header_length {
@@ -146,6 +150,7 @@ pub(super) fn recover_with_mode(
         BlockRecoveryFormat {
             version: format_version,
             segment_retention,
+            segment_event_range,
         },
     )?;
     let expected_blocks = usize::try_from(next_sequence)
@@ -219,12 +224,21 @@ pub(super) fn read_blocks(
                 .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?,
         )
         .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
-        let block_retention = if format.version == 3 {
+        let block_retention = if format.version >= 3 {
             decode_block_retention(plaintext)?
         } else {
             SegmentRetention::Unavailable
         };
-        let payload_offset = if format.version == 3 { 25 } else { 16 };
+        let event_range = if format.version == 4 {
+            decode_block_event_range(plaintext)?
+        } else {
+            super::AuthenticatedEventRange::unavailable(super::EventRangeUnavailable::LegacyFormat)
+        };
+        let payload_offset = match format.version {
+            4 => 42,
+            3 => 25,
+            _ => 16,
+        };
         let payload = plaintext
             .get(payload_offset..)
             .filter(|bytes| !bytes.is_empty())
@@ -268,6 +282,7 @@ pub(super) fn read_blocks(
             segment,
             frontier_authenticator,
             block_retention,
+            event_range,
         });
     }
     let recovered_retention = blocks
@@ -275,7 +290,18 @@ pub(super) fn read_blocks(
         .fold(SegmentRetention::Empty, |aggregate, block| {
             aggregate.append_block(block.block_retention)
         });
-    if format.version == 3 && recovered_retention != format.segment_retention {
+    if format.version >= 3 && recovered_retention != format.segment_retention {
+        return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+    }
+    let recovered_event_range = blocks
+        .iter()
+        .map(|block| block.event_range)
+        .reduce(super::AuthenticatedEventRange::aggregate)
+        .map_or(
+            super::AuthenticatedEventRange::unavailable(super::EventRangeUnavailable::LegacyFormat),
+            |range| range,
+        );
+    if format.version == 4 && recovered_event_range != format.segment_event_range {
         return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
     }
     Ok(blocks)
@@ -310,7 +336,7 @@ fn read_frontier(
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?,
     );
-    if !matches!(format_version, 1..=3) {
+    if !matches!(format_version, 1..=4) {
         return Err(LedgerFailure::new(LedgerFailureCode::UnsupportedFormat));
     }
     let frame_bytes = usize::try_from(u32::from_be_bytes(
@@ -361,13 +387,15 @@ fn read_frontier(
         FRONTIER_V1_PLAINTEXT_BYTES
     } else if format_version == 2 {
         FRONTIER_V2_PLAINTEXT_BYTES
-    } else {
+    } else if format_version == 3 {
         FRONTIER_V3_PLAINTEXT_BYTES
+    } else {
+        FRONTIER_V4_PLAINTEXT_BYTES
     };
     if plaintext.len() != expected_plaintext_bytes {
         return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
     }
-    let authenticated = if format_version == 3 {
+    let authenticated = if format_version >= 3 {
         let authenticated_version = u16::from_be_bytes(
             plaintext
                 .get(..2)
@@ -389,12 +417,17 @@ fn read_frontier(
         return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
     }
     let position = position_from_value(read_u64(authenticated, 16)?)?;
-    let segment_retention = if format_version == 3 {
+    let segment_retention = if format_version >= 3 {
         decode_segment_retention(authenticated)?
     } else {
         // v1 carried no bound and v2 could be authored from caller-supplied
         // metadata. Both remain readable but are ineligible for destruction.
         SegmentRetention::Unavailable
+    };
+    let segment_event_range = if format_version == 4 {
+        decode_segment_event_range(authenticated)?
+    } else {
+        super::AuthenticatedEventRange::unavailable(super::EventRangeUnavailable::LegacyFormat)
     };
     if matches!(segment_retention, SegmentRetention::Complete(_)) && next_sequence == 0 {
         return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
@@ -405,6 +438,7 @@ fn read_frontier(
         next_sequence,
         position,
         segment_retention,
+        segment_event_range,
     }))
 }
 
@@ -432,6 +466,53 @@ fn decode_block_retention(bytes: &[u8]) -> Result<SegmentRetention, LedgerFailur
 
 fn decode_segment_retention(bytes: &[u8]) -> Result<SegmentRetention, LedgerFailure> {
     decode_retention(bytes, 24, 25)
+}
+
+fn decode_block_event_range(bytes: &[u8]) -> Result<super::AuthenticatedEventRange, LedgerFailure> {
+    decode_event_range(bytes, 25, 26)
+}
+
+fn decode_segment_event_range(
+    bytes: &[u8],
+) -> Result<super::AuthenticatedEventRange, LedgerFailure> {
+    decode_event_range(bytes, 33, 34)
+}
+
+fn decode_event_range(
+    bytes: &[u8],
+    tag_offset: usize,
+    earliest_offset: usize,
+) -> Result<super::AuthenticatedEventRange, LedgerFailure> {
+    let earliest = i64::from_be_bytes(
+        bytes
+            .get(earliest_offset..earliest_offset.saturating_add(8))
+            .and_then(|value| value.try_into().ok())
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?,
+    );
+    let latest_offset = earliest_offset.saturating_add(8);
+    let latest = i64::from_be_bytes(
+        bytes
+            .get(latest_offset..latest_offset.saturating_add(8))
+            .and_then(|value| value.try_into().ok())
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?,
+    );
+    match bytes.get(tag_offset).copied() {
+        Some(1) => super::AuthenticatedEventRange::known(
+            positron_domain::time::UnixNanoseconds::new(earliest),
+            positron_domain::time::UnixNanoseconds::new(latest),
+        )
+        .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption)),
+        Some(2) if earliest == 0 && latest == 0 => Ok(super::AuthenticatedEventRange::unavailable(
+            super::EventRangeUnavailable::MissingSourceTime,
+        )),
+        Some(3) if earliest == 0 && latest == 0 => Ok(super::AuthenticatedEventRange::unavailable(
+            super::EventRangeUnavailable::InvalidSourceTime,
+        )),
+        Some(4) if earliest == 0 && latest == 0 => Ok(super::AuthenticatedEventRange::unavailable(
+            super::EventRangeUnavailable::LegacyFormat,
+        )),
+        _ => Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption)),
+    }
 }
 
 fn decode_retention(

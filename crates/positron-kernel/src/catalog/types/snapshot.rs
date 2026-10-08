@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::{Formatter, Result as FormatResult};
 use std::sync::Arc;
 
-use super::{CatalogFailure, CatalogGenerationId, CatalogObjectId, FormatEpoch};
+use super::{
+    CatalogFailure, CatalogFailureCode, CatalogGenerationId, CatalogObjectId, FormatEpoch,
+};
 
 #[derive(Clone)]
 pub struct CatalogSnapshot(pub(in crate::catalog) Arc<SnapshotData>);
@@ -40,6 +42,37 @@ impl CatalogSnapshot {
     }
     pub fn object(&self, identity: CatalogObjectId) -> Result<Option<&[u8]>, CatalogFailure> {
         Ok(self.0.objects.get(&identity).map(AsRef::as_ref))
+    }
+
+    /// Compares two authenticated Catalog states while excluding only the
+    /// supplied durable maintenance records. Callers derive this bounded
+    /// allowlist from their authenticated operation lineage; every other
+    /// record, including foreign maintenance work and non-maintenance
+    /// authority, remains part of the compare-and-swap basis.
+    pub fn same_except_maintenance_tasks(
+        &self,
+        successor: &Self,
+        permitted_tasks: &[crate::MaintenanceTaskId],
+    ) -> Result<bool, CatalogFailure> {
+        fn retained<'snapshot>(
+            snapshot: &'snapshot CatalogSnapshot,
+            permitted_tasks: &[crate::MaintenanceTaskId],
+        ) -> Result<Vec<(CatalogObjectId, &'snapshot [u8])>, CatalogFailure> {
+            let mut objects = Vec::new();
+            objects
+                .try_reserve(snapshot.0.objects.len())
+                .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+            for (identity, object) in &snapshot.0.objects {
+                let record = crate::maintenance::durable_task_record_identity(object)
+                    .map_err(|_| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
+                if !record.is_some_and(|record| permitted_tasks.contains(&record)) {
+                    objects.push((*identity, object.as_ref()));
+                }
+            }
+            Ok(objects)
+        }
+
+        Ok(retained(self, permitted_tasks)? == retained(successor, permitted_tasks)?)
     }
     pub(crate) fn plaintext_objects(&self) -> impl Iterator<Item = &[u8]> {
         self.0.objects.values().map(AsRef::as_ref)

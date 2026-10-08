@@ -82,7 +82,8 @@ async fn grpc_hostile_second_stream_is_refused_after_the_one_stream_setting()
     assert_eq!(refusal.kind, 3);
     assert_eq!(refusal.stream, 3);
     assert_eq!(refusal.payload, [0, 0, 0, 7]);
-    drop(stream);
+    stream.shutdown().await?;
+    assert_closed(stream).await?;
     fresh_authenticated_export(&harness).await?;
     harness.shutdown()?;
     Ok(())
@@ -249,11 +250,7 @@ impl GrpcHarness {
 
     fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let process = self.process.take().ok_or("runtime process missing")?;
-        assert_eq!(
-            process.shutdown(ShutdownTrigger::FirstSignal),
-            positron_runtime::ExitOutcome::Graceful
-        );
-        Ok(())
+        super::shutdown_gracefully(process, &self._roots)
     }
 }
 

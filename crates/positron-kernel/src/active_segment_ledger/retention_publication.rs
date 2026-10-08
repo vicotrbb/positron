@@ -244,16 +244,19 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
                     Ok::<_, LedgerFailure>(retired)
                 })?;
             let recovered_frontier = super::retention_frontier::recover(&basis, self.scope)?;
+            let verified_anchor = retention_time
+                .catalog_anchor_subsumes_observed(&basis, expected_frontier)
+                .map_err(super::map_retention_time_failure)?;
+            let Some(verified_anchor) = verified_anchor else {
+                return Err(LedgerFailure::new(LedgerFailureCode::RecoveryRequired));
+            };
             if retired.len() != outputs.len()
                 || recovered_frontier.is_none_or(|frontier| frontier < expected_frontier)
-                || !retention_time
-                    .catalog_anchor_subsumes_observed(&basis, expected_frontier)
-                    .map_err(super::map_retention_time_failure)?
             {
                 return Err(LedgerFailure::new(LedgerFailureCode::RecoveryRequired));
             }
             retention_time
-                .recover_catalog_anchor(&basis)
+                .recover_verified_catalog_anchor(verified_anchor)
                 .map_err(super::map_retention_time_failure)?;
             completion
                 .install_reconciled(coordinator)

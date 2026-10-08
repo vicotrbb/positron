@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "47e817235f3c64cfdd154a0e5b9f36d82659e5dbf66dd8f5155ed8c8580209e2"
+    "x-positron-schema-digest": "204391aa83d0ed56d7d4ba510a2b03946ec40a75815f7c28c5357f4b770ce21c"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -508,6 +508,22 @@
           "401": {"description": "System-administration authentication failed before request decoding."},
           "409": {"description": "The Catalog generation precondition failed, or the idempotency binding conflicts."},
           "503": {"description": "Maintenance administration is unavailable."}
+        }
+      }
+    },
+    "/v1/maintenance:verify": {
+      "post": {
+        "operationId": "VerifyOnlineIntegrity",
+        "security": [{"apiKeyBearer": []}],
+        "x-positron-availability": "available",
+        "x-positron-max-request-bytes": 512,
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OnlineVerificationRequest"}}}},
+        "responses": {
+          "200": {"description": "One bounded authenticated online integrity Verification Report.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OnlineVerificationReport"}}}},
+          "400": {"description": "Invalid bounded verification request."},
+          "401": {"description": "System-administration authentication failed before request decoding."},
+          "404": {"description": "The explicit immutable signal scope is unavailable."},
+          "503": {"description": "Verification administration or a required key is unavailable."}
         }
       }
     },
@@ -1367,7 +1383,7 @@
       },
       "MaintenanceStatusResponse": {
         "type": "object", "additionalProperties": false,
-        "required": ["tasks", "returned", "total", "queued", "running", "deferred", "terminal"],
+        "required": ["tasks", "returned", "total", "queued", "running", "deferred", "terminal", "integrity_findings"],
         "properties": {
           "tasks": {"type": "array", "maxItems": 32, "items": {"$ref": "#/components/schemas/MaintenanceTaskStatus"}},
           "returned": {"type": "integer", "minimum": 0, "maximum": 32},
@@ -1376,7 +1392,30 @@
           "queued": {"type": "integer", "minimum": 0},
           "running": {"type": "integer", "minimum": 0},
           "deferred": {"type": "integer", "minimum": 0},
-          "terminal": {"type": "integer", "minimum": 0}
+          "terminal": {"type": "integer", "minimum": 0},
+          "integrity_findings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/components/schemas/IntegrityQuarantineFinding"}}
+        }
+      },
+      "AuthenticatedTimeRange": {
+        "type": "object", "additionalProperties": false,
+        "required": ["provenance"],
+        "properties": {
+          "provenance": {"type": "string", "enum": ["known", "missing_source_time", "invalid_source_time", "legacy_format", "unavailable"]},
+          "earliest_unix_nanos": {"type": "integer", "format": "int64"},
+          "latest_unix_nanos": {"type": "integer", "format": "int64"}
+        }
+      },
+      "IntegrityQuarantineFinding": {
+        "type": "object", "additionalProperties": false,
+        "required": ["tenant", "signal", "shard", "segment", "base_position", "event_range", "ingest_range"],
+        "properties": {
+          "tenant": {"type": "string", "format": "uuid"},
+          "signal": {"type": "string", "enum": ["logs", "traces"]},
+          "shard": {"type": "integer", "minimum": 1},
+          "segment": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+          "base_position": {"type": "integer", "minimum": 0},
+          "event_range": {"$ref": "#/components/schemas/AuthenticatedTimeRange"},
+          "ingest_range": {"$ref": "#/components/schemas/AuthenticatedTimeRange"}
         }
       },
       "MaintenanceExplainRequest": {
@@ -1452,6 +1491,36 @@
           "until_unix_seconds": {"type": "integer", "minimum": 1},
           "catalog_generation": {"type": "integer", "minimum": 1},
           "audit_position": {"type": "integer", "minimum": 1}
+        }
+      },
+      "OnlineVerificationRequest": {
+        "type": "object", "additionalProperties": false,
+        "required": ["tenant", "signal", "shard"],
+        "properties": {
+          "tenant": {"type": "string", "format": "uuid"},
+          "signal": {"type": "string", "enum": ["logs", "traces"]},
+          "shard": {"type": "integer", "minimum": 1},
+          "expected_catalog_generation": {"type": "integer", "minimum": 1},
+          "continuation": {"type": "string", "pattern": "^[0-9A-Fa-f]{272}$", "minLength": 272, "maxLength": 272}
+        }
+      },
+      "OnlineVerificationReport": {
+        "type": "object", "additionalProperties": false,
+        "required": ["report_version", "tenant", "signal", "shard", "catalog_generation", "examined_segments", "examined_bytes", "omitted_segments", "outcome", "verification_complete", "report_checksum", "findings"],
+        "properties": {
+          "report_version": {"type": "integer", "const": 1},
+          "tenant": {"type": "string", "format": "uuid"},
+          "signal": {"type": "string", "enum": ["logs", "traces"]},
+          "shard": {"type": "integer", "minimum": 1},
+          "catalog_generation": {"type": "integer", "minimum": 1},
+          "examined_segments": {"type": "integer", "minimum": 0, "maximum": 128},
+          "examined_bytes": {"type": "integer", "minimum": 0},
+          "omitted_segments": {"type": "integer", "minimum": 0},
+          "outcome": {"type": "string", "enum": ["verified", "incomplete", "stale", "quarantined", "fenced"]},
+          "verification_complete": {"type": "boolean"},
+          "report_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$", "minLength": 64, "maxLength": 64},
+          "continuation": {"type": "string", "pattern": "^[0-9A-Fa-f]{272}$", "minLength": 272, "maxLength": 272},
+          "findings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/components/schemas/IntegrityQuarantineFinding"}}
         }
       },
       "TenantRetentionPreviewRequest": {

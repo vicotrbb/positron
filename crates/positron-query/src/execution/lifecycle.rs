@@ -7,6 +7,13 @@ use crate::{
 use super::resources::ExecutionResources;
 use crate::cursor::CursorState;
 
+pub(super) struct IncompletePage {
+    pub(super) header: Option<QueryEvent>,
+    pub(super) failure: QueryFailure,
+    pub(super) affected_ranges: Vec<crate::QueryAffectedRange>,
+    pub(super) terminal_stats: QueryStats,
+}
+
 impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
     pub(super) fn failed_page(
         &self,
@@ -43,6 +50,32 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
             state,
             delivered_before,
             terminal_stats,
+            resources,
+        )
+    }
+
+    pub(super) fn incomplete_page_with_affected_ranges(
+        &self,
+        incomplete: IncompletePage,
+        state: &CursorState,
+        delivered_before: QueryStats,
+        resources: ExecutionResources,
+    ) -> Result<QueryStream<'ledger>, QueryFailure> {
+        let mut events = Vec::with_capacity(1);
+        events.extend(incomplete.header);
+        events.push(QueryEvent::Terminal(QueryTerminal::Incomplete(
+            QueryIncomplete::with_affected_ranges(
+                incomplete.failure,
+                incomplete.terminal_stats,
+                incomplete.affected_ranges,
+            ),
+        )));
+        self.stream(
+            events,
+            state,
+            false,
+            delivered_before,
+            incomplete.terminal_stats,
             resources,
         )
     }

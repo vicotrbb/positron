@@ -56,22 +56,39 @@ pub(super) fn resume_source_lease<'kernel, 'catalog, 'ledger>(
     state: &TailCursorState,
     now: u64,
     expected_catalog: Option<(positron_kernel::CatalogGenerationId, u64)>,
+    require_expiry_descriptor: bool,
 ) -> Result<SnapshotLeaseGrant<'kernel>, QueryFailure> {
     let now = now.max(
         authority
             .snapshot_lease_time()
             .map_err(crate::execution_support::map_ledger_failure)?,
     );
-    let grant = match expected_catalog {
-        Some((identity, generation)) => authority.resume_snapshot_lease_with_marker_at_catalog(
+    let grant = match (expected_catalog, require_expiry_descriptor) {
+        (Some((identity, generation)), true) => authority
+            .resume_snapshot_lease_with_marker_at_catalog_with_expiry_task(
+                binding.lease(),
+                now,
+                state.sequence(),
+                state.prior_digest(),
+                identity,
+                generation,
+            ),
+        (Some((identity, generation)), false) => authority
+            .resume_snapshot_lease_with_marker_at_catalog(
+                binding.lease(),
+                now,
+                state.sequence(),
+                state.prior_digest(),
+                identity,
+                generation,
+            ),
+        (None, true) => authority.resume_snapshot_lease_with_marker_with_expiry_task(
             binding.lease(),
             now,
             state.sequence(),
             state.prior_digest(),
-            identity,
-            generation,
         ),
-        None => authority.resume_snapshot_lease_with_marker(
+        (None, false) => authority.resume_snapshot_lease_with_marker(
             binding.lease(),
             now,
             state.sequence(),
@@ -96,6 +113,7 @@ pub(super) fn validate_resume_leases(
     sources: &TailSourceSet<'_, '_, '_>,
     now: u64,
     primary_shard: positron_domain::routing::VirtualShardId,
+    require_expiry_descriptor: bool,
 ) -> Result<(), QueryFailure> {
     for reader in sources.readers() {
         let binding = state
@@ -109,15 +127,23 @@ pub(super) fn validate_resume_leases(
                 .snapshot_lease_time()
                 .map_err(crate::execution_support::map_ledger_failure)?,
         );
-        let grant = authority
-            .resume_snapshot_lease(binding.lease(), lease_now)
-            .map_err(|failure| {
-                if failure.code() == positron_kernel::LedgerFailureCode::SnapshotExpired {
-                    QueryFailure::new(QueryFailureCode::StoreUnavailable)
-                } else {
-                    crate::execution_support::map_ledger_failure(failure)
-                }
-            })?;
+        let grant = if require_expiry_descriptor {
+            authority.resume_snapshot_lease_with_marker_with_expiry_task(
+                binding.lease(),
+                lease_now,
+                state.sequence(),
+                state.prior_digest(),
+            )
+        } else {
+            authority.resume_snapshot_lease(binding.lease(), lease_now)
+        }
+        .map_err(|failure| {
+            if failure.code() == positron_kernel::LedgerFailureCode::SnapshotExpired {
+                QueryFailure::new(QueryFailureCode::StoreUnavailable)
+            } else {
+                crate::execution_support::map_ledger_failure(failure)
+            }
+        })?;
         let snapshot = grant.snapshot();
         if snapshot.scope().shard_id() != binding.shard()
             || snapshot.frontier() != binding.frontier()

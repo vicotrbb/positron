@@ -22,13 +22,14 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
+pub use budget::integrity_scrub_resource_claim;
 use budget::{
     audit_checkpoint_resource_claim, audit_reclamation_resource_claim, commit_resource_claim,
     recovery_resource_claim, reserve_history, retained_artifact_bytes,
 };
 use codec::{
-    CommitRecord, encode_commit, generation_identity, object_set_digest, prepare_audit,
-    snapshot_from_record, transaction_digest,
+    CommitRecord, decode_commit, encode_commit, generation_identity, object_set_digest,
+    prepare_audit, snapshot_from_record, transaction_digest,
 };
 use preparation::PreparedCommit;
 use recovery::load_snapshot;
@@ -71,6 +72,39 @@ pub use types::{
     TransactionId,
 };
 pub(crate) use types::{MAX_CATALOG_OBJECTS, MAX_CATALOG_TOTAL_BYTES};
+
+/// Exclusive, system-scoped admission for one complete offline integrity
+/// inspection. Its Catalog read cannot acquire a second independent grant.
+pub struct OfflineIntegrityCatalogInspection<'authority> {
+    authority: &'authority StorageKernelResourceAuthority,
+    _reservation: crate::ResourceReservation<'authority>,
+}
+
+impl OfflineIntegrityCatalogInspection<'_> {
+    #[must_use]
+    pub const fn authority(&self) -> &StorageKernelResourceAuthority {
+        self.authority
+    }
+
+    pub fn read_current_snapshot(
+        &self,
+        instance: InstanceId,
+        secret: CatalogSecret,
+    ) -> Result<CatalogSnapshot, CatalogFailure> {
+        Ok(Catalog::read_current_view_admitted(self.authority, instance, secret)?.snapshot)
+    }
+
+    /// Reads the authenticated immutable Catalog view under this inspection's
+    /// single system-diagnostics reservation. The returned view does not
+    /// acquire a writer lease or create Catalog storage.
+    pub fn read_current_view(
+        &self,
+        instance: InstanceId,
+        secret: CatalogSecret,
+    ) -> Result<CatalogReadView, CatalogFailure> {
+        Catalog::read_current_view_admitted(self.authority, instance, secret)
+    }
+}
 
 #[cfg(any(test, fuzzing))]
 pub(crate) use storage::with_catalog_fault;
@@ -270,6 +304,26 @@ impl std::fmt::Debug for Catalog<'_> {
 }
 
 impl<'authority> Catalog<'authority> {
+    /// Admits the complete bounded offline inspection before Catalog recovery
+    /// or snapshot materialization. The returned capability binds the read to
+    /// this one system diagnostics reservation.
+    pub fn reserve_offline_integrity_inspection(
+        authority: &'authority StorageKernelResourceAuthority,
+        claim: WorkClaim,
+    ) -> Result<OfflineIntegrityCatalogInspection<'authority>, CatalogFailure> {
+        if !claim.is_system_diagnostics() {
+            return Err(CatalogFailure::new(CatalogFailureCode::InvalidInput));
+        }
+        let reservation = authority
+            .governor()
+            .reserve(claim)
+            .map_err(CatalogFailure::admission)?;
+        Ok(OfflineIntegrityCatalogInspection {
+            authority,
+            _reservation: reservation,
+        })
+    }
+
     /// Builds the sole durable coordinator task contract for a checkpoint of
     /// one already-visible Governance Audit frontier.
     pub fn governance_audit_checkpoint_task(
@@ -369,6 +423,41 @@ impl<'authority> Catalog<'authority> {
         Ok(Self::read_current_view(authority, instance, secret)?.snapshot)
     }
 
+    /// Reads one authenticated immutable ancestor of a supplied current view
+    /// without acquiring the Catalog Writer lease.
+    pub fn read_historical_snapshot(
+        authority: &'authority StorageKernelResourceAuthority,
+        instance: InstanceId,
+        secret: CatalogSecret,
+        current: &CatalogSnapshot,
+        identity: [u8; 32],
+        number: u64,
+    ) -> Result<CatalogSnapshot, CatalogFailure> {
+        let recovery_claim =
+            RecoveryWorkClaim::system(RecoveryWorkKind::Repair, recovery_resource_claim())
+                .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let _reservation = authority
+            .recovery()
+            .reserve(recovery_claim)
+            .map_err(CatalogFailure::admission)?;
+        let volume = authority
+            .primary_data_volume()
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::ResourceAdmissionRefused))?;
+        let root = volume
+            ._root
+            .try_clone()
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::StorageUnavailable))?;
+        let storage = CatalogStorage::inspect(&root)?;
+        pin_historical_generation(
+            &storage,
+            &secret,
+            instance,
+            current,
+            CatalogGenerationId::from_authenticated_bytes(identity),
+            number,
+        )
+    }
+
     /// Reads the highest complete authenticated generation and its visible
     /// audit records without acquiring the Catalog writer lease.
     pub fn read_current_view(
@@ -383,6 +472,14 @@ impl<'authority> Catalog<'authority> {
             .recovery()
             .reserve(recovery_claim)
             .map_err(CatalogFailure::admission)?;
+        Self::read_current_view_admitted(authority, instance, secret)
+    }
+
+    fn read_current_view_admitted(
+        authority: &StorageKernelResourceAuthority,
+        instance: InstanceId,
+        secret: CatalogSecret,
+    ) -> Result<CatalogReadView, CatalogFailure> {
         let volume = authority
             .primary_data_volume()
             .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::ResourceAdmissionRefused))?;
@@ -436,6 +533,36 @@ impl<'authority> Catalog<'authority> {
             .lock()
             .map(|state| state.current.clone())
             .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))
+    }
+
+    /// Opens one exact, authenticated predecessor of an already-pinned
+    /// generation. This is deliberately crate-private: persistent snapshot
+    /// leases use it to resume their immutable original Catalog generation;
+    /// callers cannot use it as another Catalog authority.
+    ///
+    /// `current` is the same immutable generation that supplied the durable
+    /// lease and its paired expiry descriptor. The walk validates that the
+    /// requested generation is an ancestor of that exact generation before it
+    /// loads any of its objects. The Catalog's bounded generation directory
+    /// limits the walk; it never retains a second history index in memory.
+    pub(crate) fn pin_historical_generation(
+        &self,
+        current: &CatalogSnapshot,
+        identity: CatalogGenerationId,
+        number: u64,
+    ) -> Result<CatalogSnapshot, CatalogFailure> {
+        let secret = self
+            .secret
+            .lock()
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+        pin_historical_generation(
+            &self.storage,
+            &secret,
+            self.instance,
+            current,
+            identity,
+            number,
+        )
     }
 
     pub(crate) fn export_output_root(&self) -> Result<File, CatalogFailure> {
@@ -1616,6 +1743,46 @@ impl<'authority> Catalog<'authority> {
     #[doc(hidden)]
     pub fn refresh_after_ambiguous_publication_for_test(&self) -> Result<(), CatalogFailure> {
         self.refresh_state()
+    }
+}
+
+fn pin_historical_generation(
+    storage: &CatalogStorage,
+    secret: &CatalogSecret,
+    instance: InstanceId,
+    current: &CatalogSnapshot,
+    identity: CatalogGenerationId,
+    number: u64,
+) -> Result<CatalogSnapshot, CatalogFailure> {
+    if number == 0 || number > current.number() {
+        return Err(CatalogFailure::new(CatalogFailureCode::StaleGeneration));
+    }
+    let mut generation = current.identity();
+    let mut expected_number = current.number();
+    let mut traversed = 0_usize;
+    loop {
+        traversed = traversed
+            .checked_add(1)
+            .filter(|count| *count <= storage::MAX_GENERATIONS)
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let encoded = storage.read_commit(secret, instance, generation)?;
+        let record = decode_commit(generation, &encoded)?;
+        if !record.format_epoch.is_catalog_readable()
+            || record.instance != instance
+            || record.number != expected_number
+        {
+            return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
+        }
+        if expected_number == number {
+            if record.generation != identity {
+                return Err(CatalogFailure::new(CatalogFailureCode::StaleGeneration));
+            }
+            return load_snapshot(storage, secret, instance, &record);
+        }
+        expected_number = expected_number
+            .checked_sub(1)
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
+        generation = record.predecessor;
     }
 }
 

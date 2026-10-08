@@ -148,11 +148,14 @@ impl ReceiverHarness {
             connection_protection: None,
             http2_profile: None,
             cors_allowed_origins: Vec::new(),
+            control_diagnostics: None,
         });
         let cancellation = TaskCancellation::new();
         let serve_cancellation = cancellation.clone();
         let force = TaskCancellation::new();
-        let health = ProcessState::starting().health();
+        let state = ProcessState::starting();
+        state.transition(crate::ProcessPhase::Serving);
+        let health = state.health();
         let server = std::thread::spawn(move || {
             let _ = serve_http(admission, serve_cancellation, force, health, Some(services));
         });

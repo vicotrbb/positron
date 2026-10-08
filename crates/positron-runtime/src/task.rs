@@ -75,6 +75,12 @@ impl positron_signals::ScanCancellation for TaskCancellation {
     }
 }
 
+impl positron_kernel::IntegrityCancellationProbe for TaskCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskJoinOutcome {
     Joined,
@@ -109,6 +115,7 @@ pub enum TaskFailure {
     RegistrationUnavailable,
     SpawnUnavailable,
     JoinUnavailable,
+    JoinPanicked,
     AbortUnavailable,
 }
 

@@ -7,7 +7,10 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::super::TrustedProxy;
 use crate::health::MaintenanceHealth;
-use crate::{ConfigurationObservation, HealthWarning, ProcessPhase};
+use crate::{
+    ConfigurationObservation, DoctorRuntimeFacts, HealthWarning, ListenerRole, ProcessPhase,
+};
+use positron_kernel::TransferredResourceReservation;
 
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 
@@ -264,14 +267,26 @@ pub(in crate::native_host) fn health_response(
 
 pub(in crate::native_host) fn configuration_status_response(
     phase: ProcessPhase,
+    integrity_degraded: bool,
     status: &ConfigurationObservation,
     maintenance: MaintenanceHealth,
+    doctor: DoctorRuntimeFacts,
+    bound_listener_roles: u8,
 ) -> Response {
+    let required_families = required_families_json(
+        phase,
+        integrity_degraded,
+        status,
+        maintenance,
+        doctor,
+        bound_listener_roles,
+    );
     Response::json(
         200,
         format!(
-            "{{\"phase\":\"{}\",\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
+            "{{\"phase\":\"{}\",\"integrity_degraded\":{},\"observed_generation\":{},\"effective_digest\":\"{}\",\"desired_digest\":\"{}\",\"drift_disposition\":\"{}\",\"pending_restart\":{},\"doctor\":{{\"key_custody\":\"{}\",\"catalog_bootstrap\":\"{}\",\"catalog_generation\":{},\"backup_repository\":\"{}\",\"durable_operations\":{},\"active_durable_operations\":{},\"snapshot_leases\":{},\"listener_topology\":{{\"control\":{},\"operations\":{},\"api\":{},\"otlp_grpc\":{},\"otlp_http\":{},\"loki_push\":{}}},\"required_families\":{required_families}}},\"maintenance\":{{\"queued\":{},\"running\":{},\"deferred\":{},\"terminal\":{},\"failed\":{},\"clock_uncertain\":{},\"oldest_queued_age_seconds\":{},\"lower_class_queue_delay_breaches\":{},\"running_no_durable_progress_slo_breaches\":{},\"running_no_durable_progress_slo_unknown\":{},\"checkpointed_tasks\":{},\"paused_tasks\":{},\"conflicted_tasks\":{},\"completed_inputs\":{},\"input_objects\":{},\"outstanding_reservations\":{},\"maximum_outstanding_reservations\":{},\"outstanding_maintenance_reservations\":{},\"global_reservation_classes\":{{\"durability_recovery\":{},\"security_lifecycle\":{},\"ingest\":{},\"interactive_query_tail\":{},\"ordinary_maintenance_backup\":{}}},\"failure_classes\":{{\"identity_mismatch\":{},\"stale_generation\":{},\"unclassified\":{}}}}}}}",
             process_phase_name(phase),
+            integrity_degraded,
             status.generation(),
             hexadecimal_digest(crate::configuration_catalog::configuration_digest(
                 status.effective()
@@ -281,6 +296,27 @@ pub(in crate::native_host) fn configuration_status_response(
             )),
             drift_disposition_name(status.drift_disposition()),
             status.pending_restart().is_some(),
+            if doctor.key_custody_verified() {
+                "verified"
+            } else {
+                "unavailable"
+            },
+            if doctor.catalog_bootstrap_verified() {
+                "verified"
+            } else {
+                "unavailable"
+            },
+            doctor.catalog_generation(),
+            doctor.backup_repository().label(),
+            doctor.durable_operations(),
+            doctor.active_durable_operations(),
+            doctor.snapshot_leases(),
+            listener_bound(bound_listener_roles, ListenerRole::Control),
+            listener_bound(bound_listener_roles, ListenerRole::Operations),
+            listener_bound(bound_listener_roles, ListenerRole::Api),
+            listener_bound(bound_listener_roles, ListenerRole::OtlpGrpc),
+            listener_bound(bound_listener_roles, ListenerRole::OtlpHttp),
+            listener_bound(bound_listener_roles, ListenerRole::LokiPush),
             maintenance.queued(),
             maintenance.running(),
             maintenance.deferred(),
@@ -293,6 +329,9 @@ pub(in crate::native_host) fn configuration_status_response(
             maintenance.lower_class_queue_delay_breaches(),
             maintenance.running_no_durable_progress_slo_breaches(),
             maintenance.running_no_durable_progress_slo_unknown(),
+            maintenance.checkpointed_tasks(),
+            maintenance.paused_tasks(),
+            maintenance.conflicted_tasks(),
             maintenance.completed_inputs(),
             maintenance.input_objects(),
             maintenance.outstanding_reservations(),
@@ -307,6 +346,132 @@ pub(in crate::native_host) fn configuration_status_response(
             maintenance.failed_stale_generation(),
             maintenance.failed_unclassified(),
         ),
+    )
+}
+
+pub(in crate::native_host) fn fenced_doctor_response(
+    doctor: DoctorRuntimeFacts,
+    bound_listener_roles: u8,
+    reason: Option<crate::IntegrityFenceReason>,
+) -> Response {
+    let reason = reason.map_or("none", crate::IntegrityFenceReason::redacted_label);
+    Response::json(
+        200,
+        format!(
+            "{{\"phase\":\"fenced\",\"liveness\":\"live\",\"readiness\":\"not_ready\",\"reason\":\"{reason}\",\"doctor\":{{\"key_custody\":\"{}\",\"catalog_bootstrap\":\"{}\",\"catalog_generation\":{},\"backup_repository\":\"{}\",\"listener_topology\":{{\"control\":{},\"operations\":{},\"api\":{},\"otlp_grpc\":{},\"otlp_http\":{},\"loki_push\":{}}}}}}}",
+            if doctor.key_custody_verified() {
+                "verified"
+            } else {
+                "unavailable"
+            },
+            if doctor.catalog_bootstrap_verified() {
+                "verified"
+            } else {
+                "unavailable"
+            },
+            doctor.catalog_generation(),
+            doctor.backup_repository().label(),
+            listener_bound(bound_listener_roles, ListenerRole::Control),
+            listener_bound(bound_listener_roles, ListenerRole::Operations),
+            listener_bound(bound_listener_roles, ListenerRole::Api),
+            listener_bound(bound_listener_roles, ListenerRole::OtlpGrpc),
+            listener_bound(bound_listener_roles, ListenerRole::OtlpHttp),
+            listener_bound(bound_listener_roles, ListenerRole::LokiPush),
+        ),
+    )
+}
+
+fn listener_bound(roles: u8, role: ListenerRole) -> bool {
+    roles & crate::health::listener_role_bit(role) != 0
+}
+
+fn required_families_json(
+    phase: ProcessPhase,
+    integrity_degraded: bool,
+    status: &ConfigurationObservation,
+    maintenance: MaintenanceHealth,
+    doctor: DoctorRuntimeFacts,
+    bound_listener_roles: u8,
+) -> String {
+    use positron_config::NetworkListenerRole;
+
+    let network_roles = [
+        (ListenerRole::Operations, NetworkListenerRole::Operations),
+        (ListenerRole::Api, NetworkListenerRole::Api),
+        (ListenerRole::OtlpGrpc, NetworkListenerRole::OtlpGrpc),
+        (ListenerRole::OtlpHttp, NetworkListenerRole::OtlpHttp),
+        (ListenerRole::LokiPush, NetworkListenerRole::LokiPush),
+    ];
+    let effective = status.effective();
+    let all_network_bound = network_roles
+        .iter()
+        .all(|(runtime_role, _)| listener_bound(bound_listener_roles, *runtime_role));
+    let all_tls_certificates_loaded = network_roles.iter().all(|(runtime_role, config_role)| {
+        effective
+            .network_listener_profile(*config_role)
+            .is_some_and(|profile| {
+                profile.transport() == positron_config::NetworkTransport::PlaintextOptOut
+                    || listener_bound(bound_listener_roles, *runtime_role)
+            })
+    });
+    let proxy_trust_configured = network_roles.iter().any(|(_, config_role)| {
+        effective
+            .network_listener_profile(*config_role)
+            .is_some_and(|profile| !profile.trusted_proxy_cidrs().is_empty())
+    });
+    let fairness = if maintenance.lower_class_queue_delay_breaches() == 0 {
+        "within_bound"
+    } else {
+        "breached"
+    };
+    let listener_profiles = if all_network_bound {
+        "active"
+    } else {
+        "incomplete"
+    };
+    let listener_certificates = if all_tls_certificates_loaded {
+        "loaded_or_not_required"
+    } else {
+        "not_loaded"
+    };
+    let proxy_trust = if proxy_trust_configured {
+        "configured"
+    } else {
+        "not_configured"
+    };
+    let drain = match phase {
+        ProcessPhase::Serving => "accepting",
+        ProcessPhase::Draining => "draining",
+        _ => "not_serving",
+    };
+    let health_derivation = match (phase, integrity_degraded) {
+        (ProcessPhase::Serving, false) => "serving_ready_live",
+        (ProcessPhase::Serving, true) => "serving_integrity_degraded",
+        (ProcessPhase::Fenced, _) => "fenced_not_ready_live",
+        _ => "not_ready_live",
+    };
+    let configuration_sources = if effective
+        .source_for("runtime.max_registered_tenants")
+        .is_some()
+    {
+        "redacted"
+    } else {
+        "unavailable"
+    };
+    format!(
+        "{{\"catalog_integrity\":{{\"disposition\":\"observed\",\"audit_chain\":\"verified\",\"frontier\":{},\"manifest_objects\":{},\"reachable_ledger_scopes\":{},\"quarantine_findings\":{},\"scrub\":\"observed\",\"scrub_tasks\":{},\"scrub_checkpoints\":{}}},\"resource_governor\":{{\"disposition\":\"observed\",\"queues\":\"observed\",\"fairness\":\"{fairness}\",\"recovery_reserve\":\"configured\",\"recovery_reserve_memory_bytes\":{}}},\"listener_security\":{{\"disposition\":\"observed\",\"profiles\":\"{listener_profiles}\",\"certificates\":\"{listener_certificates}\",\"proxy_trust\":\"{proxy_trust}\",\"drain\":\"{drain}\"}},\"backup_verification\":{{\"disposition\":\"not_shipped\",\"manifest_verification\":\"not_shipped\",\"purge_compatibility\":\"not_shipped\"}},\"health_state\":{{\"disposition\":\"observed\",\"derivation\":\"{health_derivation}\"}},\"configuration\":{{\"disposition\":\"observed\",\"contract\":\"valid\",\"effective_sources\":\"{configuration_sources}\",\"key_custody\":\"{}\"}}}}",
+        doctor.catalog_audit_frontier(),
+        doctor.catalog_manifest_objects(),
+        doctor.catalog_reachable_ledger_scopes(),
+        doctor.catalog_quarantine_findings(),
+        doctor.integrity_scrub_tasks(),
+        doctor.integrity_scrub_checkpoints(),
+        maintenance.recovery_reserve_memory_bytes(),
+        if doctor.key_custody_verified() {
+            "verified"
+        } else {
+            "unavailable"
+        },
     )
 }
 
@@ -382,6 +547,7 @@ pub(in crate::native_host) struct Response {
     pub(in crate::native_host) content_type: &'static str,
     pub(in crate::native_host) body: Vec<u8>,
     pub(in crate::native_host) retry_after_seconds: Option<u32>,
+    pub(in crate::native_host) diagnostics_reservation: Option<Box<TransferredResourceReservation>>,
 }
 
 impl Drop for Response {
@@ -397,6 +563,7 @@ impl Response {
             content_type: "application/json",
             body: Vec::new(),
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }
     }
 
@@ -406,6 +573,7 @@ impl Response {
             content_type: "application/json",
             body: body.into_bytes(),
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }
     }
 
@@ -415,6 +583,7 @@ impl Response {
             content_type: "application/x-protobuf",
             body,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }
     }
 
@@ -446,7 +615,7 @@ impl Response {
 
 pub(in crate::native_host) fn write_response<S: Write>(
     stream: &mut S,
-    response: Response,
+    mut response: Response,
 ) -> Result<(), std::io::Error> {
     let reason = match response.status {
         200 => "OK",
@@ -475,7 +644,9 @@ pub(in crate::native_host) fn write_response<S: Write>(
         retry_after
     );
     stream.write_all(header.as_bytes())?;
-    stream.write_all(&response.body)
+    let outcome = stream.write_all(&response.body);
+    drop(response.diagnostics_reservation.take());
+    outcome
 }
 
 #[cfg(test)]
@@ -540,7 +711,7 @@ mod tests {
                     "127.0.0.1:1".parse().expect("loopback peer"),
                     None,
                     &health,
-                    None,
+                    super::super::RouteDependencies::new(None, None),
                     crate::ConnectionProtection::new(
                         std::num::NonZeroU16::MIN,
                         std::time::Duration::from_secs(1),

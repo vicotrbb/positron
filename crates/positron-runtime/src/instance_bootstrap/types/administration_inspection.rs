@@ -1,6 +1,208 @@
 use super::*;
 
 impl InitializedInstance {
+    /// Opens the kernel-owned sanitized crash-record boundary while this
+    /// initialized instance still retains Primary Data Volume ownership.
+    pub fn crash_records(&self) -> Result<positron_kernel::CrashRecordStore, BootstrapFailure> {
+        positron_kernel::CrashRecordStore::from_authenticated_authority(
+            &self._authority,
+            &self.key,
+            self.instance,
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
+    }
+
+    /// Verifies the current authenticated bootstrap, Catalog, and opaque key
+    /// custody binding for Doctor. This inspection never publishes Catalog
+    /// state, creates a key, or exports key material.
+    pub fn doctor_runtime_facts(
+        &self,
+        actor: positron_governance::AuthorizedContext,
+    ) -> Result<DoctorRuntimeFacts, BootstrapFailure> {
+        let secret = self
+            .key
+            .catalog_secret(self.instance)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        let view = Catalog::read_current_view(&self._authority, self.instance, secret)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let identity = positron_governance::Identity::open(view.snapshot())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+        identity
+            .inspect(actor, &[])
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ApiKeyUnauthorized))?;
+        let (_, governance) = view
+            .snapshot()
+            .governance_object()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+        if governance.integrity_key_fingerprint() != self.integrity_key_fingerprint {
+            return Err(BootstrapFailure::new(
+                BootstrapFailureCode::IdentityMismatch,
+            ));
+        }
+        let signer = self
+            .key
+            .export_manifest_signer(self.instance, governance.protected_integrity_key())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        if signer.identity().public_key() != governance.integrity_public_key() {
+            return Err(BootstrapFailure::new(
+                BootstrapFailureCode::IdentityMismatch,
+            ));
+        }
+        let backup_repository =
+            BackupRepositoryInspection::from_authenticated_catalog(view.snapshot())
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        view.verify_audit_chain(governance.integrity_public_key(), None)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let catalog_manifest_objects = u32::try_from(view.snapshot().object_count())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let mut catalog_reachable_ledger_scopes = 0_u32;
+        for tenant in
+            positron_governance::TenantAdministration::registered_tenant_ids(view.snapshot())
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
+        {
+            for signal in [
+                positron_domain::routing::SignalKind::Logs,
+                positron_domain::routing::SignalKind::Traces,
+            ] {
+                let scopes = view
+                    .snapshot()
+                    .reachable_ledger_scopes(tenant, signal)
+                    .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+                let count = u32::try_from(scopes.len())
+                    .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+                catalog_reachable_ledger_scopes =
+                    catalog_reachable_ledger_scopes.checked_add(count).ok_or(
+                        BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable),
+                    )?;
+            }
+        }
+        let catalog_quarantine_findings = u32::try_from(
+            positron_kernel::integrity_quarantine_findings(view.snapshot())
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?
+                .len(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let mut operations = Vec::new();
+        for record in view.governance_audit_records() {
+            let entry = positron_governance::GovernanceAuditEntry::decode(record)
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+            let positron_governance::GovernanceAuditEntry::DurableOperation(operation) = entry
+            else {
+                continue;
+            };
+            if let Some((_, outcome)) = operations
+                .iter_mut()
+                .find(|(identity, _)| *identity == operation.operation_id())
+            {
+                *outcome = operation.outcome();
+            } else {
+                operations.try_reserve(1).map_err(|_| {
+                    BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable)
+                })?;
+                operations.push((operation.operation_id(), operation.outcome()));
+            }
+        }
+        let durable_operations = u32::try_from(operations.len())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let active_durable_operations = u32::try_from(
+            operations
+                .iter()
+                .filter(|(_, outcome)| !outcome.is_terminal())
+                .count(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let maintenance_statuses = self
+            .maintenance
+            .statuses()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let snapshot_leases = u32::try_from(
+            maintenance_statuses
+                .iter()
+                .filter(|status| {
+                    status.task().class()
+                        == positron_kernel::MaintenanceTaskClass::SnapshotLeaseExpiry
+                        && !matches!(
+                            status.phase(),
+                            positron_kernel::MaintenanceTaskPhase::Cancelled
+                                | positron_kernel::MaintenanceTaskPhase::Succeeded
+                                | positron_kernel::MaintenanceTaskPhase::Failed
+                        )
+                })
+                .count(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let integrity_scrub_tasks = u32::try_from(
+            maintenance_statuses
+                .iter()
+                .filter(|status| {
+                    status.task().class() == positron_kernel::MaintenanceTaskClass::IntegrityScrub
+                })
+                .count(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let integrity_scrub_checkpoints = u32::try_from(
+            maintenance_statuses
+                .iter()
+                .filter(|status| {
+                    status.task().class() == positron_kernel::MaintenanceTaskClass::IntegrityScrub
+                        && status.checkpoint().is_some()
+                })
+                .count(),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        Ok(DoctorRuntimeFacts::verified(VerifiedDoctorFacts {
+            catalog_generation: view.snapshot().number(),
+            catalog_audit_frontier: view.snapshot().governance_audit_frontier(),
+            catalog_manifest_objects,
+            catalog_reachable_ledger_scopes,
+            catalog_quarantine_findings,
+            integrity_scrub_tasks,
+            integrity_scrub_checkpoints,
+            backup_repository,
+            durable_operations,
+            active_durable_operations,
+            snapshot_leases,
+        }))
+    }
+
+    /// Opens the existing Instance Integrity Key only as an opaque signer for
+    /// an authenticated operator export. The wrapped seed never crosses this
+    /// boundary.
+    pub fn support_bundle_manifest_signer(
+        &self,
+        actor: positron_governance::AuthorizedContext,
+    ) -> Result<positron_kernel::ExportManifestSigner, BootstrapFailure> {
+        if actor.principal_id() != self.administrator {
+            return Err(BootstrapFailure::new(
+                BootstrapFailureCode::ApiKeyUnauthorized,
+            ));
+        }
+        let secret = self
+            .key
+            .catalog_secret(self.instance)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        let view = Catalog::read_current_view(&self._authority, self.instance, secret)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let snapshot = view.snapshot();
+        let (_, governance) = snapshot
+            .governance_object()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+        if governance.integrity_key_fingerprint() != self.integrity_key_fingerprint {
+            return Err(BootstrapFailure::new(
+                BootstrapFailureCode::IdentityMismatch,
+            ));
+        }
+        let signer = self
+            .key
+            .export_manifest_signer(self.instance, governance.protected_integrity_key())
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyCustodyUnavailable))?;
+        (signer.identity().public_key() == governance.integrity_public_key())
+            .then_some(signer)
+            .ok_or(BootstrapFailure::new(
+                BootstrapFailureCode::IdentityMismatch,
+            ))
+    }
+
     /// Returns the bounded, decoded Governance Audit history visible to this
     /// authenticated principal. System administrators receive the complete
     /// retained history; tenant administrators receive only entries with an
@@ -420,8 +622,9 @@ impl InitializedInstance {
     }
 
     #[must_use]
-    pub const fn catalog_generation(&self) -> u64 {
+    pub fn catalog_generation(&self) -> u64 {
         self.catalog_generation
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     #[must_use]

@@ -12,15 +12,19 @@ use super::adapters::tenant::{
     tenant_retention_preview_response, tenant_retention_update_response, tenant_service_response,
 };
 use super::io::{
-    RequestHead, Response, capability_response, configuration_status_response, health_response,
-    read_body,
+    RequestHead, Response, capability_response, configuration_status_response,
+    fenced_doctor_response, health_response, read_body,
 };
 use crate::{
-    HealthState, ListenerRole, Liveness, Readiness, ServiceHandle,
+    HealthState, ListenerRole, Liveness, ProcessPhase, Readiness,
     services::MaintenanceServiceFailure,
 };
 
+use super::super::ControlDiagnosticsFailure;
+
 use super::MAX_API_BODY_BYTES;
+
+const MAX_CONTROL_SUPPORT_BUNDLE_REQUEST_BYTES: usize = 8 * 1024;
 
 fn maintenance_failure_response(failure: MaintenanceServiceFailure) -> Response {
     let (status, code) = match failure {
@@ -63,6 +67,9 @@ pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
         positron_api::maintenance::WINDOW_HTTP_PATH => {
             positron_api::maintenance::MAX_WINDOW_REQUEST_BYTES
         },
+        positron_api::maintenance::VERIFY_HTTP_PATH => {
+            positron_api::maintenance::MAX_VERIFY_REQUEST_BYTES
+        },
         positron_api::tenant_aliases::HTTP_PATH => positron_api::tenant_aliases::MAX_REQUEST_BYTES,
         positron_api::tenant_service::CREATE_HTTP_PATH
         | positron_api::tenant_service::INSPECT_HTTP_PATH
@@ -100,6 +107,7 @@ fn api_path_is_known(path: &str) -> bool {
             | positron_api::maintenance::PAUSE_HTTP_PATH
             | positron_api::maintenance::RESUME_HTTP_PATH
             | positron_api::maintenance::WINDOW_HTTP_PATH
+            | positron_api::maintenance::VERIFY_HTTP_PATH
             | positron_api::tenant_aliases::HTTP_PATH
             | positron_api::tenant_service::CREATE_HTTP_PATH
             | positron_api::tenant_service::INSPECT_HTTP_PATH
@@ -121,8 +129,17 @@ pub(super) fn route<S: Read + Write>(
     trusted_proxy: Option<TrustedProxy>,
     mut head: RequestHead,
     health: &HealthState,
-    services: Option<&ServiceHandle>,
+    dependencies: super::RouteDependencies<'_>,
 ) -> Result<Response, Response> {
+    let services = dependencies.services;
+    let control_diagnostics = dependencies.control_diagnostics;
+    if matches!(
+        role,
+        ListenerRole::Api | ListenerRole::OtlpHttp | ListenerRole::LokiPush
+    ) && !health.admits_data_or_mutation()
+    {
+        return Ok(Response::empty(503));
+    }
     match (role, head.method.as_str(), head.path.as_str()) {
         (ListenerRole::Api, "POST", positron_api::api_keys::HTTP_PATH) => {
             let services = services.ok_or_else(|| Response::empty(503))?;
@@ -142,6 +159,7 @@ pub(super) fn route<S: Read + Write>(
                         content_type: "application/json",
                         body,
                         retry_after_seconds: None,
+                        diagnostics_reservation: None,
                     })
                 },
                 Err((status, code)) => {
@@ -213,6 +231,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -233,6 +252,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -253,6 +273,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -273,6 +294,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -293,6 +315,7 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -313,6 +336,28 @@ pub(super) fn route<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
+                    diagnostics_reservation: None,
+                }),
+                Err(failure) => Ok(maintenance_failure_response(failure)),
+            }
+        },
+        (ListenerRole::Api, "POST", positron_api::maintenance::VERIFY_HTTP_PATH) => {
+            let services = services.ok_or_else(|| Response::empty(503))?;
+            let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
+                Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+            })?);
+            let body = read_body(
+                stream,
+                head.content_length,
+                positron_api::maintenance::MAX_VERIFY_REQUEST_BYTES,
+            )?;
+            match services.verify_online_integrity(&bearer, &body) {
+                Ok(response) => Ok(Response {
+                    status: 200,
+                    content_type: "application/json",
+                    body: response.encode().map_err(|_| Response::empty(503))?,
+                    retry_after_seconds: None,
+                    diagnostics_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -453,6 +498,51 @@ pub(super) fn route<S: Read + Write>(
             )?;
             policy_activate_response(services, &bearer, &body)
         },
+        (ListenerRole::Control, "GET", "/control/fenced/inspection")
+            if health.phase() == ProcessPhase::Fenced =>
+        {
+            let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
+                Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+            })?);
+            let status = health
+                .authorized_fenced_doctor_status(&bearer)
+                .map_err(|_| {
+                    Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+                })?;
+            Ok(fenced_doctor_response(
+                status.doctor,
+                status.bound_listener_roles,
+                status.reason,
+            ))
+        },
+        (ListenerRole::Control, "POST", "/control/support-bundle") => {
+            let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
+                Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+            })?);
+            let body = read_body(
+                stream,
+                head.content_length,
+                MAX_CONTROL_SUPPORT_BUNDLE_REQUEST_BYTES,
+            )?;
+            let handler = control_diagnostics.ok_or_else(|| Response::empty(503))?;
+            match handler.collect(&bearer, &body, health) {
+                Ok(response) => {
+                    let (body, reservation) = response.into_parts();
+                    Ok(Response {
+                        status: 200,
+                        content_type: "application/octet-stream",
+                        body,
+                        retry_after_seconds: None,
+                        diagnostics_reservation: Some(Box::new(reservation)),
+                    })
+                },
+                Err(ControlDiagnosticsFailure::AuthenticationRejected) => Ok(Response::json(
+                    401,
+                    "{\"code\":\"authentication_rejected\"}".to_owned(),
+                )),
+                Err(ControlDiagnosticsFailure::Unavailable) => Ok(Response::empty(503)),
+            }
+        },
         (ListenerRole::Operations, "GET", "/health/live") => Ok(health_response(
             health.liveness() == Liveness::Live,
             "live",
@@ -480,8 +570,11 @@ pub(super) fn route<S: Read + Write>(
                 |configuration| {
                     Ok(configuration_status_response(
                         health.phase(),
+                        health.integrity_degraded(),
                         configuration,
                         status.maintenance,
+                        status.doctor,
+                        status.bound_listener_roles,
                     ))
                 },
             )
@@ -534,11 +627,14 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{RequestHead, route};
+    use positron_config::{
+        CommandLineOverrides, ConfigurationInputs, EnvironmentOverrides, resolve,
+    };
     use positron_kernel::MountQualification;
 
     use crate::{
-        BootstrapPaths, InitializationPlan, InstanceBootstrap, ListenerRole, ServiceHandle,
-        health::ProcessState,
+        BootstrapPaths, CatalogConfigurationPublication, InitializationPlan, InstanceBootstrap,
+        ListenerRole, RuntimeConfiguration, ServiceHandle, health::ProcessState,
     };
 
     #[test]
@@ -589,7 +685,7 @@ mod tests {
                 None,
                 head,
                 &request_health,
-                None,
+                super::super::RouteDependencies::new(None, None),
             ) {
                 Ok(response) | Err(response) => response.status(),
             };
@@ -609,6 +705,258 @@ mod tests {
             .map_err(|_| "status request thread panicked")?;
         drop(services);
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_status_handler_preserves_initialized_sources_without_workers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-status-readonly-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        #[cfg(unix)]
+        fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
+        let local_key = secrets.join("local-root-key.v1");
+        let configuration = format!(
+            "schema_version = 1\n[listener]\ncontrol_path = \"{}\"\noperations_bind_address = \"127.0.0.1:0\"\napi_bind_address = \"127.0.0.1:0\"\notlp_grpc_bind_address = \"127.0.0.1:0\"\notlp_http_bind_address = \"127.0.0.1:0\"\nloki_push_bind_address = \"127.0.0.1:0\"\noperations_transport = \"plaintext\"\napi_transport = \"plaintext\"\notlp_grpc_transport = \"plaintext\"\notlp_http_transport = \"plaintext\"\nloki_push_transport = \"plaintext\"\n[storage]\ndata_directory = \"{}\"\nsecrets_directory = \"{}\"\n[security]\nlocal_key_file = \"{}\"\n",
+            root.join("control.sock").display(),
+            data.display(),
+            secrets.display(),
+            local_key.display(),
+        );
+        let effective = Arc::new(resolve(ConfigurationInputs::try_new(
+            Some(&configuration),
+            EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+            CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+        )?)?);
+        let paths = BootstrapPaths::with_local_key(
+            &data,
+            &secrets,
+            effective.local_key_file().as_path(),
+            MountQualification::LocalHost,
+        )?;
+        drop(InstanceBootstrap::initialize(
+            &paths,
+            InitializationPlan::non_interactive(),
+        )?);
+        let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
+        let instance = Arc::new(InstanceBootstrap::reopen(&paths)?);
+        let generation =
+            CatalogConfigurationPublication::new(Arc::clone(&instance)).establish(&effective)?;
+        let state = ProcessState::starting();
+        state.set_configuration_runtime(Arc::new(RuntimeConfiguration::new_at_generation(
+            Arc::clone(&effective),
+            generation,
+        )))?;
+        state.set_inspection_authority(Arc::clone(&instance))?;
+        let services = ServiceHandle::new(instance)?;
+        state.set_catalog_operation(services.catalog_operation_gate())?;
+        state.record_bound_listener(ListenerRole::Operations);
+        state.transition(crate::ProcessPhase::Serving);
+
+        let before = source_listing(&data, &secrets)?;
+        let response = request_for_role(
+            &state.health(),
+            ListenerRole::Operations,
+            "GET",
+            "/status",
+            Some(administrator.clone()),
+        );
+        assert_eq!(response.status(), 200);
+        let body = std::str::from_utf8(response.body())?;
+        assert!(body.contains("\"key_custody\":\"verified\""));
+        assert!(!body.contains(&administrator));
+        assert_eq!(source_listing(&data, &secrets)?, before);
+
+        drop(services);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn fenced_control_inspection_requires_current_administrator_and_admits_no_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("positron-fenced-control-{nonce}"));
+        let data = root.join("data");
+        let secrets = root.join("secrets");
+        fs::create_dir_all(&data)?;
+        fs::create_dir_all(&secrets)?;
+        #[cfg(unix)]
+        fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
+        let paths = BootstrapPaths::new(&data, &secrets, MountQualification::LocalHost)?;
+        drop(InstanceBootstrap::initialize(
+            &paths,
+            InitializationPlan::non_interactive(),
+        )?);
+        let administrator = InstanceBootstrap::claim(&paths)?.secret().to_owned();
+        let instance = Arc::new(InstanceBootstrap::reopen(&paths)?);
+        let state = ProcessState::starting();
+        state.health().set_fenced_inspection(paths.clone(), 2)?;
+        state.set_inspection_authority(Arc::clone(&instance))?;
+        state.transition(crate::ProcessPhase::Fenced);
+
+        let response = control_request(&state.health(), None, "/control/fenced/inspection");
+        assert_eq!(response.status(), 401);
+
+        let response = control_request(
+            &state.health(),
+            Some(administrator.clone()),
+            "/control/fenced/inspection",
+        );
+        assert_eq!(response.status(), 200);
+        let body = std::str::from_utf8(response.body())?;
+        assert!(body.contains("\"phase\":\"fenced\""));
+        assert!(body.contains("\"key_custody\":\"verified\""));
+        assert!(body.contains("\"catalog_bootstrap\":\"verified\""));
+        assert!(body.contains("\"listener_topology\":{\"control\":false"));
+        assert!(!body.contains(&administrator));
+
+        for (role, path) in [
+            (ListenerRole::Api, "/v1/capabilities:negotiate"),
+            (ListenerRole::OtlpHttp, "/v1/logs"),
+            (ListenerRole::LokiPush, "/loki/api/v1/push"),
+        ] {
+            let response = request_for_role(&state.health(), role, "POST", path, None);
+            assert_eq!(
+                response.status(),
+                503,
+                "the fenced lifecycle authority closes every HTTP data or mutation listener"
+            );
+        }
+
+        let response = control_request_with_method(
+            &state.health(),
+            None,
+            "POST",
+            positron_api::maintenance::VERIFY_HTTP_PATH,
+        );
+        assert_eq!(response.status(), 404);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn control_support_bundle_accepts_its_bounded_request_before_handler_and_rejects_larger_body() {
+        let health = ProcessState::starting().health();
+
+        assert_eq!(
+            control_support_bundle_response(&health, 8 * 1024).status(),
+            503,
+            "a protocol-sized request must reach the configured control handler"
+        );
+        assert_eq!(
+            control_support_bundle_response(&health, 8 * 1024 + 1).status(),
+            413,
+            "the control transport must reject a request beyond its bounded protocol maximum"
+        );
+    }
+
+    fn control_support_bundle_response(
+        health: &crate::HealthState,
+        body_length: usize,
+    ) -> super::Response {
+        let mut stream = Cursor::new(vec![b'x'; body_length]);
+        match route(
+            &mut stream,
+            ListenerRole::Control,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            None,
+            RequestHead {
+                method: "POST".to_owned(),
+                path: "/control/support-bundle".to_owned(),
+                content_length: body_length,
+                bearer: Some("syntactic-test-bearer".to_owned()),
+                content_type: None,
+                content_encoding: None,
+                tenant_hint: None,
+                forwarded_for: None,
+                forwarded_actor: None,
+            },
+            health,
+            super::super::RouteDependencies::new(None, None),
+        ) {
+            Ok(response) | Err(response) => response,
+        }
+    }
+
+    fn control_request(
+        health: &crate::HealthState,
+        bearer: Option<String>,
+        path: &str,
+    ) -> super::Response {
+        control_request_with_method(health, bearer, "GET", path)
+    }
+
+    fn control_request_with_method(
+        health: &crate::HealthState,
+        bearer: Option<String>,
+        method: &str,
+        path: &str,
+    ) -> super::Response {
+        request_for_role(health, ListenerRole::Control, method, path, bearer)
+    }
+
+    fn request_for_role(
+        health: &crate::HealthState,
+        role: ListenerRole,
+        method: &str,
+        path: &str,
+        bearer: Option<String>,
+    ) -> super::Response {
+        let mut stream = Cursor::new(Vec::new());
+        match route(
+            &mut stream,
+            role,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            None,
+            RequestHead {
+                method: method.to_owned(),
+                path: path.to_owned(),
+                content_length: 0,
+                bearer,
+                content_type: None,
+                content_encoding: None,
+                tenant_hint: None,
+                forwarded_for: None,
+                forwarded_actor: None,
+            },
+            health,
+            super::super::RouteDependencies::new(None, None),
+        ) {
+            Ok(response) | Err(response) => response,
+        }
+    }
+
+    fn source_listing(
+        data: &std::path::Path,
+        secrets: &std::path::Path,
+    ) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, std::io::Error> {
+        let mut listing = Vec::new();
+        collect_regular_files(data, &mut listing)?;
+        collect_regular_files(secrets, &mut listing)?;
+        listing.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(listing)
+    }
+
+    fn collect_regular_files(
+        root: &std::path::Path,
+        listing: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+    ) -> Result<(), std::io::Error> {
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                collect_regular_files(&path, listing)?;
+            } else if file_type.is_file() {
+                listing.push((path, fs::read(entry.path())?));
+            }
+        }
         Ok(())
     }
 }

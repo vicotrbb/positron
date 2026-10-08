@@ -8,8 +8,8 @@ use positron_domain::routing::{CommitPosition, SignalKind, VirtualShardId};
 use super::support::TemporaryRoot;
 use crate::active_segment_ledger::format::{SegmentMetadata, SegmentState};
 use crate::active_segment_ledger::recovery::{
-    BlockRecoveryFormat, RecoveryMode, publish_frontier, read_blocks, recover, recover_with_mode,
-    segment_name,
+    BlockRecoveryFormat, FrontierPublication, RecoveryMode, publish_frontier, read_blocks, recover,
+    recover_with_mode, segment_name,
 };
 use crate::active_segment_ledger::{
     LedgerFailureCode, MAX_ENCODED_FRAME_BYTES, SegmentId, SegmentRetention, SegmentScope,
@@ -74,10 +74,15 @@ fn authenticated_but_semantically_inconsistent_frontier_is_rejected() -> Result<
         &directory,
         metadata.id,
         &key,
-        0,
-        0,
-        CommitPosition::origin().next()?,
-        SegmentRetention::Empty,
+        FrontierPublication {
+            durable_bytes: 0,
+            next_sequence: 0,
+            position: CommitPosition::origin().next()?,
+            retention: SegmentRetention::Empty,
+            event_range: crate::active_segment_ledger::AuthenticatedEventRange::unavailable(
+                crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
+            ),
+        },
     )?;
     let failure = recover(&directory, &directory, metadata, &key, 0, true)
         .err()
@@ -104,6 +109,9 @@ fn block_reader_rejects_oversized_lengths_overflow_and_record_overrun() -> Resul
         BlockRecoveryFormat {
             version: 2,
             segment_retention: SegmentRetention::Unavailable,
+            segment_event_range: crate::active_segment_ledger::AuthenticatedEventRange::unavailable(
+                crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
+            ),
         },
     )
     .expect_err("oversized record");
@@ -132,6 +140,9 @@ fn block_reader_rejects_oversized_lengths_overflow_and_record_overrun() -> Resul
         BlockRecoveryFormat {
             version: 2,
             segment_retention: SegmentRetention::Unavailable,
+            segment_event_range: crate::active_segment_ledger::AuthenticatedEventRange::unavailable(
+                crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
+            ),
         },
     )
     .expect_err("record cannot overrun frontier bytes");
@@ -149,6 +160,9 @@ fn block_reader_rejects_oversized_lengths_overflow_and_record_overrun() -> Resul
         BlockRecoveryFormat {
             version: 2,
             segment_retention: SegmentRetention::Unavailable,
+            segment_event_range: crate::active_segment_ledger::AuthenticatedEventRange::unavailable(
+                crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
+            ),
         },
     )
     .expect_err("commit position cannot wrap");
@@ -170,10 +184,15 @@ fn frontier_publication_rejects_an_unremovable_temporary_path() -> Result<(), Bo
         &directory,
         metadata.id,
         &key(metadata)?,
-        0,
-        0,
-        CommitPosition::origin(),
-        SegmentRetention::Empty,
+        FrontierPublication {
+            durable_bytes: 0,
+            next_sequence: 0,
+            position: CommitPosition::origin(),
+            retention: SegmentRetention::Empty,
+            event_range: crate::active_segment_ledger::AuthenticatedEventRange::unavailable(
+                crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
+            ),
+        },
     )
     .expect_err("temporary directory cannot be unlinked as a file");
     assert_eq!(failure.code(), LedgerFailureCode::StorageUnavailable);
@@ -240,6 +259,9 @@ fn block_reader_enforces_the_bounded_recovery_cardinality() -> Result<(), Box<dy
         BlockRecoveryFormat {
             version: 2,
             segment_retention: SegmentRetention::Unavailable,
+            segment_event_range: crate::active_segment_ledger::AuthenticatedEventRange::unavailable(
+                crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
+            ),
         },
     )
     .expect_err("recovery cannot retain an unbounded block set");
@@ -257,6 +279,11 @@ fn metadata(base_position: CommitPosition) -> SegmentMetadata {
         id: SegmentId::new([0x84; 16]).expect("fixed segment"),
         state: SegmentState::Active,
         base_position,
+        sealed_frontier: None,
+        event_range: crate::AuthenticatedEventRange::unavailable(
+            crate::EventRangeUnavailable::LegacyFormat,
+        ),
+        ingest_range: crate::AuthenticatedIngestRange::unavailable(),
     }
 }
 

@@ -1,6 +1,7 @@
 //! Bounded, authenticated Maintenance Coordinator inspection wire types.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub use crate::api_keys::ApiKeyTransport as MaintenanceTransport;
 
@@ -15,17 +16,22 @@ pub const RUN_HTTP_PATH: &str = "/v1/maintenance:run";
 pub const PAUSE_HTTP_PATH: &str = "/v1/maintenance:pause";
 pub const RESUME_HTTP_PATH: &str = "/v1/maintenance:resume";
 pub const WINDOW_HTTP_PATH: &str = "/v1/maintenance:window";
+pub const VERIFY_HTTP_PATH: &str = "/v1/maintenance:verify";
 pub const MAX_REQUEST_BYTES: usize = 128;
 pub const MAX_RUN_REQUEST_BYTES: usize = 256;
 pub const MAX_CONTROL_REQUEST_BYTES: usize = 192;
 /// The exact largest canonical JSON window request: six permitted classes,
 /// maximum generation and duration, and a canonical idempotency key.
 pub const MAX_WINDOW_REQUEST_BYTES: usize = 266;
+pub const MAX_VERIFY_REQUEST_BYTES: usize = 512;
+const ONLINE_VERIFY_CONTINUATION_HEX_BYTES: usize = 272;
 pub const MAX_PAUSE_DURATION_SECONDS: u64 = 86_400;
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 /// The total number of durable tasks the coordinator may expose in one
 /// bounded registry snapshot.
 pub const MAX_TASKS: usize = 128;
+/// Quarantine findings have an independent bounded Catalog capacity.
+pub const MAX_INTEGRITY_FINDINGS: usize = 64;
 /// A status page is deliberately smaller than the coordinator registry so a
 /// complete row, including its resource reservation, always fits the HTTP
 /// response bound at the registry's maximum valid values.
@@ -89,6 +95,91 @@ impl MaintenanceStatusRequest {
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceExplainRequest {
     pub identity: String,
+}
+
+/// One bounded, authenticated, source-read-only verification pass over the
+/// sealed objects reachable from an explicit immutable signal scope.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnlineVerificationRequest {
+    tenant: String,
+    signal: String,
+    shard: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_catalog_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    continuation: Option<String>,
+}
+
+impl OnlineVerificationRequest {
+    #[must_use]
+    pub fn new(
+        tenant: String,
+        signal: String,
+        shard: u32,
+        expected_catalog_generation: Option<u64>,
+        continuation: Option<String>,
+    ) -> Self {
+        Self {
+            tenant,
+            signal,
+            shard,
+            expected_catalog_generation,
+            continuation,
+        }
+    }
+
+    pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
+        if body.len() > MAX_VERIFY_REQUEST_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        let request: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
+        self.validate()?;
+        serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)
+    }
+
+    #[must_use]
+    pub fn tenant(&self) -> &str {
+        &self.tenant
+    }
+
+    #[must_use]
+    pub fn signal(&self) -> &str {
+        &self.signal
+    }
+
+    #[must_use]
+    pub const fn shard(&self) -> u32 {
+        self.shard
+    }
+
+    #[must_use]
+    pub const fn expected_catalog_generation(&self) -> Option<u64> {
+        self.expected_catalog_generation
+    }
+
+    #[must_use]
+    pub fn continuation(&self) -> Option<&str> {
+        self.continuation.as_deref()
+    }
+
+    pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        (identifier(&self.tenant)
+            && matches!(self.signal.as_str(), "logs" | "traces")
+            && self.shard != 0
+            && self
+                .expected_catalog_generation
+                .is_none_or(|generation| generation != 0)
+            && self.continuation.as_deref().is_none_or(valid_continuation)
+            && (self.continuation.is_none() || self.expected_catalog_generation.is_some()))
+        .then_some(())
+        .ok_or(MaintenanceWireFailure)
+    }
 }
 
 /// A bounded operator request for the coordinator to prepare one already
@@ -533,6 +624,187 @@ pub struct MaintenanceStatusResponse {
     pub running: u32,
     pub deferred: u32,
     pub terminal: u32,
+    #[serde(default)]
+    pub integrity_findings: Vec<IntegrityQuarantineDescriptor>,
+}
+
+/// A durable quarantine record from authenticated Catalog metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrityQuarantineDescriptor {
+    pub tenant: String,
+    pub signal: String,
+    pub shard: u32,
+    pub segment: String,
+    pub base_position: u64,
+    pub event_range: AuthenticatedTimeRangeDescriptor,
+    pub ingest_range: AuthenticatedTimeRangeDescriptor,
+}
+
+/// A known range or an explicit authenticated absence provenance.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatedTimeRangeDescriptor {
+    pub provenance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_unix_nanos: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_unix_nanos: Option<i64>,
+}
+
+/// Fixed-version machine-readable result from one online immutable-scope
+/// verification pass. It carries only authenticated identifiers, ranges, and
+/// bounded aggregate work; it never includes payload, key, path, or error
+/// detail.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnlineVerificationReport {
+    pub report_version: u8,
+    pub tenant: String,
+    pub signal: String,
+    pub shard: u32,
+    pub catalog_generation: u64,
+    pub examined_segments: u32,
+    pub examined_bytes: u64,
+    pub omitted_segments: u32,
+    pub outcome: String,
+    pub verification_complete: bool,
+    pub report_checksum: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<IntegrityQuarantineDescriptor>,
+}
+
+impl OnlineVerificationReport {
+    pub fn decode(body: &[u8]) -> Result<Self, MaintenanceWireFailure> {
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        let report: Self = serde_json::from_slice(body).map_err(|_| MaintenanceWireFailure)?;
+        report.validate()?;
+        Ok(report)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        Ok(bytes)
+    }
+
+    pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        (self.report_version == 1
+            && identifier(&self.tenant)
+            && matches!(self.signal.as_str(), "logs" | "traces")
+            && self.shard != 0
+            && self.catalog_generation != 0
+            && self.findings.len() <= MAX_INTEGRITY_FINDINGS
+            && self.findings.iter().all(valid_integrity_finding)
+            && valid_report_checksum(&self.report_checksum)
+            && match self.outcome.as_str() {
+                "verified" => {
+                    self.verification_complete
+                        && self.omitted_segments == 0
+                        && self.continuation.is_none()
+                },
+                "incomplete" => {
+                    !self.verification_complete
+                        && self.omitted_segments != 0
+                        && self.continuation.as_deref().is_some_and(valid_continuation)
+                },
+                "stale" | "quarantined" | "fenced" => {
+                    !self.verification_complete && self.continuation.is_none()
+                },
+                _ => false,
+            }
+            && self.report_checksum == self.checksum())
+        .then_some(())
+        .ok_or(MaintenanceWireFailure)
+    }
+
+    #[must_use]
+    pub fn checksum(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"positron/online-verification-report/v1");
+        digest.update([self.report_version]);
+        update_text(&mut digest, &self.tenant);
+        update_text(&mut digest, &self.signal);
+        digest.update(self.shard.to_be_bytes());
+        digest.update(self.catalog_generation.to_be_bytes());
+        digest.update(self.examined_segments.to_be_bytes());
+        digest.update(self.examined_bytes.to_be_bytes());
+        digest.update(self.omitted_segments.to_be_bytes());
+        update_text(&mut digest, &self.outcome);
+        digest.update([u8::from(self.verification_complete)]);
+        update_optional_text(&mut digest, self.continuation.as_deref());
+        digest.update(
+            u64::try_from(self.findings.len())
+                .map_or(u64::MAX, |value| value)
+                .to_be_bytes(),
+        );
+        for finding in &self.findings {
+            update_text(&mut digest, &finding.tenant);
+            update_text(&mut digest, &finding.signal);
+            digest.update(finding.shard.to_be_bytes());
+            update_text(&mut digest, &finding.segment);
+            digest.update(finding.base_position.to_be_bytes());
+            update_time_range(&mut digest, &finding.event_range);
+            update_time_range(&mut digest, &finding.ingest_range);
+        }
+        hex_digest(digest.finalize().as_ref())
+    }
+}
+
+fn update_text(digest: &mut Sha256, value: &str) {
+    digest.update(
+        u64::try_from(value.len())
+            .map_or(u64::MAX, |length| length)
+            .to_be_bytes(),
+    );
+    digest.update(value.as_bytes());
+}
+
+fn update_optional_text(digest: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            digest.update([1]);
+            update_text(digest, value);
+        },
+        None => digest.update([0]),
+    }
+}
+
+fn update_time_range(digest: &mut Sha256, range: &AuthenticatedTimeRangeDescriptor) {
+    update_text(digest, &range.provenance);
+    for value in [range.earliest_unix_nanos, range.latest_unix_nanos] {
+        match value {
+            Some(value) => {
+                digest.update([1]);
+                digest.update(value.to_be_bytes());
+            },
+            None => digest.update([0]),
+        }
+    }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    text
+}
+
+fn valid_report_checksum(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -649,6 +921,7 @@ impl MaintenanceExplainResponse {
                 response.task.phase.as_str(),
                 "cancelled" | "succeeded" | "failed"
             )),
+            integrity_findings: Vec::new(),
         }
         .validate()?;
         Ok(response)
@@ -680,6 +953,7 @@ impl MaintenanceStatusResponse {
 
     pub fn validate(&self) -> Result<(), MaintenanceWireFailure> {
         if self.tasks.len() > MAX_STATUS_PAGE_TASKS
+            || self.integrity_findings.len() > MAX_INTEGRITY_FINDINGS
             || self.returned as usize != self.tasks.len()
             || self.total as usize > MAX_TASKS
             || self
@@ -773,6 +1047,10 @@ impl MaintenanceStatusResponse {
                         })
                     || task.phase == "failed" && task.terminal_failure_class.is_none()
             })
+            || self
+                .integrity_findings
+                .iter()
+                .any(|finding| !valid_integrity_finding(finding))
         {
             return Err(MaintenanceWireFailure);
         }
@@ -787,6 +1065,36 @@ impl MaintenanceStatusResponse {
         }
         Ok(())
     }
+}
+
+fn valid_authenticated_range(range: &AuthenticatedTimeRangeDescriptor, event: bool) -> bool {
+    match range.provenance.as_str() {
+        "known" => range
+            .earliest_unix_nanos
+            .zip(range.latest_unix_nanos)
+            .is_some_and(|(earliest, latest)| earliest <= latest),
+        "missing_source_time" | "invalid_source_time" | "legacy_format" if event => {
+            range.earliest_unix_nanos.is_none() && range.latest_unix_nanos.is_none()
+        },
+        "unavailable" if !event => {
+            range.earliest_unix_nanos.is_none() && range.latest_unix_nanos.is_none()
+        },
+        _ => false,
+    }
+}
+
+fn valid_integrity_finding(finding: &IntegrityQuarantineDescriptor) -> bool {
+    identifier(&finding.tenant)
+        && matches!(finding.signal.as_str(), "logs" | "traces")
+        && finding.shard != 0
+        && valid_task_identity(&finding.segment)
+        && valid_authenticated_range(&finding.event_range, true)
+        && valid_authenticated_range(&finding.ingest_range, false)
+}
+
+fn valid_continuation(value: &str) -> bool {
+    value.len() == ONLINE_VERIFY_CONTINUATION_HEX_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

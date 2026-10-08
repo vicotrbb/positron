@@ -53,6 +53,7 @@ service MaintenanceService {
   rpc Pause(MaintenancePauseRequest) returns (MaintenanceControlResponse);
   rpc Resume(MaintenanceResumeRequest) returns (MaintenanceControlResponse);
   rpc Window(MaintenanceWindowRequest) returns (MaintenanceWindowResponse);
+  rpc Verify(OnlineVerificationRequest) returns (OnlineVerificationReport);
 }
 
 // Authenticated system administration for explicit tenant registry entries.
@@ -436,6 +437,28 @@ message MaintenanceStatusResponse {
   uint32 returned = 6;
   uint32 total = 7;
   optional string next_cursor = 8;
+  // Authenticated Catalog-backed evidence for durable immutable corruption.
+  // It is repeated on each task page because it has a separate fixed capacity.
+  repeated IntegrityQuarantineFinding integrity_findings = 9;
+}
+
+// A known Event or Ingest range, or an explicit authenticated absence reason.
+// Endpoints are present only for `known`; no ingest-time fallback is permitted
+// for unavailable Event evidence.
+message AuthenticatedTimeRange {
+  string provenance = 1;
+  optional sint64 earliest_unix_nanos = 2;
+  optional sint64 latest_unix_nanos = 3;
+}
+
+message IntegrityQuarantineFinding {
+  string tenant = 1;
+  string signal = 2;
+  uint32 shard = 3;
+  string segment = 4;
+  uint64 base_position = 5;
+  AuthenticatedTimeRange event_range = 6;
+  AuthenticatedTimeRange ingest_range = 7;
 }
 
 message MaintenanceExplainRequest {
@@ -444,6 +467,35 @@ message MaintenanceExplainRequest {
 
 message MaintenanceExplainResponse {
   MaintenanceTaskStatus task = 1;
+}
+
+// A bounded authenticated pass over one explicit immutable signal scope. A
+// continuation is accepted only with its exact prior Catalog generation.
+message OnlineVerificationRequest {
+  string tenant = 1;
+  string signal = 2;
+  uint32 shard = 3;
+  optional uint64 expected_catalog_generation = 4;
+  optional string continuation = 5;
+}
+
+// Secret-free, versioned evidence for one online verification pass. A true
+// completion is only emitted for a fully authenticated healthy scope.
+message OnlineVerificationReport {
+  uint32 report_version = 1;
+  string tenant = 2;
+  string signal = 3;
+  uint32 shard = 4;
+  uint64 catalog_generation = 5;
+  uint32 examined_segments = 6;
+  uint64 examined_bytes = 7;
+  uint32 omitted_segments = 8;
+  string outcome = 9;
+  bool verification_complete = 10;
+  optional string continuation = 11;
+  repeated IntegrityQuarantineFinding findings = 12;
+  // SHA-256 over the versioned canonical JSON account, excluding this field.
+  string report_checksum = 13;
 }
 
 // An authenticated system-administration request for one explicit existing

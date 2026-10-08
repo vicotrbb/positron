@@ -1,6 +1,6 @@
 use positron_kernel::{
     BootstrapArtifact, BootstrapArtifactAccess, BootstrapKeyCustody, BootstrapKeyIdentity,
-    BootstrapObjectPurpose, OwnedPrimaryDataVolume,
+    BootstrapObjectPurpose, CatalogFailure, CatalogFailureCode, OwnedPrimaryDataVolume,
 };
 
 use super::super::codec::BootstrapRecord;
@@ -105,6 +105,19 @@ pub(crate) fn key_failure(failure: positron_kernel::BootstrapKeyFailure) -> Boot
     BootstrapFailure::new(code)
 }
 
-pub(super) fn catalog_failure(_failure: positron_kernel::CatalogFailure) -> BootstrapFailure {
-    BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable)
+pub(super) fn catalog_failure(failure: CatalogFailure) -> BootstrapFailure {
+    let code = match failure.code() {
+        CatalogFailureCode::IntegrityCorruption
+        | CatalogFailureCode::AuthenticationFailed
+        | CatalogFailureCode::UnsupportedFormat
+        | CatalogFailureCode::InvalidInput => BootstrapFailureCode::CorruptState,
+        CatalogFailureCode::StorageUnavailable => BootstrapFailureCode::StorageUnavailable,
+        CatalogFailureCode::ResourceAdmissionRefused | CatalogFailureCode::LimitExceeded => {
+            BootstrapFailureCode::ResourceUnavailable
+        },
+        CatalogFailureCode::StaleGeneration
+        | CatalogFailureCode::IdempotencyConflict
+        | CatalogFailureCode::ConcurrentWriter => BootstrapFailureCode::CatalogUnavailable,
+    };
+    BootstrapFailure::new(code)
 }

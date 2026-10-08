@@ -25,6 +25,7 @@ pub enum WorkKind {
     Ingest,
     InteractiveQueryTail,
     OrdinaryMaintenanceBackup,
+    Diagnostics,
 }
 
 impl WorkKind {
@@ -36,6 +37,7 @@ impl WorkKind {
             Self::Ingest => WorkClass::Ingest,
             Self::InteractiveQueryTail => WorkClass::InteractiveQueryTail,
             Self::OrdinaryMaintenanceBackup => WorkClass::OrdinaryMaintenanceBackup,
+            Self::Diagnostics => WorkClass::OrdinaryMaintenanceBackup,
         }
     }
 }
@@ -114,6 +116,30 @@ impl WorkClaim {
             amounts,
             operation: None,
         })
+    }
+
+    /// Creates a bounded system-scoped diagnostics claim. Diagnostics shares
+    /// the ordinary maintenance pool but retains a distinct durable work kind
+    /// for inspection and accounting.
+    pub fn system_diagnostics(amounts: ResourceAmounts) -> Result<Self, GovernorFailure> {
+        if amounts.is_empty() {
+            return Err(GovernorFailure::InvalidConfiguration);
+        }
+        Ok(Self {
+            tenant: None,
+            principal: None,
+            kind: WorkKind::Diagnostics,
+            amounts,
+            operation: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn is_system_diagnostics(&self) -> bool {
+        matches!(self.kind, WorkKind::Diagnostics)
+            && self.tenant.is_none()
+            && self.principal.is_none()
+            && self.operation.is_none()
     }
 
     /// Creates one post-authentication tenant operation attributed to its

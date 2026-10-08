@@ -259,6 +259,11 @@ fn metadata(base_position: CommitPosition) -> SegmentMetadata {
         id: SegmentId::new([0x91; 16]).expect("fixed segment"),
         state: SegmentState::Active,
         base_position,
+        sealed_frontier: None,
+        event_range: crate::AuthenticatedEventRange::unavailable(
+            crate::EventRangeUnavailable::LegacyFormat,
+        ),
+        ingest_range: crate::AuthenticatedIngestRange::unavailable(),
     }
 }
 

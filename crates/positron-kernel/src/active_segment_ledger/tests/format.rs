@@ -25,11 +25,17 @@ fn metadata(state: SegmentState, signal: SignalKind) -> SegmentMetadata {
         id: SegmentId::new([2; 16]).expect("fixed segment"),
         state,
         base_position: position_from_value(9).expect("fixed position"),
+        sealed_frontier: (state == SegmentState::Sealed)
+            .then(|| position_from_value(9).expect("fixed position")),
+        event_range: crate::AuthenticatedEventRange::unavailable(
+            crate::EventRangeUnavailable::LegacyFormat,
+        ),
+        ingest_range: crate::AuthenticatedIngestRange::unavailable(),
     }
 }
 
 #[test]
-fn metadata_and_header_v3_round_trip_every_closed_tag() {
+fn metadata_and_header_v2_round_trip_every_closed_tag() {
     for (state, signal) in [
         (SegmentState::Active, SignalKind::Logs),
         (SegmentState::Sealed, SignalKind::Traces),
@@ -61,12 +67,32 @@ fn metadata_and_header_v3_round_trip_every_closed_tag() {
 }
 
 #[test]
+fn released_metadata_v1_decodes_as_legacy_without_a_published_frontier() {
+    let mut released = encode_metadata(metadata(SegmentState::Active, SignalKind::Logs));
+    released.truncate(8 + 2 + 1 + 16 + 1 + 4 + 16 + 8);
+    released[8..10].copy_from_slice(&1_u16.to_be_bytes());
+
+    let decoded = decode_metadata(&released)
+        .expect("released metadata decodes")
+        .expect("metadata object recognized");
+    assert_eq!(decoded.sealed_frontier, None);
+    assert_eq!(
+        decoded.event_range,
+        crate::AuthenticatedEventRange::unavailable(crate::EventRangeUnavailable::LegacyFormat)
+    );
+    assert_eq!(
+        decoded.ingest_range,
+        crate::AuthenticatedIngestRange::unavailable()
+    );
+}
+
+#[test]
 fn metadata_and_header_decoders_fail_closed_at_format_and_shape_boundaries() {
     let expected = metadata(SegmentState::Active, SignalKind::Logs);
     let encoded = encode_metadata(expected);
     let mut cases = Vec::new();
     let mut version = encoded.clone();
-    version[9] = 2;
+    version[9] = 3;
     cases.push((version, LedgerFailureCode::UnsupportedFormat));
     let mut state = encoded.clone();
     state[10] = 9;

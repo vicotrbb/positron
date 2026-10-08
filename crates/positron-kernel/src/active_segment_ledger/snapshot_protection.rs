@@ -31,6 +31,15 @@ impl SnapshotProtection {
         )
     }
 
+    pub(super) fn for_segments(
+        registry: SnapshotProtectionRegistry,
+        barrier: &RwLock<()>,
+        segments: impl IntoIterator<Item = SegmentId>,
+    ) -> Result<Self, LedgerFailure> {
+        let barrier = Self::read_barrier(barrier)?;
+        Self::with_barrier(registry, barrier, segments)
+    }
+
     pub(super) fn read_barrier<'kernel>(
         barrier: &'kernel RwLock<()>,
     ) -> Result<RwLockReadGuard<'kernel, ()>, LedgerFailure> {

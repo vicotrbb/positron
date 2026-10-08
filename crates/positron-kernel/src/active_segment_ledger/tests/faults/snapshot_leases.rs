@@ -9,7 +9,9 @@ use crate::{
 fn missing_leased_block_in_a_valid_empty_retired_artifact_is_snapshot_expired()
 -> Result<(), Box<dyn Error>> {
     use crate::active_segment_ledger::format::{SegmentState, decode_header};
-    use crate::active_segment_ledger::recovery::{frontier_name, publish_frontier, segment_name};
+    use crate::active_segment_ledger::recovery::{
+        FrontierPublication, frontier_name, publish_frontier, segment_name,
+    };
     use crate::active_segment_ledger::storage::LedgerStorage;
     use crate::active_segment_ledger::{SegmentRetention, publish_segments};
 
@@ -56,10 +58,15 @@ fn missing_leased_block_in_a_valid_empty_retired_artifact_is_snapshot_expired()
         &sealed_handle,
         sealed.id,
         &segment_key,
-        u64::try_from(header_bytes)?,
-        0,
-        sealed.base_position,
-        SegmentRetention::Empty,
+        FrontierPublication {
+            durable_bytes: u64::try_from(header_bytes)?,
+            next_sequence: 0,
+            position: sealed.base_position,
+            retention: SegmentRetention::Empty,
+            event_range: crate::active_segment_ledger::AuthenticatedEventRange::unavailable(
+                crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
+            ),
+        },
     )?;
     assert!(sealed_directory.join(frontier_name(sealed.id)).is_file());
     publish_segments(
@@ -176,6 +183,78 @@ fn snapshot_lease_pins_exact_visibility_across_append_restart_release_and_expiry
             LedgerFailureCode::SnapshotExpired
         );
         reopened.release_snapshot_lease(expiring)?;
+        Ok(())
+    })
+}
+
+#[test]
+fn paired_snapshot_lease_resume_rejects_a_legacy_unpaired_lease() -> Result<(), Box<dyn Error>> {
+    with_fixture(|authority, catalog, scope| {
+        let key = || SegmentProtectionKey::from_owned(Box::new([0x76; 32]));
+        let ledger = ActiveSegmentLedger::open(authority, catalog, scope, key())?;
+        let lease = ledger.create_snapshot_lease(100, 200)?;
+        let identity = lease.identity();
+        drop(lease);
+        let basis = catalog.pin()?;
+
+        let failure = ledger
+            .resume_snapshot_lease_with_marker_at_catalog_with_expiry_task(
+                identity,
+                101,
+                1,
+                [0x61; 32],
+                basis.identity(),
+                basis.number(),
+            )
+            .expect_err("the runtime paired path needs its durable expiry descriptor");
+        assert_eq!(failure.code(), LedgerFailureCode::StaleGeneration);
+
+        drop(ledger.resume_snapshot_lease(identity, 101)?);
+        Ok(())
+    })
+}
+
+#[test]
+fn snapshot_lease_rejects_an_unknown_original_catalog_identity() -> Result<(), Box<dyn Error>> {
+    with_fixture(|authority, catalog, scope| {
+        let ledger = ActiveSegmentLedger::open(
+            authority,
+            catalog,
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0x75; 32])),
+        )?;
+        let identity = ledger.create_snapshot_lease(100, 200)?.identity();
+        publish_lease_rewrite(catalog, 0xf1, |bytes| {
+            bytes[47..79].copy_from_slice(&[0xf2; 32]);
+        })?;
+
+        let failure = ledger.resume_snapshot_lease(identity, 101).expect_err(
+            "a lease must not open a Catalog generation outside its authenticated ancestry",
+        );
+        assert_eq!(failure.code(), LedgerFailureCode::StaleGeneration);
+        Ok(())
+    })
+}
+
+#[test]
+fn snapshot_lease_rejects_an_original_catalog_number_beyond_its_lease_basis()
+-> Result<(), Box<dyn Error>> {
+    with_fixture(|authority, catalog, scope| {
+        let ledger = ActiveSegmentLedger::open(
+            authority,
+            catalog,
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0x75; 32])),
+        )?;
+        let identity = ledger.create_snapshot_lease(100, 200)?.identity();
+        publish_lease_rewrite(catalog, 0xf3, |bytes| {
+            bytes[79..87].copy_from_slice(&u64::MAX.to_be_bytes());
+        })?;
+
+        let failure = ledger.resume_snapshot_lease(identity, 101).expect_err(
+            "a lease must not use a future Catalog generation as its original snapshot",
+        );
+        assert_eq!(failure.code(), LedgerFailureCode::StaleGeneration);
         Ok(())
     })
 }

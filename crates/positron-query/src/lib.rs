@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod attribute_syntax;
+mod availability;
 mod budget;
 mod cancellation;
 mod cursor;
@@ -50,9 +51,9 @@ pub use runtime::{
     QueryClock, QueryClockFailure, QueryWorkFailure, QueryWorkMeter, QueryWorkStage,
 };
 pub use stream::{
-    CorrelationOutcome, CorrelationSnapshot, QueryBatch, QueryEvent, QueryHeader, QueryIncomplete,
-    QueryRecord, QueryStats, QueryTerminal, ResultLease, ResultOrdering, ResultSchema,
-    ResultSnapshot, ResultValueType, TailPhase,
+    CorrelationOutcome, CorrelationSnapshot, QueryAffectedRange, QueryBatch, QueryEvent,
+    QueryHeader, QueryIncomplete, QueryRecord, QueryStats, QueryTerminal, ResultLease,
+    ResultOrdering, ResultSchema, ResultSnapshot, ResultValueType, TailPhase,
 };
 pub use stream_lifecycle::QueryStream;
 #[cfg(feature = "test-support")]

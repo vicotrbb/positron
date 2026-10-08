@@ -7,6 +7,7 @@ mod fault;
 mod format;
 #[cfg(fuzzing)]
 mod fuzzing;
+mod integrity;
 mod io;
 mod protection;
 mod publication;
@@ -37,6 +38,8 @@ mod test_support;
 mod types;
 
 #[cfg(test)]
+mod integrity_tests;
+#[cfg(test)]
 mod tests;
 
 use std::fmt::Formatter;
@@ -53,6 +56,13 @@ use crate::{
 use capacity::{recovery_claim, retained_claim, snapshot_retained_claim};
 pub use compaction::PreparedCompactionTask;
 use format::{SegmentMetadata, SegmentState};
+pub use integrity::{
+    CatalogIntegrityVerificationRequest, IntegrityCancellation, IntegrityCancellationProbe,
+    IntegrityFailure, IntegrityFailureCode, IntegrityFinding, IntegrityQuarantineFinding,
+    IntegrityScrubBudget, IntegrityScrubContinuation, IntegrityVerificationMode,
+    IntegrityVerificationOutcome, IntegrityVerificationReport, IntegrityVerificationRequest,
+    IntegrityVerificationScope, OnlineQuarantinePublication, integrity_quarantine_findings,
+};
 use protection::{map_frame_failure, object_context};
 use publication::{fresh_metadata, publish_segments};
 pub use reader::CommittedLedgerReader;
@@ -264,6 +274,12 @@ pub fn fuzz_snapshot_lease_record(data: &[u8]) {
     snapshot_lease_codec::fuzz_snapshot_lease_record(data);
 }
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_integrity_quarantine_record(data: &[u8]) {
+    integrity::fuzz_quarantine_record(data);
+}
+
 /// The Storage Kernel-owned active segment for one physical tenant/signal/shard scope.
 pub struct ActiveSegmentLedger<'kernel, 'catalog> {
     _writer: ActiveSegmentLedgerLease<'kernel>,
@@ -282,6 +298,25 @@ impl std::fmt::Debug for ActiveSegmentLedger<'_, '_> {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ActiveSegmentLedger { <storage-and-key-redacted> }")
     }
+}
+
+fn validate_quarantine_holes(
+    metadata: &[SegmentMetadata],
+    holes: &[IntegrityQuarantineFinding],
+) -> Result<(), LedgerFailure> {
+    for hole in holes {
+        let matching = metadata
+            .iter()
+            .find(|candidate| candidate.id == hole.segment())
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
+        if matching.state != SegmentState::Sealed
+            || matching.base_position.value() != hole.base_position()
+            || matching.sealed_frontier != Some(hole.sealed_frontier())
+        {
+            return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+        }
+    }
+    Ok(())
 }
 
 impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
@@ -447,9 +482,25 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         }
         let retention_frontier = retention_frontier::recover(&snapshot, scope)?;
         let recovery_metadata = storage.catalog_segments(&snapshot, scope)?;
+        let mut quarantined_holes = integrity_quarantine_findings(&snapshot)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+            .into_iter()
+            .filter(|finding| finding.scope() == scope)
+            .collect::<Vec<_>>();
+        quarantined_holes.sort_unstable_by_key(|finding| finding.base_position());
+        validate_quarantine_holes(&recovery_metadata, &quarantined_holes)?;
+        let recovery_metadata = recovery_metadata
+            .into_iter()
+            .filter(|metadata| {
+                !quarantined_holes
+                    .iter()
+                    .any(|finding| finding.segment() == metadata.id)
+            })
+            .collect::<Vec<_>>();
         let reconstruction = reconstruct(
             &storage,
             &recovery_metadata,
+            &quarantined_holes,
             &protection,
             catalog.instance(),
             recovery::RecoveryMode::Repair,
@@ -517,6 +568,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
                 metadata.retain(|candidate| candidate.id != predecessor.id);
                 metadata.push(SegmentMetadata {
                     state: SegmentState::Sealed,
+                    sealed_frontier: Some(frontier),
                     ..predecessor
                 });
             }
@@ -786,18 +838,40 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .reserve(claim)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
         let catalog = self.catalog.pin()?;
+        let mut quarantined_holes = integrity_quarantine_findings(&catalog)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+            .into_iter()
+            .filter(|finding| finding.scope() == self.scope)
+            .collect::<Vec<_>>();
+        quarantined_holes.sort_unstable_by_key(|finding| finding.base_position());
+        let catalog_metadata = self
+            .storage
+            .catalog_segments_observed(&catalog, self.scope)?;
+        validate_quarantine_holes(&catalog_metadata, &quarantined_holes)?;
+        let blocks = state
+            .blocks
+            .iter()
+            .filter(|block| {
+                !quarantined_holes
+                    .iter()
+                    .any(|finding| finding.segment() == block.segment_id())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let protection = SnapshotProtection::with_barrier(
+            self.authority.snapshot_protection(),
+            barrier,
+            blocks.iter().map(CommittedBlock::segment_id),
+        )?;
         Ok(LedgerSnapshot {
             _capacity: reservation,
             scope: self.scope,
             frontier: state.frontier,
             catalog_generation: catalog.number(),
             catalog_identity: catalog.identity(),
-            blocks: state.blocks.clone(),
-            _protection: SnapshotProtection::with_barrier(
-                self.authority.snapshot_protection(),
-                barrier,
-                state.blocks.iter().map(CommittedBlock::segment_id),
-            )?,
+            blocks,
+            quarantined_holes,
+            _protection: protection,
         })
     }
 
@@ -817,6 +891,29 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .find(|candidate| candidate.id == current.id)
             .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
         published.state = SegmentState::Sealed;
+        published.sealed_frontier = Some(state.frontier);
+        published.event_range = state
+            .blocks
+            .iter()
+            .filter(|block| block.segment == current.id)
+            .map(CommittedBlock::event_range)
+            .reduce(AuthenticatedEventRange::aggregate)
+            .map_or(
+                AuthenticatedEventRange::unavailable(EventRangeUnavailable::LegacyFormat),
+                |range| range,
+            );
+        published.ingest_range = state
+            .blocks
+            .iter()
+            .filter(|block| block.segment == current.id)
+            .map(|block| match block.block_retention {
+                SegmentRetention::Complete(instant) => AuthenticatedIngestRange::one(instant),
+                SegmentRetention::Empty | SegmentRetention::Unavailable => {
+                    AuthenticatedIngestRange::unavailable()
+                },
+            })
+            .reduce(AuthenticatedIngestRange::aggregate)
+            .map_or(AuthenticatedIngestRange::unavailable(), |range| range);
         publish_segments(
             self.catalog,
             &basis,

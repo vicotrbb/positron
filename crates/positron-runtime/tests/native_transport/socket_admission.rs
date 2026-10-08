@@ -13,7 +13,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::{
 use positron_config::{CommandLineOverrides, ConfigurationInputs, EnvironmentOverrides, resolve};
 use positron_runtime::{
     ApplicationRuntime, HostInputs, InitializationMode, InstanceBootstrap, ListenerRole,
-    NativeBindings, NativeHost, ServeConfiguration, ShutdownTrigger,
+    NativeBindings, NativeHost, ServeConfiguration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
@@ -51,10 +51,7 @@ async fn api_global_accepted_socket_cap_closes_another_peer_then_releases_after_
     drop(holder);
     let accepted = request_from(Ipv4Addr::LOCALHOST, api).await?;
     assert_status(accepted, 405);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -82,10 +79,7 @@ async fn api_per_address_accepted_socket_cap_closes_the_second_socket_from_one_p
     assert_closed(connect_from(Ipv4Addr::LOCALHOST, api).await?).await?;
     drop(holder);
     assert_status(request_from(Ipv4Addr::LOCALHOST, api).await?, 405);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -122,10 +116,7 @@ async fn api_preauthentication_rate_refuses_by_peer_and_global_window_then_recov
         .await
         .map_err(|error| format!("recovered request: {error}"))?;
     assert_status(recovered, 405);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -174,10 +165,7 @@ async fn api_http2_repeated_requests_are_rate_limited_before_authentication()
     drop(client);
     connection.abort();
     let _ = connection.await;
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -232,10 +220,7 @@ async fn api_global_rate_exhaustion_leaves_a_queued_socket_in_the_backlog_until_
     drop(client);
     connection.abort();
     let _ = connection.await;
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -265,10 +250,7 @@ async fn failed_api_tls_handshake_releases_its_accepted_socket_permit()
     let certificate = fixture("api-test-cert.pem");
     let accepted = wait_for_tls_response(api, &certificate)?;
     assert_status(accepted, 405);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -299,10 +281,7 @@ async fn api_tls_handshake_cap_refuses_a_second_pending_handshake_and_releases_a
     drop(holder);
     let accepted = wait_for_tls_response(api, &fixture("api-test-cert.pem"))?;
     assert_status(accepted, 405);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -335,10 +314,7 @@ async fn api_header_deadline_is_absolute_despite_trickled_bytes()
         tokio::time::sleep(Duration::from_millis(450)).await;
     }
     assert_closed(client).await?;
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -372,10 +348,7 @@ async fn api_body_deadline_is_absolute_despite_trickled_bytes()
         client.write_all(&[byte]).await?;
     }
     assert_status(read_response(&mut client).await?, 408);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -409,10 +382,7 @@ async fn api_request_deadline_bounds_a_slow_request_even_when_its_body_phase_all
         client.write_all(&[byte]).await?;
     }
     assert_status(read_response(&mut client).await?, 408);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -449,10 +419,7 @@ async fn api_idle_deadline_allows_active_traffic_but_closes_an_idle_connection()
     let idle = connect_from(Ipv4Addr::LOCALHOST, api).await?;
     tokio::time::sleep(Duration::from_secs(1) + Duration::from_millis(100)).await;
     assert_closed(idle).await?;
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -515,10 +482,7 @@ fn old_api_generation_keeps_its_lease_until_the_held_socket_releases_drain()
         outcome,
         positron_runtime::ConfigurationReloadOutcome::PublishedLive { .. }
     ));
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -558,10 +522,7 @@ async fn otlp_grpc_global_accepted_socket_cap_closes_then_releases_for_a_real_rp
     assert_eq!(refusal.code(), Code::Unauthenticated);
     drop(client);
     tokio::time::sleep(Duration::from_millis(25)).await;
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -614,10 +575,7 @@ async fn otlp_grpc_repeated_unauthenticated_requests_are_rate_limited_then_recov
     assert_eq!(recovered.code(), Code::Unauthenticated);
     drop(client);
     tokio::time::sleep(Duration::from_millis(25)).await;
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 
@@ -667,10 +625,7 @@ async fn otlp_grpc_unknown_methods_are_rate_limited_before_routing()
     drop(client);
     connection.abort();
     let _ = connection.await;
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    super::shutdown_gracefully(process, &roots)?;
     Ok(())
 }
 

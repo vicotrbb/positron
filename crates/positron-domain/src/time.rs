@@ -120,7 +120,12 @@ impl EventTime {
             || (matches!(self.quality, SourceTimeQuality::Outlier) && self.raw_instant.is_none())
     }
 
-    const fn usable_instant(self) -> Option<UnixNanoseconds> {
+    /// Returns an exact source instant only when its quality permits it to be
+    /// used as Event Time evidence. Missing, zero, contradictory, and
+    /// unrepresentable source values remain preserved but cannot stand in for
+    /// an authenticated range endpoint.
+    #[must_use]
+    pub const fn usable_instant(self) -> Option<UnixNanoseconds> {
         if self.is_usable() { self.instant } else { None }
     }
 }

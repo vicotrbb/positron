@@ -27,6 +27,7 @@ mod test_support;
 
 use codec::SecretRootKey;
 
+pub(crate) use runtime_bootstrap::CrashRecordProtector;
 pub use runtime_bootstrap::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose,

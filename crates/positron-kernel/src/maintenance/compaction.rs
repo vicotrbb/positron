@@ -4,7 +4,7 @@ use positron_domain::identity::TenantId;
 use positron_domain::routing::{SignalKind, VirtualShardId};
 use positron_domain::time::UnixNanoseconds;
 
-use super::{MaintenanceCheckpoint, MaintenanceFailure, MaintenanceScope};
+use super::{MaintenanceCheckpoint, MaintenanceFailure, MaintenanceScope, MaintenanceTaskClass};
 use crate::CatalogLogRetentionPolicy;
 
 const COMPACTION_BINDING_MAGIC: &[u8; 8] = b"CMPBND01";
@@ -50,7 +50,12 @@ pub(crate) fn compaction_task_record_working_bytes(
         return Err(MaintenanceFailure::InvalidInput);
     }
     let checkpoint = binding.checkpoint()?;
-    super::record::encoded_record_capacity(inputs, 0, checkpoint.opaque_progress.len())
+    super::record::encoded_record_capacity(
+        MaintenanceTaskClass::Compaction,
+        inputs,
+        0,
+        checkpoint.opaque_progress.len(),
+    )
 }
 
 /// Immutable source authority for one Compaction task. It is persisted before

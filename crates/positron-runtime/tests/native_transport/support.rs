@@ -14,6 +14,54 @@ pub(super) async fn live_async_test_guard() -> MutexGuard<'static, ()> {
     LIVE_NATIVE_TEST.lock().await
 }
 
+pub(super) fn shutdown_gracefully(
+    process: positron_runtime::RunningProcess,
+    roots: &TestRoots,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut draining = process.begin_shutdown();
+    if let Err(failure) = draining.poll() {
+        return Err(
+            format!("native runtime task failed before graceful drain: {failure:?}").into(),
+        );
+    }
+    let outcome = draining.finish(positron_runtime::ShutdownTrigger::FirstSignal);
+    assert_eq!(
+        outcome,
+        positron_runtime::ExitOutcome::Graceful,
+        "{}",
+        graceful_shutdown_failure_context(roots)
+    );
+    Ok(())
+}
+
+fn graceful_shutdown_failure_context(roots: &TestRoots) -> String {
+    let readout = roots
+        .paths()
+        .map_err(|failure| format!("reopen paths unavailable: {failure:?}"))
+        .and_then(|paths| {
+            InstanceBootstrap::reopen(&paths)
+                .map_err(|failure| format!("reopen unavailable: {failure:?}"))
+        })
+        .and_then(|instance| {
+            instance
+                .crash_records()
+                .map_err(|failure| format!("crash records unavailable: {failure:?}"))
+        })
+        .and_then(|store| {
+            store
+                .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+                .map_err(|failure| format!("crash readout unavailable: {failure:?}"))
+        });
+    match readout {
+        Ok(readout) => format!(
+            "sanitized crash readout: {}; omissions={:?}",
+            readout.render(),
+            readout.omissions()
+        ),
+        Err(failure) => failure,
+    }
+}
+
 pub(super) fn bindings(
     roots: &TestRoots,
     label: &str,

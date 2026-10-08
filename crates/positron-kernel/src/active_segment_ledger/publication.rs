@@ -50,6 +50,11 @@ pub(super) fn fresh_metadata(
         id: SegmentId::new(bytes)?,
         state: SegmentState::Active,
         base_position,
+        sealed_frontier: None,
+        event_range: super::AuthenticatedEventRange::unavailable(
+            super::EventRangeUnavailable::LegacyFormat,
+        ),
+        ingest_range: super::AuthenticatedIngestRange::unavailable(),
     })
 }
 

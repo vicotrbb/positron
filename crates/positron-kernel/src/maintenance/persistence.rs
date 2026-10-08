@@ -6,14 +6,21 @@
 //! in-memory transition visible. An acknowledgement-ambiguous commit is safe
 //! to retry because the exact replacement record is content-addressed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::scheduling::{reclaimable_terminal_identity, remove_task_and_clear_empty_scope};
+use super::scheduling::{
+    reclaimable_terminal_identity, remove_task_and_clear_empty_scope, snapshot_lease_time_for_task,
+};
 use super::*;
 use crate::Catalog;
 
 pub(crate) fn retention_publication_record_bytes_bound() -> Result<usize, MaintenanceFailure> {
-    record::encoded_record_capacity(MAX_TASK_OBJECTS, MAX_TASK_OBJECTS, MAX_CHECKPOINT_BYTES)
+    record::encoded_record_capacity(
+        MaintenanceTaskClass::IntegrityScrub,
+        MAX_TASK_OBJECTS,
+        MAX_TASK_OBJECTS,
+        MAX_CHECKPOINT_BYTES,
+    )
 }
 
 mod catalog;
@@ -28,6 +35,11 @@ pub(crate) use transitions::{
     CompactionTaskReplacement, QueuedMaintenanceSubmission, RetentionPublicationTaskCompletion,
     RetentionReclamationTaskReplacement, SnapshotLeaseExpiryTaskReplacement,
 };
+
+struct SchedulerSelection<'times> {
+    requested_identity: Option<MaintenanceTaskId>,
+    snapshot_lease_times: &'times BTreeMap<MaintenanceScope, u64>,
+}
 
 impl MaintenanceCoordinator {
     /// Selects, reserves, and durably marks one task Running before handing its
@@ -91,6 +103,35 @@ impl MaintenanceCoordinator {
         )
     }
 
+    /// Selects installed work with Snapshot Lease expiry eligibility evaluated
+    /// in the same segment lifecycle-time domain that created each lease.
+    /// The coordinator still owns candidate ordering, resource admission, and
+    /// the durable Running transition; the caller supplies only authoritative
+    /// scope observations for the already-typed lease task class.
+    pub fn start_next_with_reservation_and_persist_for_classes_with_snapshot_lease_times<
+        'authority,
+    >(
+        &self,
+        catalog: &Catalog<'_>,
+        authority: &'authority StorageKernelResourceAuthority,
+        now: u64,
+        clock_uncertain: bool,
+        classes: &[MaintenanceTaskClass],
+        snapshot_lease_times: &BTreeMap<MaintenanceScope, u64>,
+    ) -> Result<Option<MaintenanceExecution<'authority>>, MaintenanceFailure> {
+        self.start_next_with_reservation_and_persist_matching_with_snapshot_lease_times(
+            catalog,
+            authority,
+            now,
+            clock_uncertain,
+            classes,
+            SchedulerSelection {
+                requested_identity: None,
+                snapshot_lease_times,
+            },
+        )
+    }
+
     /// Starts one exact admitted task without allowing another task of the
     /// same class to consume an attach caller's result path.
     pub fn start_task_with_reservation_and_persist<'authority>(
@@ -131,6 +172,27 @@ impl MaintenanceCoordinator {
         )
     }
 
+    /// Starts the one exact authenticated integrity task selected by an
+    /// operator request. The task still takes the coordinator's durable
+    /// admission and Resource Governor reservation before any scan begins.
+    pub fn start_integrity_scrub_task_with_reservation_and_persist<'authority>(
+        &self,
+        catalog: &Catalog<'_>,
+        authority: &'authority StorageKernelResourceAuthority,
+        now: u64,
+        clock_uncertain: bool,
+        identity: MaintenanceTaskId,
+    ) -> Result<Option<MaintenanceExecution<'authority>>, MaintenanceFailure> {
+        self.start_next_with_reservation_and_persist_matching(
+            catalog,
+            authority,
+            now,
+            clock_uncertain,
+            &[MaintenanceTaskClass::IntegrityScrub],
+            Some(identity),
+        )
+    }
+
     fn start_next_with_reservation_and_persist_matching<'authority>(
         &self,
         catalog: &Catalog<'_>,
@@ -140,17 +202,47 @@ impl MaintenanceCoordinator {
         classes: &[MaintenanceTaskClass],
         requested_identity: Option<MaintenanceTaskId>,
     ) -> Result<Option<MaintenanceExecution<'authority>>, MaintenanceFailure> {
+        self.start_next_with_reservation_and_persist_matching_with_snapshot_lease_times(
+            catalog,
+            authority,
+            now,
+            clock_uncertain,
+            classes,
+            SchedulerSelection {
+                requested_identity,
+                snapshot_lease_times: &BTreeMap::new(),
+            },
+        )
+    }
+
+    fn start_next_with_reservation_and_persist_matching_with_snapshot_lease_times<'authority>(
+        &self,
+        catalog: &Catalog<'_>,
+        authority: &'authority StorageKernelResourceAuthority,
+        now: u64,
+        clock_uncertain: bool,
+        classes: &[MaintenanceTaskClass],
+        selection: SchedulerSelection<'_>,
+    ) -> Result<Option<MaintenanceExecution<'authority>>, MaintenanceFailure> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
         let mut prospective = state.clone();
-        let candidates = eligible_task_ids(&mut prospective, now, clock_uncertain)?;
+        let candidates = eligible_task_ids(
+            &mut prospective,
+            now,
+            clock_uncertain,
+            selection.snapshot_lease_times,
+        )?;
         if candidates.is_empty() {
             return Ok(None);
         }
         for identity in candidates {
-            if requested_identity.is_some_and(|requested| requested != identity) {
+            if selection
+                .requested_identity
+                .is_some_and(|requested| requested != identity)
+            {
                 continue;
             }
             let task = prospective
@@ -169,7 +261,7 @@ impl MaintenanceCoordinator {
                 &mut prospective,
                 self.coordinator_id,
                 identity,
-                now,
+                snapshot_lease_time_for_task(&task, now, selection.snapshot_lease_times),
                 clock_uncertain,
             )?;
             let updated = prospective

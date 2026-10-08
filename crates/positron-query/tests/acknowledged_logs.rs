@@ -12,6 +12,8 @@ mod durable_export;
 mod lifecycle;
 #[path = "acknowledged_logs/parity.rs"]
 mod parity;
+#[path = "acknowledged_logs/quarantine_availability.rs"]
+mod quarantine_availability;
 #[path = "acknowledged_logs/query_lifecycle_admission.rs"]
 mod query_lifecycle_admission;
 #[path = "acknowledged_logs/resource_governance.rs"]

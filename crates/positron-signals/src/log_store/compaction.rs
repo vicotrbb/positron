@@ -192,14 +192,14 @@ fn compact_inner<'kernel, 'catalog>(
             .is_some_and(|(_, all_in_bucket)| *all_in_bucket);
         let input = complete_in_bucket
             .then(|| {
-                CompactionBlock::new(
+                CompactionBlock::new_with_time(
                     snapshot.scope(),
                     block.segment_id(),
                     block.identity(),
                     block.position(),
                     clone_payload(block.payload())?,
                     block.content_digest().map_err(LogStoreFailure::kernel)?,
-                    ingest_time,
+                    positron_kernel::CompactionBlockTime::new(ingest_time, block.event_range()),
                 )
                 .map_err(LogStoreFailure::kernel)
             })

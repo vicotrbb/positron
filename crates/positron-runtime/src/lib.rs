@@ -8,6 +8,7 @@ mod configuration;
 mod configuration_catalog;
 mod health;
 mod instance_bootstrap;
+mod integrity_verification;
 mod listener;
 mod native_host;
 mod process;
@@ -23,12 +24,23 @@ pub use configuration::{
     ConfigurationReloadOutcome, ConfigurationRuntimeFailure, PendingRestart, RuntimeConfiguration,
 };
 pub use configuration_catalog::CatalogConfigurationPublication;
-pub use health::{HealthState, HealthWarning, Liveness, ProcessPhase, Readiness};
+pub use health::{
+    FencedDiagnosticsFailure, HealthState, HealthWarning, IntegrityFenceReason, Liveness,
+    ProcessPhase, Readiness, ServingDiagnosticsFailure,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use instance_bootstrap::GovernanceTestFixture;
 pub use instance_bootstrap::{
-    BootstrapClaim, BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BootstrapState,
-    InitializationPlan, InitializedInstance, InstanceBootstrap, TenantRetentionImpactPreview,
+    BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
+    BootstrapPaths, BootstrapState, DoctorRuntimeFacts, InitializationPlan, InitializedInstance,
+    InstanceBootstrap, OfflineSupportBundleFailure, OfflineSupportBundleInspection,
+    TenantRetentionImpactPreview,
+};
+pub use integrity_verification::{
+    OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityAggregateOutcome,
+    OfflineIntegrityContinuation, OfflineIntegrityEvidence, OfflineIntegrityFailure,
+    OfflineIntegrityReportScope, OfflineIntegrityVerification, resume_offline_integrity,
+    verify_offline_integrity, verify_offline_integrity_scope,
 };
 pub use listener::{
     BoundEndpoint, BoundListener, ConnectionProtection, ListenerFactory, ListenerFailure,
@@ -36,16 +48,18 @@ pub use listener::{
     ListenerRequest, ListenerRole, ListenerTransport, ValidatedListenerSet,
 };
 pub use native_host::{
-    ApiTransportProfile, NativeBindings, NativeHost, NativeHostFailure, ProxyTrustFailure,
+    ApiTransportProfile, ControlDiagnosticsFailure, ControlDiagnosticsHandler,
+    ControlDiagnosticsResponse, NativeBindings, NativeHost, NativeHostFailure, ProxyTrustFailure,
     TlsFailure, TlsIdentity, TlsProfile, TlsTrust, TransportProfile, TrustedCidr, TrustedProxy,
     TrustedProxyPolicy,
 };
 #[cfg(feature = "test-support")]
 pub use native_host::{fuzz_connection_admission, fuzz_h2_observer};
 pub use process::{
-    ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole, DrainingProcess, ExitOutcome,
-    HostInputs, InitializationMode, PublicPlaintextApiStartupIntent, RecoveryAttempt,
-    RecoveryAttemptHost, RecoveryDecision, RunningProcess, ServeConfiguration, ShutdownTrigger,
+    ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole, CrashInspection,
+    DrainingProcess, ExitOutcome, HostInputs, InitializationMode, PublicPlaintextApiStartupIntent,
+    RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision, RunningProcess, ServeConfiguration,
+    ShutdownTrigger,
 };
 pub use services::{ConfiguredExportDestinationResolver, ServiceFailure, ServiceHandle};
 pub use task::{

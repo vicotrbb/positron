@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use positron_config::{
     CommandLineOverrides, ConfigurationDiff, ConfigurationDriftDisposition, ConfigurationInputs,
@@ -22,6 +22,34 @@ use positron_runtime::{
 #[path = "support/process_lifecycle.rs"]
 mod lifecycle;
 use lifecycle::{ObservingListeners, ObservingTasks, TestRoots};
+
+fn bounded_crash_readout(roots: &TestRoots) -> String {
+    const MAX_CRASH_RECORD_FILES: usize = 1;
+    const MAX_CRASH_RECORD_BYTES: usize = 384;
+
+    let Ok(paths) = roots.bootstrap_paths() else {
+        return "crash_records=unavailable".to_owned();
+    };
+    let Ok(instance) = InstanceBootstrap::reopen(&paths) else {
+        return "crash_records=unavailable".to_owned();
+    };
+    let Ok(records) = instance.crash_records() else {
+        return "crash_records=unavailable".to_owned();
+    };
+    let Ok(readout) = records.read_recent(
+        Duration::from_secs(60),
+        MAX_CRASH_RECORD_FILES,
+        MAX_CRASH_RECORD_BYTES,
+        SystemTime::now(),
+    ) else {
+        return "crash_records=unavailable".to_owned();
+    };
+    format!(
+        "crash_records={}; omissions={:?}",
+        readout.render(),
+        readout.omissions()
+    )
+}
 
 struct FailingPublication;
 
@@ -429,10 +457,11 @@ fn listener_reload_publishes_the_staged_configuration_generation()
         .and_then(|endpoint| endpoint.socket_address())
         .ok_or("replacement operations endpoint missing")?;
     assert_eq!(operations.port(), successor_operations);
-    assert!(matches!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    ));
+    let shutdown = process.shutdown(ShutdownTrigger::FirstSignal);
+    assert!(
+        matches!(shutdown, positron_runtime::ExitOutcome::Graceful),
+        "listener reload shutdown returned {shutdown:?}"
+    );
     Ok(())
 }
 
@@ -488,10 +517,12 @@ fn same_endpoint_reload_drains_accepted_old_work_before_the_successor_serves()
     let mut successor = String::new();
     fresh.read_to_string(&mut successor)?;
     assert!(successor.starts_with("HTTP/1.1 200 "));
-    assert!(matches!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    ));
+    let shutdown = process.shutdown(ShutdownTrigger::FirstSignal);
+    assert!(
+        matches!(shutdown, positron_runtime::ExitOutcome::Graceful),
+        "listener reload drain shutdown returned {shutdown:?}; {}",
+        bounded_crash_readout(&roots)
+    );
     Ok(())
 }
 
@@ -723,10 +754,11 @@ fn failed_listener_staging_preserves_the_serving_generation_and_endpoints()
         after.effective().operations_bind_address(),
         before.effective().operations_bind_address()
     );
-    assert!(matches!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    ));
+    let shutdown = process.shutdown(ShutdownTrigger::FirstSignal);
+    assert!(
+        matches!(shutdown, positron_runtime::ExitOutcome::Graceful),
+        "listener staging cleanup returned {shutdown:?}"
+    );
     let claim = InstanceBootstrap::claim(&paths)?;
     let reopened = InstanceBootstrap::reopen(&paths)?;
     let administrator = reopened.attribute(

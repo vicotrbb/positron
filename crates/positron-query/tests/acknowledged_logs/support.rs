@@ -19,8 +19,9 @@ use positron_kernel::{
     MountQualification, ObservedResourceEnvironment, OperatorLimits, OrdinaryPoolPolicy,
     PreparedStoreBlock, PrimaryDataVolume, PrincipalQuota, RecoveryPoolCapacities, RecoveryReserve,
     ResourceAmounts, ResourceDimension, ResourceGovernorConfiguration, ResourceInventory,
-    RetentionTimeAuthority, SegmentProtectionKey, SegmentScope, StorageKernelResourceAuthority,
-    StoreBlockIdentity, TenantQuota, TransactionId, WorkClaim, WorkKind,
+    RetentionTimeAuthority, SealedSegment, SegmentProtectionKey, SegmentScope,
+    StorageKernelResourceAuthority, StoreBlockIdentity, TenantQuota, TransactionId, WorkClaim,
+    WorkKind,
 };
 use positron_policy::{
     IngestPolicy, LogMetadata, NativeLogAttribute, NativeLogCandidate, NativeTraceCandidate,
@@ -1120,8 +1121,12 @@ impl<'kernel, 'catalog> KernelFixture<'kernel, 'catalog> {
     }
 
     pub fn seal_and_reopen(&mut self) -> Result<(), Box<dyn Error>> {
+        self.seal_and_reopen_with_segment().map(|_| ())
+    }
+
+    pub fn seal_and_reopen_with_segment(&mut self) -> Result<SealedSegment, Box<dyn Error>> {
         let ledger = self.ledger.take().ok_or("ledger unavailable")?;
-        ledger.seal()?;
+        let sealed = ledger.seal()?;
         self.ledger = Some(if self.retention_enabled {
             ActiveSegmentLedger::open_with_retention_time(
                 self.authority,
@@ -1138,12 +1143,16 @@ impl<'kernel, 'catalog> KernelFixture<'kernel, 'catalog> {
                 SegmentProtectionKey::from_owned(Box::new([0x34; 32])),
             )?
         });
-        Ok(())
+        Ok(sealed)
     }
 
     pub fn seal_and_reopen_trace(&mut self) -> Result<(), Box<dyn Error>> {
+        self.seal_and_reopen_trace_with_segment().map(|_| ())
+    }
+
+    pub fn seal_and_reopen_trace_with_segment(&mut self) -> Result<SealedSegment, Box<dyn Error>> {
         let ledger = self.trace_ledger.take().ok_or("trace ledger unavailable")?;
-        ledger.seal()?;
+        let sealed = ledger.seal()?;
         self.trace_ledger = Some(if self.retention_enabled {
             ActiveSegmentLedger::open_with_retention_time(
                 self.authority,
@@ -1160,7 +1169,7 @@ impl<'kernel, 'catalog> KernelFixture<'kernel, 'catalog> {
                 SegmentProtectionKey::from_owned(Box::new([0x35; 32])),
             )?
         });
-        Ok(())
+        Ok(sealed)
     }
 
     pub fn reopen_ledger(&mut self) -> Result<(), Box<dyn Error>> {
@@ -1186,6 +1195,25 @@ impl<'kernel, 'catalog> KernelFixture<'kernel, 'catalog> {
                 &clock,
             )?
         });
+        Ok(())
+    }
+
+    pub fn corrupt_sealed_segment_for_test(
+        &self,
+        sealed: SealedSegment,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut name = String::with_capacity(40);
+        for byte in sealed.segment_id().to_bytes() {
+            use std::fmt::Write;
+            write!(&mut name, "{byte:02x}")?;
+        }
+        fs::write(
+            self.root
+                .0
+                .join("segments/sealed")
+                .join(format!("{name}.segment")),
+            b"corrupt",
+        )?;
         Ok(())
     }
 
@@ -1343,7 +1371,10 @@ impl<'kernel, 'catalog> KernelFixture<'kernel, 'catalog> {
                     UnixNanoseconds::new(event_time),
                     SourceTimeQuality::Usable,
                 )?,
-                end_time: EventTime::missing(),
+                end_time: EventTime::received(
+                    UnixNanoseconds::new(event_time),
+                    SourceTimeQuality::Usable,
+                )?,
                 kind: SpanKind::Internal,
                 sampling: SamplingDecision::Unknown,
                 evaluated: *evaluated,

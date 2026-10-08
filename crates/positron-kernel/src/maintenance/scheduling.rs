@@ -4,6 +4,7 @@ pub(super) fn eligible_task_ids(
     state: &mut CoordinatorState,
     now: u64,
     clock_uncertain: bool,
+    snapshot_lease_times: &std::collections::BTreeMap<MaintenanceScope, u64>,
 ) -> Result<Vec<MaintenanceTaskId>, MaintenanceFailure> {
     for task in state.tasks.values_mut() {
         if task.phase == MaintenanceTaskPhase::Deferred
@@ -46,7 +47,8 @@ pub(super) fn eligible_task_ids(
             .iter()
             .any(|active| tasks_conflict(&task.task, active));
         if task.phase == MaintenanceTaskPhase::Queued
-            && task.task.not_before <= now
+            && task.task.not_before
+                <= snapshot_lease_time_for_task(&task.task, now, snapshot_lease_times)
             && !state.pending_task_transitions.contains(identity)
             && !clock_blocks
             && !window_blocks
@@ -62,6 +64,20 @@ pub(super) fn eligible_task_ids(
         }
     });
     Ok(candidates)
+}
+
+pub(super) fn snapshot_lease_time_for_task(
+    task: &MaintenanceTask,
+    now: u64,
+    snapshot_lease_times: &std::collections::BTreeMap<MaintenanceScope, u64>,
+) -> u64 {
+    if task.class == MaintenanceTaskClass::SnapshotLeaseExpiry {
+        return snapshot_lease_times
+            .get(&task.scope)
+            .copied()
+            .unwrap_or(now);
+    }
+    now
 }
 
 pub(super) fn clock_uncertain_blocks(
@@ -289,7 +305,30 @@ pub(super) fn tasks_conflict(left: &MaintenanceTask, right: &MaintenanceTask) ->
     object_conflict
         || (scopes_overlap(left.scope, right.scope)
             && (matches!(left.class, MaintenanceTaskClass::TenantPurge)
-                || matches!(right.class, MaintenanceTaskClass::TenantPurge)))
+                || matches!(right.class, MaintenanceTaskClass::TenantPurge)
+                || integrity_scrub_conflicts_with_source_mutation(left.class, right.class)))
+}
+
+/// A scrub authenticates the complete immutable source manifest for its scope.
+/// These writers can replace that manifest even when their bounded physical
+/// object lists differ, so object-identity comparison alone is insufficient.
+fn integrity_scrub_conflicts_with_source_mutation(
+    left: MaintenanceTaskClass,
+    right: MaintenanceTaskClass,
+) -> bool {
+    (left == MaintenanceTaskClass::IntegrityScrub && source_mutation(right))
+        || (right == MaintenanceTaskClass::IntegrityScrub && source_mutation(left))
+}
+
+fn source_mutation(class: MaintenanceTaskClass) -> bool {
+    matches!(
+        class,
+        MaintenanceTaskClass::ActiveSegmentRoll
+            | MaintenanceTaskClass::Compaction
+            | MaintenanceTaskClass::RetentionPublication
+            | MaintenanceTaskClass::RetentionReclamation
+            | MaintenanceTaskClass::QuarantineFollowUp
+    )
 }
 
 fn scopes_overlap(left: MaintenanceScope, right: MaintenanceScope) -> bool {

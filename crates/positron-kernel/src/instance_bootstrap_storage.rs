@@ -68,6 +68,7 @@ pub enum BootstrapEntry {
     Initialized,
     Catalog,
     Segments,
+    Diagnostics,
     LocalKey,
     LocalKeyStaging,
     Claim,
@@ -119,6 +120,7 @@ impl BootstrapLayout {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapStorageFailure {
     InvalidRoots,
+    OwnershipLocked,
     Unavailable,
     UnsafeOrCorrupt,
     BoundIdentityMismatch,
@@ -180,7 +182,9 @@ impl InstanceBootstrapStorage {
         };
         let volume = PrimaryDataVolume::acquire_bound(&self.data, self.qualification, expected)
             .map_err(|failure| {
-                if failure.operation() == VolumeOperation::VerifyRootIdentity {
+                if failure.operation() == VolumeOperation::AcquireOwnershipLock {
+                    BootstrapStorageFailure::OwnershipLocked
+                } else if failure.operation() == VolumeOperation::VerifyRootIdentity {
                     BootstrapStorageFailure::BoundIdentityMismatch
                 } else {
                     BootstrapStorageFailure::Unavailable

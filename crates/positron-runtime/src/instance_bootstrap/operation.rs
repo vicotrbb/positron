@@ -7,7 +7,7 @@ use positron_kernel::{
     AuditIntent, BootstrapArtifact, BootstrapArtifactAccess, BootstrapKeyCustody,
     BootstrapObjectPurpose, Catalog, CatalogObject, CatalogProposal, FormatEpoch, InstanceId,
     MaintenanceCoordinator, OwnedPrimaryDataVolume, ResourceAmounts, RetentionTimeAuthority,
-    StorageKernelResourceAuthority, TransactionId,
+    StorageKernelResourceAuthority, TransactionId, WorkClaim,
 };
 use zeroize::Zeroizing;
 
@@ -23,9 +23,11 @@ use super::{
 mod classification;
 mod compatibility;
 mod completion;
+mod offline_integrity;
 pub(super) mod support;
 pub(super) use classification::classify;
 pub(super) use completion::governance_audit_records;
+pub(crate) use completion::recover_initial_ledgers;
 use completion::{ensure_claim, open_initial_ledgers, outcome};
 pub(super) use support::decode_record;
 use support::{
@@ -272,14 +274,6 @@ pub(super) fn reopen(
     if catalog.pin().map_err(catalog_failure)?.number() == 0 {
         return Err(BootstrapFailure::new(BootstrapFailureCode::CorruptState));
     }
-    // Ledger startup may publish unaudited Catalog generations. Preserve the exact
-    // predecessor of a prepared administrative transaction until its owner resolves it.
-    if !catalog
-        .has_prepared_transaction()
-        .map_err(catalog_failure)?
-    {
-        open_initial_ledgers(&authority, &retention_time, &catalog, &key, &record)?;
-    }
     let current = catalog.pin().map_err(catalog_failure)?;
     apply_catalog_quota(&authority, &current)?;
     let registered_tenants = TenantAdministration::registered_tenant_ids(&current)
@@ -307,6 +301,94 @@ pub(super) fn reopen(
         registered_tenants,
         max_registered_tenants,
     )
+}
+
+/// Opens exactly the immutable bootstrap and Catalog authorities required for
+/// an offline support bundle. Unlike `reopen`, this path never restores
+/// runtime state or creates missing Catalog directories.
+pub(super) fn inspect_offline_support_bundle(
+    paths: &BootstrapPaths,
+    max_registered_tenants: u16,
+    credential: positron_governance::PresentedCredential,
+    claim: WorkClaim,
+) -> Result<super::OfflineSupportBundleInspection, super::OfflineSupportBundleFailure> {
+    use super::OfflineSupportBundleFailure::{AuthenticationRejected, Unavailable};
+
+    let (volume, access) = paths.storage.acquire().map_err(|_| Unavailable)?;
+    if storage::classify_with(&access).map_err(|_| Unavailable)? != BootstrapState::Initialized {
+        return Err(Unavailable);
+    }
+    let key = access.open_key().map_err(|_| Unavailable)?;
+    let encoded =
+        storage::read(&access, BootstrapArtifact::Initialized).map_err(|_| Unavailable)?;
+    let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)
+        .map_err(|_| Unavailable)?;
+    require_key_identity(&record, key.identity()).map_err(|_| Unavailable)?;
+    let authority = resources::establish_system_diagnostics(volume, max_registered_tenants)
+        .map_err(|_| Unavailable)?;
+    let inspection = Catalog::reserve_offline_integrity_inspection(&authority, claim)
+        .map_err(|_| Unavailable)?;
+    let resources = inspection
+        .authority()
+        .governor()
+        .inspect()
+        .map_err(|_| Unavailable)?;
+    let view = inspection
+        .read_current_view(
+            record.instance,
+            key.catalog_secret(record.instance)
+                .map_err(|_| Unavailable)?,
+        )
+        .map_err(|_| Unavailable)?;
+    let snapshot = view.snapshot();
+    if snapshot.number() == 0 {
+        return Err(Unavailable);
+    }
+    let identity = Identity::open(snapshot).map_err(|_| Unavailable)?;
+    let retention_time = RetentionTimeAuthority::establish().map_err(|_| Unavailable)?;
+    let actor = identity
+        .attribute_with_expiry_time(
+            &key,
+            credential,
+            positron_governance::RequestedIntent::SystemAdministration,
+            positron_governance::CompatibilityHints::none(),
+            || {
+                retention_time
+                    .security_time_seconds()
+                    .map_err(|_| positron_governance::AttributionFailure)
+            },
+        )
+        .map_err(|_| AuthenticationRejected)?;
+    if actor.principal_id() != record.administrator {
+        return Err(AuthenticationRejected);
+    }
+    let (_, governance) = snapshot.governance_object().map_err(|_| Unavailable)?;
+    if governance.integrity_key_fingerprint() != record.integrity_fingerprint {
+        return Err(Unavailable);
+    }
+    let signer = key
+        .export_manifest_signer(record.instance, governance.protected_integrity_key())
+        .map_err(|_| Unavailable)?;
+    if signer.identity().public_key() != governance.integrity_public_key() {
+        return Err(Unavailable);
+    }
+    view.verify_audit_chain(governance.integrity_public_key(), None)
+        .map_err(|_| Unavailable)?;
+    let backup_repository = super::BackupRepositoryInspection::from_authenticated_catalog(snapshot)
+        .map_err(|_| Unavailable)?;
+    let crash_records = positron_kernel::CrashRecordStore::from_authenticated_authority(
+        &authority,
+        &key,
+        record.instance,
+    )
+    .map_err(|_| Unavailable)?;
+    Ok(super::OfflineSupportBundleInspection {
+        signer,
+        catalog_generation: snapshot.number(),
+        backup_repository,
+        resources,
+        crash_records,
+    })
 }
 
 pub(super) fn claim(paths: &BootstrapPaths) -> Result<BootstrapClaim, BootstrapFailure> {
@@ -443,4 +525,159 @@ fn generate_record(key: &BootstrapKeyCustody) -> Result<BootstrapRecord, Bootstr
         api_key_secret: Some(Zeroizing::new(*api_key_secret)),
         integrity_key_secret: Some(Zeroizing::new(*integrity_secret)),
     })
+}
+
+/// Opens only read-only bootstrap and Catalog inspection state for offline
+/// verification. It deliberately does not call reopen: reopen may restore
+/// active ledgers, whereas verification must neither create nor repair data.
+pub(super) use offline_integrity::{offline_integrity_claim, verify as verify_offline_integrity};
+/// Holds exclusive offline ownership and a system diagnostics reservation for
+/// the complete caller operation when bootstrap key custody is unavailable.
+/// The closure cannot acquire a second Positron ownership lock while this
+/// capability is live, which keeps admission ahead of every collection step.
+pub(super) fn with_offline_key_unavailable_diagnostics<T>(
+    paths: &BootstrapPaths,
+    max_registered_tenants: u16,
+    claim: WorkClaim,
+    operation: impl FnOnce(positron_kernel::CrashRecordStore) -> T,
+) -> Result<T, crate::OfflineIntegrityFailure> {
+    let (volume, access) = paths.storage.acquire().map_err(|failure| match failure {
+        positron_kernel::BootstrapStorageFailure::OwnershipLocked => {
+            crate::OfflineIntegrityFailure::OwnershipLocked
+        },
+        _ => crate::OfflineIntegrityFailure::BootstrapUnavailable,
+    })?;
+    let state = storage::classify_with(&access)
+        .map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
+    if state != BootstrapState::Inconsistent || access.open_key().is_ok() {
+        return Err(crate::OfflineIntegrityFailure::BootstrapUnavailable);
+    }
+    let authority = resources::establish_system_diagnostics(volume, max_registered_tenants)
+        .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
+    let _reservation = authority
+        .governor()
+        .reserve(claim)
+        .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
+    let crash_records = positron_kernel::CrashRecordStore::from_authority_without_key(&authority)
+        .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
+    Ok(operation(crash_records))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use positron_kernel::{
+        AdmissionFailureCode, DiskObservation, DiskPressureThresholds, GovernorPolicy,
+        InventoryCardinalityLimits, MountQualification, ObservedResourceEnvironment,
+        OperatorLimits, OrdinaryPoolPolicy, PrimaryDataVolume, RecoveryPoolCapacities,
+        RecoveryReserve, ResourceAmounts, ResourceDimension, ResourceGovernorConfiguration,
+        ResourceInventory, StorageKernelResourceAuthority,
+    };
+
+    use super::offline_integrity_claim;
+
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn offline_integrity_claim_refuses_the_complete_catalog_peak_before_catalog_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "positron-offline-integrity-admission-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root)?;
+        let authority = bounded_system_diagnostics_authority(&root)?;
+
+        // This is the historical single-scrub claim. It fits the configured
+        // ordinary capacity and releases normally, demonstrating that the
+        // pressure fixture does not reject all diagnostics work.
+        let historical_scrub =
+            positron_kernel::WorkClaim::system_diagnostics(ResourceAmounts::new([
+                16_777_216, 0, 1, 4_000_000, 128, 0, 0, 1, 1, 1, 0,
+            ]))?;
+        let reservation = authority.governor().reserve(historical_scrub)?;
+        assert_eq!(authority.governor().inspect()?.outstanding_total(), 1);
+        drop(reservation);
+        assert!(authority.governor().inspect()?.complete());
+
+        let refusal =
+            authority
+                .governor()
+                .reserve(offline_integrity_claim().map_err(|failure| {
+                    std::io::Error::other(format!("claim failed: {failure:?}"))
+                })?)
+                .expect_err("the complete Catalog peak must be refused before Catalog inspection");
+        assert_eq!(refusal.code(), AdmissionFailureCode::CapacityExhausted);
+        assert!(authority.governor().inspect()?.complete());
+        drop(authority);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn bounded_system_diagnostics_authority(
+        root: &std::path::Path,
+    ) -> Result<StorageKernelResourceAuthority, Box<dyn std::error::Error>> {
+        let volume = PrimaryDataVolume::acquire(root, MountQualification::LocalHost)?;
+        let cardinality = InventoryCardinalityLimits::new(1, 16)?;
+        let ordinary = ResourceAmounts::new([
+            16_777_316, 32, 32, 4_000_100, 70_000, 32, 32, 32, 4_000_100, 32, 40_000_000,
+        ]);
+        let recovery_reserve = ResourceAmounts::new([7; 11]);
+        let raw = add(
+            add(ordinary, recovery_reserve)?,
+            cardinality.governor_bootstrap_overhead(1)?,
+        )?;
+        let observed = ObservedResourceEnvironment::for_test(
+            &volume,
+            raw,
+            DiskObservation::new(raw.get(ResourceDimension::DiskHeadroomBytes)),
+        )?;
+        let inventory = ResourceInventory::new_observed(
+            observed,
+            OperatorLimits::new(raw)?,
+            RecoveryReserve::new(recovery_reserve)?,
+            cardinality,
+            DiskPressureThresholds::new(7, 8, 9, raw.get(ResourceDimension::DiskHeadroomBytes))?,
+        )?;
+        let policy = GovernorPolicy::system_only(OrdinaryPoolPolicy::new(
+            ResourceAmounts::new([4; 11]),
+            ResourceAmounts::new([3; 11]),
+            ResourceAmounts::new([2; 11]),
+            ResourceAmounts::new([1; 11]),
+        )?);
+        let one = ResourceAmounts::new([1; 11]);
+        let recovery = RecoveryPoolCapacities::new(one, one, one, one, one, one, one)?;
+        let configuration = ResourceGovernorConfiguration::new(inventory, policy, recovery)?;
+        Ok(StorageKernelResourceAuthority::establish(
+            volume,
+            configuration,
+        )?)
+    }
+
+    fn add(
+        left: ResourceAmounts,
+        right: ResourceAmounts,
+    ) -> Result<ResourceAmounts, Box<dyn std::error::Error>> {
+        let amount = |dimension| {
+            left.get(dimension)
+                .checked_add(right.get(dimension))
+                .ok_or("resource amount overflow")
+        };
+        Ok(ResourceAmounts::new([
+            amount(ResourceDimension::MemoryBytes)?,
+            amount(ResourceDimension::QueueSlots)?,
+            amount(ResourceDimension::TaskSlots)?,
+            amount(ResourceDimension::BufferCacheBytes)?,
+            amount(ResourceDimension::BatchItems)?,
+            amount(ResourceDimension::LeaseSlots)?,
+            amount(ResourceDimension::RetrySlots)?,
+            amount(ResourceDimension::IoPermits)?,
+            amount(ResourceDimension::CpuWorkUnits)?,
+            amount(ResourceDimension::FileDescriptors)?,
+            amount(ResourceDimension::DiskHeadroomBytes)?,
+        ]))
+    }
 }

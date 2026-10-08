@@ -36,6 +36,7 @@ impl CommittedLedgerReader<'_, '_, '_> {
         let reconstruction = super::reconstruction::reconstruct(
             &self.storage,
             &metadata,
+            &[],
             &self.protection,
             self.catalog.instance(),
             super::recovery::RecoveryMode::Observe,

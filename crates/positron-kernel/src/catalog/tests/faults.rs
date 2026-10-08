@@ -114,6 +114,30 @@ fn catalog_open_is_refused_while_a_same_authority_repair_claim_is_held_then_reco
     Ok(())
 }
 
+#[test]
+fn read_only_current_view_is_refused_while_a_same_authority_repair_claim_is_held()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = TemporaryRoot::new()?;
+    let instance = InstanceId::new(id(2))?;
+    let volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
+    let authority = establish_catalog_authority_with_repair_memory(volume, 90_000_000)?;
+    drop(Catalog::open(&authority, instance, secret())?);
+
+    let claim = RecoveryWorkClaim::system(
+        RecoveryWorkKind::Repair,
+        super::super::recovery_resource_claim(),
+    )?;
+    let reservation = authority.recovery().reserve(claim)?;
+    let failure = match Catalog::read_current_view(&authority, instance, secret()) {
+        Ok(_) => return Err("current view unexpectedly acquired a second repair claim".into()),
+        Err(failure) => failure,
+    };
+
+    assert_eq!(failure.code(), CatalogFailureCode::ResourceAdmissionRefused);
+    drop(reservation);
+    Ok(())
+}
+
 fn rotating_secret(
     wrapping_byte: u8,
     provider: u8,

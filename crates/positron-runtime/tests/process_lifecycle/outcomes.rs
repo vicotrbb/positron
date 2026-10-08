@@ -352,6 +352,36 @@ fn task_join_failure_reconciles_with_abort_and_forced_exit()
 }
 
 #[test]
+fn task_poll_join_failure_reconciles_with_forced_exit_and_releases_ownership()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("poll-join-fault")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks {
+        fail_join: Some(TaskRole::Api),
+        ..ObservingTasks::default()
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&listeners, &tasks),
+    )?;
+
+    let mut draining = process.begin_shutdown();
+    assert_eq!(
+        draining.poll(),
+        Err(positron_runtime::TaskFailure::JoinUnavailable)
+    );
+    assert_eq!(
+        draining.finish(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Forced
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
+}
+
+#[test]
 fn missing_instance_is_a_typed_dependency_outage_without_data_admission()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("missing")?;
@@ -413,6 +443,61 @@ fn ambiguous_bootstrap_fences_without_exposing_a_data_endpoint()
 }
 
 #[test]
+fn online_integrity_fence_retires_data_ownership_but_keeps_reauthenticated_inspection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("online-integrity-fence")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks::default();
+    let mut process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&listeners, &tasks),
+    )?;
+    let services = process.services().ok_or("runtime services missing")?;
+
+    services.request_integrity_fence();
+    drop(services);
+    assert!(process.apply_pending_integrity_fence());
+    assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+    assert_eq!(
+        process
+            .bound_endpoints()
+            .into_iter()
+            .map(|endpoint| endpoint.role())
+            .collect::<Vec<_>>(),
+        [ListenerRole::Control, ListenerRole::Operations]
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    assert_eq!(
+        tasks
+            .events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                TaskEvent::Joined(role, ProcessPhase::Fenced, false) => Some(*role),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [
+            TaskRole::Maintenance,
+            TaskRole::Api,
+            TaskRole::OtlpGrpc,
+            TaskRole::OtlpHttp,
+            TaskRole::LokiPush,
+        ]
+    );
+
+    assert!(!process.apply_pending_integrity_fence());
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+#[test]
 fn first_signal_closes_admission_joins_registered_tasks_and_releases_ownership_last()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("graceful")?;
@@ -444,8 +529,14 @@ fn first_signal_closes_admission_joins_registered_tasks_and_releases_ownership_l
         TaskRole::Maintenance,
     ];
     assert_eq!(
-        &events[..expected.len()],
-        expected.map(TaskEvent::Registered)
+        &events[..4],
+        [
+            TaskEvent::Registered(TaskRole::Control),
+            TaskEvent::Registered(TaskRole::Operations),
+            TaskEvent::Spawned(TaskRole::Control),
+            TaskEvent::Spawned(TaskRole::Operations),
+        ],
+        "only recovery-safe Control and Operations tasks may start before data-plane registration"
     );
     assert_eq!(
         events

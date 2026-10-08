@@ -71,6 +71,7 @@ mod active_segment_ledger;
 mod catalog;
 #[allow(dead_code)]
 mod data_protection;
+mod diagnostics;
 mod export_output;
 mod instance_bootstrap_storage;
 mod lifecycle_clock;
@@ -100,22 +101,30 @@ pub use catalog::{GovernanceFixtureObject, GovernanceFixtureTarget};
 #[cfg(feature = "test-support")]
 pub use active_segment_ledger::publish_snapshot_lease_marker_for_test;
 pub use active_segment_ledger::{
-    ActiveSegmentLedger, AppendCancellation, CommitReceipt, CommittedBlock, CommittedLedgerReader,
-    CompactionBlock, CompactionPreparation, CompactionPublication, LedgerCompletionState,
-    LedgerFailure, LedgerFailureCode, LedgerSnapshot, MAX_SNAPSHOT_LEASE_TTL_SECONDS,
-    PreparedCompactionTask, PreparedStoreBlock, RetentionBucket, RetentionEvaluation,
-    RetentionImpactPreview, RetentionImpactTimeRange, RetentionReclamation,
-    RetentionReclamationEstimate, SealedSegment, SegmentId, SegmentProtectionKey, SegmentScope,
-    SnapshotLeaseAttempt, SnapshotLeaseGrant, SnapshotLeaseId, SnapshotLeaseReplacement,
-    SnapshotLeaseUsage, StoreBlockIdentity, StoreBlockPreparation,
+    ActiveSegmentLedger, AppendCancellation, AuthenticatedEventRange, AuthenticatedIngestRange,
+    CatalogIntegrityVerificationRequest, CommitReceipt, CommittedBlock, CommittedLedgerReader,
+    CompactionBlock, CompactionBlockTime, CompactionPreparation, CompactionPublication,
+    EventRangeUnavailable, IntegrityCancellation, IntegrityCancellationProbe, IntegrityFailure,
+    IntegrityFailureCode, IntegrityFinding, IntegrityQuarantineFinding, IntegrityScrubBudget,
+    IntegrityScrubContinuation, IntegrityVerificationMode, IntegrityVerificationOutcome,
+    IntegrityVerificationReport, IntegrityVerificationRequest, IntegrityVerificationScope,
+    LedgerCompletionState, LedgerFailure, LedgerFailureCode, LedgerSnapshot,
+    MAX_SNAPSHOT_LEASE_TTL_SECONDS, OnlineQuarantinePublication, PreparedCompactionTask,
+    PreparedStoreBlock, RetentionBucket, RetentionEvaluation, RetentionImpactPreview,
+    RetentionImpactTimeRange, RetentionReclamation, RetentionReclamationEstimate, SealedSegment,
+    SegmentId, SegmentProtectionKey, SegmentScope, SnapshotLeaseAttempt, SnapshotLeaseGrant,
+    SnapshotLeaseId, SnapshotLeaseReplacement, SnapshotLeaseUsage, StoreBlockIdentity,
+    StoreBlockPreparation, integrity_quarantine_findings,
 };
 
+pub use catalog::integrity_scrub_resource_claim;
 pub use data_protection::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose, ControlTokenAuthentication, ControlTokenFailure, ControlTokenProtector,
     ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
     QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest,
 };
+pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{
     ExportBatchReceipt, ExportOutput, ExportOutputBatchReservation, ExportOutputBinding,
     ExportOutputCheckpoint, ExportOutputFailure, ExportOutputFailureCode, ExportOutputRequest,
@@ -132,12 +141,13 @@ pub use lifecycle_clock::{
     LifecycleClockSource, RetentionCutoffProvenance, SystemLifecycleClockSource,
 };
 pub use maintenance::{
-    CompactionBinding, GovernanceAuditCheckpointBinding, MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS,
-    MaintenanceCheckpoint, MaintenanceCoordinator, MaintenanceExecution, MaintenanceFailure,
-    MaintenanceObjectId, MaintenancePreconditions, MaintenancePriority, MaintenanceReservation,
-    MaintenanceReservationAuthority, MaintenanceScope, MaintenanceTask, MaintenanceTaskClass,
-    MaintenanceTaskId, MaintenanceTaskPhase, MaintenanceTaskRecord, MaintenanceTaskStatus,
-    MaintenanceTerminalFailure, MaintenanceTrigger, NO_DURABLE_PROGRESS_SLO_SECONDS,
+    CompactionBinding, GovernanceAuditCheckpointBinding, IntegrityScrubSourceBinding,
+    MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS, MaintenanceCheckpoint, MaintenanceCoordinator,
+    MaintenanceExecution, MaintenanceFailure, MaintenanceObjectId, MaintenancePreconditions,
+    MaintenancePriority, MaintenanceReservation, MaintenanceReservationAuthority, MaintenanceScope,
+    MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase,
+    MaintenanceTaskRecord, MaintenanceTaskStatus, MaintenanceTerminalFailure, MaintenanceTrigger,
+    NO_DURABLE_PROGRESS_SLO_SECONDS,
 };
 #[cfg(feature = "test-support")]
 pub use retention_time::ManualRetentionTime;
@@ -194,7 +204,15 @@ pub use active_segment_ledger::{fuzz_active_segment_stateful, fuzz_retention_pre
 
 #[cfg(fuzzing)]
 #[doc(hidden)]
+pub use active_segment_ledger::fuzz_integrity_quarantine_record;
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
 pub use export_output::fuzz_export_output_record;
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub use diagnostics::fuzz_crash_record_decoder;
 
 #[cfg(fuzzing)]
 #[doc(hidden)]

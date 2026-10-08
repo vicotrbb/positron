@@ -8,6 +8,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+age = "=0.11.5"
 libfuzzer-sys = "0.4"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "logs", "trace"] }
 positron-api = { path = "../crates/positron-api" }
@@ -20,7 +21,36 @@ positron-ingest = { path = "../crates/positron-ingest" }
 positron-runtime = { path = "../crates/positron-runtime", features = ["test-support"] }
 positron-signals = { path = "../crates/positron-signals" }
 positron-query = { path = "../crates/positron-query" }
+positron = { path = "../crates/positron" }
 prost = "=0.14.3"
+
+[[bin]]
+name = "live_bundle_request"
+path = "fuzz_targets/live_bundle_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "support_bundle_options"
+path = "fuzz_targets/support_bundle_options.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "offline_integrity_continuation_hex"
+path = "fuzz_targets/offline_integrity_continuation_hex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crash_record_decoder"
+path = "fuzz_targets/crash_record_decoder.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "configuration_document"
@@ -109,6 +139,13 @@ bench = false
 [[bin]]
 name = "snapshot_lease_record"
 path = "fuzz_targets/snapshot_lease_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "integrity_quarantine_record"
+path = "fuzz_targets/integrity_quarantine_record.rs"
 test = false
 doc = false
 bench = false

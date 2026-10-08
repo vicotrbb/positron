@@ -1,7 +1,44 @@
 //! Bounded adapters around wire messages generated from `positron.v1`.
 
+use std::{fs::File, io::Read, path::Path};
+
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
+
+const MAX_TRUST_FILE_BYTES: u64 = 65_536;
+
+/// Opens a caller-selected TLS trust file through one bounded, non-following
+/// descriptor. The API clients treat every failure at this untrusted boundary
+/// as a transport failure before they can send credentials.
+pub(crate) fn read_bounded_trust_file(path: &Path) -> Result<Vec<u8>, ()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| ())?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_TRUST_FILE_BYTES {
+        return Err(());
+    }
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| ())?;
+    let file = File::from(descriptor);
+    let opened = file.metadata().map_err(|_| ())?;
+    if !opened.file_type().is_file() || opened.len() > MAX_TRUST_FILE_BYTES {
+        return Err(());
+    }
+    let capacity = usize::try_from(opened.len()).map_err(|_| ())?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_TRUST_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    if bytes.len() > MAX_TRUST_FILE_BYTES as usize {
+        return Err(());
+    }
+    Ok(bytes)
+}
 
 /// Standard Prost output generated at build time from the canonical schema.
 pub mod protobuf {

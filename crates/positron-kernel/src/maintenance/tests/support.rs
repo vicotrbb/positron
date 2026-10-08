@@ -85,6 +85,61 @@ pub(super) fn authority() -> (StorageKernelResourceAuthority, TenantId) {
     )
 }
 
+pub(super) fn integrity_scrub_authority(tenant: TenantId) -> StorageKernelResourceAuthority {
+    let capacity = ResourceAmounts::new([1_000_000_000; 11]);
+    let minimum = ResourceAmounts::new([1; 11]);
+    let repair = ResourceAmounts::new([
+        70_000_001, 2, 2, 70_000_001, 65_541, 2, 2, 2, 2, 9, 17_302_529,
+    ]);
+    let reserve = ResourceAmounts::new([
+        70_000_009, 10, 10, 70_000_009, 65_549, 10, 10, 10, 10, 17, 17_302_537,
+    ]);
+    let dual = ResourceAmounts::new([2; 11]);
+    let inventory = ResourceInventory::new(
+        DetectedCapacity::new(capacity).expect("detected capacity"),
+        OperatorLimits::new(capacity).expect("operator limits"),
+        RecoveryReserve::new(reserve).expect("recovery reserve"),
+        InventoryCardinalityLimits::new(1, 8).expect("cardinality"),
+        DiskPressureThresholds::new(20_000_000, 30_000_000, 40_000_000, 50_000_000)
+            .expect("pressure thresholds"),
+        DiskObservation::new(1_000_000_000),
+    )
+    .expect("inventory");
+    let policy = GovernorPolicy::new(
+        [TenantQuota::new(
+            tenant,
+            1,
+            ResourceAmounts::new([
+                100_000_000,
+                100,
+                100,
+                100_000_000,
+                100_000,
+                100,
+                100,
+                100,
+                100,
+                100,
+                100_000_000,
+            ]),
+        )
+        .expect("tenant quota")],
+        OrdinaryPoolPolicy::new(
+            ResourceAmounts::new([200_000_000; 11]),
+            ResourceAmounts::new([150_000_000; 11]),
+            ResourceAmounts::new([100_000_000; 11]),
+            ResourceAmounts::new([50_000_000; 11]),
+        )
+        .expect("ordinary pools"),
+    )
+    .expect("policy");
+    let recovery_pools =
+        RecoveryPoolCapacities::new(dual, minimum, dual, minimum, repair, minimum, minimum)
+            .expect("recovery pools");
+    StorageKernelResourceAuthority::establish_for_test(inventory, policy, recovery_pools)
+        .expect("resource authority")
+}
+
 pub(super) fn tenant_task(
     identity: u8,
     tenant: TenantId,

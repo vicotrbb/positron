@@ -5,7 +5,7 @@ mod roots;
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use positron_api::maintenance::{
     MaintenanceExplainRequest, MaintenanceServiceClient, MaintenanceStatusRequest,
@@ -19,8 +19,29 @@ use positron_governance::{
 use positron_runtime::{
     ApplicationRuntime, ConfigurationReloadOutcome, ConfigurationRuntimeFailure, HealthWarning,
     HostInputs, InitializationMode, InstanceBootstrap, ListenerRole, NativeBindings, NativeHost,
-    ProcessPhase, Readiness, ServeConfiguration, ShutdownTrigger,
+    ProcessPhase, Readiness, RunningProcess, ServeConfiguration, ShutdownTrigger,
 };
+
+fn assert_graceful_shutdown(
+    process: RunningProcess,
+    roots: &roots::TestRoots,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if process.shutdown(ShutdownTrigger::FirstSignal) == positron_runtime::ExitOutcome::Graceful {
+        return Ok(());
+    }
+
+    let paths = roots.bootstrap_paths()?;
+    let reopened = InstanceBootstrap::reopen(&paths)
+        .map_err(|_| "forced native shutdown; authenticated crash-record read unavailable")?;
+    let crash_records = reopened
+        .crash_records()
+        .map_err(|_| "forced native shutdown; authenticated crash-record store unavailable")?;
+    let rendered = crash_records
+        .read_recent(Duration::from_secs(60), 1, 384, SystemTime::now())
+        .map_err(|_| "forced native shutdown; bounded crash-record read unavailable")?
+        .render();
+    Err(format!("forced native shutdown; bounded crash records:\n{rendered}").into())
+}
 
 #[test]
 fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_plaintext_generation()
@@ -98,10 +119,7 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
     );
     assert_eq!(process.health().phase(), ProcessPhase::Serving);
     assert_eq!(process.health().readiness(), Readiness::Ready);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    assert_graceful_shutdown(process, &roots)?;
     drop(roots.acquire_volume_again()?);
     let claim = InstanceBootstrap::claim(&paths)?;
     let reopened = InstanceBootstrap::reopen(&paths)?;
@@ -175,7 +193,7 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
     )?;
     drop(reopened);
     let resumed_host = NativeHost::new(NativeBindings::from_effective(&plaintext)?);
-    let resumed = ApplicationRuntime::start(
+    let mut resumed = ApplicationRuntime::start(
         ServeConfiguration::new(paths.clone(), InitializationMode::ExistingOnly)
             .with_effective_configuration(plaintext),
         HostInputs::new(&resumed_host, &resumed_host),
@@ -194,8 +212,29 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
         })?;
     let deadline = Instant::now() + Duration::from_secs(3);
     let task_identity = loop {
-        let status =
-            maintenance_client.status(claim.secret(), &MaintenanceStatusRequest::default())?;
+        let status = match maintenance_client
+            .status(claim.secret(), &MaintenanceStatusRequest::default())
+        {
+            Ok(status) => status,
+            Err(failure) => {
+                let pre_fence_health = resumed.health();
+                let applied_pending_fence = resumed.apply_pending_integrity_fence();
+                let post_fence_health = resumed.health();
+                let shutdown = resumed.shutdown(ShutdownTrigger::FirstSignal);
+                return Err(format!(
+                    "maintenance status failed: {failure:?}; applied_pending_fence={applied_pending_fence}; \
+                     pre_phase={:?}; pre_readiness={:?}; pre_fence_reason={:?}; \
+                     post_phase={:?}; post_readiness={:?}; post_fence_reason={:?}; shutdown={shutdown:?}",
+                    pre_fence_health.phase(),
+                    pre_fence_health.readiness(),
+                    pre_fence_health.integrity_fence_reason(),
+                    post_fence_health.phase(),
+                    post_fence_health.readiness(),
+                    post_fence_health.integrity_fence_reason(),
+                )
+                .into());
+            },
+        };
         let tasks = status
             .tasks
             .into_iter()
@@ -218,27 +257,67 @@ fn native_listener_reload_authenticated_maintenance_polling_preserves_visible_pl
     // Catalog gate as a storage outage and exponentially defer this durable
     // reclamation.
     loop {
-        let task = maintenance_client
-            .explain(
-                claim.secret(),
-                &MaintenanceExplainRequest {
-                    identity: task_identity.clone(),
-                },
-            )?
-            .task;
+        let task = match maintenance_client.explain(
+            claim.secret(),
+            &MaintenanceExplainRequest {
+                identity: task_identity.clone(),
+            },
+        ) {
+            Ok(response) => response.task,
+            Err(failure) => {
+                let pre_fence_health = resumed.health();
+                let applied_pending_fence = resumed.apply_pending_integrity_fence();
+                let post_fence_health = resumed.health();
+                let shutdown = resumed.shutdown(ShutdownTrigger::FirstSignal);
+                return Err(format!(
+                    "maintenance explain failed: {failure:?}; applied_pending_fence={applied_pending_fence}; \
+                     pre_phase={:?}; pre_readiness={:?}; pre_fence_reason={:?}; \
+                     post_phase={:?}; post_readiness={:?}; post_fence_reason={:?}; shutdown={shutdown:?}",
+                    pre_fence_health.phase(),
+                    pre_fence_health.readiness(),
+                    pre_fence_health.integrity_fence_reason(),
+                    post_fence_health.phase(),
+                    post_fence_health.readiness(),
+                    post_fence_health.integrity_fence_reason(),
+                )
+                .into());
+            },
+        };
         match task.phase.as_str() {
             "succeeded" => break,
             "failed" | "cancelled" => {
                 return Err(format!(
-                    "system catalog reclamation task reached terminal phase {}",
-                    task.phase
+                    "system catalog reclamation task reached terminal phase {}: {task:?}",
+                    task.phase,
                 )
                 .into());
             },
             _ if Instant::now() >= deadline => {
-                return Err(
-                    "system catalog reclamation task did not succeed before deadline".into(),
-                );
+                let pre_fence_health = resumed.health();
+                let phase = pre_fence_health.phase();
+                let readiness = pre_fence_health.readiness();
+                let fence_reason = pre_fence_health.integrity_fence_reason();
+                let applied_pending_fence = resumed.apply_pending_integrity_fence();
+                let post_fence_health = resumed.health();
+                let tasks = maintenance_client
+                    .status(claim.secret(), &MaintenanceStatusRequest::default())
+                    .map(|status| status.tasks);
+                let resources = pre_fence_health
+                    .with_authenticated_serving_diagnostics(claim.secret(), |instance, _, _| {
+                        instance.resource_governor().inspect().map_err(|_| ())
+                    });
+                let shutdown = resumed.shutdown(ShutdownTrigger::FirstSignal);
+                return Err(format!(
+                    "system catalog reclamation task did not succeed before deadline: {task:?}; \
+                     applied_pending_fence={applied_pending_fence}; phase={phase:?}; \
+                     readiness={readiness:?}; fence_reason={fence_reason:?}; \
+                     post_phase={:?}; post_readiness={:?}; post_fence_reason={:?}; \
+                     tasks={tasks:?}; resources={resources:?}; shutdown={shutdown:?}",
+                    post_fence_health.phase(),
+                    post_fence_health.readiness(),
+                    post_fence_health.integrity_fence_reason(),
+                )
+                .into());
             },
             _ => std::thread::yield_now(),
         }
@@ -298,10 +377,7 @@ fn failed_joint_plaintext_publication_keeps_the_tls_generation_and_no_role_recei
     assert!(process.health().security_warnings().is_empty());
     assert_eq!(process.health().phase(), ProcessPhase::Serving);
     assert_eq!(process.health().readiness(), Readiness::Ready);
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+    assert_graceful_shutdown(process, &roots)?;
     drop(roots.acquire_volume_again()?);
     let claim = InstanceBootstrap::claim(&paths)?;
     let reopened = InstanceBootstrap::reopen(&paths)?;

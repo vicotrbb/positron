@@ -405,6 +405,8 @@ fn pre_marker_api_key_create_retry_resumes_the_prepared_credential_without_a_sec
     }));
     drop(recovered);
     let normally_reopened = InstanceBootstrap::reopen(&paths)?;
+    crate::services::verify_startup_integrity(&normally_reopened)?;
+    crate::instance_bootstrap::recover_initial_ledgers(&normally_reopened)?;
     assert!(
         normally_reopened.catalog_generation() > prepared_predecessor + 1,
         "a published prepared record no longer defers normal ledger startup"

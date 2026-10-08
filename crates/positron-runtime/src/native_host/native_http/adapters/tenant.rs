@@ -13,6 +13,7 @@ pub(in crate::native_host::native_http) fn tenant_alias_response(
             content_type: "application/json",
             body: serde_json::to_vec(&response).map_err(|_| Response::empty(500))?,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }),
         Err(crate::services::tenant_aliases::TenantAliasHttpFailure::Code(status, code)) => {
             Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
@@ -32,6 +33,7 @@ pub(in crate::native_host::native_http) fn tenant_service_response<T>(
                 Response::json(503, "{\"code\":\"administration_unavailable\"}".to_owned())
             })?,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }),
         Err(crate::services::tenant_service::TenantServiceHttpFailure::Code(status, code)) => {
             Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
@@ -61,6 +63,7 @@ pub(in crate::native_host::native_http) fn tenant_lifecycle_response(
             content_type: "application/json",
             body: serde_json::to_vec(&response).map_err(|_| Response::empty(500))?,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }),
         Err(crate::services::tenant_lifecycle::TenantLifecycleHttpFailure::Code(status, code)) => {
             Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
@@ -91,6 +94,7 @@ pub(in crate::native_host::native_http) fn tenant_retention_preview_response(
                 Response::json(503, "{\"code\":\"administration_unavailable\"}".to_owned())
             })?,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }),
         Err(crate::services::tenant_retention::TenantRetentionHttpFailure::Code(status, code)) => {
             Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
@@ -120,6 +124,7 @@ pub(in crate::native_host::native_http) fn tenant_retention_update_response(
                 Response::json(503, "{\"code\":\"administration_unavailable\"}".to_owned())
             })?,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }),
         Err(crate::services::tenant_retention::TenantRetentionHttpFailure::Code(status, code)) => {
             Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))
@@ -147,6 +152,7 @@ pub(in crate::native_host::native_http) fn tenant_quota_response(
             content_type: "application/json",
             body: serde_json::to_vec(&response).map_err(|_| Response::empty(500))?,
             retry_after_seconds: None,
+            diagnostics_reservation: None,
         }),
         Err(crate::services::tenant_quotas::TenantQuotaHttpFailure::Code(status, code)) => {
             Ok(Response::json(status, format!("{{\"code\":\"{code}\"}}")))

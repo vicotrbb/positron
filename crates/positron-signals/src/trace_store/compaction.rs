@@ -157,14 +157,14 @@ fn compact_inner<'kernel, 'catalog>(
         }
         if complete {
             inputs.push(
-                CompactionBlock::new(
+                CompactionBlock::new_with_time(
                     snapshot.scope(),
                     block.segment_id(),
                     block.identity(),
                     block.position(),
                     clone_payload(block.payload())?,
                     block.content_digest().map_err(TraceStoreFailure::kernel)?,
-                    ingest_time,
+                    positron_kernel::CompactionBlockTime::new(ingest_time, block.event_range()),
                 )
                 .map_err(TraceStoreFailure::kernel)?,
             );

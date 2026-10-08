@@ -6,7 +6,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::catalog::{CatalogSecret, InstanceId};
 use crate::data_protection::{
-    DataProtection, FrameLimits, FrameSequence, ObjectDataKey, SecretKeyBytes, SecretKeyInput,
+    DataProtection, FrameLimits, FrameObjectContext, FrameObjectId, FrameSequence, KeyEpoch,
+    ObjectDataKey, SecretKeyBytes, SecretKeyInput, SystemObjectKind,
 };
 use crate::{AuditCheckpointSigner, ExportManifestSigner};
 use crate::{SegmentProtectionKey, SegmentScope};
@@ -106,6 +107,98 @@ pub struct BootstrapKeyCustody {
     key: VerifiedLocalKey,
 }
 
+/// An opaque, instance-bound capability for authenticated crash-record frames.
+/// It retains only a derived object key and never exposes custody material.
+pub(crate) struct CrashRecordProtector {
+    key: SecretKeyBytes,
+    instance: InstanceId,
+}
+
+impl std::fmt::Debug for CrashRecordProtector {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CrashRecordProtector { <redacted> }")
+    }
+}
+
+impl CrashRecordProtector {
+    pub(crate) fn protect(
+        &self,
+        slot: u64,
+        plaintext: &[u8],
+        limits: FrameLimits,
+    ) -> Result<Vec<u8>, BootstrapKeyFailure> {
+        let identifier = DataProtection::random_identifier().map_err(map_frame)?;
+        let object_id: [u8; 16] = identifier
+            .get(..16)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(BootstrapKeyFailure::Entropy)?;
+        let key = self.record_key(slot, object_id)?;
+        DataProtection::protect_frame(
+            &key,
+            key.object
+                .system_frame(FrameSequence::new(0))
+                .map_err(map_frame)?,
+            plaintext,
+            limits,
+        )
+        .map(|frame| {
+            let mut encoded = Vec::with_capacity(20_usize.saturating_add(frame.as_bytes().len()));
+            encoded.extend_from_slice(b"PCR1");
+            encoded.extend_from_slice(&object_id);
+            encoded.extend_from_slice(frame.as_bytes());
+            encoded
+        })
+        .map_err(map_frame)
+    }
+
+    pub(crate) fn open(
+        &self,
+        slot: u64,
+        encoded: &[u8],
+        limits: FrameLimits,
+    ) -> Result<Zeroizing<Vec<u8>>, BootstrapKeyFailure> {
+        let (object_id, frame) = super::super::crash_record_frame_parts(encoded)
+            .ok_or(BootstrapKeyFailure::Authentication)?;
+        let key = self.record_key(slot, object_id)?;
+        DataProtection::open_frame(
+            &key,
+            key.object
+                .system_frame(FrameSequence::new(0))
+                .map_err(map_frame)?,
+            frame,
+            limits,
+        )
+        .map(|frame| Zeroizing::new(frame.as_plaintext().to_vec()))
+        .map_err(map_frame)
+    }
+
+    fn record_key(
+        &self,
+        slot: u64,
+        object_id: [u8; 16],
+    ) -> Result<ObjectDataKey, BootstrapKeyFailure> {
+        let mut binding = [0_u8; 24];
+        binding[..16].copy_from_slice(&object_id);
+        binding[16..].copy_from_slice(&slot.to_be_bytes());
+        let object = FrameObjectContext::system(
+            SystemObjectKind::CrashRecord,
+            FrameObjectId::new(object_id).map_err(map_frame)?,
+            KeyEpoch::new(1),
+            crate::data_protection::FrameFormatEpoch::new(1).map_err(map_frame)?,
+        );
+        let key = derive_child(
+            &self.key,
+            self.instance,
+            b"crash-record-object-dek-v1",
+            &binding,
+        )?;
+        Ok(ObjectDataKey::import(
+            SecretKeyInput::from_owned(key),
+            object,
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootstrapIntegrityIdentity {
     public_key: [u8; 32],
@@ -166,6 +259,18 @@ impl std::fmt::Debug for BootstrapKeyCustody {
 }
 
 impl BootstrapKeyCustody {
+    pub(crate) fn crash_record_protector(
+        &self,
+        instance: InstanceId,
+    ) -> Result<CrashRecordProtector, BootstrapKeyFailure> {
+        let system = self.system_kek(instance)?;
+        let key = derive_child(&system, instance, b"crash-record-protector-v1", &[])?;
+        Ok(CrashRecordProtector {
+            key: SecretKeyBytes::from_owned(key),
+            instance,
+        })
+    }
+
     pub fn initialize(secrets_root: &Path) -> Result<Self, BootstrapKeyFailure> {
         let proof = FreshInitializationRootProof::new(secrets_root).map_err(map_local)?;
         initialize_local_key(proof)

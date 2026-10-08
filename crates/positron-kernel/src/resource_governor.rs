@@ -325,7 +325,13 @@ impl ResourceGovernorConfiguration {
             tenant_quotas,
             pools,
             principal_quota,
+            system_only,
         } = policy;
+        if (system_only && (!tenant_quotas.is_empty() || principal_quota.is_some()))
+            || (!system_only && tenant_quotas.is_empty())
+        {
+            return Err(GovernorFailure::InvalidConfiguration);
+        }
         if tenant_quotas.len() > inventory.cardinality.max_tenant_quotas {
             return Err(GovernorFailure::PolicyCardinalityExceeded);
         }
@@ -370,6 +376,7 @@ impl ResourceGovernorConfiguration {
             ordinary_ceiling,
             principal_quota,
             tenant_quotas,
+            system_only,
             maximum_outstanding: inventory.cardinality.max_outstanding_reservations,
             pool_capacities,
             recovery_pool_capacities: recovery_pools,

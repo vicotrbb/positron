@@ -24,6 +24,11 @@ use positron_runtime::{
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
+fn scope_is_attributable(scope: Scope, lifecycle: TenantLifecycleState) -> bool {
+    lifecycle == TenantLifecycleState::Active
+        || (lifecycle == TenantLifecycleState::ReadOnly && scope == Scope::Query)
+}
+
 struct FuzzRoots {
     parent: PathBuf,
     data: PathBuf,
@@ -256,6 +261,7 @@ fuzz_target!(|data: &[u8]| {
     let mut tenant_key: Option<(PrincipalId, String, Scope)> = None;
     let mut credential_generation = 1_u64;
     let mut lifecycle_generation = 1_u64;
+    let mut default_lifecycle = TenantLifecycleState::Active;
     let mut alias_generation = 1_u64;
     let mut retention_generation = 1_u64;
     let mut audit_retention_generation = 1_u64;
@@ -448,7 +454,10 @@ fuzz_target!(|data: &[u8]| {
                             intent,
                             CompatibilityHints::none(),
                         );
-                        assert!(attributed.is_ok());
+                        assert_eq!(
+                            attributed.is_ok(),
+                            scope_is_attributable(scope, default_lifecycle)
+                        );
                         let confused_deputy = instance.attribute(
                             PresentedCredential::parse(&key_secret)
                                 .expect("generated API key remains canonical"),
@@ -524,15 +533,15 @@ fuzz_target!(|data: &[u8]| {
                             RequestedIntent::Ingest
                         };
                         for presented in [&old_secret, &successor_secret] {
-                            assert!(
-                                instance
-                                    .attribute(
-                                        PresentedCredential::parse(presented)
-                                            .expect("generated API key remains canonical"),
-                                        intent,
-                                        CompatibilityHints::none(),
-                                    )
-                                    .is_ok()
+                            let attributed = instance.attribute(
+                                PresentedCredential::parse(presented)
+                                    .expect("generated API key remains canonical"),
+                                intent,
+                                CompatibilityHints::none(),
+                            );
+                            assert_eq!(
+                                attributed.is_ok(),
+                                scope_is_attributable(scope, default_lifecycle)
                             );
                         }
                         tenant_key = Some((successor.principal_id(), successor_secret, scope));
@@ -636,6 +645,7 @@ fuzz_target!(|data: &[u8]| {
                         );
                         assert_eq!(replay.expect("exact lifecycle retry"), transition);
                         lifecycle_generation = lifecycle_generation.saturating_add(1);
+                        default_lifecycle = target;
                         if let Some((_, key_secret, scope)) = tenant_key.as_ref() {
                             let intent = if *scope == Scope::Query {
                                 RequestedIntent::Query
@@ -648,10 +658,10 @@ fuzz_target!(|data: &[u8]| {
                                 intent,
                                 CompatibilityHints::none(),
                             );
-                            let allowed = target == TenantLifecycleState::Active
-                                || (target == TenantLifecycleState::ReadOnly
-                                    && *scope == Scope::Query);
-                            assert_eq!(attributed.is_ok(), allowed);
+                            assert_eq!(
+                                attributed.is_ok(),
+                                scope_is_attributable(*scope, default_lifecycle)
+                            );
                         }
                     }
                 }

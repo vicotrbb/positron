@@ -48,6 +48,7 @@ fn governor_with_principal_quota(
 ) -> Result<TestKernel, Box<dyn std::error::Error>> {
     let quotas = quotas.into_iter().collect::<Vec<_>>();
     let policy = match quotas.as_slice() {
+        [] => GovernorPolicy::system_only(pool_policy()?),
         [one] => GovernorPolicy::new([*one], pool_policy()?)?,
         [one, two] => GovernorPolicy::new([*one, *two], pool_policy()?)?,
         _ => return Err("test governor requires one or two quotas".into()),
@@ -89,6 +90,35 @@ fn governor_with_principal_quota(
     )
 }
 
+#[test]
+fn system_only_policy_admits_diagnostics_but_refuses_tenant_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    let kernel = governor(amounts(10), amounts(10), [])?;
+    let reservation = kernel.reserve(WorkClaim::system_diagnostics(ResourceAmounts::only(
+        ResourceDimension::MemoryBytes,
+        1,
+    )?)?)?;
+    let tenant_claim = WorkClaim::tenant(
+        tenant(0xd2)?,
+        WorkKind::OrdinaryMaintenanceBackup,
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, 1)?,
+    )?;
+    let refusal = kernel
+        .reserve(tenant_claim)
+        .expect_err("tenant work must be rejected");
+    assert_eq!(refusal.code(), AdmissionFailureCode::UnregisteredTenant);
+    drop(reservation);
+    Ok(())
+}
+
+#[test]
+fn system_only_policy_rejects_principal_scoped_admission_configuration()
+-> Result<(), Box<dyn std::error::Error>> {
+    let quota = PrincipalQuota::new(1, amounts(1), amounts(1))?;
+    assert!(governor_with_principal_quota(amounts(10), amounts(10), [], Some(quota)).is_err());
+    Ok(())
+}
+
 fn add_reserve(
     amounts: ResourceAmounts,
     reserve: u64,
@@ -112,6 +142,38 @@ fn add_reserve(
         value(ResourceDimension::FileDescriptors)?,
         value(ResourceDimension::DiskHeadroomBytes)?,
     ]))
+}
+
+#[test]
+fn system_diagnostics_reservation_refuses_before_work_and_releases_on_terminal_drop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = tenant(0xd1)?;
+    let kernel = governor(
+        amounts(10),
+        amounts(10),
+        [TenantQuota::new(tenant, 1, amounts(10))?],
+    )?;
+    let existing = kernel.reserve(WorkClaim::system_diagnostics(ResourceAmounts::only(
+        ResourceDimension::MemoryBytes,
+        3,
+    )?)?)?;
+    let refused = kernel
+        .reserve(WorkClaim::system_diagnostics(ResourceAmounts::only(
+            ResourceDimension::MemoryBytes,
+            3,
+        )?)?)
+        .expect_err("diagnostics collection must not begin when its full reservation is refused");
+    assert_eq!(
+        refused.limiting_dimension(),
+        Some(ResourceDimension::MemoryBytes)
+    );
+    drop(existing);
+    let released = kernel.reserve(WorkClaim::system_diagnostics(ResourceAmounts::only(
+        ResourceDimension::MemoryBytes,
+        3,
+    )?)?)?;
+    drop(released);
+    Ok(())
 }
 
 #[test]

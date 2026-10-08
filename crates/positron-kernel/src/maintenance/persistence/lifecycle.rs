@@ -3,6 +3,11 @@
 use super::super::*;
 use super::*;
 
+enum RetentionPublicationTerminalization<'failure> {
+    Disallowed,
+    RejectedBeforeMutation(&'failure crate::LedgerFailure),
+}
+
 impl MaintenanceCoordinator {
     pub(in super::super) fn checkpoint_and_persist_dispatch(
         &self,
@@ -30,7 +35,8 @@ impl MaintenanceCoordinator {
                     | MaintenanceTaskClass::RetentionReclamation
             )
             || task.active_dispatch != Some(dispatch)
-            || checkpoint.completed_inputs as usize > task.task.inputs.len()
+            || (task.task.class != MaintenanceTaskClass::IntegrityScrub
+                && checkpoint.completed_inputs as usize > task.task.inputs.len())
             || task
                 .checkpoint
                 .as_ref()
@@ -58,7 +64,14 @@ impl MaintenanceCoordinator {
         dispatch: MaintenanceDispatch,
         succeeded: bool,
     ) -> Result<(), MaintenanceFailure> {
-        self.complete_and_persist_dispatch_inner(catalog, dispatch, succeeded, None, None)
+        self.complete_and_persist_dispatch_inner(
+            catalog,
+            dispatch,
+            succeeded,
+            None,
+            None,
+            RetentionPublicationTerminalization::Disallowed,
+        )
     }
 
     pub(in super::super) fn fail_and_persist_dispatch(
@@ -67,7 +80,33 @@ impl MaintenanceCoordinator {
         dispatch: MaintenanceDispatch,
         failure: MaintenanceTerminalFailure,
     ) -> Result<(), MaintenanceFailure> {
-        self.complete_and_persist_dispatch_inner(catalog, dispatch, false, Some(failure), None)
+        self.complete_and_persist_dispatch_inner(
+            catalog,
+            dispatch,
+            false,
+            Some(failure),
+            None,
+            RetentionPublicationTerminalization::Disallowed,
+        )
+    }
+
+    /// Records the only retention-publication failure that is known to occur
+    /// before its handler mutates a segment or publishes a successor. Other
+    /// retention completion paths retain their class-specific atomic proof.
+    pub(in super::super) fn fail_rejected_retention_publication_and_persist_dispatch(
+        &self,
+        catalog: &Catalog<'_>,
+        dispatch: MaintenanceDispatch,
+        proof: &crate::LedgerFailure,
+    ) -> Result<(), MaintenanceFailure> {
+        self.complete_and_persist_dispatch_inner(
+            catalog,
+            dispatch,
+            false,
+            Some(MaintenanceTerminalFailure::StaleGeneration),
+            None,
+            RetentionPublicationTerminalization::RejectedBeforeMutation(proof),
+        )
     }
 
     fn complete_and_persist_dispatch_inner(
@@ -77,6 +116,7 @@ impl MaintenanceCoordinator {
         succeeded: bool,
         failure: Option<MaintenanceTerminalFailure>,
         execution: Option<&MaintenanceExecution<'_>>,
+        retention_terminalization: RetentionPublicationTerminalization<'_>,
     ) -> Result<(), MaintenanceFailure> {
         if dispatch.coordinator_id != self.coordinator_id {
             return Err(MaintenanceFailure::InvalidTransition);
@@ -86,13 +126,28 @@ impl MaintenanceCoordinator {
             .lock()
             .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
         super::require_unreserved_task_transition(&state, dispatch.identity)?;
-        if state.tasks.get(&dispatch.identity).is_some_and(|task| {
-            matches!(
-                task.task.class,
-                MaintenanceTaskClass::RetentionPublication
-                    | MaintenanceTaskClass::RetentionReclamation
-            )
-        }) {
+        let allows_rejected_retention_publication =
+            state.tasks.get(&dispatch.identity).is_some_and(|task| {
+                matches!(
+                    retention_terminalization,
+                    RetentionPublicationTerminalization::RejectedBeforeMutation(proof)
+                        if proof.code() == crate::LedgerFailureCode::StaleGeneration
+                            && proof.completion_state()
+                                == crate::LedgerCompletionState::RejectedBeforeMutation
+                            && task.task.class == MaintenanceTaskClass::RetentionPublication
+                            && matches!(failure, Some(MaintenanceTerminalFailure::StaleGeneration))
+                            && execution.is_none()
+                )
+            });
+        if !allows_rejected_retention_publication
+            && state.tasks.get(&dispatch.identity).is_some_and(|task| {
+                matches!(
+                    task.task.class,
+                    MaintenanceTaskClass::RetentionPublication
+                        | MaintenanceTaskClass::RetentionReclamation
+                )
+            })
+        {
             return Err(MaintenanceFailure::InvalidTransition);
         }
         let mut next = state.clone();
@@ -146,6 +201,7 @@ impl MaintenanceCoordinator {
             succeeded,
             None,
             Some(execution),
+            RetentionPublicationTerminalization::Disallowed,
         )
     }
 
@@ -162,6 +218,7 @@ impl MaintenanceCoordinator {
             false,
             Some(failure),
             Some(execution),
+            RetentionPublicationTerminalization::Disallowed,
         )
     }
 
@@ -390,8 +447,10 @@ impl MaintenanceCoordinator {
             .tasks
             .get_mut(&dispatch.identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        if task.task.class != MaintenanceTaskClass::GovernanceAuditCheckpoint
-            || task.phase != MaintenanceTaskPhase::Running
+        if !matches!(
+            task.task.class,
+            MaintenanceTaskClass::GovernanceAuditCheckpoint | MaintenanceTaskClass::IntegrityScrub
+        ) || task.phase != MaintenanceTaskPhase::Running
             || task.active_dispatch != Some(dispatch)
             || task.cancellation_requested
         {
@@ -420,8 +479,10 @@ impl MaintenanceCoordinator {
             .tasks
             .get_mut(&dispatch.identity)
             .ok_or(MaintenanceFailure::UnknownTask)?;
-        if task.task.class != MaintenanceTaskClass::GovernanceAuditCheckpoint
-            || task.phase != MaintenanceTaskPhase::Running
+        if !matches!(
+            task.task.class,
+            MaintenanceTaskClass::GovernanceAuditCheckpoint | MaintenanceTaskClass::IntegrityScrub
+        ) || task.phase != MaintenanceTaskPhase::Running
             || task.active_dispatch != Some(dispatch)
         {
             return Err(MaintenanceFailure::InvalidTransition);

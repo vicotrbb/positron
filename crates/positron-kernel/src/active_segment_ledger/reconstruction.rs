@@ -2,6 +2,7 @@ use crate::catalog::InstanceId;
 use crate::data_protection::ObjectDataKey;
 use positron_domain::routing::CommitPosition;
 
+use super::IntegrityQuarantineFinding;
 use super::format::{SegmentMetadata, SegmentState};
 use super::recovery::RecoveryMode;
 use super::state::retain_recovered;
@@ -20,16 +21,38 @@ pub(super) struct Reconstruction {
 pub(super) fn reconstruct(
     storage: &LedgerStorage,
     metadata: &[SegmentMetadata],
+    quarantined_holes: &[IntegrityQuarantineFinding],
     protection: &SegmentProtectionKey,
     instance: InstanceId,
     mode: RecoveryMode,
 ) -> Result<Reconstruction, LedgerFailure> {
     let mut segments = metadata.iter().copied().peekable();
+    let mut holes = quarantined_holes.iter().copied().peekable();
     let mut blocks = Vec::new();
     let mut retained_bytes = 0_usize;
     let mut frontier = CommitPosition::origin();
     let mut recovered_active = None;
-    while let Some(first) = segments.peek().copied() {
+    while segments.peek().is_some() || holes.peek().is_some() {
+        if let Some(hole) = holes.peek().copied()
+            && (segments
+                .peek()
+                .is_none_or(|segment| hole.base_position() <= segment.base_position.value()))
+        {
+            let hole = holes
+                .next()
+                .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
+            let base = super::format::position_from_value(hole.base_position())?;
+            let end = hole.sealed_frontier();
+            if base != frontier || end < base {
+                return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+            }
+            frontier = end;
+            continue;
+        }
+        let first = segments
+            .peek()
+            .copied()
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
         if first.state == SegmentState::Retired {
             let retired = segments
                 .next()

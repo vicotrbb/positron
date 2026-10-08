@@ -183,6 +183,27 @@ impl MaintenanceObjectId {
     }
 }
 
+/// Authenticated immutable-source basis for a bounded integrity scrub.
+///
+/// This is distinct from a physical object identity: it is a catalog-derived
+/// precondition which the executor must revalidate before it reads a scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntegrityScrubSourceBinding([u8; 32]);
+
+impl IntegrityScrubSourceBinding {
+    pub fn new(bytes: [u8; 32]) -> Result<Self, MaintenanceFailure> {
+        if bytes.iter().all(|byte| *byte == 0) {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
+        Ok(Self(bytes))
+    }
+
+    #[must_use]
+    pub const fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
 /// The event provenance used to gate unsafe clock-derived work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaintenanceTrigger {
@@ -290,6 +311,7 @@ pub struct MaintenanceTask {
     pub(super) preconditions: MaintenancePreconditions,
     pub(super) inputs: Vec<MaintenanceObjectId>,
     pub(super) outputs: Vec<MaintenanceObjectId>,
+    pub(super) integrity_scrub_source: Option<IntegrityScrubSourceBinding>,
     pub(super) reservations: ResourceAmounts,
     pub(super) not_before: u64,
 }
@@ -312,6 +334,7 @@ impl MaintenanceTask {
             },
             inputs: Vec::new(),
             outputs: Vec::new(),
+            integrity_scrub_source: None,
             reservations: ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
             not_before: 0,
         }
@@ -339,6 +362,36 @@ impl MaintenanceTask {
             reservations,
             0,
         )
+    }
+
+    /// Creates one source-bound integrity scrub descriptor.
+    pub fn integrity_scrub(
+        identity: MaintenanceTaskId,
+        scope: MaintenanceScope,
+        trigger: MaintenanceTrigger,
+        preconditions: MaintenancePreconditions,
+        source_basis: [u8; 32],
+        not_before: u64,
+    ) -> Result<Self, MaintenanceFailure> {
+        if !matches!(scope, MaintenanceScope::Segment { .. })
+            || (trigger == MaintenanceTrigger::Scheduled && not_before == 0)
+            || (trigger != MaintenanceTrigger::Scheduled && not_before != 0)
+        {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
+        let mut task = Self::with_contract_not_before(
+            identity,
+            MaintenanceTaskClass::IntegrityScrub,
+            scope,
+            trigger,
+            preconditions,
+            Vec::new(),
+            Vec::new(),
+            crate::catalog::integrity_scrub_resource_claim(),
+            not_before,
+        )?;
+        task.integrity_scrub_source = Some(IntegrityScrubSourceBinding::new(source_basis)?);
+        Ok(task)
     }
 
     #[cfg(feature = "test-support")]
@@ -400,6 +453,7 @@ impl MaintenanceTask {
             preconditions,
             inputs,
             outputs,
+            integrity_scrub_source: None,
             reservations,
             not_before,
         })
@@ -446,6 +500,11 @@ impl MaintenanceTask {
     #[must_use]
     pub fn outputs(&self) -> &[MaintenanceObjectId] {
         &self.outputs
+    }
+    /// Returns the catalog-derived source precondition for an integrity scrub.
+    #[must_use]
+    pub const fn source_binding(&self) -> Option<IntegrityScrubSourceBinding> {
+        self.integrity_scrub_source
     }
     #[must_use]
     pub const fn reservations(&self) -> ResourceAmounts {

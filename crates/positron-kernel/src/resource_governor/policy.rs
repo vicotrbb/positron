@@ -107,6 +107,7 @@ pub struct GovernorPolicy {
     pub(super) tenant_quotas: Box<[TenantQuota]>,
     pub(super) pools: OrdinaryPoolPolicy,
     pub(super) principal_quota: Option<PrincipalQuota>,
+    pub(super) system_only: bool,
 }
 
 /// Fixed aggregate resource ceiling for one authenticated Principal.
@@ -160,6 +161,20 @@ impl PrincipalQuota {
 }
 
 impl GovernorPolicy {
+    /// Establishes a tenantless policy that admits only closed system work.
+    ///
+    /// This is for an exclusively owned offline diagnostic authority before
+    /// encrypted bootstrap custody can reveal a tenant. It cannot be made by
+    /// the ordinary tenant-policy constructor.
+    pub fn system_only(pools: OrdinaryPoolPolicy) -> Self {
+        Self {
+            tenant_quotas: Box::default(),
+            pools,
+            principal_quota: None,
+            system_only: true,
+        }
+    }
+
     pub fn new<const N: usize>(
         quotas: [TenantQuota; N],
         pools: OrdinaryPoolPolicy,
@@ -199,6 +214,7 @@ impl GovernorPolicy {
             tenant_quotas: into_boxed_exact(tenant_quotas, required)?,
             pools,
             principal_quota: None,
+            system_only: false,
         })
     }
 

@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::error::Error;
 use std::fs;
+use std::num::NonZeroU64;
 
 use positron_domain::identity::TenantId;
 use positron_domain::routing::{SignalKind, VirtualShardId};
@@ -16,12 +17,14 @@ use crate::active_segment_ledger::publication::publish_segments;
 use crate::active_segment_ledger::recovery::{frontier_name, segment_name};
 use crate::catalog::{CatalogFileEvent, with_catalog_fault};
 use crate::{
-    ActiveSegmentLedger, Catalog, CatalogObject, CatalogProposal, CatalogSecret, CommittedBlock,
-    CompactionBlock, FormatEpoch, IngestTime, InstanceId, LedgerCompletionState, LedgerFailureCode,
-    MaintenanceCoordinator, MaintenanceTaskId, MountQualification, PrimaryDataVolume,
+    ActiveSegmentLedger, AuthenticatedEventRange, Catalog, CatalogIntegrityVerificationRequest,
+    CatalogObject, CatalogProposal, CatalogSecret, CommittedBlock, CompactionBlock, FormatEpoch,
+    IngestTime, InstanceId, IntegrityCancellation, IntegrityScrubBudget, IntegrityVerificationMode,
+    IntegrityVerificationRequest, LedgerCompletionState, LedgerFailureCode, MaintenanceCoordinator,
+    MaintenanceTaskId, MountQualification, PreparedStoreBlock, PrimaryDataVolume,
     RecoveryWorkClaim, RecoveryWorkKind, ResourceAmounts, ResourceDimension, RetentionBucket,
     RetentionTimeAuthority, SegmentId, SegmentProtectionKey, SegmentScope, StoreBlockIdentity,
-    TransactionId, WorkClaim, WorkKind,
+    TransactionId, WorkClaim, WorkKind, integrity_quarantine_findings,
 };
 
 #[cfg(feature = "test-support")]
@@ -51,14 +54,14 @@ fn compaction_block(
             return Err("compaction fixture block lacks authenticated ingest time".into());
         },
     };
-    Ok(CompactionBlock::new(
+    Ok(CompactionBlock::new_with_time(
         scope,
         block.segment_id(),
         block.identity(),
         block.position(),
         block.payload().to_vec(),
         block.content_digest()?,
-        ingest_time,
+        crate::active_segment_ledger::CompactionBlockTime::new(ingest_time, block.event_range()),
     )?)
 }
 
@@ -485,13 +488,12 @@ fn compaction_rejects_invalid_inputs_and_repairs_after_output_seal_ambiguity()
         .find(|candidate| candidate.id == missing_metadata_block.source_segment)
         .copied()
         .ok_or("repaired source metadata missing")?;
-    assert_eq!(
+    assert!(
         repaired
             .storage
-            .retired_recovery_encoded_bytes(source_metadata)
-            .expect_err("sealed metadata cannot request retired recovery bytes")
-            .code(),
-        LedgerFailureCode::InvalidInput
+            .snapshot_recovery_encoded_bytes(source_metadata)
+            .expect("the original leased generation may retain sealed recovery metadata")
+            > 0
     );
     assert_eq!(
         repaired
@@ -1444,10 +1446,13 @@ fn successful_compaction_replaces_sealed_sources_and_survives_reopen() -> Result
     let retention_time = RetentionTimeAuthority::establish()?;
     let key = || SegmentProtectionKey::from_owned(Box::new([0xd9; 32]));
 
-    for (identity, payload) in [
+    for (index, (identity, payload)) in [
         ([0xda; 16], b"successful-first".as_slice()),
         ([0xdb; 16], b"successful-second".as_slice()),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let source = ActiveSegmentLedger::open_with_retention_time(
             &authority,
             &retention_time,
@@ -1461,7 +1466,14 @@ fn successful_compaction_replaces_sealed_sources_and_survives_reopen() -> Result
                     preparation_capacity(&authority, tenant)?,
                     StoreBlockIdentity::new(identity)?,
                 )?
-                .finish(payload.to_vec())?,
+                .finish_with_event_range(
+                    payload.to_vec(),
+                    crate::AuthenticatedEventRange::known(
+                        UnixNanoseconds::new(100 + i64::try_from(index)?),
+                        UnixNanoseconds::new(200 + i64::try_from(index)?),
+                    )
+                    .map_err(|_| "fixed Event Time range")?,
+                )?,
         )?;
         source.seal()?;
     }
@@ -1549,6 +1561,16 @@ fn successful_compaction_replaces_sealed_sources_and_survives_reopen() -> Result
     assert_eq!(after.blocks().len(), 2);
     assert_eq!(after.blocks()[0].payload(), b"successful-first");
     assert_eq!(after.blocks()[1].payload(), b"successful-second");
+    assert_eq!(
+        after.blocks()[0].event_range(),
+        crate::AuthenticatedEventRange::known(UnixNanoseconds::new(100), UnixNanoseconds::new(200))
+            .map_err(|_| "fixed Event Time range")?
+    );
+    assert_eq!(
+        after.blocks()[1].event_range(),
+        crate::AuthenticatedEventRange::known(UnixNanoseconds::new(101), UnixNanoseconds::new(201))
+            .map_err(|_| "fixed Event Time range")?
+    );
     drop(before);
     drop(after);
     drop(ledger);
@@ -1564,6 +1586,16 @@ fn successful_compaction_replaces_sealed_sources_and_survives_reopen() -> Result
     assert_eq!(recovered.blocks().len(), 2);
     assert_eq!(recovered.blocks()[0].payload(), b"successful-first");
     assert_eq!(recovered.blocks()[1].payload(), b"successful-second");
+    assert_eq!(
+        recovered.blocks()[0].event_range(),
+        crate::AuthenticatedEventRange::known(UnixNanoseconds::new(100), UnixNanoseconds::new(200))
+            .map_err(|_| "fixed Event Time range")?
+    );
+    assert_eq!(
+        recovered.blocks()[1].event_range(),
+        crate::AuthenticatedEventRange::known(UnixNanoseconds::new(101), UnixNanoseconds::new(201))
+            .map_err(|_| "fixed Event Time range")?
+    );
     Ok(())
 }
 
@@ -1853,6 +1885,126 @@ fn typed_compaction_task_couples_the_exact_manifest_and_terminal_record()
         2,
         "reopen observes the one canonical post-compaction source replacement"
     );
+    Ok(())
+}
+
+#[test]
+fn compaction_preserves_quarantined_sources_and_other_scopes_remain_eligible()
+-> Result<(), Box<dyn Error>> {
+    let root = TemporaryRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(root.path(), MountQualification::LocalHost)?;
+    let authority = establish_authority(volume)?;
+    let instance = InstanceId::new([0xb1; 16])?;
+    let catalog = Catalog::open(
+        &authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([0xb2; 32]), Box::new([0xb3; 32])),
+    )?;
+    let tenant = TenantId::from_bytes([0x64; 16])?;
+    super::retention_frontier::install_governance_policy(&catalog, instance, tenant, 60, 0xb4)?;
+    let scope = SegmentScope::new(tenant, SignalKind::Logs, VirtualShardId::new(71)?);
+    let key = || SegmentProtectionKey::from_owned(Box::new([0xb5; 32]));
+    let retention_time = RetentionTimeAuthority::establish()?;
+    let source = ActiveSegmentLedger::open_with_retention_time(
+        &authority,
+        &retention_time,
+        &catalog,
+        scope,
+        key(),
+    )?;
+    source.append(PreparedStoreBlock::new_with_authenticated_ranges_for_test(
+        scope,
+        StoreBlockIdentity::new([0xb6; 16])?,
+        b"quarantined compaction source".to_vec(),
+        AuthenticatedEventRange::known(UnixNanoseconds::new(10), UnixNanoseconds::new(20))
+            .map_err(|_| "fixed Event Time range")?,
+        IngestTime::from_authenticated_durable(UnixNanoseconds::new(30)),
+    )?)?;
+    let ingest_time = match source.snapshot()?.blocks()[0].block_retention {
+        SegmentRetention::Complete(value) => value,
+        _ => return Err("source block lacks authenticated retention time".into()),
+    };
+    let sealed = source.seal()?;
+    let quarantined = ActiveSegmentLedger::open_with_retention_time(
+        &authority,
+        &retention_time,
+        &catalog,
+        scope,
+        key(),
+    )?;
+    fs::write(
+        root.path()
+            .join("segments/sealed")
+            .join(segment_name(sealed.segment_id())),
+        b"corrupt",
+    )?;
+    let report = ActiveSegmentLedger::verify_catalog_integrity(
+        &authority,
+        &catalog,
+        CatalogIntegrityVerificationRequest::new(
+            IntegrityVerificationRequest::new(
+                scope,
+                key(),
+                IntegrityScrubBudget::new(1).map_err(|_| "valid integrity budget")?,
+                &IntegrityCancellation::new(),
+                TransactionId::new([0xb7; 16])?,
+                None,
+            ),
+            IntegrityVerificationMode::Online,
+        ),
+    )?;
+    assert_eq!(report.quarantined_segment(), Some(sealed.segment_id()));
+    let duration = NonZeroU64::new(60).ok_or("compaction retention duration")?;
+    let bucket = RetentionBucket::for_ingest_time(tenant, SignalKind::Logs, ingest_time, duration)?;
+    let task = MaintenanceTaskId::new([0xb8; 16]).map_err(|_| "compaction task identity")?;
+    let failure = match quarantined.prepare_compaction_task(bucket, task) {
+        Ok(_) => return Err("a quarantined source cannot be compacted away".into()),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.code(), LedgerFailureCode::IntegrityCorruption);
+    assert!(
+        root.path()
+            .join("segments/sealed")
+            .join(segment_name(sealed.segment_id()))
+            .is_file()
+    );
+    assert_eq!(integrity_quarantine_findings(&catalog.pin()?)?.len(), 1);
+
+    let healthy_scope = SegmentScope::new(tenant, SignalKind::Logs, VirtualShardId::new(72)?);
+    let healthy = ActiveSegmentLedger::open_with_retention_time(
+        &authority,
+        &retention_time,
+        &catalog,
+        healthy_scope,
+        key(),
+    )?;
+    healthy.append(
+        healthy
+            .begin_store_block(
+                preparation_capacity(&authority, tenant)?,
+                StoreBlockIdentity::new([0xb9; 16])?,
+            )?
+            .finish(b"healthy other scope".to_vec())?,
+    )?;
+    let healthy_ingest = match healthy.snapshot()?.blocks()[0].block_retention {
+        SegmentRetention::Complete(value) => value,
+        _ => return Err("healthy block lacks authenticated retention time".into()),
+    };
+    healthy.seal()?;
+    let healthy = ActiveSegmentLedger::open_with_retention_time(
+        &authority,
+        &retention_time,
+        &catalog,
+        healthy_scope,
+        key(),
+    )?;
+    let healthy_bucket =
+        RetentionBucket::for_ingest_time(tenant, SignalKind::Logs, healthy_ingest, duration)?;
+    let healthy_task =
+        MaintenanceTaskId::new([0xba; 16]).map_err(|_| "healthy compaction task identity")?;
+    healthy
+        .prepare_compaction_task(healthy_bucket, healthy_task)
+        .map_err(|failure| format!("healthy scope compaction preparation failed: {failure:?}"))?;
     Ok(())
 }
 
@@ -2498,6 +2650,7 @@ fn repair_moves_a_catalog_published_active_compaction_output_to_sealed_namespace
         .find(|candidate| candidate.id == current.id)
         .ok_or("active segment missing from Catalog")?;
     published.state = SegmentState::Sealed;
+    published.sealed_frontier = Some(ledger.snapshot()?.frontier());
     publish_segments(&catalog, &basis, &ledger.storage, scope, &metadata)?;
     drop(ledger);
 

@@ -361,7 +361,7 @@ pub struct InitializedInstance {
     pub(in crate::instance_bootstrap) tenant_slug: TenantSlug,
     pub(in crate::instance_bootstrap) administrator: PrincipalId,
     pub(in crate::instance_bootstrap) integrity_key_fingerprint: [u8; 32],
-    pub(in crate::instance_bootstrap) catalog_generation: u64,
+    pub(in crate::instance_bootstrap) catalog_generation: std::sync::atomic::AtomicU64,
     pub(in crate::instance_bootstrap) governance_audit_frontier: u64,
     pub(in crate::instance_bootstrap) claim_available: bool,
 }
@@ -372,16 +372,68 @@ impl std::fmt::Debug for InitializedInstance {
             .debug_struct("InitializedInstance")
             .field("instance", &self.instance)
             .field("tenant", &self.tenant)
-            .field("catalog_generation", &self.catalog_generation)
+            .field("catalog_generation", &self.catalog_generation())
             .field("claim_available", &self.claim_available)
             .finish_non_exhaustive()
     }
 }
 
 impl InitializedInstance {
+    pub(in crate::instance_bootstrap) fn record_catalog_generation(&self, generation: u64) {
+        self.catalog_generation
+            .store(generation, std::sync::atomic::Ordering::Release);
+    }
+
     #[must_use]
     pub(crate) fn maintenance_coordinator(&self) -> &positron_kernel::MaintenanceCoordinator {
         &self.maintenance
+    }
+
+    /// Bounded maintenance and operation evidence for authenticated diagnostics.
+    /// This reads the restored coordinator and current governance audit without
+    /// exposing task identities, scopes, checkpoint payloads, or operation
+    /// targets. Every active Snapshot Lease owns exactly one nonterminal expiry
+    /// task, so that durable task count is the current lease inventory.
+    pub fn maintenance_bundle_evidence(
+        &self,
+        facts: DoctorRuntimeFacts,
+    ) -> Result<String, BootstrapFailure> {
+        let statuses = self
+            .maintenance
+            .statuses()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let mut queued = 0_u32;
+        let mut running = 0_u32;
+        let mut deferred = 0_u32;
+        let mut terminal = 0_u32;
+        let mut checkpoints = 0_u32;
+        let mut pauses = 0_u32;
+        let mut conflicts = 0_u32;
+        for status in statuses {
+            match status.phase() {
+                positron_kernel::MaintenanceTaskPhase::Queued => queued = queued.saturating_add(1),
+                positron_kernel::MaintenanceTaskPhase::Running => {
+                    running = running.saturating_add(1)
+                },
+                positron_kernel::MaintenanceTaskPhase::Deferred => {
+                    deferred = deferred.saturating_add(1)
+                },
+                positron_kernel::MaintenanceTaskPhase::Cancelled
+                | positron_kernel::MaintenanceTaskPhase::Succeeded
+                | positron_kernel::MaintenanceTaskPhase::Failed => {
+                    terminal = terminal.saturating_add(1)
+                },
+            }
+            checkpoints = checkpoints.saturating_add(u32::from(status.checkpoint().is_some()));
+            pauses = pauses.saturating_add(u32::from(status.pause_until().is_some()));
+            conflicts = conflicts.saturating_add(u32::from(status.conflict_owner().is_some()));
+        }
+        Ok(format!(
+            "maintenance_inventory=coordinator_and_governance_audit\nqueued_tasks={queued}\nrunning_tasks={running}\ndeferred_tasks={deferred}\nterminal_tasks={terminal}\ncheckpointed_tasks={checkpoints}\npaused_tasks={pauses}\nconflicted_tasks={conflicts}\ndurable_operations={}\nactive_durable_operations={}\nsnapshot_leases={}\n",
+            facts.durable_operations(),
+            facts.active_durable_operations(),
+            facts.snapshot_leases(),
+        ))
     }
     /// Returns the bootstrap-pinned system administrator that acts for
     /// instance-owned maintenance transitions.

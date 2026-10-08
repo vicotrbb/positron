@@ -51,6 +51,7 @@ const SYSTEM_AUDIT_RETENTION_MAGIC: [u8; 8] = *b"POSAR001";
 const LIFECYCLE_CLOCK_ACCEPTANCE_MAGIC: [u8; 8] = *b"POSLCA01";
 const MAINTENANCE_CONTROL_AUDIT_MAGIC: [u8; 8] = *b"POSMTC01";
 const MAINTENANCE_RUN_AUDIT_MAGIC: [u8; 8] = *b"POSMTR01";
+const INTEGRITY_QUARANTINE_AUDIT_MAGIC: [u8; 8] = *b"POSIQR01";
 const MAINTENANCE_WINDOW_AUDIT_MAGIC: [u8; 8] = *b"POSMTW01";
 const DURABLE_OPERATION_AUDIT_MAGIC: [u8; 8] = *b"POSOPA02";
 const DURABLE_OPERATION_AUDIT_MAGIC_V3: [u8; 8] = *b"POSOPA03";
@@ -143,10 +144,89 @@ pub enum GovernanceAuditEntry {
     LifecycleClockAcceptance(LifecycleClockAcceptanceAuditEntry),
     MaintenanceControl(MaintenanceControlAuditEntry),
     MaintenanceRun(MaintenanceRunAuditEntry),
+    IntegrityQuarantine(IntegrityQuarantineAuditEntry),
     MaintenanceWindow(MaintenanceWindowAuditEntry),
     DurableOperation(DurableOperationAuditEntry),
     Configuration(ConfigurationAuditEntry),
     TlsMaterialReload(TlsMaterialReloadAuditEntry),
+}
+
+/// Redacted system-derived evidence for one Catalog-published localized
+/// integrity quarantine. The record carries no source bytes or keys.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegrityQuarantineAuditEntry {
+    position: u64,
+    tenant: TenantId,
+    signal: SignalKind,
+    shard: u32,
+    segment: Option<[u8; 16]>,
+}
+
+impl IntegrityQuarantineAuditEntry {
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
+
+    #[must_use]
+    pub const fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    #[must_use]
+    pub const fn signal(&self) -> SignalKind {
+        self.signal
+    }
+
+    #[must_use]
+    pub const fn shard(&self) -> u32 {
+        self.shard
+    }
+
+    #[must_use]
+    pub const fn segment(&self) -> Option<[u8; 16]> {
+        self.segment
+    }
+}
+
+/// Facts proven by the verifier before its trusted atomic quarantine
+/// publication. This is intentionally system-derived: no caller supplies an
+/// actor, source bytes, or mutable time range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IntegrityQuarantineAuditRequest {
+    pub tenant: TenantId,
+    pub signal: SignalKind,
+    pub shard: u32,
+    pub segment: Option<[u8; 16]>,
+}
+
+pub fn integrity_quarantine_audit_intent(
+    request: IntegrityQuarantineAuditRequest,
+) -> Result<AuditIntent, GovernanceIntentFailure> {
+    if request.shard == 0
+        || request
+            .segment
+            .is_some_and(|segment| segment.iter().all(|byte| *byte == 0))
+    {
+        return Err(GovernanceIntentFailure);
+    }
+    let signal = match request.signal {
+        SignalKind::Logs => 1,
+        SignalKind::Traces => 2,
+    };
+    let mut encoded = Vec::with_capacity(46);
+    encoded.extend_from_slice(&INTEGRITY_QUARANTINE_AUDIT_MAGIC);
+    encoded.extend_from_slice(&request.tenant.to_bytes());
+    encoded.push(signal);
+    encoded.extend_from_slice(&request.shard.to_be_bytes());
+    match request.segment {
+        Some(segment) => {
+            encoded.push(1);
+            encoded.extend_from_slice(&segment);
+        },
+        None => encoded.push(0),
+    }
+    AuditIntent::new(encoded).map_err(|_| GovernanceIntentFailure)
 }
 
 /// Redacted immutable receipt for one server-derived maintenance Run request.
@@ -2084,6 +2164,7 @@ impl GovernanceAuditEntry {
             Self::TlsMaterialReload(entry) => entry.position(),
             Self::MaintenanceControl(entry) => entry.position(),
             Self::MaintenanceRun(entry) => entry.position(),
+            Self::IntegrityQuarantine(entry) => entry.position(),
             Self::MaintenanceWindow(entry) => entry.position(),
         }
     }
@@ -2111,6 +2192,7 @@ impl GovernanceAuditEntry {
             Self::DurableOperation(entry) => entry.applicable_tenant(),
             Self::Configuration(entry) => entry.applicable_tenant(),
             Self::MaintenanceRun(entry) => Some(entry.tenant()),
+            Self::IntegrityQuarantine(entry) => Some(entry.tenant()),
             Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceWindow(_) => None,
@@ -2151,6 +2233,7 @@ impl GovernanceAuditEntry {
             },
             Self::MaintenanceWindow(_) => "maintenance.window",
             Self::MaintenanceRun(_) => "maintenance.run",
+            Self::IntegrityQuarantine(_) => "integrity.quarantine",
         }
     }
 
@@ -2186,9 +2269,10 @@ impl GovernanceAuditEntry {
                 | ConfigurationAuditOutcome::PendingRestart => "succeeded",
             },
             Self::TlsMaterialReload(entry) => entry.outcome_label(),
-            Self::MaintenanceControl(_) | Self::MaintenanceRun(_) | Self::MaintenanceWindow(_) => {
-                "succeeded"
-            },
+            Self::MaintenanceControl(_)
+            | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
+            | Self::MaintenanceWindow(_) => "succeeded",
         }
     }
 
@@ -2215,6 +2299,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2242,6 +2327,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2269,6 +2355,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2296,6 +2383,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2323,6 +2411,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2350,6 +2439,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2377,6 +2467,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2406,6 +2497,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2433,6 +2525,7 @@ impl GovernanceAuditEntry {
             | Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
+            | Self::IntegrityQuarantine(_)
             | Self::MaintenanceWindow(_) => None,
         }
     }
@@ -2469,6 +2562,14 @@ impl GovernanceAuditEntry {
     pub const fn as_tls_material_reload(&self) -> Option<&TlsMaterialReloadAuditEntry> {
         match self {
             Self::TlsMaterialReload(entry) => Some(entry),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_integrity_quarantine(&self) -> Option<&IntegrityQuarantineAuditEntry> {
+        match self {
+            Self::IntegrityQuarantine(entry) => Some(entry),
             _ => None,
         }
     }

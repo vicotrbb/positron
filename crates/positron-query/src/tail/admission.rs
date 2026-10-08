@@ -76,7 +76,13 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
             if state.source_bindings().is_none() {
                 return Err(QueryFailure::new(QueryFailureCode::InvalidCursor));
             }
-            validate_resume_leases(state, &sources, now, self.ledger.scope().shard_id())?;
+            validate_resume_leases(
+                state,
+                &sources,
+                now,
+                self.ledger.scope().shard_id(),
+                self.maintenance.is_some(),
+            )?;
         }
         let memory_budget = tail_memory_budget(&query)?;
         // `query` owns the already-admitted root. Its opaque token remains in
@@ -107,6 +113,7 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 state,
                 now,
                 Some((catalog_identity, generation)),
+                self.maintenance.is_some(),
             )?;
             let owner = TailLeaseOwner::new(self.ledger, lease.identity(), self.maintenance);
             (lease, owner)
@@ -143,7 +150,14 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 let authority = reader
                     .lease_authority()
                     .ok_or_else(|| QueryFailure::new(QueryFailureCode::StoreUnavailable))?;
-                let source_lease = resume_source_lease(authority, binding, state, now, None)?;
+                let source_lease = resume_source_lease(
+                    authority,
+                    binding,
+                    state,
+                    now,
+                    None,
+                    self.maintenance.is_some(),
+                )?;
                 (authority, Some(source_lease))
             } else {
                 let authority = reader

@@ -12,9 +12,10 @@ use crate::health::ProcessState;
 use crate::{
     BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BoundEndpoint, BoundListener,
     CatalogConfigurationPublication, ConfigurationReloadOutcome, ConfigurationRuntimeFailure,
-    HealthState, InitializationPlan, InstanceBootstrap, ListenerFactory, ListenerGenerationFactory,
-    ListenerRequest, ListenerRole, ProcessPhase, RegisteredTask, RunningTask, RuntimeConfiguration,
-    ServiceHandle, TaskCancellation, TaskFailure, TaskJoinOutcome, TaskRegistrar, TaskRole,
+    HealthState, InitializationPlan, InstanceBootstrap, IntegrityFenceReason, ListenerFactory,
+    ListenerGenerationFactory, ListenerRequest, ListenerRole, ProcessPhase, RegisteredTask,
+    RunningTask, RuntimeConfiguration, ServiceHandle, TaskCancellation, TaskFailure,
+    TaskJoinOutcome, TaskRegistrar, TaskRole,
 };
 
 /// Whether serving may initialize a provably empty instance.
@@ -22,6 +23,25 @@ use crate::{
 pub enum InitializationMode {
     ExistingOnly,
     InitializeIfEmpty,
+}
+
+/// A sanitized crash record could not be created through the current kernel
+/// authority. The error deliberately contains no storage path or crash data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CrashRecordPersistenceFailure {
+    Unavailable,
+    Full,
+    Invalid,
+}
+
+impl From<positron_kernel::CrashRecordFailure> for CrashRecordPersistenceFailure {
+    fn from(value: positron_kernel::CrashRecordFailure) -> Self {
+        match value {
+            positron_kernel::CrashRecordFailure::Unavailable => Self::Unavailable,
+            positron_kernel::CrashRecordFailure::Full => Self::Full,
+            positron_kernel::CrashRecordFailure::Invalid => Self::Invalid,
+        }
+    }
 }
 
 /// A configuration-file-only plaintext API selection carried from the
@@ -419,6 +439,19 @@ pub struct RunningProcess {
 /// A process that has stopped data admission and awaits one terminal trigger.
 pub struct DrainingProcess(RunningProcess);
 
+/// Closed crash evidence available only while the runtime still owns its
+/// instance. It deliberately exposes no catalog contents or operation data.
+#[derive(Clone, Copy)]
+pub struct CrashInspection {
+    catalog_generation: Option<u64>,
+}
+impl CrashInspection {
+    #[must_use]
+    pub const fn catalog_generation(self) -> Option<u64> {
+        self.catalog_generation
+    }
+}
+
 type RunningTasks = Vec<(TaskRole, Box<dyn RunningTask>)>;
 
 mod cleanup;
@@ -470,12 +503,53 @@ impl RunningProcess {
 
     fn take_listeners(&self) -> Vec<Box<dyn BoundListener>> {
         let mut listeners = self.listeners();
-        std::mem::take(&mut *listeners)
+        let taken = std::mem::take(&mut *listeners);
+        self.state.replace_bound_listener_roles(0);
+        taken
     }
 
     #[must_use]
     pub fn health(&self) -> HealthState {
         self.state.health()
+    }
+
+    /// Returns only the stable crash context available while this process
+    /// still owns the live instance. It never exposes catalog contents,
+    /// operation state, or mutable authority.
+    #[must_use]
+    pub fn crash_inspection(&self) -> CrashInspection {
+        CrashInspection {
+            catalog_generation: self
+                .instance
+                .as_ref()
+                .map(|instance| instance.catalog_generation()),
+        }
+    }
+
+    /// Persists only closed, sanitized crash evidence through the Storage
+    /// Kernel while this process still owns its initialized instance.
+    pub fn persist_crash_record(
+        &self,
+        phase: &'static str,
+        finding_code: &'static str,
+        component: &'static str,
+    ) -> Result<(), CrashRecordPersistenceFailure> {
+        let instance = self
+            .instance
+            .as_ref()
+            .ok_or(CrashRecordPersistenceFailure::Unavailable)?;
+        let record = positron_kernel::CrashRecord::new(phase, finding_code, component)
+            .map_err(CrashRecordPersistenceFailure::from)?
+            .with_backtrace(&std::backtrace::Backtrace::capture());
+        let record = match self.crash_inspection().catalog_generation() {
+            Some(generation) => record.with_catalog_generation(generation),
+            None => record,
+        };
+        instance
+            .crash_records()
+            .map_err(|_| CrashRecordPersistenceFailure::Unavailable)?
+            .persist(&record)
+            .map_err(CrashRecordPersistenceFailure::from)
     }
 
     #[must_use]
@@ -489,6 +563,93 @@ impl RunningProcess {
     #[must_use]
     pub fn services(&self) -> Option<ServiceHandle> {
         self.services.clone()
+    }
+
+    /// Applies one pending integrity-fence request at the sole owner of
+    /// listeners, tasks, key custody, and mutable volume authority.
+    ///
+    /// The request is intentionally one-way and idempotent: verification code
+    /// can only request fencing; it cannot partially tear down process state.
+    pub fn apply_pending_integrity_fence(&mut self) -> bool {
+        let Some(reason) = self.state.health().pending_integrity_fence_request() else {
+            return false;
+        };
+        self.apply_integrity_fence(reason);
+        true
+    }
+
+    fn apply_integrity_fence(&mut self, reason: IntegrityFenceReason) {
+        self.state.health().record_integrity_fence(reason);
+
+        let (mut retired_listeners, retained_listeners) = {
+            let listeners = self
+                .listeners
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(listeners)
+                .into_iter()
+                .partition(|listener| listener.endpoint().role().is_data())
+        };
+        *self
+            .listeners
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = retained_listeners;
+        self.state.replace_bound_listener_roles(listener_roles(
+            self.listeners
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        ));
+        let (mut retired_tasks, retained_tasks): (RunningTasks, RunningTasks) = self
+            .tasks
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .partition(|(role, _)| {
+                matches!(
+                    role,
+                    TaskRole::Api
+                        | TaskRole::OtlpGrpc
+                        | TaskRole::OtlpHttp
+                        | TaskRole::LokiPush
+                        | TaskRole::Maintenance
+                )
+            });
+        *self
+            .tasks
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = retained_tasks;
+
+        self.cleanup.cleanup_listeners(&mut retired_listeners);
+        let (mut retired_maintenance, mut retired_data): (RunningTasks, RunningTasks) =
+            retired_tasks
+                .drain(..)
+                .partition(|(role, _)| *role == TaskRole::Maintenance);
+        let deadline = std::time::Instant::now() + self.drain_deadline;
+        // Maintenance has no listener whose admission closure can wake it. Its
+        // task-local cancellation does not affect retained Control or
+        // Operations, so retire it before waiting for the network tasks.
+        let maintenance_failed = abort_retired_tasks(&mut retired_maintenance, deadline).is_err();
+        let data_failed = join_retired_tasks_until(&mut retired_data, deadline).is_err()
+            && abort_retired_tasks(&mut retired_data, deadline).is_err();
+        if maintenance_failed || data_failed {
+            self.cleanup.set_primary(ExitOutcome::Fenced);
+        }
+        if self
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.begin_shutdown().is_err())
+        {
+            self.cleanup.set_primary(ExitOutcome::Fenced);
+        }
+        self.services.take();
+        // A fenced process has retired its active Configuration generation.
+        // Keeping its publication would retain the just-shut-down instance,
+        // causing restricted inspection to read through stale authority rather
+        // than reopen the current durable owner-local view.
+        self.configuration_publication.take();
+        self.configuration.take();
+        self.instance.take();
+        self.fenced_volume.take();
     }
 
     /// Returns the only complete Configuration generation visible to runtime
@@ -775,6 +936,8 @@ impl RunningProcess {
                     true
                 }
             });
+            self.state
+                .replace_bound_listener_roles(listener_roles(&listeners));
             failed_roles
         };
         for role in failed_roles {
@@ -794,6 +957,12 @@ impl RunningProcess {
         self.cancel_listener_tasks();
         DrainingProcess(self)
     }
+}
+
+fn listener_roles(listeners: &[Box<dyn BoundListener>]) -> u8 {
+    listeners.iter().fold(0_u8, |roles, listener| {
+        roles | crate::health::listener_role_bit(listener.endpoint().role())
+    })
 }
 
 fn split_listener_tasks(tasks: RunningTasks) -> (RunningTasks, RunningTasks) {
@@ -922,7 +1091,268 @@ mod retirement_tests {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DrainFailureSite {
+    PollJoin,
+    JoinWithin,
+}
+
+impl DrainFailureSite {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::PollJoin => "poll_join",
+            Self::JoinWithin => "join_within",
+        }
+    }
+}
+
+struct DrainTaskFailureDiagnostic {
+    site: DrainFailureSite,
+    role: TaskRole,
+    failure: TaskFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrainDiagnosticDelivery {
+    Delivered,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CrashRecordDiagnosticDelivery {
+    Delivered,
+    Unavailable,
+}
+
+fn preserve_crash_record_diagnostic(
+    delivery: CrashRecordDiagnosticDelivery,
+    primary: ExitOutcome,
+) -> ExitOutcome {
+    match delivery {
+        CrashRecordDiagnosticDelivery::Delivered | CrashRecordDiagnosticDelivery::Unavailable => {
+            primary
+        },
+    }
+}
+
+fn report_crash_record_persistence_failure() -> CrashRecordDiagnosticDelivery {
+    let mut stderr = std::io::stderr().lock();
+    report_crash_record_persistence_failure_to(&mut stderr)
+}
+
+fn report_crash_record_persistence_failure_to(
+    sink: &mut impl std::io::Write,
+) -> CrashRecordDiagnosticDelivery {
+    match writeln!(
+        sink,
+        "positron: unable to persist sanitized runtime crash record"
+    ) {
+        Ok(()) => CrashRecordDiagnosticDelivery::Delivered,
+        Err(_) => CrashRecordDiagnosticDelivery::Unavailable,
+    }
+}
+
+fn preserve_drain_task_failure(
+    delivery: DrainDiagnosticDelivery,
+    primary: TaskFailure,
+) -> TaskFailure {
+    match delivery {
+        DrainDiagnosticDelivery::Delivered => primary,
+        // The existing task failure still drives process shutdown and its
+        // bounded crash record. A closed stderr sink must not replace that
+        // primary failure or skip the forced shutdown path.
+        DrainDiagnosticDelivery::Unavailable => primary,
+    }
+}
+
+impl std::fmt::Display for DrainTaskFailureDiagnostic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "positron: runtime drain task failure site={} role={} category={}",
+            self.site.token(),
+            drain_task_role_token(self.role),
+            drain_task_failure_token(self.failure),
+        )
+    }
+}
+
+const fn drain_task_role_token(role: TaskRole) -> &'static str {
+    match role {
+        TaskRole::Control => "control",
+        TaskRole::Operations => "operations",
+        TaskRole::Maintenance => "maintenance",
+        TaskRole::Api => "api",
+        TaskRole::OtlpGrpc => "otlp_grpc",
+        TaskRole::OtlpHttp => "otlp_http",
+        TaskRole::LokiPush => "loki_push",
+    }
+}
+
+const fn drain_task_failure_token(failure: TaskFailure) -> &'static str {
+    match failure {
+        TaskFailure::RegistrationUnavailable => "registration_unavailable",
+        TaskFailure::SpawnUnavailable => "spawn_unavailable",
+        TaskFailure::JoinUnavailable => "join_unavailable",
+        TaskFailure::JoinPanicked => "join_panicked",
+        TaskFailure::AbortUnavailable => "abort_unavailable",
+    }
+}
+
+fn report_drain_task_failure(
+    site: DrainFailureSite,
+    role: TaskRole,
+    failure: TaskFailure,
+) -> DrainDiagnosticDelivery {
+    let mut stderr = std::io::stderr().lock();
+    report_drain_task_failure_to(&mut stderr, site, role, failure)
+}
+
+fn report_drain_task_failure_to(
+    sink: &mut impl std::io::Write,
+    site: DrainFailureSite,
+    role: TaskRole,
+    failure: TaskFailure,
+) -> DrainDiagnosticDelivery {
+    match writeln!(
+        sink,
+        "{}",
+        DrainTaskFailureDiagnostic {
+            site,
+            role,
+            failure,
+        }
+    ) {
+        Ok(()) => DrainDiagnosticDelivery::Delivered,
+        Err(_) => DrainDiagnosticDelivery::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod drain_failure_diagnostic_tests {
+    use super::{
+        CrashRecordDiagnosticDelivery, DrainDiagnosticDelivery, DrainFailureSite,
+        DrainTaskFailureDiagnostic, preserve_crash_record_diagnostic, preserve_drain_task_failure,
+        report_crash_record_persistence_failure_to, report_drain_task_failure_to,
+    };
+    use crate::{TaskFailure, TaskRole};
+
+    #[test]
+    fn drain_failure_diagnostic_uses_every_closed_token() {
+        let roles = [
+            (TaskRole::Control, "control"),
+            (TaskRole::Operations, "operations"),
+            (TaskRole::Maintenance, "maintenance"),
+            (TaskRole::Api, "api"),
+            (TaskRole::OtlpGrpc, "otlp_grpc"),
+            (TaskRole::OtlpHttp, "otlp_http"),
+            (TaskRole::LokiPush, "loki_push"),
+        ];
+        let failures = [
+            (
+                TaskFailure::RegistrationUnavailable,
+                "registration_unavailable",
+            ),
+            (TaskFailure::SpawnUnavailable, "spawn_unavailable"),
+            (TaskFailure::JoinUnavailable, "join_unavailable"),
+            (TaskFailure::JoinPanicked, "join_panicked"),
+            (TaskFailure::AbortUnavailable, "abort_unavailable"),
+        ];
+        let sites = [
+            (DrainFailureSite::PollJoin, "poll_join"),
+            (DrainFailureSite::JoinWithin, "join_within"),
+        ];
+
+        for (site, site_token) in sites {
+            for (role, role_token) in roles {
+                for (failure, failure_token) in failures {
+                    assert_eq!(
+                        DrainTaskFailureDiagnostic {
+                            site,
+                            role,
+                            failure,
+                        }
+                        .to_string(),
+                        format!(
+                            "positron: runtime drain task failure site={site_token} role={role_token} category={failure_token}"
+                        )
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_drain_diagnostic_preserves_the_primary_task_failure() {
+        struct ClosedDiagnosticSink;
+
+        impl std::io::Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut sink = ClosedDiagnosticSink;
+        let delivery = report_drain_task_failure_to(
+            &mut sink,
+            DrainFailureSite::JoinWithin,
+            TaskRole::Maintenance,
+            TaskFailure::JoinUnavailable,
+        );
+
+        assert_eq!(delivery, DrainDiagnosticDelivery::Unavailable);
+        assert_eq!(
+            preserve_drain_task_failure(delivery, TaskFailure::JoinUnavailable),
+            TaskFailure::JoinUnavailable
+        );
+    }
+
+    #[test]
+    fn unavailable_crash_record_diagnostic_is_explicit_and_keeps_the_forced_path() {
+        struct ClosedDiagnosticSink;
+
+        impl std::io::Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut sink = ClosedDiagnosticSink;
+        assert_eq!(
+            report_crash_record_persistence_failure_to(&mut sink),
+            CrashRecordDiagnosticDelivery::Unavailable
+        );
+        assert_eq!(
+            preserve_crash_record_diagnostic(
+                CrashRecordDiagnosticDelivery::Unavailable,
+                crate::ExitOutcome::Forced
+            ),
+            crate::ExitOutcome::Forced
+        );
+    }
+}
+
 impl DrainingProcess {
+    #[must_use]
+    pub fn crash_inspection(&self) -> CrashInspection {
+        self.0.crash_inspection()
+    }
+    pub fn persist_crash_record(
+        &self,
+        phase: &'static str,
+        finding_code: &'static str,
+        component: &'static str,
+    ) -> Result<(), CrashRecordPersistenceFailure> {
+        self.0.persist_crash_record(phase, finding_code, component)
+    }
     #[must_use]
     pub fn health(&self) -> HealthState {
         self.0.health()
@@ -934,8 +1364,17 @@ impl DrainingProcess {
             .tasks
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (_, task) in &mut *tasks {
-            match task.poll_join()? {
+        for (role, task) in &mut *tasks {
+            let joined = match task.poll_join() {
+                Ok(joined) => joined,
+                Err(failure) => {
+                    return Err(preserve_drain_task_failure(
+                        report_drain_task_failure(DrainFailureSite::PollJoin, *role, failure),
+                        failure,
+                    ));
+                },
+            };
+            match joined {
                 Some(TaskJoinOutcome::Joined) => {},
                 Some(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal) => {
                     return Ok(false);
@@ -955,21 +1394,55 @@ impl DrainingProcess {
         }
         if trigger == ShutdownTrigger::FirstSignal {
             let deadline = std::time::Instant::now() + self.0.drain_deadline;
-            let tasks = self
-                .0
-                .tasks
-                .get_mut()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for (_, task) in &mut *tasks {
-                let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
-                else {
-                    return self.0.abort_shutdown();
-                };
-                match task.join_within(remaining) {
-                    Ok(TaskJoinOutcome::Joined) => {},
-                    Ok(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal)
-                    | Err(_) => return self.0.abort_shutdown(),
+            let late_failure = {
+                let tasks = self
+                    .0
+                    .tasks
+                    .get_mut()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut late_failure = None;
+                for (role, task) in &mut *tasks {
+                    let Some(remaining) =
+                        deadline.checked_duration_since(std::time::Instant::now())
+                    else {
+                        return self.0.abort_shutdown();
+                    };
+                    match task.join_within(remaining) {
+                        Ok(TaskJoinOutcome::Joined) => {},
+                        Ok(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal) => {
+                            return self.0.abort_shutdown();
+                        },
+                        Err(failure) => {
+                            late_failure = Some(preserve_drain_task_failure(
+                                report_drain_task_failure(
+                                    DrainFailureSite::JoinWithin,
+                                    *role,
+                                    failure,
+                                ),
+                                failure,
+                            ));
+                            break;
+                        },
+                    }
                 }
+                late_failure
+            };
+            if let Some(failure) = late_failure {
+                let finding_code = if failure == TaskFailure::JoinPanicked {
+                    "joined_task_panicked"
+                } else {
+                    "runtime_drain_failed"
+                };
+                if self
+                    .persist_crash_record("draining", finding_code, "runtime")
+                    .is_err()
+                {
+                    return preserve_crash_record_diagnostic(
+                        report_crash_record_persistence_failure(),
+                        self.0.abort_shutdown(),
+                    );
+                }
+                return self.0.abort_shutdown();
             }
         }
         self.0

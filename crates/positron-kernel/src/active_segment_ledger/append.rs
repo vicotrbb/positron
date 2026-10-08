@@ -119,6 +119,15 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
             });
         let block_retention = super::SegmentRetention::for_block(block.retention_ingest_time);
         let segment_retention = prior_retention.append_block(block_retention);
+        let segment_event_range = state
+            .blocks
+            .iter()
+            .filter(|committed| committed.segment == segment)
+            .map(|committed| committed.event_range)
+            .reduce(super::AuthenticatedEventRange::aggregate)
+            .map_or(block.event_range, |prior| {
+                prior.aggregate(block.event_range)
+            });
         let content_digest = block.content_digest()?;
         let context = self
             .key
@@ -134,7 +143,7 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
             )
             .map_err(map_frame_failure)?;
         let limits = FrameLimits::new(MAX_ENCODED_FRAME_BYTES).map_err(map_frame_failure)?;
-        let mut frame_plaintext = Vec::with_capacity(25 + block.payload.len());
+        let mut frame_plaintext = Vec::with_capacity(42 + block.payload.len());
         frame_plaintext.extend_from_slice(&block.identity.to_bytes());
         let (retention_tag, retention_instant) = match block_retention {
             super::SegmentRetention::Complete(instant) => (2_u8, instant.instant().value()),
@@ -145,6 +154,7 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
         };
         frame_plaintext.push(retention_tag);
         frame_plaintext.extend_from_slice(&retention_instant.to_be_bytes());
+        encode_event_range(&mut frame_plaintext, block.event_range);
         frame_plaintext.extend_from_slice(&block.payload);
         let frame_bytes = DataProtection::protected_frame_length(frame_plaintext.len(), limits)
             .map_err(map_frame_failure)?;
@@ -159,6 +169,7 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
                 sequence: state.next_sequence,
                 position,
                 segment_retention,
+                segment_event_range,
             },
             frame_bytes,
             || {
@@ -193,6 +204,7 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
             segment,
             frontier_authenticator: authenticator,
             block_retention,
+            event_range: block.event_range,
         });
         state.frontier = position;
         state.retained_bytes = retained_bytes;
@@ -205,5 +217,34 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
             position,
             frontier_authenticator: authenticator,
         })
+    }
+}
+
+fn encode_event_range(bytes: &mut Vec<u8>, range: super::AuthenticatedEventRange) {
+    match range {
+        super::AuthenticatedEventRange::Known { earliest, latest } => {
+            bytes.push(1);
+            bytes.extend_from_slice(&earliest.value().to_be_bytes());
+            bytes.extend_from_slice(&latest.value().to_be_bytes());
+        },
+        super::AuthenticatedEventRange::Unavailable(
+            super::EventRangeUnavailable::MissingSourceTime,
+        ) => {
+            bytes.push(2);
+            bytes.extend_from_slice(&0_i64.to_be_bytes());
+            bytes.extend_from_slice(&0_i64.to_be_bytes());
+        },
+        super::AuthenticatedEventRange::Unavailable(
+            super::EventRangeUnavailable::InvalidSourceTime,
+        ) => {
+            bytes.push(3);
+            bytes.extend_from_slice(&0_i64.to_be_bytes());
+            bytes.extend_from_slice(&0_i64.to_be_bytes());
+        },
+        super::AuthenticatedEventRange::Unavailable(super::EventRangeUnavailable::LegacyFormat) => {
+            bytes.push(4);
+            bytes.extend_from_slice(&0_i64.to_be_bytes());
+            bytes.extend_from_slice(&0_i64.to_be_bytes());
+        },
     }
 }

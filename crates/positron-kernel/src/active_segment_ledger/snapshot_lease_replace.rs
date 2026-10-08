@@ -489,7 +489,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             blocks: state.blocks.iter().map(LeaseBlock::from).collect(),
         };
         let encoded = encode(&record)?;
-        let snapshot = snapshot_from_record(self, &state, &record)?;
+        let snapshot = snapshot_from_record(self, &state, &basis, &record)?;
         let grant = SnapshotLeaseGrant {
             identity: new_identity,
             expiry,

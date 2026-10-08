@@ -85,11 +85,18 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             (authority.status().state() == crate::LifecycleClockState::Certain).then_some(sampled)
         });
         let leased = super::snapshot_lease::active_segments(&basis, self.scope, now.unwrap_or(0))?;
+        let quarantined = super::integrity::quarantined_segment_ids(&basis, self.scope)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
         let in_process = retired.iter().try_fold(false, |protected, segment| {
             SnapshotProtection::is_protected(&self.authority.snapshot_protection(), segment.id)
                 .map(|current| protected || current)
         })?;
-        if in_process || retired.iter().any(|segment| leased.contains(&segment.id)) {
+        if in_process
+            || retired.iter().any(|segment| leased.contains(&segment.id))
+            || retired
+                .iter()
+                .any(|segment| quarantined.contains(&segment.id))
+        {
             execution
                 .requeue_running_retention_reclamation_and_persist(
                     coordinator,

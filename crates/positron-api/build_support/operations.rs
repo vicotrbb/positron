@@ -94,6 +94,11 @@ const MAINTENANCE_METHODS: &[MethodSpec] = &[
         input: ".positron.v1.MaintenanceWindowRequest",
         output: ".positron.v1.MaintenanceWindowResponse",
     },
+    MethodSpec {
+        name: "Verify",
+        input: ".positron.v1.OnlineVerificationRequest",
+        output: ".positron.v1.OnlineVerificationReport",
+    },
 ];
 const POLICY_METHODS: &[MethodSpec] = &[
     MethodSpec {

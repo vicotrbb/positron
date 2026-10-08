@@ -269,5 +269,6 @@ const fn key_kind(kind: SystemObjectKind) -> u64 {
         SystemObjectKind::BackupMetadata => 4,
         SystemObjectKind::InstanceBootstrap => 5,
         SystemObjectKind::ExportOutput => 6,
+        SystemObjectKind::CrashRecord => 7,
     }
 }

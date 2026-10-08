@@ -33,7 +33,7 @@ fn partial_task_spawn_failure_aborts_started_tasks_and_releases_ownership()
         positron_runtime::ExitOutcome::TaskUnavailable(TaskRole::Api)
     );
     assert!(roots.acquire_volume_again().is_ok());
-    assert_registration_then_api_spawn(&tasks);
+    assert_recovery_tasks_start_before_data_registration(&tasks);
     assert_eq!(
         tasks
             .events
@@ -80,7 +80,7 @@ fn partial_spawn_with_failed_rollback_reports_internal_cleanup_failure()
     assert_eq!(cleanup.task_failures(), 1);
     assert_eq!(cleanup.listener_failures(), 1);
     assert!(roots.acquire_volume_again().is_ok());
-    assert_registration_then_api_spawn(&tasks);
+    assert_recovery_tasks_start_before_data_registration(&tasks);
     assert!(tasks.events.borrow().iter().any(|event| matches!(
         event,
         TaskEvent::Aborted(TaskRole::Operations, ProcessPhase::Recovering, true)
@@ -102,7 +102,7 @@ fn partial_spawn_with_failed_rollback_reports_internal_cleanup_failure()
     Ok(())
 }
 
-fn assert_registration_then_api_spawn(tasks: &ObservingTasks) {
+fn assert_recovery_tasks_start_before_data_registration(tasks: &ObservingTasks) {
     let events = tasks.events.borrow();
     let expected = [
         TaskRole::Control,
@@ -114,8 +114,14 @@ fn assert_registration_then_api_spawn(tasks: &ObservingTasks) {
         TaskRole::Maintenance,
     ];
     assert_eq!(
-        &events[..expected.len()],
-        expected.map(TaskEvent::Registered)
+        &events[..4],
+        [
+            TaskEvent::Registered(TaskRole::Control),
+            TaskEvent::Registered(TaskRole::Operations),
+            TaskEvent::Spawned(TaskRole::Control),
+            TaskEvent::Spawned(TaskRole::Operations),
+        ],
+        "only recovery-safe Control and Operations tasks may start before data-plane task registration"
     );
     assert_eq!(
         events

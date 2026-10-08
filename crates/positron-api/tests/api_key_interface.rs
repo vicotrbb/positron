@@ -1,4 +1,43 @@
-use positron_api::api_keys::{ApiKeyRequest, KeyAction, KeyScope};
+use positron_api::api_keys::{
+    ApiKeyRequest, ApiKeyServiceClient, ApiKeyTransport, KeyAction, KeyScope,
+};
+
+#[test]
+fn generated_api_key_tls_client_rejects_an_oversized_trust_file_before_connecting()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::{
+        fs, process,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    const MAX_TRUST_FILE_BYTES: usize = 65_536;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("positron-api-key-trust-{}-{nonce}", process::id()));
+    fs::create_dir(&root)?;
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let trust_file = root.join("oversized.pem");
+        let mut pem = include_bytes!(
+            "../../positron-runtime/tests/native_transport/fixtures/api-test-cert.pem"
+        )
+        .to_vec();
+        pem.resize(MAX_TRUST_FILE_BYTES + 1, b'\n');
+        fs::write(&trust_file, pem)?;
+        let endpoint = "127.0.0.1:443".parse()?;
+        assert!(
+            ApiKeyServiceClient::new(ApiKeyTransport::Tls {
+                endpoint,
+                server_name: "127.0.0.1".to_owned(),
+                trust_file,
+            })
+            .is_err(),
+            "an oversized trust file must be rejected before a TLS client can connect"
+        );
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(root);
+    result
+}
 
 #[test]
 fn generated_api_key_service_client_uses_the_canonical_http_mapping()

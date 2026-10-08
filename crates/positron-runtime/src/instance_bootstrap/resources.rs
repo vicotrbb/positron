@@ -11,15 +11,13 @@ use super::{BootstrapFailure, BootstrapFailureCode};
 
 const DIMENSIONS: usize = 11;
 const DEFAULT_TENANT_QUOTA: [u64; DIMENSIONS] = [
-    32_000_000, 32, 32, 5_000_000, 2_048, 32, 32, 32, 32, 32, 2_000_000,
+    90_000_000, 32, 32, 90_000_000, 70_000, 32, 32, 32, 32, 32, 40_000_000,
 ];
 // These are conservative engineering defaults under the existing tenant and
-// class-pool policy, not product-specified constants. The operation vector is
-// large enough for the largest currently admissible query lane and the 4 MiB /
-// 1,024-record OTLP receiver claim. The aggregate is deliberately identical:
-// it preserves existing valid single-query and receiver budgets while keeping
-// a Principal's combined live usage finite. QueryBudget and receiver-specific
-// limits remain tighter where they apply.
+// class-pool policy, not product-specified constants. The tenant ceiling also
+// covers the bounded repair lane: a source-bound integrity scrub can retain
+// the complete Catalog-recovery peak before it persists its terminal record.
+// QueryBudget and receiver-specific limits remain tighter where they apply.
 const DEFAULT_PRINCIPAL_OPERATION_QUOTA: [u64; DIMENSIONS] = [
     16_000_000, 16, 16, 5_000_000, 2_000, 16, 16, 16, 16, 16, 1_000_000,
 ];
@@ -52,6 +50,22 @@ pub(super) fn establish(
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
 }
 
+/// Establishes the canonical storage-bound governor for an exclusively owned
+/// offline diagnostics operation while encrypted bootstrap custody is absent.
+/// Its policy is system-only, so no tenant identity is fabricated.
+pub(super) fn establish_system_diagnostics(
+    volume: OwnedPrimaryDataVolume,
+    max_registered_tenants: u16,
+) -> Result<StorageKernelResourceAuthority, BootstrapFailure> {
+    let sizing = resource_sizing(max_registered_tenants)?;
+    let observed =
+        ObservedResourceEnvironment::observe(&volume, registered_resource_bounds(sizing.raw)?)
+            .map_err(resource_failure)?;
+    let configuration = system_diagnostics_resource_configuration(sizing, observed)?;
+    StorageKernelResourceAuthority::establish(volume, configuration)
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
+}
+
 fn resource_sizing(max_registered_tenants: u16) -> Result<ResourceSizing, BootstrapFailure> {
     let max_registered_tenants = usize::from(max_registered_tenants);
     let cardinality =
@@ -71,7 +85,15 @@ fn resource_sizing(max_registered_tenants: u16) -> Result<ResourceSizing, Bootst
     let retention = at_least(large, tenant_recovery);
     let compaction = at_least(uniform(3), dual_scope_recovery);
     let purge = at_least(small, tenant_recovery);
-    let repair = at_least(large, dual_scope_recovery);
+    // Repair capacity is shared by every registered tenant. One integrity
+    // scrub can hold the complete bounded Catalog-recovery peak, so preserve
+    // one such claim for each tenant that may be scheduled concurrently. The
+    // extra small lane is the separately required system-scope repair
+    // progress; it is not another per-tenant scrub allocation.
+    let repair = at_least(
+        add(multiply(large, max_registered_tenants)?, small)?,
+        dual_scope_recovery,
+    );
     let fencing = small;
     let shutdown = small;
     let recovery_capacity = recovery_reserve(RecoveryReserveTerms {
@@ -145,6 +167,35 @@ fn resource_configuration(
             ResourceAmounts::new(DEFAULT_PRINCIPAL_AGGREGATE_QUOTA),
         )
         .map_err(resource_failure)?,
+    );
+    ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(resource_failure)
+}
+
+fn system_diagnostics_resource_configuration(
+    sizing: ResourceSizing,
+    observed: ObservedResourceEnvironment,
+) -> Result<ResourceGovernorConfiguration, BootstrapFailure> {
+    let disk = observed.initial_disk().usable_bytes();
+    let recovery_disk = sizing
+        .recovery_capacity
+        .get(ResourceDimension::DiskHeadroomBytes);
+    let inventory = ResourceInventory::new_observed(
+        observed,
+        OperatorLimits::new(sizing.raw).map_err(resource_failure)?,
+        RecoveryReserve::new(sizing.recovery_capacity).map_err(resource_failure)?,
+        sizing.cardinality,
+        DiskPressureThresholds::new(
+            recovery_disk,
+            recovery_disk.saturating_add(1),
+            recovery_disk.saturating_add(2),
+            disk,
+        )
+        .map_err(resource_failure)?,
+    )
+    .map_err(resource_failure)?;
+    let policy = GovernorPolicy::system_only(
+        OrdinaryPoolPolicy::new(uniform(8), uniform(6), uniform(4), uniform(2))
+            .map_err(resource_failure)?,
     );
     ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(resource_failure)
 }
@@ -312,17 +363,17 @@ mod tests {
         assert_eq!(
             sizing.recovery_capacity,
             ResourceAmounts::new([
-                540_000_010,
-                34,
-                34,
-                540_000_010,
-                420_010,
-                34,
-                34,
-                34,
-                34,
-                106,
-                240_000_010,
+                630_000_012,
+                40,
+                40,
+                630_000_012,
+                490_012,
+                40,
+                40,
+                40,
+                40,
+                124,
+                280_000_012,
             ])
         );
         Ok(())
