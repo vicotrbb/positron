@@ -329,18 +329,32 @@ fn wait_for_shutdown(
                         Ok(candidate) => {
                             let outcome = process.reload_configuration(candidate);
                             if let Some(category) = reload_rejection_category(&outcome) {
-                                eprintln!(
+                                let delivery = report_runtime_diagnostic(std::format_args!(
                                     "positron: configuration reload rejected category={category}"
-                                );
+                                ));
+                                match delivery {
+                                    RuntimeDiagnosticDelivery::Delivered
+                                    | RuntimeDiagnosticDelivery::Unavailable => {},
+                                }
                             }
                         },
                         Err(()) => {
                             if process.record_invalid_configuration_reload().is_err() {
-                                eprintln!("positron: configuration reload audit unavailable");
+                                let delivery = report_runtime_diagnostic(std::format_args!(
+                                    "positron: configuration reload audit unavailable"
+                                ));
+                                match delivery {
+                                    RuntimeDiagnosticDelivery::Delivered
+                                    | RuntimeDiagnosticDelivery::Unavailable => {},
+                                }
                             }
-                            eprintln!(
+                            let delivery = report_runtime_diagnostic(std::format_args!(
                                 "positron: configuration reload rejected category=source_rejected"
-                            );
+                            ));
+                            match delivery {
+                                RuntimeDiagnosticDelivery::Delivered
+                                | RuntimeDiagnosticDelivery::Unavailable => {},
+                            }
                         },
                     }
                 }
@@ -351,8 +365,10 @@ fn wait_for_shutdown(
             Ok(termination_count) if termination_count > 0 => break termination_count > 1,
             Ok(_) => std::thread::sleep(Duration::from_millis(5)),
             Err(_) => {
-                capture_runtime_failure(&process, "serving", "runtime_serving_loop_panicked");
-                return Ok(process.shutdown(ShutdownTrigger::DeadlineExpired));
+                return Ok(preserve_runtime_outcome(
+                    capture_runtime_failure(&process, "serving", "runtime_serving_loop_panicked"),
+                    process.shutdown(ShutdownTrigger::DeadlineExpired),
+                ));
             },
         }
     };
@@ -370,8 +386,14 @@ fn wait_for_shutdown(
         }
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draining.poll())) {
             Err(_) => {
-                capture_draining_runtime_failure(&draining, "draining", "runtime_poll_panicked");
-                return Ok(draining.finish(ShutdownTrigger::DeadlineExpired));
+                return Ok(preserve_runtime_outcome(
+                    capture_draining_runtime_failure(
+                        &draining,
+                        "draining",
+                        "runtime_poll_panicked",
+                    ),
+                    draining.finish(ShutdownTrigger::DeadlineExpired),
+                ));
             },
             Ok(Ok(true)) => return Ok(draining.finish(ShutdownTrigger::FirstSignal)),
             Ok(Ok(false)) => std::thread::yield_now(),
@@ -381,8 +403,10 @@ fn wait_for_shutdown(
                 } else {
                     "runtime_drain_failed"
                 };
-                capture_draining_runtime_failure(&draining, "draining", finding_code);
-                return Ok(draining.finish(ShutdownTrigger::DeadlineExpired));
+                return Ok(preserve_runtime_outcome(
+                    capture_draining_runtime_failure(&draining, "draining", finding_code),
+                    draining.finish(ShutdownTrigger::DeadlineExpired),
+                ));
             },
         }
     }
@@ -392,25 +416,61 @@ fn capture_runtime_failure(
     process: &positron_runtime::RunningProcess,
     phase: &'static str,
     finding_code: &'static str,
-) {
+) -> RuntimeDiagnosticDelivery {
     if process
         .persist_crash_record(phase, finding_code, "runtime")
         .is_err()
     {
-        eprintln!("positron: unable to persist sanitized runtime crash record");
+        return report_runtime_diagnostic(std::format_args!(
+            "positron: unable to persist sanitized runtime crash record"
+        ));
     }
+    RuntimeDiagnosticDelivery::Delivered
 }
 
 fn capture_draining_runtime_failure(
     process: &positron_runtime::DrainingProcess,
     phase: &'static str,
     finding_code: &'static str,
-) {
+) -> RuntimeDiagnosticDelivery {
     if process
         .persist_crash_record(phase, finding_code, "runtime")
         .is_err()
     {
-        eprintln!("positron: unable to persist sanitized runtime crash record");
+        return report_runtime_diagnostic(std::format_args!(
+            "positron: unable to persist sanitized runtime crash record"
+        ));
+    }
+    RuntimeDiagnosticDelivery::Delivered
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeDiagnosticDelivery {
+    Delivered,
+    Unavailable,
+}
+
+fn preserve_runtime_outcome(
+    delivery: RuntimeDiagnosticDelivery,
+    primary: ExitOutcome,
+) -> ExitOutcome {
+    match delivery {
+        RuntimeDiagnosticDelivery::Delivered | RuntimeDiagnosticDelivery::Unavailable => primary,
+    }
+}
+
+fn report_runtime_diagnostic(message: std::fmt::Arguments<'_>) -> RuntimeDiagnosticDelivery {
+    let mut stderr = std::io::stderr().lock();
+    report_runtime_diagnostic_to(&mut stderr, message)
+}
+
+fn report_runtime_diagnostic_to(
+    sink: &mut impl std::io::Write,
+    message: std::fmt::Arguments<'_>,
+) -> RuntimeDiagnosticDelivery {
+    match writeln!(sink, "{message}") {
+        Ok(()) => RuntimeDiagnosticDelivery::Delivered,
+        Err(_) => RuntimeDiagnosticDelivery::Unavailable,
     }
 }
 
@@ -533,8 +593,9 @@ mod tests {
 
     use super::{
         ExitOutcome, LaunchFailure, NativeRecovery, RecoveryAttemptHost, RecoveryDecision,
-        ReloadInputs, ShutdownTrigger, exit_code, pending_termination_trigger,
-        reload_rejection_category, wait_for_shutdown,
+        ReloadInputs, RuntimeDiagnosticDelivery, ShutdownTrigger, exit_code,
+        pending_termination_trigger, preserve_runtime_outcome, reload_rejection_category,
+        report_runtime_diagnostic_to, wait_for_shutdown,
     };
     use positron_runtime::{
         ApplicationRuntime, BootstrapFailureCode, BootstrapPaths, BoundEndpoint, BoundListener,
@@ -597,6 +658,40 @@ mod tests {
         ] {
             assert_eq!(reload_rejection_category(&outcome), Some(expected));
         }
+    }
+
+    #[test]
+    fn unavailable_runtime_diagnostic_preserves_the_forced_outcome() {
+        struct ClosedDiagnosticSink;
+
+        impl std::io::Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let message = "positron: unable to persist sanitized runtime crash record";
+        let mut rendered = Vec::new();
+        assert_eq!(
+            report_runtime_diagnostic_to(&mut rendered, format_args!("{message}")),
+            RuntimeDiagnosticDelivery::Delivered
+        );
+        assert_eq!(
+            String::from_utf8(rendered).expect("UTF-8 diagnostic"),
+            format!("{message}\n")
+        );
+
+        let mut sink = ClosedDiagnosticSink;
+        let delivery = report_runtime_diagnostic_to(&mut sink, format_args!("{message}"));
+        assert_eq!(delivery, RuntimeDiagnosticDelivery::Unavailable);
+        assert_eq!(
+            preserve_runtime_outcome(delivery, ExitOutcome::Forced),
+            ExitOutcome::Forced
+        );
     }
 
     #[test]

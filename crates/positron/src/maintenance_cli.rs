@@ -61,9 +61,12 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
             for task in &completed.tasks {
                 print_task(task);
             }
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
             for finding in &completed.findings {
-                print_integrity_finding(finding);
+                write_integrity_finding(&mut output, finding)?;
             }
+            flush_integrity_findings(&mut output)?;
         },
         Command::Explain(request) => {
             let response = client.explain(bearer, &request).map_err(client_failure)?;
@@ -157,8 +160,12 @@ struct CompletedStatus {
     pages: usize,
 }
 
-fn print_integrity_finding(finding: &positron_api::maintenance::IntegrityQuarantineDescriptor) {
-    println!(
+fn write_integrity_finding(
+    output: &mut impl std::io::Write,
+    finding: &positron_api::maintenance::IntegrityQuarantineDescriptor,
+) -> Result<(), &'static str> {
+    writeln!(
+        output,
         "integrity_quarantine tenant={} signal={} shard={} segment={} base_position={} event_provenance={} event_earliest_unix_nanos={} event_latest_unix_nanos={} ingest_provenance={} ingest_earliest_unix_nanos={} ingest_latest_unix_nanos={}",
         finding.tenant,
         finding.signal,
@@ -171,7 +178,12 @@ fn print_integrity_finding(finding: &positron_api::maintenance::IntegrityQuarant
         finding.ingest_range.provenance,
         unknown(finding.ingest_range.earliest_unix_nanos),
         unknown(finding.ingest_range.latest_unix_nanos),
-    );
+    )
+    .map_err(|_| "output unavailable")
+}
+
+fn flush_integrity_findings(output: &mut impl std::io::Write) -> Result<(), &'static str> {
+    output.flush().map_err(|_| "output unavailable")
 }
 
 struct MaintenanceStatus {
@@ -470,6 +482,73 @@ const USAGE: &str = "usage: positron maintenance status|explain|run|pause|resume
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn integrity_finding() -> positron_api::maintenance::IntegrityQuarantineDescriptor {
+        positron_api::maintenance::IntegrityQuarantineDescriptor {
+            tenant: "00000000-0000-0000-0000-000000000001".to_owned(),
+            signal: "logs".to_owned(),
+            shard: 1,
+            segment: "00000000000000000000000000000001".to_owned(),
+            base_position: 0,
+            event_range: positron_api::maintenance::AuthenticatedTimeRangeDescriptor {
+                provenance: "missing_source_time".to_owned(),
+                earliest_unix_nanos: None,
+                latest_unix_nanos: None,
+            },
+            ingest_range: positron_api::maintenance::AuthenticatedTimeRangeDescriptor {
+                provenance: "known".to_owned(),
+                earliest_unix_nanos: Some(10),
+                latest_unix_nanos: Some(10),
+            },
+        }
+    }
+
+    #[test]
+    fn integrity_finding_writer_reports_a_closed_stdout_sink() {
+        struct ClosedOutput;
+
+        impl std::io::Write for ClosedOutput {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let finding = integrity_finding();
+        let mut rendered = Vec::new();
+        write_integrity_finding(&mut rendered, &finding).expect("available stdout");
+        assert_eq!(
+            String::from_utf8(rendered).expect("UTF-8 status row"),
+            "integrity_quarantine tenant=00000000-0000-0000-0000-000000000001 signal=logs shard=1 segment=00000000000000000000000000000001 base_position=0 event_provenance=missing_source_time event_earliest_unix_nanos=unknown event_latest_unix_nanos=unknown ingest_provenance=known ingest_earliest_unix_nanos=10 ingest_latest_unix_nanos=10\n"
+        );
+
+        let mut output = ClosedOutput;
+        assert_eq!(
+            write_integrity_finding(&mut output, &finding),
+            Err("output unavailable")
+        );
+
+        struct FlushFailingOutput;
+
+        impl std::io::Write for FlushFailingOutput {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+
+        let mut output = FlushFailingOutput;
+        assert_eq!(
+            flush_integrity_findings(&mut output),
+            Err("output unavailable")
+        );
+    }
 
     #[test]
     fn every_maintenance_operation_defaults_to_tls_with_explicit_plaintext_opt_out() {

@@ -1118,6 +1118,40 @@ enum DrainDiagnosticDelivery {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CrashRecordDiagnosticDelivery {
+    Delivered,
+    Unavailable,
+}
+
+fn preserve_crash_record_diagnostic(
+    delivery: CrashRecordDiagnosticDelivery,
+    primary: ExitOutcome,
+) -> ExitOutcome {
+    match delivery {
+        CrashRecordDiagnosticDelivery::Delivered | CrashRecordDiagnosticDelivery::Unavailable => {
+            primary
+        },
+    }
+}
+
+fn report_crash_record_persistence_failure() -> CrashRecordDiagnosticDelivery {
+    let mut stderr = std::io::stderr().lock();
+    report_crash_record_persistence_failure_to(&mut stderr)
+}
+
+fn report_crash_record_persistence_failure_to(
+    sink: &mut impl std::io::Write,
+) -> CrashRecordDiagnosticDelivery {
+    match writeln!(
+        sink,
+        "positron: unable to persist sanitized runtime crash record"
+    ) {
+        Ok(()) => CrashRecordDiagnosticDelivery::Delivered,
+        Err(_) => CrashRecordDiagnosticDelivery::Unavailable,
+    }
+}
+
 fn preserve_drain_task_failure(
     delivery: DrainDiagnosticDelivery,
     primary: TaskFailure,
@@ -1197,8 +1231,9 @@ fn report_drain_task_failure_to(
 #[cfg(test)]
 mod drain_failure_diagnostic_tests {
     use super::{
-        DrainDiagnosticDelivery, DrainFailureSite, DrainTaskFailureDiagnostic,
-        preserve_drain_task_failure, report_drain_task_failure_to,
+        CrashRecordDiagnosticDelivery, DrainDiagnosticDelivery, DrainFailureSite,
+        DrainTaskFailureDiagnostic, preserve_crash_record_diagnostic, preserve_drain_task_failure,
+        report_crash_record_persistence_failure_to, report_drain_task_failure_to,
     };
     use crate::{TaskFailure, TaskRole};
 
@@ -1273,6 +1308,34 @@ mod drain_failure_diagnostic_tests {
         assert_eq!(
             preserve_drain_task_failure(delivery, TaskFailure::JoinUnavailable),
             TaskFailure::JoinUnavailable
+        );
+    }
+
+    #[test]
+    fn unavailable_crash_record_diagnostic_is_explicit_and_keeps_the_forced_path() {
+        struct ClosedDiagnosticSink;
+
+        impl std::io::Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut sink = ClosedDiagnosticSink;
+        assert_eq!(
+            report_crash_record_persistence_failure_to(&mut sink),
+            CrashRecordDiagnosticDelivery::Unavailable
+        );
+        assert_eq!(
+            preserve_crash_record_diagnostic(
+                CrashRecordDiagnosticDelivery::Unavailable,
+                crate::ExitOutcome::Forced
+            ),
+            crate::ExitOutcome::Forced
         );
     }
 }
@@ -1374,7 +1437,10 @@ impl DrainingProcess {
                     .persist_crash_record("draining", finding_code, "runtime")
                     .is_err()
                 {
-                    eprintln!("positron: unable to persist sanitized runtime crash record");
+                    return preserve_crash_record_diagnostic(
+                        report_crash_record_persistence_failure(),
+                        self.0.abort_shutdown(),
+                    );
                 }
                 return self.0.abort_shutdown();
             }
