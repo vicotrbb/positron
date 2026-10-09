@@ -1,5 +1,6 @@
 //! Bounded adapters around wire messages generated from `positron.v1`.
 
+use crate::validation::identifier;
 use std::{fs::File, io::Read, path::Path};
 
 use serde::{Deserialize, Serialize};
@@ -255,20 +256,6 @@ impl ApiKeyRequest {
         }
         Ok(())
     }
-}
-
-fn identifier(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
-            }
-        })
-        && value
-            .bytes()
-            .any(|byte| matches!(byte, b'1'..=b'9' | b'a'..=b'f'))
 }
 
 impl Drop for ApiKeyResponse {

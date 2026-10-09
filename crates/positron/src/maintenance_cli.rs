@@ -1,6 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{IsTerminal, Read};
-use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use positron_api::maintenance::{
@@ -10,39 +8,15 @@ use positron_api::maintenance::{
     MaintenanceTaskAcknowledgement, MaintenanceTaskStatus, MaintenanceTransport,
     MaintenanceWindowRequest,
 };
-use zeroize::Zeroizing;
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
-    match execute(arguments) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("positron: {message}");
-            ExitCode::from(2)
-        },
-    }
+    crate::administrative_cli::exit(execute(arguments))
 }
 
 fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> {
     let (transport, command) = parse(arguments)?;
-    let input = std::io::stdin();
-    if input.is_terminal() {
-        return Err("credential input must be a pipe; terminal input is refused to prevent echo");
-    }
-    let mut credential = Zeroizing::new(String::new());
-    input
-        .take(1025)
-        .read_to_string(&mut credential)
-        .map_err(|_| "credential input unavailable")?;
+    let credential = crate::administrative_cli::credential()?;
     let bearer = credential.trim_end_matches(['\r', '\n']);
-    if credential.len() > 1024
-        || bearer.is_empty()
-        || bearer.len() > 1024
-        || !bearer
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return Err("invalid credential input");
-    }
     let client =
         MaintenanceServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     match command {
@@ -382,7 +356,7 @@ fn parse(
             "--credential-stdin is required; secrets are never accepted as arguments or environment variables",
         );
     }
-    let transport = transport(&mut options, allow_plaintext)?;
+    let transport = crate::administrative_cli::transport(&mut options, allow_plaintext, take)?;
     let command = match operation.as_str() {
         "status" => Command::Status,
         "explain" => Command::Explain(MaintenanceExplainRequest {
@@ -445,30 +419,6 @@ fn parse(
             .map_err(|_| "invalid maintenance window request")?,
     }
     Ok((transport, command))
-}
-
-fn transport(
-    options: &mut BTreeMap<String, String>,
-    allow_plaintext: bool,
-) -> Result<MaintenanceTransport, &'static str> {
-    let endpoint: SocketAddr = take(options, "--endpoint")?
-        .parse()
-        .map_err(|_| "invalid API endpoint")?;
-    if endpoint.port() == 0 {
-        return Err("invalid API endpoint");
-    }
-    if allow_plaintext {
-        if options.contains_key("--server-name") || options.contains_key("--trust-file") {
-            return Err("TLS options do not apply to plaintext opt-out");
-        }
-        Ok(MaintenanceTransport::PlaintextOptOut { endpoint })
-    } else {
-        Ok(MaintenanceTransport::Tls {
-            endpoint,
-            server_name: take(options, "--server-name")?,
-            trust_file: take(options, "--trust-file")?.into(),
-        })
-    }
 }
 
 fn take(options: &mut BTreeMap<String, String>, name: &str) -> Result<String, &'static str> {

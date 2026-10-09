@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Read, Write};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
@@ -9,36 +9,13 @@ use positron_api::api_keys::{
 use zeroize::Zeroizing;
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
-    match execute(arguments) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("positron: {message}");
-            ExitCode::from(2)
-        },
-    }
+    crate::administrative_cli::exit(execute(arguments))
 }
 
 fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> {
     let (transport, request) = parse(arguments)?;
-    let input = std::io::stdin();
-    if input.is_terminal() {
-        return Err("credential input must be a pipe; terminal input is refused to prevent echo");
-    }
-    let mut credential = Zeroizing::new(String::new());
-    input
-        .take(1025)
-        .read_to_string(&mut credential)
-        .map_err(|_| "credential input unavailable")?;
+    let credential = crate::administrative_cli::credential()?;
     let bearer = credential.trim_end_matches(['\r', '\n']);
-    if credential.len() > 1024
-        || bearer.is_empty()
-        || bearer.len() > 1024
-        || !bearer
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return Err("invalid credential input");
-    }
     let client = ApiKeyServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     let mut response = client.manage(bearer, &request).map_err(client_failure)?;
     let mut output = std::io::stdout().lock();

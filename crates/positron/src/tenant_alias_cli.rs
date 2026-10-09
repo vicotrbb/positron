@@ -1,45 +1,19 @@
 use std::collections::BTreeMap;
-use std::io::{IsTerminal, Read};
-use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use positron_api::tenant_aliases::{
     TenantAliasBindRequest, TenantAliasServiceClient, TenantAliasServiceClientFailure,
     TenantAliasTransport,
 };
-use zeroize::Zeroizing;
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
-    match execute(arguments) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("positron: {message}");
-            ExitCode::from(2)
-        },
-    }
+    crate::administrative_cli::exit(execute(arguments))
 }
 
 fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> {
     let (transport, request) = parse(arguments)?;
-    let input = std::io::stdin();
-    if input.is_terminal() {
-        return Err("credential input must be a pipe; terminal input is refused to prevent echo");
-    }
-    let mut credential = Zeroizing::new(String::new());
-    input
-        .take(1025)
-        .read_to_string(&mut credential)
-        .map_err(|_| "credential input unavailable")?;
+    let credential = crate::administrative_cli::credential()?;
     let bearer = credential.trim_end_matches(['\r', '\n']);
-    if credential.len() > 1024
-        || bearer.is_empty()
-        || bearer.len() > 1024
-        || !bearer
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return Err("invalid credential input");
-    }
     let client =
         TenantAliasServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     let response = client.bind(bearer, &request).map_err(client_failure)?;
@@ -127,24 +101,8 @@ fn parse(
             "--credential-stdin is required; secrets are never accepted as arguments or environment variables",
         );
     }
-    let endpoint: SocketAddr = take(&mut options, "--endpoint")?
-        .parse()
-        .map_err(|_| "invalid API endpoint")?;
-    if endpoint.port() == 0 {
-        return Err("invalid API endpoint");
-    }
-    let transport = if allow_plaintext {
-        if options.contains_key("--server-name") || options.contains_key("--trust-file") {
-            return Err("TLS options do not apply to plaintext opt-out");
-        }
-        TenantAliasTransport::PlaintextOptOut { endpoint }
-    } else {
-        TenantAliasTransport::Tls {
-            endpoint,
-            server_name: take(&mut options, "--server-name")?,
-            trust_file: take(&mut options, "--trust-file")?.into(),
-        }
-    };
+    let transport = crate::administrative_cli::transport(&mut options, allow_plaintext, take)?;
+
     let request = TenantAliasBindRequest::new(
         take(&mut options, "--tenant")?,
         take(&mut options, "--external-alias")?,

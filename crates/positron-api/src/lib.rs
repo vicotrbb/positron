@@ -28,3 +28,6 @@ pub mod tenant_retention;
 
 /// V1 system tenant-registry administration wire types.
 pub mod tenant_service;
+
+mod http_client;
+mod validation;

@@ -1,27 +1,18 @@
 use std::collections::BTreeMap;
-use std::io::{IsTerminal, Read};
-use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use positron_api::tenant_service::{
     TenantCreateRequest, TenantDisplayNameUpdateRequest, TenantInspectRequest, TenantListRequest,
     TenantServiceClient, TenantServiceClientFailure, TenantServiceTransport,
 };
-use zeroize::Zeroizing;
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
-    match execute(arguments) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("positron: {message}");
-            ExitCode::from(2)
-        },
-    }
+    crate::administrative_cli::exit(execute(arguments))
 }
 
 fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> {
     let (transport, command) = parse(arguments)?;
-    let credential = credential()?;
+    let credential = crate::administrative_cli::credential()?;
     let bearer = credential.trim_end_matches(['\r', '\n']);
     let client = TenantServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     match command {
@@ -70,29 +61,6 @@ fn print_descriptor(descriptor: &positron_api::tenant_service::TenantDescriptor)
         descriptor.retention_generation,
         descriptor.lifecycle
     );
-}
-
-fn credential() -> Result<Zeroizing<String>, &'static str> {
-    let input = std::io::stdin();
-    if input.is_terminal() {
-        return Err("credential input must be a pipe; terminal input is refused to prevent echo");
-    }
-    let mut credential = Zeroizing::new(String::new());
-    input
-        .take(1025)
-        .read_to_string(&mut credential)
-        .map_err(|_| "credential input unavailable")?;
-    let bearer = credential.trim_end_matches(['\r', '\n']);
-    if credential.len() > 1024
-        || bearer.is_empty()
-        || bearer.len() > 1024
-        || !bearer
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return Err("invalid credential input");
-    }
-    Ok(credential)
 }
 
 fn client_failure(failure: TenantServiceClientFailure) -> &'static str {
@@ -190,7 +158,7 @@ fn parse(
             "--credential-stdin is required; secrets are never accepted as arguments or environment variables",
         );
     }
-    let transport = transport(&mut options, allow_plaintext)?;
+    let transport = crate::administrative_cli::transport(&mut options, allow_plaintext, required)?;
     let command = match command.as_str() {
         "create" => Command::Create(TenantCreateRequest::new(
             required(&mut options, "--slug")?,
@@ -244,30 +212,6 @@ fn parse(
             .map_err(|_| "invalid display-name update request")?,
     }
     Ok((transport, command))
-}
-
-fn transport(
-    options: &mut BTreeMap<String, String>,
-    allow_plaintext: bool,
-) -> Result<TenantServiceTransport, &'static str> {
-    let endpoint: SocketAddr = required(options, "--endpoint")?
-        .parse()
-        .map_err(|_| "invalid API endpoint")?;
-    if endpoint.port() == 0 {
-        return Err("invalid API endpoint");
-    }
-    if allow_plaintext {
-        if options.contains_key("--server-name") || options.contains_key("--trust-file") {
-            return Err("TLS options do not apply to plaintext opt-out");
-        }
-        Ok(TenantServiceTransport::PlaintextOptOut { endpoint })
-    } else {
-        Ok(TenantServiceTransport::Tls {
-            endpoint,
-            server_name: required(options, "--server-name")?,
-            trust_file: required(options, "--trust-file")?.into(),
-        })
-    }
 }
 
 fn required(options: &mut BTreeMap<String, String>, name: &str) -> Result<String, &'static str> {
