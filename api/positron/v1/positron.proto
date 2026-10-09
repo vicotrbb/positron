@@ -54,6 +54,7 @@ service MaintenanceService {
   rpc Resume(MaintenanceResumeRequest) returns (MaintenanceControlResponse);
   rpc Window(MaintenanceWindowRequest) returns (MaintenanceWindowResponse);
   rpc Verify(OnlineVerificationRequest) returns (OnlineVerificationReport);
+  rpc AbandonSegment(SegmentAbandonmentRequest) returns (SegmentAbandonmentResponse);
 }
 
 // Authenticated system administration for explicit tenant registry entries.
@@ -642,4 +643,26 @@ enum SafeDetail {
   SAFE_DETAIL_REQUEST_MALFORMED = 4;
   SAFE_DETAIL_REQUEST_LIMIT_EXCEEDED = 5;
   SAFE_DETAIL_FIELD_NOT_RECOGNIZED = 6;
+}
+
+// Preview is read-only. Confirmation requires the exact generation-bound loss
+// commitment and an explicit acknowledgement; status requires only Operation ID.
+message SegmentAbandonmentRequest {
+  string tenant = 1;
+  string signal = 2;
+  uint32 shard = 3;
+  string segment = 4;
+  optional uint64 expected_catalog_generation = 5;
+  optional string confirmation = 6;
+  optional string idempotency_key = 7;
+  bool accept_data_loss = 8;
+  optional string operation_id = 9;
+}
+message SegmentAbandonmentResponse {
+  uint64 catalog_generation = 1;
+  string status = 2;
+  string irreversible_boundary = 3;
+  optional string confirmation = 4;
+  optional string operation_id = 5;
+  IntegrityQuarantineFinding finding = 6;
 }

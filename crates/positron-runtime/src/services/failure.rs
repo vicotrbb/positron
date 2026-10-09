@@ -22,6 +22,8 @@ pub enum ServiceFailure {
     LedgerUnavailable,
     StorageUnavailable,
     CorruptState,
+    DurabilityFrontierAmbiguity,
+    KeyEnvelopeMismatch,
     Internal,
     Cancelled,
 }
@@ -140,6 +142,10 @@ pub(super) const fn classify_bootstrap_failure_code(
         },
         crate::BootstrapFailureCode::KeyCustodyUnavailable => ServiceFailure::KeyUnavailable,
         crate::BootstrapFailureCode::ResourceUnavailable => ServiceFailure::CapacityUnavailable,
+        crate::BootstrapFailureCode::DurabilityFrontierAmbiguity => {
+            ServiceFailure::DurabilityFrontierAmbiguity
+        },
+        crate::BootstrapFailureCode::KeyEnvelopeMismatch => ServiceFailure::KeyEnvelopeMismatch,
         crate::BootstrapFailureCode::CorruptState
         | crate::BootstrapFailureCode::IdentityMismatch => ServiceFailure::CorruptState,
         crate::BootstrapFailureCode::StorageUnavailable
@@ -160,6 +166,9 @@ pub(super) const fn classify_ledger_failure_code(code: LedgerFailureCode) -> Ser
         | LedgerFailureCode::LimitExceeded
         | LedgerFailureCode::StorageExhausted => ServiceFailure::CapacityUnavailable,
         LedgerFailureCode::StorageUnavailable => ServiceFailure::StorageUnavailable,
+        LedgerFailureCode::DurabilityFrontierAmbiguity => {
+            ServiceFailure::DurabilityFrontierAmbiguity
+        },
         LedgerFailureCode::IntegrityCorruption
         | LedgerFailureCode::Quarantined
         | LedgerFailureCode::AuthenticationFailed
@@ -266,8 +275,23 @@ impl Display for ServiceFailure {
 impl Error for ServiceFailure {}
 
 impl ServiceFailure {
+    pub(crate) const fn integrity_fence_reason(self) -> Option<crate::IntegrityFenceReason> {
+        match self {
+            Self::KeyEnvelopeMismatch => Some(crate::IntegrityFenceReason::KeyEnvelopeMismatch),
+            Self::DurabilityFrontierAmbiguity => {
+                Some(crate::IntegrityFenceReason::DurabilityAmbiguity)
+            },
+            Self::CorruptState => Some(crate::IntegrityFenceReason::AmbiguousIntegrity),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn bootstrap_code(self) -> crate::BootstrapFailureCode {
         match self {
+            Self::DurabilityFrontierAmbiguity => {
+                crate::BootstrapFailureCode::DurabilityFrontierAmbiguity
+            },
+            Self::KeyEnvelopeMismatch => crate::BootstrapFailureCode::KeyEnvelopeMismatch,
             Self::CorruptState => crate::BootstrapFailureCode::CorruptState,
             Self::KeyUnavailable => crate::BootstrapFailureCode::KeyCustodyUnavailable,
             Self::CatalogBusy | Self::CatalogUnavailable | Self::StorageUnavailable => {

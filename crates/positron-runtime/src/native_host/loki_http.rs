@@ -136,9 +136,11 @@ fn service_response(service_failure: ServiceFailure) -> Response {
         | ServiceFailure::StorageUnavailable => {
             failure(503, "Loki Push ingest is temporarily unavailable")
         },
-        ServiceFailure::CorruptState | ServiceFailure::Internal | ServiceFailure::Cancelled => {
-            failure(500, "Loki Push ingest failed")
-        },
+        ServiceFailure::DurabilityFrontierAmbiguity
+        | ServiceFailure::KeyEnvelopeMismatch
+        | ServiceFailure::CorruptState
+        | ServiceFailure::Internal
+        | ServiceFailure::Cancelled => failure(500, "Loki Push ingest failed"),
     }
 }
 

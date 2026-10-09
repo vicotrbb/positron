@@ -152,10 +152,17 @@ fn recovery_rejects_committed_frame_corruption_and_truncation() -> Result<(), Bo
         let failure = fixture
             .open(&catalog, [0x73; 32])
             .expect_err("committed bytes must fail closed");
-        assert!(matches!(
-            failure.code(),
-            LedgerFailureCode::IntegrityCorruption | LedgerFailureCode::AuthenticationFailed
-        ));
+        if truncate {
+            assert_eq!(
+                failure.code(),
+                LedgerFailureCode::DurabilityFrontierAmbiguity
+            );
+        } else {
+            assert!(matches!(
+                failure.code(),
+                LedgerFailureCode::IntegrityCorruption | LedgerFailureCode::AuthenticationFailed
+            ));
+        }
     }
     Ok(())
 }

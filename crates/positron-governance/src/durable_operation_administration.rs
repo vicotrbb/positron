@@ -10,6 +10,7 @@ use positron_kernel::{
 };
 use sha2::{Digest, Sha256};
 
+mod abandonment;
 mod codec;
 mod types;
 

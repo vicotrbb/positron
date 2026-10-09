@@ -276,7 +276,13 @@ fn corrupted_startup_frontier_rederives_the_fence_after_restart()
     assert_eq!(inspection["phase"], "fenced");
     assert_eq!(inspection["liveness"], "live");
     assert_eq!(inspection["readiness"], "not_ready");
-    assert_eq!(inspection["reason"], "none");
+    // Startup re-derives the unsafe integrity state; diagnosis must expose
+    // that reason without inventing a durability-sync outcome.
+    assert_eq!(inspection["reason"], "ambiguous_integrity");
+    assert_eq!(
+        process.health().integrity_fence_reason(),
+        Some(positron_runtime::IntegrityFenceReason::AmbiguousIntegrity)
+    );
     assert_eq!(inspection["doctor"]["key_custody"], "verified");
     assert_eq!(inspection["doctor"]["catalog_bootstrap"], "verified");
     assert_eq!(inspection["doctor"]["listener_topology"]["control"], true);

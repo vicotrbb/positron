@@ -112,8 +112,13 @@ pub(super) fn recover_with_mode(
             blocks: Vec::new(),
         });
     };
-    if durable_bytes < header_length || file_length < durable_bytes {
+    if durable_bytes < header_length {
         return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+    }
+    if file_length < durable_bytes {
+        return Err(LedgerFailure::new(
+            LedgerFailureCode::DurabilityFrontierAmbiguity,
+        ));
     }
     if file_length > durable_bytes {
         if matches!(mode, RecoveryMode::Observe) {

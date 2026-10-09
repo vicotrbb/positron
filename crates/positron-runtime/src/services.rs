@@ -29,6 +29,7 @@ pub(crate) mod policy;
 mod query;
 mod schema_bootstrap;
 mod schema_maintenance;
+mod segment_abandonment;
 pub(crate) mod tenant_aliases;
 pub(crate) mod tenant_lifecycle;
 pub(crate) mod tenant_quotas;
@@ -46,7 +47,12 @@ pub(super) fn tenant_segment_key(
     instance
         .key
         .segment_key_from_tenant_envelope(instance.instance, scope, envelope)
-        .map_err(|_| ServiceFailure::KeyUnavailable)
+        .map_err(|failure| match failure {
+            positron_kernel::BootstrapKeyFailure::Authentication => {
+                ServiceFailure::KeyEnvelopeMismatch
+            },
+            _ => ServiceFailure::KeyUnavailable,
+        })
 }
 
 pub(super) fn context_tenant(
@@ -92,6 +98,8 @@ pub(crate) const fn maintenance_failure_category(failure: ServiceFailure) -> Opt
         ServiceFailure::CatalogUnavailable => Some("catalog_unavailable"),
         ServiceFailure::LedgerUnavailable => Some("ledger_unavailable"),
         ServiceFailure::StorageUnavailable => Some("storage_unavailable"),
+        ServiceFailure::DurabilityFrontierAmbiguity => Some("durability_frontier_ambiguity"),
+        ServiceFailure::KeyEnvelopeMismatch => Some("key_envelope_mismatch"),
         ServiceFailure::CorruptState => Some("corrupt_state"),
         ServiceFailure::Internal => Some("internal"),
         ServiceFailure::Cancelled => None,
@@ -256,7 +264,16 @@ impl ServiceHandle {
     /// integrity ambiguity. This method never changes listeners, tasks, or
     /// volume ownership itself.
     pub fn request_integrity_fence(&self) {
-        self.mark_integrity_fenced();
+        self.request_integrity_fence_with(crate::IntegrityFenceReason::AmbiguousIntegrity);
+    }
+
+    /// Requests retirement for one trusted, typed unsafe-state finding.
+    pub fn request_integrity_fence_with(&self, reason: crate::IntegrityFenceReason) {
+        if let Ok(target) = self.integrity_health.lock()
+            && let Some(health) = target.as_ref()
+        {
+            health.request_integrity_fence(reason);
+        }
     }
 
     #[cfg(test)]

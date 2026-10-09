@@ -244,6 +244,7 @@ pub(in super::super) fn verify(
             },
             positron_kernel::IntegrityFailureCode::Cancelled
             | positron_kernel::IntegrityFailureCode::InvalidInput
+            | positron_kernel::IntegrityFailureCode::DurabilityFrontierAmbiguity
             | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
             | positron_kernel::IntegrityFailureCode::FindingCapacity => {
                 crate::OfflineIntegrityFailure::CorruptState

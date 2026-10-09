@@ -84,3 +84,14 @@ mod status;
 mod verification;
 #[path = "maintenance_api_tests/window.rs"]
 mod window;
+
+#[path = "maintenance_api_tests/abandonment.rs"]
+mod abandonment;
+
+#[cfg(unix)]
+#[path = "maintenance_api_tests/fencing_causes.rs"]
+mod fencing_causes;
+
+#[cfg(unix)]
+#[path = "maintenance_api_tests/live_key_fencing.rs"]
+mod live_key_fencing;

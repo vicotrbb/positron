@@ -476,9 +476,12 @@ impl LedgerStorage {
         }
         let (durable_bytes, blocks) =
             authenticated_frontier_bounds(frontier_directory, metadata.id, &key)?;
-        if file_bytes < durable_bytes
-            || (metadata.state == SegmentState::Sealed && file_bytes != durable_bytes)
-        {
+        if file_bytes < durable_bytes {
+            return Err(LedgerFailure::new(
+                LedgerFailureCode::DurabilityFrontierAmbiguity,
+            ));
+        }
+        if metadata.state == SegmentState::Sealed && file_bytes != durable_bytes {
             return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
         }
         let frontier_bytes = unix_fs::statat(

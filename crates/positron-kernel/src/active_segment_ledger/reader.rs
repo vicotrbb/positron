@@ -112,18 +112,7 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
                 .reserve(reconstruction_claim)
                 .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
             let catalog_metadata = self.storage.catalog_segments_observed(&basis, self.scope)?;
-            for hole in &holes {
-                let metadata = catalog_metadata
-                    .iter()
-                    .find(|metadata| metadata.id == hole.segment())
-                    .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
-                if metadata.state != super::format::SegmentState::Sealed
-                    || metadata.base_position.value() != hole.base_position()
-                    || metadata.sealed_frontier != Some(hole.sealed_frontier())
-                {
-                    return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
-                }
-            }
+            super::validate_quarantine_holes(&catalog_metadata, &holes)?;
             let metadata = catalog_metadata
                 .into_iter()
                 .filter(|metadata| !holes.iter().any(|hole| hole.segment() == metadata.id))

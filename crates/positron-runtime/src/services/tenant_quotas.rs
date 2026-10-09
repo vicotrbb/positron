@@ -78,6 +78,8 @@ fn map_failure(failure: crate::BootstrapFailure) -> TenantQuotaHttpFailure {
             TenantQuotaHttpFailure::Code(503, "administration_unavailable")
         },
         BootstrapFailureCode::StorageUnavailable
+        | BootstrapFailureCode::DurabilityFrontierAmbiguity
+        | BootstrapFailureCode::KeyEnvelopeMismatch
         | BootstrapFailureCode::CorruptState
         | BootstrapFailureCode::IdentityMismatch
         | BootstrapFailureCode::InvalidRoots

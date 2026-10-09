@@ -206,7 +206,9 @@ pub(super) const fn classify_kernel_failure_code(code: Kernel) -> TraceStoreFail
         Kernel::LimitExceeded => TraceStoreFailureCode::LimitExceeded,
         Kernel::ResourceAdmissionRefused => TraceStoreFailureCode::ResourceAdmissionRefused,
         Kernel::StorageUnavailable => TraceStoreFailureCode::StorageUnavailable,
-        Kernel::IntegrityCorruption => TraceStoreFailureCode::IntegrityCorruption,
+        Kernel::IntegrityCorruption | Kernel::DurabilityFrontierAmbiguity => {
+            TraceStoreFailureCode::IntegrityCorruption
+        },
         Kernel::Quarantined => TraceStoreFailureCode::Quarantined,
         Kernel::AuthenticationFailed => TraceStoreFailureCode::AuthenticationFailed,
         Kernel::ConcurrentWriter => TraceStoreFailureCode::ConcurrentWriter,

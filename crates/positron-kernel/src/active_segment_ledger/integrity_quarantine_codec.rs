@@ -45,8 +45,16 @@ pub(in crate::active_segment_ledger) fn encode_quarantine(
 pub(in crate::active_segment_ledger) fn decode_quarantine(
     bytes: &[u8],
 ) -> Result<Option<QuarantineRecord>, IntegrityFailure> {
+    let abandoned = bytes.starts_with(super::super::abandonment::ABANDONMENT_MAGIC);
+    let bytes = bytes
+        .strip_prefix(super::super::abandonment::ABANDONMENT_MAGIC)
+        .unwrap_or(bytes);
     if !bytes.starts_with(QUARANTINE_V2_MAGIC) {
-        return Ok(None);
+        return if abandoned {
+            Err(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))
+        } else {
+            Ok(None)
+        };
     }
     if bytes.len() != QUARANTINE_BYTES {
         return Err(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity));

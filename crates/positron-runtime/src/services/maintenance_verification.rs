@@ -181,8 +181,13 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             let identity = Identity::open(&snapshot)
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-            let protection = tenant_segment_key(&self.instance, &identity, scope)
-                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let protection =
+                tenant_segment_key(&self.instance, &identity, scope).map_err(|failure| {
+                    if let Some(reason) = failure.integrity_fence_reason() {
+                        self.request_integrity_fence_with(reason);
+                    }
+                    MaintenanceServiceFailure::AdministrationUnavailable
+                })?;
             let transaction =
                 online_verification_transaction(scope, snapshot.identity().to_bytes())?;
             let cancellation = IntegrityCancellation::new();
@@ -452,7 +457,7 @@ fn integrity_findings_for_scope(
     Ok(projected)
 }
 
-fn integrity_finding_descriptor(
+pub(super) fn integrity_finding_descriptor(
     finding: positron_kernel::IntegrityQuarantineFinding,
 ) -> IntegrityQuarantineDescriptor {
     IntegrityQuarantineDescriptor {
@@ -507,7 +512,7 @@ fn unavailable_range(provenance: &str) -> AuthenticatedTimeRangeDescriptor {
     }
 }
 
-fn hex_bytes(bytes: &[u8]) -> String {
+pub(super) fn hex_bytes(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut text = String::with_capacity(bytes.len().saturating_mul(2));
     for byte in bytes {
@@ -657,7 +662,7 @@ fn online_verification_publication_lineage(
     Ok(lineage)
 }
 
-fn decode_fixed_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
+pub(super) fn decode_fixed_hex<const N: usize>(value: &str) -> Option<[u8; N]> {
     if value.len() != N.checked_mul(2)? {
         return None;
     }

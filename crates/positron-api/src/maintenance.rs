@@ -6,6 +6,13 @@ use sha2::{Digest, Sha256};
 
 pub use crate::api_keys::ApiKeyTransport as MaintenanceTransport;
 
+#[path = "maintenance_abandonment.rs"]
+mod abandonment;
+pub use abandonment::{
+    ABANDON_HTTP_PATH, MAX_ABANDON_REQUEST_BYTES, SegmentAbandonmentRequest,
+    SegmentAbandonmentResponse,
+};
+
 mod client {
     include!(concat!(env!("OUT_DIR"), "/maintenance_service_client.rs"));
 }

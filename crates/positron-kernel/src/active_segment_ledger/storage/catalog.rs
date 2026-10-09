@@ -45,7 +45,7 @@ impl LedgerStorage {
         repair: bool,
     ) -> Result<Vec<SegmentMetadata>, LedgerFailure> {
         let all_segments = self.decode_catalog_segments(snapshot)?;
-        self.reject_unpublished_entries(&all_segments, repair)?;
+        self.reject_unpublished_entries(&all_segments, snapshot, repair)?;
         Self::segments_for_scope(all_segments, scope)
     }
 
@@ -106,8 +106,11 @@ impl LedgerStorage {
     fn reject_unpublished_entries(
         &self,
         metadata: &[SegmentMetadata],
+        snapshot: &CatalogSnapshot,
         repair: bool,
     ) -> Result<(), LedgerFailure> {
+        let abandoned = crate::integrity_abandonment_findings(snapshot)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
         for (directory, active_namespace) in [(&self.active, true), (&self.sealed, false)] {
             let mut entries = Dir::read_from(directory).map_err(map_errno)?;
             let mut count = 0_usize;
@@ -129,7 +132,12 @@ impl LedgerStorage {
                             && segment.state == SegmentState::Active
                             && name == frontier_temporary_name(segment.id).as_bytes())
                 });
-                if !published {
+                let retained_evidence = !active_namespace
+                    && abandoned.iter().any(|finding| {
+                        name == segment_name(finding.segment()).as_bytes()
+                            || name == frontier_name(finding.segment()).as_bytes()
+                    });
+                if !published && !retained_evidence {
                     if active_namespace && recognized_ledger_name(name) {
                         if repair {
                             unix_fs::unlinkat(directory, name, AtFlags::empty())

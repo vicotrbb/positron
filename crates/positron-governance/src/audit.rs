@@ -1034,6 +1034,7 @@ impl ConfigurationAuditEntry {
 /// Redacted jointly committed evidence for one durable-operation state transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableOperationAuditEntry {
+    abandonment_loss: Option<positron_kernel::IntegrityQuarantineFinding>,
     position: u64,
     operation_id: OperationId,
     actor: Option<PrincipalId>,
@@ -1049,6 +1050,10 @@ pub struct DurableOperationAuditEntry {
 }
 
 impl DurableOperationAuditEntry {
+    #[must_use]
+    pub const fn abandonment_loss(&self) -> Option<positron_kernel::IntegrityQuarantineFinding> {
+        self.abandonment_loss
+    }
     #[must_use]
     pub const fn operation_id(&self) -> OperationId {
         self.operation_id

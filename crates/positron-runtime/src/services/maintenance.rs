@@ -275,6 +275,9 @@ pub(super) fn verify_startup_integrity(
             positron_kernel::IntegrityFailureCode::StorageUnavailable => {
                 ServiceFailure::StorageUnavailable
             },
+            positron_kernel::IntegrityFailureCode::DurabilityFrontierAmbiguity => {
+                ServiceFailure::DurabilityFrontierAmbiguity
+            },
             positron_kernel::IntegrityFailureCode::Cancelled => ServiceFailure::Cancelled,
             positron_kernel::IntegrityFailureCode::InvalidInput
             | positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
@@ -922,6 +925,9 @@ fn complete_integrity_scrub(
         let failure = match failure.code() {
             positron_kernel::IntegrityFailureCode::StorageUnavailable => {
                 ServiceFailure::StorageUnavailable
+            },
+            positron_kernel::IntegrityFailureCode::DurabilityFrontierAmbiguity => {
+                ServiceFailure::DurabilityFrontierAmbiguity
             },
             positron_kernel::IntegrityFailureCode::Cancelled => ServiceFailure::Cancelled,
             positron_kernel::IntegrityFailureCode::InvalidInput

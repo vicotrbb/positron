@@ -12,6 +12,8 @@ pub enum LedgerFailureCode {
     ResourceAdmissionRefused,
     StorageUnavailable,
     IntegrityCorruption,
+    /// Authenticated acknowledged frontier extends beyond available bytes.
+    DurabilityFrontierAmbiguity,
     Quarantined,
     AuthenticationFailed,
     ConcurrentWriter,

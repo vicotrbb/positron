@@ -581,6 +581,12 @@ fn verify_integrity_against_snapshot(
                         .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?,
                 ));
             },
+            Err(failure)
+                if failure.code()
+                    == super::super::LedgerFailureCode::DurabilityFrontierAmbiguity =>
+            {
+                return Err(map_ledger_failure(failure));
+            },
             Err(_) => {
                 return Ok(report(IntegrityReport {
                     mode,
@@ -712,6 +718,12 @@ fn verify_integrity_against_snapshot(
                     localized_finding(scope, *candidate)
                         .ok_or(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity))?,
                 ));
+            },
+            Err(failure)
+                if failure.code()
+                    == super::super::LedgerFailureCode::DurabilityFrontierAmbiguity =>
+            {
+                return Err(map_ledger_failure(failure));
             },
             Err(_) => {
                 return Ok(report(IntegrityReport {

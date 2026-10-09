@@ -612,6 +612,46 @@ impl<'authority> Catalog<'authority> {
         )
     }
 
+    /// Reserves both abandonment proposal copies and bounded registry/audit
+    /// overhead before inspecting or copying objects. Publication separately
+    /// reserves its protected durability-completion capacity.
+    pub(crate) fn reserve_segment_abandonment(
+        &self,
+        snapshot: &CatalogSnapshot,
+    ) -> Result<crate::ResourceReservation<'_>, CatalogFailure> {
+        let mut payload = 0_u64;
+        for id in snapshot.object_identities() {
+            let bytes = snapshot
+                .object(id)?
+                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
+            payload = payload
+                .checked_add(
+                    u64::try_from(bytes.len())
+                        .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?,
+                )
+                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        }
+        // One extra maximum-sized object covers new operation/evidence bytes.
+        // 1 KiB per catalog slot covers both Vec<CatalogObject> descriptors
+        // (including growth), the registry identity BTreeSet, at most 64 finding
+        // descriptors, and transient codecs/audit buffers (audit <= 64 KiB).
+        // These are catalog format bounds, independent of current payload size.
+        let overhead =
+            types::MAX_CATALOG_OBJECT_BYTES as u64 + types::MAX_CATALOG_OBJECTS as u64 * 1_024;
+        let memory = payload
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(overhead))
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let claim = WorkClaim::system_maintenance(ResourceAmounts::new([
+            memory, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]))
+        .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        self.authority
+            .governor()
+            .reserve(claim)
+            .map_err(CatalogFailure::admission)
+    }
+
     pub(crate) fn reserve_export_output(
         &self,
         tenant: positron_domain::identity::TenantId,

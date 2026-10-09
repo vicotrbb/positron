@@ -84,7 +84,12 @@ fn recover_ledgers(
         let scope = SegmentScope::new(tenant, signal, shard);
         let protection = key
             .segment_key_from_tenant_envelope(instance, scope, envelope)
-            .map_err(key_failure)?;
+            .map_err(|failure| match failure {
+                positron_kernel::BootstrapKeyFailure::Authentication => {
+                    BootstrapFailure::new(BootstrapFailureCode::KeyEnvelopeMismatch)
+                },
+                failure => key_failure(failure),
+            })?;
         let ledger = ActiveSegmentLedger::open_with_retention_time(
             authority,
             retention_time,
@@ -100,6 +105,9 @@ fn recover_ledgers(
 
 const fn ledger_open_failure(code: LedgerFailureCode) -> BootstrapFailure {
     let bootstrap = match code {
+        LedgerFailureCode::DurabilityFrontierAmbiguity => {
+            BootstrapFailureCode::DurabilityFrontierAmbiguity
+        },
         LedgerFailureCode::IntegrityCorruption
         | LedgerFailureCode::Quarantined
         | LedgerFailureCode::AuthenticationFailed

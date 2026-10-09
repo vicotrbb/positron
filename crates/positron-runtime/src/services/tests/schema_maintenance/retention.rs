@@ -37,7 +37,8 @@ fn runtime_worker_terminalizes_a_policy_stale_retention_publication_before_recla
             .ingest_otlp_logs(
                 &ingest,
                 request("policy-stale retention source").encode_to_vec()
-            )?
+            )
+            .map_err(|failure| format!("ingest retention source: {failure:?}"))?
             .accepted_records(),
         1,
         "the public OTLP path provides the sealed retention source"
@@ -102,7 +103,9 @@ fn runtime_worker_terminalizes_a_policy_stale_retention_publication_before_recla
         .outstanding_total();
 
     assert!(
-        services.wake_maintenance_worker()?,
+        services
+            .wake_maintenance_worker()
+            .map_err(|failure| format!("terminalize stale retention task: {failure:?}"))?,
         "the public worker must terminalize its admitted stale descriptor instead of retaining its claim"
     );
     let status = initialized

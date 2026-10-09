@@ -8,6 +8,32 @@ impl GovernanceAuditEntry {
         transaction_id: [u8; 16],
         intent: &[u8],
     ) -> Result<Self, IdentityFailure> {
+        if let Some(payload) = intent.strip_prefix(b"POSABL01") {
+            let (length, payload) = payload.split_at_checked(2).ok_or(IdentityFailure)?;
+            let length = usize::from(u16::from_be_bytes(
+                length.try_into().map_err(|_| IdentityFailure)?,
+            ));
+            let (base, evidence) = payload.split_at_checked(length).ok_or(IdentityFailure)?;
+            if !base.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V5) {
+                return Err(IdentityFailure);
+            }
+            let Self::DurableOperation(mut operation) =
+                Self::decode_fields(position, transaction_id, base)?
+            else {
+                return Err(IdentityFailure);
+            };
+            let finding = positron_kernel::IntegrityQuarantineFinding::decode_evidence(evidence)
+                .map_err(|_| IdentityFailure)?;
+            if operation.action != DurableOperationKind::SegmentAbandonment
+                || operation.outcome != DurableOperationStatus::Succeeded
+                || operation.applicable_tenant != Some(finding.scope().tenant_id())
+                || base.get(40..56) != Some(finding.segment().to_bytes().as_slice())
+            {
+                return Err(IdentityFailure);
+            }
+            operation.abandonment_loss = Some(finding);
+            return Ok(Self::DurableOperation(operation));
+        }
         if intent.starts_with(&INTEGRITY_QUARANTINE_AUDIT_MAGIC) {
             let mut cursor = Cursor::new(intent);
             if cursor.take_array::<8>()? != INTEGRITY_QUARANTINE_AUDIT_MAGIC {
@@ -271,6 +297,7 @@ impl GovernanceAuditEntry {
                 return Err(IdentityFailure);
             }
             return Ok(Self::DurableOperation(DurableOperationAuditEntry {
+                abandonment_loss: None,
                 position,
                 operation_id,
                 actor: Some(actor),
@@ -300,6 +327,7 @@ impl GovernanceAuditEntry {
                 return Err(IdentityFailure);
             }
             return Ok(Self::DurableOperation(DurableOperationAuditEntry {
+                abandonment_loss: None,
                 position,
                 operation_id,
                 actor: None,
