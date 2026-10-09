@@ -114,7 +114,11 @@ impl ApplicationRuntime {
                                 },
                             }
                         },
-                        Err(crate::ServiceFailure::CorruptState) => {
+                        Err(
+                            failure @ (crate::ServiceFailure::CorruptState
+                            | crate::ServiceFailure::DurabilityFrontierAmbiguity
+                            | crate::ServiceFailure::KeyEnvelopeMismatch),
+                        ) => {
                             state
                                 .set_inspection_authority(Arc::clone(&candidate))
                                 .map_err(|_| {
@@ -134,7 +138,7 @@ impl ApplicationRuntime {
                                 cancellation,
                                 candidate,
                                 drain_deadline,
-                                ExitOutcome::StartupUnavailable(BootstrapFailureCode::CorruptState),
+                                ExitOutcome::StartupUnavailable(failure.bootstrap_code()),
                             );
                         },
                         Err(failure) => BootstrapAttemptFailure {
@@ -596,7 +600,10 @@ const fn bootstrap_fence_reason(code: BootstrapFailureCode) -> IntegrityFenceRea
     match code {
         BootstrapFailureCode::InconsistentRoots => IntegrityFenceReason::UnreliableOwnership,
         BootstrapFailureCode::IdentityMismatch => IntegrityFenceReason::IdentityMismatch,
-        BootstrapFailureCode::LedgerUnavailable => IntegrityFenceReason::DurabilityAmbiguity,
+        BootstrapFailureCode::DurabilityFrontierAmbiguity => {
+            IntegrityFenceReason::DurabilityAmbiguity
+        },
+        BootstrapFailureCode::KeyEnvelopeMismatch => IntegrityFenceReason::KeyEnvelopeMismatch,
         _ => IntegrityFenceReason::AmbiguousIntegrity,
     }
 }
@@ -605,6 +612,8 @@ const fn fences(code: BootstrapFailureCode) -> bool {
     matches!(
         code,
         BootstrapFailureCode::InconsistentRoots
+            | BootstrapFailureCode::DurabilityFrontierAmbiguity
+            | BootstrapFailureCode::KeyEnvelopeMismatch
             | BootstrapFailureCode::CorruptState
             | BootstrapFailureCode::IdentityMismatch
     )

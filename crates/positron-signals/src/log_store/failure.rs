@@ -131,7 +131,9 @@ impl From<positron_kernel::LedgerFailureCode> for LogStoreFailureCode {
             Kernel::LimitExceeded => LogStoreFailureCode::LimitExceeded,
             Kernel::ResourceAdmissionRefused => LogStoreFailureCode::ResourceAdmissionRefused,
             Kernel::StorageUnavailable => LogStoreFailureCode::StorageUnavailable,
-            Kernel::IntegrityCorruption => LogStoreFailureCode::IntegrityCorruption,
+            Kernel::IntegrityCorruption | Kernel::DurabilityFrontierAmbiguity => {
+                LogStoreFailureCode::IntegrityCorruption
+            },
             Kernel::Quarantined => LogStoreFailureCode::Quarantined,
             Kernel::AuthenticationFailed => LogStoreFailureCode::AuthenticationFailed,
             Kernel::ConcurrentWriter => LogStoreFailureCode::ConcurrentWriter,

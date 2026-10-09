@@ -47,7 +47,12 @@ pub(super) fn tenant_segment_key(
     instance
         .key
         .segment_key_from_tenant_envelope(instance.instance, scope, envelope)
-        .map_err(|_| ServiceFailure::KeyUnavailable)
+        .map_err(|failure| match failure {
+            positron_kernel::BootstrapKeyFailure::Authentication => {
+                ServiceFailure::KeyEnvelopeMismatch
+            },
+            _ => ServiceFailure::KeyUnavailable,
+        })
 }
 
 pub(super) fn context_tenant(
@@ -93,6 +98,8 @@ pub(crate) const fn maintenance_failure_category(failure: ServiceFailure) -> Opt
         ServiceFailure::CatalogUnavailable => Some("catalog_unavailable"),
         ServiceFailure::LedgerUnavailable => Some("ledger_unavailable"),
         ServiceFailure::StorageUnavailable => Some("storage_unavailable"),
+        ServiceFailure::DurabilityFrontierAmbiguity => Some("durability_frontier_ambiguity"),
+        ServiceFailure::KeyEnvelopeMismatch => Some("key_envelope_mismatch"),
         ServiceFailure::CorruptState => Some("corrupt_state"),
         ServiceFailure::Internal => Some("internal"),
         ServiceFailure::Cancelled => None,

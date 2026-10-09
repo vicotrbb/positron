@@ -19,6 +19,8 @@ pub enum BootstrapFailureCode {
     CatalogUnavailable,
     LedgerUnavailable,
     CorruptState,
+    DurabilityFrontierAmbiguity,
+    KeyEnvelopeMismatch,
     IdentityMismatch,
     ClaimUnavailable,
     ClaimDestructionFailed,

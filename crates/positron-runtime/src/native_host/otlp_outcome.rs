@@ -246,17 +246,19 @@ impl OtlpSignal {
                 limit: None,
                 retry_after: false,
             },
-            ServiceFailure::CorruptState | ServiceFailure::Internal | ServiceFailure::Cancelled => {
-                OtlpFailure {
-                    http_status: 500,
-                    grpc_code: 13,
-                    message: match self {
-                        Self::Logs => "OTLP Logs ingest failed",
-                        Self::Traces => "OTLP Traces ingest failed",
-                    },
-                    limit: None,
-                    retry_after: false,
-                }
+            ServiceFailure::DurabilityFrontierAmbiguity
+            | ServiceFailure::KeyEnvelopeMismatch
+            | ServiceFailure::CorruptState
+            | ServiceFailure::Internal
+            | ServiceFailure::Cancelled => OtlpFailure {
+                http_status: 500,
+                grpc_code: 13,
+                message: match self {
+                    Self::Logs => "OTLP Logs ingest failed",
+                    Self::Traces => "OTLP Traces ingest failed",
+                },
+                limit: None,
+                retry_after: false,
             },
         }
     }

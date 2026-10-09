@@ -81,9 +81,10 @@ pub(super) fn fuzz_active_segment_stateful(data: &[u8]) {
     let mut protected_snapshot: Option<(LedgerSnapshot<'_>, SnapshotExpectation)> = None;
 
     for (index, selector) in data.iter().copied().take(24).enumerate() {
-        let operation = selector % 27;
+        let operation = selector % 28;
         match operation {
             26 => abandonment::exercise(selector),
+            27 => abandonment::exercise_missing_acknowledged_tail(selector),
             0 => {
                 let (identity, payload) = block_parts(index, selector);
                 let (prepared, ingest_time) =

@@ -451,6 +451,7 @@ const fn verification_outcome_code(outcome: IntegrityVerificationOutcome) -> u8 
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntegrityFailureCode {
+    DurabilityFrontierAmbiguity,
     InvalidInput,
     Cancelled,
     StorageUnavailable,
@@ -480,12 +481,17 @@ impl Error for IntegrityFailure {}
 pub(super) fn is_isolated_corruption(code: LedgerFailureCode) -> bool {
     matches!(
         code,
-        LedgerFailureCode::IntegrityCorruption | LedgerFailureCode::UnsupportedFormat
+        LedgerFailureCode::IntegrityCorruption
+            | LedgerFailureCode::DurabilityFrontierAmbiguity
+            | LedgerFailureCode::UnsupportedFormat
     )
 }
 
 pub(super) fn map_ledger_failure(failure: LedgerFailure) -> IntegrityFailure {
     IntegrityFailure(match failure.code() {
+        LedgerFailureCode::DurabilityFrontierAmbiguity => {
+            IntegrityFailureCode::DurabilityFrontierAmbiguity
+        },
         LedgerFailureCode::Cancelled => IntegrityFailureCode::Cancelled,
         LedgerFailureCode::StorageUnavailable | LedgerFailureCode::StorageExhausted => {
             IntegrityFailureCode::StorageUnavailable

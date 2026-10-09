@@ -116,3 +116,72 @@ pub(super) fn exercise(selector: u8) {
         1
     );
 }
+
+pub(super) fn exercise_missing_acknowledged_tail(selector: u8) {
+    let Some(root) = FuzzRoot::new() else {
+        return;
+    };
+    let volume =
+        PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost).expect("volume");
+    let Some(authority) = fuzz_authority(volume) else {
+        return;
+    };
+    let instance = InstanceId::new([0x81; 16]).expect("instance");
+    let catalog = Catalog::open(&authority, instance, catalog_secret()).expect("catalog");
+    let scope = scope();
+    install_retention_policy(&catalog, instance, scope.tenant_id());
+    let (time, _) = RetentionTimeAuthority::establish_with_manual_elapsed(
+        positron_domain::time::UnixNanoseconds::new(1_000_000_000),
+    );
+    let ledger = open(&authority, &time, &catalog, scope).expect("ledger");
+    ledger
+        .append(prepared_retained(
+            &ledger,
+            &authority,
+            identity(1),
+            vec![selector],
+        ))
+        .expect("acknowledged append");
+    let segment = ledger.active_segment_id().expect("active");
+    drop(ledger);
+    let path = root
+        .0
+        .join("segments/active")
+        .join(super::super::recovery::segment_name(segment));
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("active file");
+    file.set_len(file.metadata().expect("size").len() - 1)
+        .expect("missing tail");
+    file.sync_all().expect("sync fixture");
+    let evidence = fs::read(&path).expect("evidence");
+    let failure = ActiveSegmentLedger::verify_catalog_integrity(
+        &authority,
+        &catalog,
+        CatalogIntegrityVerificationRequest::new(
+            IntegrityVerificationRequest::new(
+                scope,
+                SegmentProtectionKey::from_owned(Box::new([0x91; 32])),
+                IntegrityScrubBudget::new(8).expect("budget"),
+                &IntegrityCancellation::new(),
+                TransactionId::new([0xd3; 16]).expect("transaction"),
+                None,
+            ),
+            IntegrityVerificationMode::Startup,
+        ),
+    )
+    .expect_err("missing acknowledged bytes fence");
+    assert_eq!(
+        failure.code(),
+        crate::IntegrityFailureCode::DurabilityFrontierAmbiguity
+    );
+    assert_eq!(
+        open(&authority, &time, &catalog, scope)
+            .err()
+            .expect("repair refuses")
+            .code(),
+        LedgerFailureCode::DurabilityFrontierAmbiguity
+    );
+    assert_eq!(fs::read(path).expect("retained evidence"), evidence);
+}
