@@ -32,13 +32,13 @@ fn recovery_rejects_a_file_shorter_than_its_declared_header() -> Result<(), Box<
 }
 
 #[test]
-fn observe_recovery_ignores_unfrontiered_bytes_without_repairing_storage()
+fn missing_frontier_payload_fences_observers_and_repair_without_changing_storage()
 -> Result<(), Box<dyn Error>> {
     let root = TemporaryRoot::new()?;
     let directory = File::open(root.path())?;
     let metadata = metadata(CommitPosition::origin());
     fs::write(root.path().join(segment_name(metadata.id)), [0_u8, 1])?;
-    let state = recover_with_mode(
+    let failure = recover_with_mode(
         &directory,
         &directory,
         metadata,
@@ -46,18 +46,21 @@ fn observe_recovery_ignores_unfrontiered_bytes_without_repairing_storage()
         1,
         RecoveryMode::Observe,
         false,
-    )?;
-    assert_eq!(state.frontier, CommitPosition::origin());
-    assert!(state.blocks.is_empty());
+    )
+    .err()
+    .expect("missing proof makes payload durability ambiguous");
+    assert_eq!(failure.code(), LedgerFailureCode::IntegrityCorruption);
     assert_eq!(
         fs::read(root.path().join(segment_name(metadata.id)))?,
         [0, 1]
     );
-    let repaired = recover(&directory, &directory, metadata, &key(metadata)?, 1, true)?;
-    assert!(repaired.blocks.is_empty());
+    let failure = recover(&directory, &directory, metadata, &key(metadata)?, 1, true)
+        .err()
+        .expect("repair cannot discard potentially acknowledged payload");
+    assert_eq!(failure.code(), LedgerFailureCode::IntegrityCorruption);
     assert_eq!(
         fs::metadata(root.path().join(segment_name(metadata.id)))?.len(),
-        1
+        2
     );
     Ok(())
 }

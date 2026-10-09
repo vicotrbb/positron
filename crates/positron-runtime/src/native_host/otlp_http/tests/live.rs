@@ -647,3 +647,116 @@ fn set_owner_only(path: &Path) -> Result<(), std::io::Error> {
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
+
+#[test]
+fn buffered_http_body_survives_catalog_wait_beyond_body_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let response = buffered_http_body_after_catalog_wait(
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_secs(2),
+    )?;
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    Ok(())
+}
+
+#[test]
+fn catalog_wait_does_not_refresh_absolute_http_request_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let response = buffered_http_body_after_catalog_wait(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(10),
+    )?;
+    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+    assert!(response.contains("request body could not be read"));
+    Ok(())
+}
+
+fn buffered_http_body_after_catalog_wait(
+    body_deadline: std::time::Duration,
+    request_deadline: std::time::Duration,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use crate::native_host::native_http::{RouteDependencies, TimeoutStream, serve_connection};
+    use std::io::{Cursor, Read};
+    use std::num::NonZeroU16;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct BufferedRequest {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+        header_bytes: u64,
+        header_read: Option<mpsc::SyncSender<()>>,
+    }
+    impl Read for BufferedRequest {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let read = self.input.read(buffer)?;
+            if self.input.position() == self.header_bytes
+                && let Some(sender) = self.header_read.take()
+            {
+                sender.send(()).map_err(std::io::Error::other)?;
+            }
+            Ok(read)
+        }
+    }
+    impl Write for BufferedRequest {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl TimeoutStream for BufferedRequest {
+        fn set_timeouts(&mut self, _timeout: Duration) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (_roots, bearer, services) =
+        http_services_with_profile(ValueLimitProfile::release_1_system_maximum())?;
+    let body = br#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"buffered"}}]}]}]}"#;
+    let head = format!(
+        "POST /v1/logs HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAuthorization: Bearer {bearer}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let mut input = head.as_bytes().to_vec();
+    input.extend_from_slice(body);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let state = crate::health::ProcessState::starting();
+    state.transition(crate::ProcessPhase::Serving);
+    let catalog = services.catalog_operation()?;
+    let output = std::thread::scope(|scope| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let handle = scope.spawn(|| {
+            let mut stream = BufferedRequest {
+                input: Cursor::new(input),
+                output: Vec::new(),
+                header_bytes: head.len() as u64,
+                header_read: Some(sender),
+            };
+            let result = serve_connection(
+                &mut stream,
+                crate::ListenerRole::OtlpHttp,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+                None,
+                &state.health(),
+                RouteDependencies::new(Some(&services), None),
+                crate::ConnectionProtection::new(
+                    NonZeroU16::MIN,
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                    body_deadline,
+                    request_deadline,
+                    Duration::from_secs(1),
+                ),
+            );
+            assert!(result.is_ok());
+            stream.output
+        });
+        receiver.recv_timeout(Duration::from_secs(1))?;
+        std::thread::sleep(Duration::from_millis(40));
+        drop(catalog);
+        handle.join().map_err(|_| "HTTP handler panicked".into())
+    })?;
+    Ok(String::from_utf8(output)?)
+}

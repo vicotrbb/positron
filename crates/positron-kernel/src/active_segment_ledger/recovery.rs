@@ -101,22 +101,11 @@ pub(super) fn recover_with_mode(
         segment_event_range,
     }) = frontier
     else {
-        if file_length < header_length {
+        // Only a legacy header-only segment is provably empty without a
+        // frontier. Any payload may have been acknowledged before frontier
+        // loss, so neither readers nor repair may silently discard it.
+        if file_length != header_length {
             return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
-        }
-        if file_length > header_length {
-            if matches!(mode, RecoveryMode::Observe) {
-                return Ok(RecoveryState {
-                    frontier: metadata.base_position,
-                    blocks: Vec::new(),
-                });
-            }
-            if !may_repair {
-                return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
-            }
-            emit_event(LedgerFileEvent::TruncatePostFrontier)?;
-            file.set_len(header_length).map_err(map_io_error)?;
-            synchronize(&file)?;
         }
         return Ok(RecoveryState {
             frontier: metadata.base_position,

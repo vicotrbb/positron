@@ -14,6 +14,7 @@ use positron_kernel::{
     ResourceAmounts, ResourceDimension, ResourceGovernor, ResourceReservation, SegmentScope,
     WorkClaim, WorkKind,
 };
+use sha2::{Digest, Sha256};
 
 use index::{Lookup, SummaryIndex};
 use retained::{checked_bytes, summary_capacity_bytes};
@@ -215,6 +216,7 @@ pub struct TraceSummaryMaintainer<'kernel> {
     cursor: Option<(CommitPosition, RecordOrdinal)>,
     catalog_generation: Option<u64>,
     catalog_identity: Option<CatalogGenerationId>,
+    snapshot_blocks: Option<(CommitPosition, [u8; 32])>,
     quiescence_basis: Option<(CatalogGenerationId, CommitPosition, u64)>,
     quiescence_target: Option<IngestTime>,
     quiescence_cursor: usize,
@@ -254,6 +256,7 @@ impl<'kernel> TraceSummaryMaintainer<'kernel> {
             cursor: None,
             catalog_generation: None,
             catalog_identity: None,
+            snapshot_blocks: None,
             quiescence_basis: None,
             quiescence_target: None,
             quiescence_cursor: 0,
@@ -269,7 +272,7 @@ impl<'kernel> TraceSummaryMaintainer<'kernel> {
         observer: &dyn ScanObserver,
         lifecycle_clock: &LifecycleClock<S>,
     ) -> Result<TraceSummaryMaintenance<'a, 'kernel>, TraceStoreFailure> {
-        self.validate_snapshot(snapshot)?;
+        self.validate_snapshot(snapshot, cancellation, observer)?;
         let scan = match self.cursor {
             Some((position, ordinal)) => {
                 super::TraceScan::after_cursor(self.limit, position, ordinal)
@@ -537,6 +540,8 @@ impl<'kernel> TraceSummaryMaintainer<'kernel> {
     fn validate_snapshot(
         &mut self,
         snapshot: &LedgerSnapshot<'_>,
+        cancellation: &dyn ScanCancellation,
+        observer: &dyn ScanObserver,
     ) -> Result<(), TraceStoreFailure> {
         if snapshot.scope() != self.scope {
             return Err(TraceStoreFailure::physical_scope_mismatch());
@@ -560,8 +565,53 @@ impl<'kernel> TraceSummaryMaintainer<'kernel> {
         {
             return Err(TraceStoreFailure::stale_generation());
         }
+        let catalog_changed = self
+            .catalog_identity
+            .is_some_and(|identity| identity != snapshot.catalog_identity());
+        let blocks_changed = if catalog_changed {
+            self.snapshot_blocks
+                .map(|(frontier, digest)| {
+                    snapshot_block_digest(snapshot, frontier, cancellation, observer)
+                        .map(|current| current != digest)
+                })
+                .transpose()?
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let snapshot_blocks = if catalog_changed
+            || self
+                .snapshot_blocks
+                .is_none_or(|(frontier, _)| frontier != snapshot.frontier())
+        {
+            Some((
+                snapshot.frontier(),
+                snapshot_block_digest(snapshot, snapshot.frontier(), cancellation, observer)?,
+            ))
+        } else {
+            self.snapshot_blocks
+        };
+        // A cursor cannot prove retired observations remain reachable. Replay
+        // only when the authenticated block view changed, preserving deltas
+        // across seals and unrelated administrative catalog publications.
+        if blocks_changed {
+            self.summaries = Vec::new();
+            self.summary_capacities = Vec::new();
+            self.summary_bytes = 0;
+            self.index = SummaryIndex::new();
+            self.cursor = None;
+            self.quiescence_basis = None;
+            self.quiescence_target = None;
+            self.quiescence_cursor = 0;
+            let empty_capacity = ResourceAmounts::only(ResourceDimension::MemoryBytes, 1)
+                .map_err(|_| TraceStoreFailure::limit_exceeded())?;
+            self.capacity
+                .try_resize_preserving_capacity(empty_capacity)
+                .map_err(|_| TraceStoreFailure::resource_admission_refused())?;
+        }
         self.catalog_generation = Some(snapshot.catalog_generation());
         self.catalog_identity = Some(snapshot.catalog_identity());
+        self.snapshot_blocks = snapshot_blocks;
         Ok(())
     }
 
@@ -711,4 +761,27 @@ impl<'kernel> TraceSummaryMaintainer<'kernel> {
             )
             .map_err(|_| TraceStoreFailure::resource_exhausted())
     }
+}
+
+fn snapshot_block_digest(
+    snapshot: &LedgerSnapshot<'_>,
+    frontier: CommitPosition,
+    cancellation: &dyn ScanCancellation,
+    observer: &dyn ScanObserver,
+) -> Result<[u8; 32], TraceStoreFailure> {
+    let mut digest = Sha256::new();
+    for block in snapshot.blocks() {
+        super::scan::check_cancel(cancellation)?;
+        observer
+            .observe_work(1)
+            .map_err(TraceStoreFailure::observation)?;
+        if block.position() > frontier {
+            continue;
+        }
+        digest.update(block.position().value().to_be_bytes());
+        digest.update(block.identity().to_bytes());
+        digest.update(block.content_digest().map_err(TraceStoreFailure::kernel)?);
+    }
+    super::scan::check_cancel(cancellation)?;
+    Ok(digest.finalize().into())
 }

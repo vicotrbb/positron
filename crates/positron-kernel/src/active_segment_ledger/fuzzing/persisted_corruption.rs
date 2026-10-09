@@ -229,6 +229,12 @@ fn corrupt_persisted_artifact(
         PersistedArtifact::Sealed => first_file(root.join("segments/sealed"), "segment")?,
         PersistedArtifact::Catalog => first_file(root.join("catalog/objects"), "frame")?,
     };
+    if artifact == PersistedArtifact::Frontier && entropy % 4 == 2 {
+        // Loss of acknowledged proof must fence just like authenticated byte
+        // corruption, never reclassify the committed payload as an empty tail.
+        fs::remove_file(path)?;
+        return Ok(());
+    }
     if matches!(
         artifact,
         PersistedArtifact::FrontierSelectorDowngrade | PersistedArtifact::FrontierSelectorUpgrade

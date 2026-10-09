@@ -824,6 +824,14 @@ The implementation owns hierarchical ceilings, tenant quotas, weighted
 fairness, priority classes, Disk Pressure State, and the protected Recovery
 Reserve. No module creates an unaccounted queue or private capacity pool.
 
+Sequential bootstrap schema recovery holds a tenant-attributed protected Repair
+claim for its full memory peak and one task, I/O permit, and CPU worker until
+reconstruction finishes. Its canonical cumulative semantic work budgets and
+cancellation observations are independent of that peak worker claim. The hard
+schema and reachable-index cardinalities still bound each traversal. Ordinary
+serving replay reserves complete operation work as before; this bootstrap-only
+distinction follows ADR-0056.
+
 #### Maintenance Coordinator
 
 The coordinator accepts typed, stable Maintenance Tasks and owns their

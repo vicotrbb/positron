@@ -75,8 +75,14 @@ fn committed_reader_coexists_with_writer_and_observes_acknowledged_appends()
     file.sync_all()?;
     assert_eq!(reader.snapshot()?.blocks().len(), 2);
 
+    let ambiguous_bytes = fs::read(&segment)?;
     fs::remove_file(frontier)?;
-    assert!(reader.snapshot()?.blocks().is_empty());
+    let failure = match reader.snapshot() {
+        Ok(_) => return Err("acknowledged payload without its frontier was accepted".into()),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.code(), LedgerFailureCode::IntegrityCorruption);
+    assert_eq!(fs::read(&segment)?, ambiguous_bytes);
     Ok(())
 }
 

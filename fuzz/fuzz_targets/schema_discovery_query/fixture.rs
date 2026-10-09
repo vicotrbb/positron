@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -15,16 +16,17 @@ use positron_governance::{
 };
 use positron_ingest::{
     AuthenticatedOtlpLogsRequest, FixedAdmissionGroupPlanner, IngestOutcome, IngestPolicy,
-    LogIngest, OtlpLogsReceiver, SchemaDiscoveryRequest, TenantSchemaRegistry, TenantSchemaSession,
+    LogIngest, OtlpLogsReceiver, SchemaDiscoveryRequest, SchemaReplayBuilder, SchemaSessionFailure,
+    TenantSchemaRegistry, TenantSchemaSession,
 };
 use positron_kernel::{
-    ActiveSegmentLedger, Catalog, CatalogSecret, InstanceId, MountQualification,
+    ActiveSegmentLedger, Catalog, CatalogSecret, InstanceId, LedgerSnapshot, MountQualification,
     SegmentProtectionKey, SegmentScope, StorageKernelResourceAuthority, StoreBlockIdentity,
 };
 use positron_runtime::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
 use positron_signals::{
-    AttributeRepresentation, LogScan, LogStore, OccurrenceSelector, ScanLimit, ScannedLogRecord,
-    SchemaCatalog, SchemaPath, SchemaQuery, SchemaValue,
+    AttributeRepresentation, LogScan, LogStore, OccurrenceSelector, ScanCancellation, ScanLimit,
+    ScannedLogRecord, SchemaCatalog, SchemaPath, SchemaQuery, SchemaValue,
 };
 use prost::Message;
 
@@ -82,7 +84,10 @@ impl FuzzFixture {
             RequestedIntent::Ingest,
             CompatibilityHints::none(),
         )?;
-        let authority = Box::leak(Box::new(authority::establish(&kernel_data, tenant)?));
+        let authority = Box::leak(Box::new(authority::establish_for_schema_recovery(
+            &kernel_data,
+            tenant,
+        )?));
         let catalog = Box::leak(Box::new(Catalog::open(
             authority,
             InstanceId::new([0x91; 16])?,
@@ -124,6 +129,7 @@ impl FuzzFixture {
         let Ok(checkpoint) = self.session.checkpoint() else {
             return;
         };
+        let replayed_catalog = self.exercise_replay(&snapshot, checkpoint.catalog_bytes(), data);
         let Ok(catalog) = SchemaCatalog::decode_catalog_object(checkpoint.catalog_bytes()) else {
             return;
         };
@@ -173,6 +179,27 @@ impl FuzzFixture {
                 actual, expected,
                 "exact scalar query changed logical results"
             );
+            if let Some(replayed_catalog) = &replayed_catalog {
+                let replayed_result = LogStore::new()
+                    .scan_schema(
+                        self.authority.governor(),
+                        self.tenant,
+                        &snapshot,
+                        LogScan::all(limit),
+                        replayed_catalog,
+                        &exact_query,
+                    )
+                    .expect("bounded replay query");
+                assert_eq!(
+                    replayed_result
+                        .records()
+                        .iter()
+                        .map(ScannedLogRecord::commit_position)
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "bootstrap replay changed logical query results"
+                );
+            }
             let expected_reduced =
                 reference_reduced_pruning(&catalog, all_result.records(), &path, &exact_value);
             assert_eq!(
@@ -213,6 +240,71 @@ impl FuzzFixture {
         }
     }
 
+    fn exercise_replay(
+        &self,
+        snapshot: &LedgerSnapshot<'_>,
+        checkpoint: &[u8],
+        data: &[u8],
+    ) -> Option<SchemaCatalog> {
+        let before = self
+            .authority
+            .governor()
+            .inspect()
+            .expect("governor before replay")
+            .outstanding_total();
+        let selector = data.first().copied().unwrap_or_default();
+        let source = (selector & 4 != 0).then_some(checkpoint);
+        let mut replay = SchemaReplayBuilder::new(self.tenant, source, self.authority.recovery())
+            .expect("bounded bootstrap replay admission");
+        let cancellation = ReplayCancellation::new(match selector % 3 {
+            1 => Some(usize::from(data.get(1).copied().unwrap_or_default())),
+            _ => None,
+        });
+        let result = replay.replay_snapshot_cancellable(snapshot, &cancellation);
+        let catalog = match result {
+            Err(SchemaSessionFailure::Cancelled) => {
+                assert_eq!(
+                    replay.replay_snapshot(snapshot),
+                    Err(SchemaSessionFailure::StateUnavailable)
+                );
+                assert!(matches!(
+                    replay.finish(),
+                    Err(SchemaSessionFailure::StateUnavailable)
+                ));
+                None
+            },
+            Err(failure) => panic!("bounded bootstrap replay failed: {failure:?}"),
+            Ok(()) if selector % 3 == 2 => {
+                let cancellation = ReplayCancellation::new(Some(usize::from(
+                    data.get(1).copied().unwrap_or_default(),
+                )));
+                match replay.finish_cancellable(&cancellation) {
+                    Ok(checkpoint) => Some(
+                        SchemaCatalog::decode_catalog_object(checkpoint.catalog_bytes())
+                            .expect("finished replay catalog"),
+                    ),
+                    Err(SchemaSessionFailure::Cancelled) => None,
+                    Err(failure) => panic!("bounded bootstrap finish failed: {failure:?}"),
+                }
+            },
+            Ok(()) => {
+                let checkpoint = replay.finish().expect("successful bootstrap replay finish");
+                Some(
+                    SchemaCatalog::decode_catalog_object(checkpoint.catalog_bytes())
+                        .expect("finished replay catalog"),
+                )
+            },
+        };
+        let after = self
+            .authority
+            .governor()
+            .inspect()
+            .expect("governor after replay")
+            .outstanding_total();
+        assert_eq!(after, before, "bootstrap replay leaked a resource grant");
+        catalog
+    }
+
     fn ingest(&self, data: &[u8]) {
         let request = AuthenticatedOtlpLogsRequest::otlp_grpc_protobuf(
             self.context,
@@ -251,6 +343,37 @@ impl FuzzFixture {
         .accept(group.into_batch(), identity);
         if matches!(outcome, IngestOutcome::Full(_) | IngestOutcome::Partial(_)) {
             self.blocks.set(next);
+        }
+    }
+}
+
+struct ReplayCancellation(AtomicUsize);
+
+impl ReplayCancellation {
+    fn new(polls: Option<usize>) -> Self {
+        Self(AtomicUsize::new(polls.unwrap_or(usize::MAX)))
+    }
+}
+
+impl ScanCancellation for ReplayCancellation {
+    fn is_cancelled(&self) -> bool {
+        let mut remaining = self.0.load(Ordering::Relaxed);
+        loop {
+            if remaining == usize::MAX {
+                return false;
+            }
+            if remaining == 0 {
+                return true;
+            }
+            match self.0.compare_exchange_weak(
+                remaining,
+                remaining - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return false,
+                Err(current) => remaining = current,
+            }
         }
     }
 }

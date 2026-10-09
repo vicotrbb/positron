@@ -157,6 +157,25 @@ impl LedgerStorage {
             .map_err(|failure| LedgerFailure::post_mutation(failure.code()))?;
         synchronize(&self.active)
             .map_err(|failure| LedgerFailure::post_mutation(failure.code()))?;
+        // Publish proof of the empty committed prefix before this segment can
+        // become Catalog-reachable. A failed first append can then be repaired
+        // without confusing a lost acknowledged frontier with an empty segment.
+        publish_frontier(
+            &self.active,
+            metadata.id,
+            &key,
+            super::recovery::FrontierPublication {
+                durable_bytes: u64::try_from(header.len())
+                    .map_err(|_| LedgerFailure::post_mutation(LedgerFailureCode::LimitExceeded))?,
+                next_sequence: 0,
+                position: metadata.base_position,
+                retention: super::SegmentRetention::Empty,
+                event_range: super::AuthenticatedEventRange::unavailable(
+                    super::EventRangeUnavailable::LegacyFormat,
+                ),
+            },
+        )
+        .map_err(|failure| LedgerFailure::post_mutation(failure.code()))?;
         self.current = Some(metadata);
         Ok(key)
     }
@@ -372,13 +391,44 @@ impl LedgerStorage {
         if metadata.state != SegmentState::Sealed {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
+        Ok(self
+            .verification_source_bound(metadata, protection, instance)?
+            .filter(|(_, blocks)| *blocks != 0))
+    }
+
+    /// Authenticates only the header and frontier before payload traversal so
+    /// verification can enforce its byte budget even for an active segment.
+    pub(super) fn verification_source_bound(
+        &self,
+        metadata: SegmentMetadata,
+        protection: &SegmentProtectionKey,
+        instance: InstanceId,
+    ) -> Result<Option<(usize, usize)>, LedgerFailure> {
+        let directory = match metadata.state {
+            SegmentState::Active if entry_exists(&self.active, &segment_name(metadata.id))? => {
+                &self.active
+            },
+            SegmentState::Active | SegmentState::Sealed => &self.sealed,
+            SegmentState::Retired => {
+                return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
+            },
+        };
+        // A seal can crash between segment and frontier renames. Locate each
+        // independently, consistently with observation-only recovery.
+        let frontier_directory = if metadata.state == SegmentState::Active
+            && entry_exists(&self.active, &frontier_name(metadata.id))?
+        {
+            &self.active
+        } else {
+            directory
+        };
         // The authenticated Catalog may name a sealed source that has since
         // disappeared. Its absence is an instance-wide availability
         // ambiguity, not byte-local corruption eligible for quarantine.
-        if !entry_exists(&self.sealed, &segment_name(metadata.id))? {
+        if !entry_exists(directory, &segment_name(metadata.id))? {
             return Err(LedgerFailure::new(LedgerFailureCode::PhysicalScopeMismatch));
         }
-        let mut file = open_regular(&self.sealed, &segment_name(metadata.id), false)?;
+        let mut file = open_regular(directory, &segment_name(metadata.id), false)?;
         let mut header = vec![0_u8; MAX_HEADER_BYTES];
         let header_bytes = file.read(&mut header).map_err(map_io_error)?;
         header.truncate(header_bytes);
@@ -415,22 +465,24 @@ impl LedgerStorage {
             return Err(LedgerFailure::new(LedgerFailureCode::AuthenticationFailed));
         }
         let file_bytes = file.metadata().map_err(map_io_error)?.len();
-        if !entry_exists(&self.sealed, &frontier_name(metadata.id))? {
+        if !entry_exists(frontier_directory, &frontier_name(metadata.id))? {
             let header_bytes = u64::try_from(decoded.encoded_bytes)
                 .map_err(|_| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
             return if file_bytes == header_bytes {
-                Ok(None)
+                Ok(Some((decoded.encoded_bytes, 0)))
             } else {
                 Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))
             };
         }
         let (durable_bytes, blocks) =
-            authenticated_frontier_bounds(&self.sealed, metadata.id, &key)?;
-        if file_bytes != durable_bytes {
+            authenticated_frontier_bounds(frontier_directory, metadata.id, &key)?;
+        if file_bytes < durable_bytes
+            || (metadata.state == SegmentState::Sealed && file_bytes != durable_bytes)
+        {
             return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
         }
         let frontier_bytes = unix_fs::statat(
-            &self.sealed,
+            frontier_directory,
             frontier_name(metadata.id),
             AtFlags::SYMLINK_NOFOLLOW,
         )

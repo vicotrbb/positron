@@ -9,8 +9,8 @@ pub(super) use super::recovery_support::{
     reserve_schema_memory, validated_frontier, verify_frontier,
 };
 use super::replay_capacity::{
-    ReplaySnapshotBounds, ensure_replay_capacity, extend_replay_work, replay_snapshot_block_work,
-    reserve_replay_snapshot_capacity, resize_replay_work,
+    ReplaySnapshotBounds, bootstrap_replay_work, ensure_replay_capacity, extend_replay_work,
+    replay_snapshot_block_work, reserve_replay_snapshot_capacity,
 };
 use super::{MAX_REPLAY_SHARDS, SchemaFailure, SchemaSessionFailure, TenantSchemaSession};
 
@@ -277,15 +277,12 @@ impl TenantSchemaSession {
                 .catalog
                 .replay_reconciliation_work_units_with_staged_entries(1, 1)
                 .map_err(SchemaSessionFailure::Schema)?;
-            resize_replay_work(recovery, block.payload().len(), reconciliation_work)?;
+            let semantic_work = bootstrap_replay_work(block.payload().len(), reconciliation_work)?;
             ensure_replay_capacity(recovery, block.payload().len())?;
-            let observer = SchemaBuildObserver::new_scan(
-                recovery.granted().get(ResourceDimension::CpuWorkUnits),
-                cancellation,
-            );
-            // Bootstrap reserves only the mandatory decode/discovery budget.
-            // Text evidence is optional and must not consume that reservation;
-            // serving replay admits it separately when capacity is available.
+            let observer = SchemaBuildObserver::new_scan(semantic_work, cancellation);
+            // Bootstrap observes the complete mandatory semantic budget under
+            // its retained peak worker reservation. Optional text evidence is
+            // omitted; serving replay admits it separately when capacity allows.
             let delta = state
                 .catalog
                 .replay_observed_cancellable_with_text_observer(
@@ -305,7 +302,7 @@ impl TenantSchemaSession {
                 .catalog
                 .replay_delta_work_units(&delta, block.identity())
                 .map_err(SchemaSessionFailure::Schema)?;
-            admit_replay_delta_work(recovery, &observer, baseline, actual, cancellation)?;
+            extend_bootstrap_delta_work(&observer, baseline, actual, cancellation)?;
             ensure_frontier_slot(&state, snapshot.scope().shard_id())?;
             let frontier = validated_frontier(
                 snapshot.scope().shard_id(),
@@ -340,6 +337,21 @@ fn admit_replay_delta_work(
     }
     let additional = actual.saturating_sub(baseline);
     extend_replay_work(reservation, additional)?;
+    observer
+        .increase_limit(additional)
+        .map_err(map_observation_failure)
+}
+
+fn extend_bootstrap_delta_work(
+    observer: &SchemaBuildObserver<'_>,
+    baseline: u64,
+    actual: u64,
+    cancellation: &dyn ScanCancellation,
+) -> Result<(), SchemaSessionFailure> {
+    if cancellation.is_cancelled() {
+        return Err(SchemaSessionFailure::Cancelled);
+    }
+    let additional = actual.saturating_sub(baseline);
     observer
         .increase_limit(additional)
         .map_err(map_observation_failure)

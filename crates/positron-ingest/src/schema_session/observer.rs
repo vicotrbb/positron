@@ -70,3 +70,53 @@ impl ScanObserver for SchemaBuildObserver<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Cancellation(AtomicBool);
+
+    impl ScanCancellation for Cancellation {
+        fn is_cancelled(&self) -> bool {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn cumulative_work_is_preserved_when_a_decoded_delta_extends_the_bound() {
+        let cancellation = Cancellation(AtomicBool::new(false));
+        let observer = SchemaBuildObserver::new_scan(33, &cancellation);
+        assert_eq!(observer.observe_work(32), Ok(()));
+        assert_eq!(observer.increase_limit(2), Ok(()));
+        assert_eq!(observer.observe_work(3), Ok(()));
+        assert_eq!(observer.consumed(), 35);
+        assert_eq!(
+            observer.observe_work(1),
+            Err(ScanObservationFailureCode::BudgetExhausted)
+        );
+        assert_eq!(observer.consumed(), 35);
+        cancellation.0.store(true, Ordering::Relaxed);
+        assert_eq!(
+            observer.observe_work(0),
+            Err(ScanObservationFailureCode::Cancelled)
+        );
+    }
+
+    #[test]
+    fn cumulative_work_and_ceiling_overflow_fail_closed() {
+        let cancellation = Cancellation(AtomicBool::new(false));
+        let observer = SchemaBuildObserver::new_scan(u64::MAX, &cancellation);
+        assert_eq!(
+            observer.increase_limit(1),
+            Err(ScanObservationFailureCode::BudgetExhausted)
+        );
+        assert_eq!(observer.observe_work(u64::MAX), Ok(()));
+        assert_eq!(
+            observer.observe_work(1),
+            Err(ScanObservationFailureCode::BudgetExhausted)
+        );
+        assert_eq!(observer.consumed(), u64::MAX);
+    }
+}

@@ -130,13 +130,6 @@ impl<'authority> SchemaReplayBuilder<'authority> {
             &mut self.recovery,
             cancellation,
         )?;
-        self.recovery
-            .try_resize(peak_resources_with_work(
-                self.source_bytes,
-                u64::try_from(snapshot.blocks().len())
-                    .map_err(|_| SchemaSessionFailure::ReplayLimitExceeded)?,
-            )?)
-            .map_err(|_| SchemaSessionFailure::StateUnavailable)?;
         let reachable_work = u64::try_from(snapshot.blocks().len())
             .map_err(|_| SchemaSessionFailure::ReplayLimitExceeded)?;
         let observer = SchemaBuildObserver::new_scan(reachable_work, cancellation);
@@ -168,15 +161,7 @@ impl<'authority> SchemaReplayBuilder<'authority> {
             return Err(SchemaSessionFailure::StateUnavailable);
         }
         let retention_work = self.session.retain_reachable_indexes_work_units()?;
-        self.recovery
-            .try_resize(peak_resources_with_work(self.source_bytes, retention_work)?)
-            .map_err(|_| SchemaSessionFailure::StateUnavailable)?;
-        let observer = SchemaBuildObserver::new_scan(
-            self.recovery
-                .granted()
-                .get(positron_kernel::ResourceDimension::CpuWorkUnits),
-            cancellation,
-        );
+        let observer = SchemaBuildObserver::new_scan(retention_work, cancellation);
         self.session.retain_reachable_indexes_observed(
             &self.reachable_indexes,
             cancellation,
@@ -207,31 +192,11 @@ fn peak_resources(source_bytes: u64) -> Result<ResourceAmounts, SchemaSessionFai
     .ok()
     .and_then(|bytes| bytes.checked_add(source_bytes))
     .ok_or(SchemaSessionFailure::ReplayLimitExceeded)?;
-    active_resources_with_work(memory, 1)
-}
-
-fn peak_resources_with_work(
-    source_bytes: u64,
-    reachable_work: u64,
-) -> Result<ResourceAmounts, SchemaSessionFailure> {
-    let working = SchemaBudget::replay_working_memory_bytes(1_048_576)
-        .ok_or(SchemaSessionFailure::ReplayLimitExceeded)?;
-    let reachable = SchemaBudget::system_max_entries()
-        .checked_mul(std::mem::size_of::<(StoreBlockIdentity, [u8; 32])>())
-        .ok_or(SchemaSessionFailure::ReplayLimitExceeded)?;
-    let serialized = SchemaBudget::release_1()
-        .map_err(SchemaSessionFailure::Schema)?
-        .max_persistent_bytes();
-    let memory = u64::try_from(
-        working
-            .checked_add(reachable)
-            .and_then(|bytes| bytes.checked_add(serialized))
-            .ok_or(SchemaSessionFailure::ReplayLimitExceeded)?,
-    )
-    .ok()
-    .and_then(|bytes| bytes.checked_add(source_bytes))
-    .ok_or(SchemaSessionFailure::ReplayLimitExceeded)?;
-    active_resources_with_work(memory, reachable_work)
+    // Bootstrap is one sequential tenant-attributed repair task. Its CPU
+    // claim accounts for the live worker, while complete checked semantic
+    // work bounds remain enforced independently by the scan observers.
+    // Serving replay continues to admit its complete operation work.
+    Ok(ResourceAmounts::new([memory, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0]))
 }
 
 fn active_resources(memory: u64) -> Result<ResourceAmounts, SchemaSessionFailure> {

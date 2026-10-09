@@ -174,6 +174,11 @@ the segment object key over a domain separator plus that commit's authenticated
 `durable_bytes`, sequence, and Commit Position. Recovery derives the same exact
 per-block evidence; a later frontier never replaces an earlier receipt.
 
+Before a new active segment becomes Catalog-reachable, creation durably
+publishes an authenticated empty frontier with the header byte length,
+sequence zero, and the segment base Commit Position. This provides a proven
+truncation boundary for an interrupted first append.
+
 Acknowledgment is permitted only after this order completes:
 
 1. write the frame-length prefix, protect the frame, and complete its bytes;
@@ -198,6 +203,9 @@ prefix it names. Every record length, sequence-derived context, encrypted-frame
 tag, and Commit Position must agree.
 
 - Missing or truncated bytes at or before the frontier are corruption.
+- A missing frontier with any payload bytes is ambiguous integrity and fences
+  recovery without truncation. A legacy header-only segment remains readable
+  as empty.
 - Authentication failure, including wrong-key recovery, fails closed.
 - Bytes after the frontier are unacknowledged and may be truncated only while
   the Catalog still names the segment active.
@@ -212,6 +220,11 @@ Recovery and append require Resource Governor reservations. Cancellation is
 observed before admission; admitted durability work runs to a typed terminal
 outcome. Any post-write append failure poisons the live ledger so no retry can
 reuse an AEAD sequence before recovery creates a fresh segment and DEK.
+
+Startup and offline integrity verification authenticate each active segment's
+header and frontier to bound its durable byte traversal before checking the
+byte budget. A budget too small for that prefix reports incomplete with the
+segment omitted; a complete traversal accounts for its authenticated bytes.
 
 ## Migration policy
 

@@ -672,7 +672,8 @@ fn preparation_capacity_is_consumed_by_the_admitted_append() -> Result<(), Box<d
 }
 
 #[test]
-fn recovery_discards_a_partial_first_frame_without_a_frontier() -> Result<(), Box<dyn Error>> {
+fn recovery_discards_a_partial_first_frame_after_the_authenticated_empty_frontier()
+-> Result<(), Box<dyn Error>> {
     with_fixture(|authority, catalog, scope| {
         let key = || SegmentProtectionKey::from_owned(Box::new([0x75; 32]));
         let ledger = ActiveSegmentLedger::open(authority, catalog, scope, key())?;

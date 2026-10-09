@@ -488,12 +488,35 @@ fn write_authenticated_segment_fixture(
     let original_segment = fs::read(&segment_path)?;
     let header = decode_header(&original_segment)?;
     let object = object_context(scope, segment)?;
-    let key = DataProtection::unwrap_segment_key_with_route(
+    let old_key = DataProtection::unwrap_segment_key_with_route(
         &wrapping.key,
         header.wrapped_key,
         instance.to_bytes(),
         object,
         header.route,
+    )?;
+    // A malformed authenticated fixture uses a fresh DEK rather than
+    // reusing the initialized segment's sequence-zero frontier nonce.
+    let metadata_context =
+        object.frame(SegmentFramePurpose::SegmentMetadata, FrameSequence::new(0))?;
+    let metadata = DataProtection::open_frame(
+        &old_key,
+        metadata_context,
+        header.encrypted_metadata,
+        FrameLimits::new(256)?,
+    )?;
+    let key = DataProtection::random_key(object)?;
+    let wrapped = DataProtection::wrap_segment_key_with_route(
+        &wrapping.key,
+        &key,
+        instance.to_bytes(),
+        header.route,
+    )?;
+    let encrypted_metadata = DataProtection::protect_frame(
+        &key,
+        metadata_context,
+        metadata.as_plaintext(),
+        FrameLimits::new(256)?,
     )?;
     let mut plaintext = Vec::with_capacity(25 + payload.len());
     plaintext.extend_from_slice(&identity.to_bytes());
@@ -513,10 +536,11 @@ fn write_authenticated_segment_fixture(
         FrameLimits::new(1_048_576)?,
     )?;
     let frame_length = u32::try_from(frame.as_bytes().len())?;
-    let mut encoded_segment = original_segment
-        .get(..header.encoded_bytes)
-        .ok_or("segment header length exceeds fixture")?
-        .to_vec();
+    let mut encoded_segment = crate::active_segment_ledger::format::encode_header(
+        header.route,
+        &wrapped,
+        encrypted_metadata.as_bytes(),
+    )?;
     encoded_segment.extend_from_slice(&frame_length.to_be_bytes());
     encoded_segment.extend_from_slice(frame.as_bytes());
     fs::write(&segment_path, &encoded_segment)?;

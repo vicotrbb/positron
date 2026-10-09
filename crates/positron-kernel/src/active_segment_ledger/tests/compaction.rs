@@ -1172,9 +1172,10 @@ fn ambiguous_output_append_is_reported_without_catalog_mutation() -> Result<(), 
         .map(|block| compaction_block(scope, block))
         .collect::<Result<Vec<_>, _>>()?;
     let preparation = ledger.prepare_compaction(&snapshot)?;
-    let failure = with_ledger_fault(LedgerFileEvent::SynchronizeFrontierDirectory, || {
-        ledger.compact_sealed_with_cancellation(blocks, preparation, || false)
-    })
+    let failure = with_ledger_faults_after(
+        &[(LedgerFileEvent::SynchronizeFrontierDirectory, 1)],
+        || ledger.compact_sealed_with_cancellation(blocks, preparation, || false),
+    )
     .expect_err("ambiguous output append must be surfaced");
     assert_eq!(failure.code(), LedgerFailureCode::StorageUnavailable);
     assert_eq!(
@@ -1614,7 +1615,10 @@ fn typed_compaction_task_couples_the_exact_manifest_and_terminal_record()
     let tenant = TenantId::from_bytes([0x64; 16])?;
     super::retention_frontier::install_governance_policy(&catalog, instance, tenant, 60, 0xe4)?;
     let scope = SegmentScope::new(tenant, SignalKind::Logs, VirtualShardId::new(61)?);
-    let retention_time = RetentionTimeAuthority::establish()?;
+    // This test verifies immutable task bindings, not wall-clock advancement.
+    // Keep both source segments in one retention bucket regardless of I/O load.
+    let (retention_time, _) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
     let key = || SegmentProtectionKey::from_owned(Box::new([0xe5; 32]));
     for (identity, payload) in [
         ([0xe6; 16], b"bound-first".as_slice()),

@@ -156,26 +156,19 @@ pub(super) fn ensure_replay_capacity(
     }
 }
 
-pub(super) fn resize_replay_work(
-    recovery: &mut ResourceReservation<'_>,
+pub(super) fn bootstrap_replay_work(
     payload_bytes: usize,
     reconciliation_work: u64,
-) -> Result<(), SchemaSessionFailure> {
-    // Bootstrap reserves mandatory decode/discovery work plus the bounded
-    // reconciliation traversal. Optional text evidence is deliberately
-    // omitted here; serving replay admits it separately when capacity allows.
+) -> Result<u64, SchemaSessionFailure> {
+    // Bootstrap's protected reservation covers one sequential worker and
+    // complete peak memory. This separate cumulative semantic ceiling covers
+    // mandatory decode/discovery and reconciliation without optional text.
     let reduced_work = SchemaBudget::replay_decode_work_units(payload_bytes)
         .ok_or(SchemaSessionFailure::ReplayLimitExceeded)?;
-    let reduced_work = reduced_work
+    reduced_work
         .checked_add(1)
         .and_then(|work| work.checked_add(reconciliation_work))
-        .ok_or(SchemaSessionFailure::ReplayLimitExceeded)?;
-    let current = recovery.granted().get(ResourceDimension::MemoryBytes);
-    let reduced = ResourceAmounts::new([current, 0, 0, 0, 0, 0, 0, 0, reduced_work, 0, 0]);
-    recovery
-        .try_resize(reduced)
-        .map(|_| ())
-        .map_err(|_| SchemaSessionFailure::StateUnavailable)
+        .ok_or(SchemaSessionFailure::ReplayLimitExceeded)
 }
 
 pub(super) fn extend_replay_work(
@@ -211,9 +204,26 @@ pub(super) fn extend_replay_work(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReplaySnapshotBounds, reserve_replay_snapshot_capacity};
+    use super::{ReplaySnapshotBounds, bootstrap_replay_work, reserve_replay_snapshot_capacity};
     use positron_kernel::ResourceDimension;
     use positron_signals::SchemaBudget;
+
+    #[test]
+    fn bootstrap_work_preserves_complete_checked_semantic_bounds() {
+        let decode = SchemaBudget::replay_decode_work_units(1_048_576).expect("maximum decode");
+        assert_eq!(
+            bootstrap_replay_work(1_048_576, 40_961),
+            Ok(decode + 40_962)
+        );
+        assert_eq!(
+            bootstrap_replay_work(0, u64::MAX),
+            Err(super::SchemaSessionFailure::ReplayLimitExceeded)
+        );
+        assert_eq!(
+            bootstrap_replay_work(usize::MAX, 1),
+            Err(super::SchemaSessionFailure::ReplayLimitExceeded)
+        );
+    }
 
     #[test]
     fn replay_snapshot_memory_admission_counts_tiny_block_slots_exactly() {

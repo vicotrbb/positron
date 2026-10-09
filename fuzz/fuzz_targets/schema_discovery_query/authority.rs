@@ -15,7 +15,7 @@ pub fn establish(
     path: &Path,
     tenant: TenantId,
 ) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
-    establish_with_compaction_pool(path, tenant, false)
+    establish_with_compaction_pool(path, tenant, false, false)
 }
 
 #[allow(dead_code)]
@@ -23,13 +23,22 @@ pub fn establish_for_compaction(
     path: &Path,
     tenant: TenantId,
 ) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
-    establish_with_compaction_pool(path, tenant, true)
+    establish_with_compaction_pool(path, tenant, true, false)
+}
+
+#[allow(dead_code)]
+pub fn establish_for_schema_recovery(
+    path: &Path,
+    tenant: TenantId,
+) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
+    establish_with_compaction_pool(path, tenant, false, true)
 }
 
 fn establish_with_compaction_pool(
     path: &Path,
     tenant: TenantId,
     large_compaction_pool: bool,
+    schema_recovery: bool,
 ) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
     let volume = PrimaryDataVolume::acquire(path, MountQualification::LocalHost)?;
     let cardinality = InventoryCardinalityLimits::new(1, 16)?;
@@ -43,13 +52,41 @@ fn establish_with_compaction_pool(
     let small = uniform(2);
     let durability = add(add(large, large)?, large)?;
     let recovery = add(add(add(durability, large)?, large)?, uniform(12))?;
+    // Bootstrap reconstruction admits its full 1 MiB working-memory peak.
+    // Keep CPU and all other dimensions unchanged so cumulative recovery
+    // still exceeds the old tiny CPU allowance during this model.
+    let ordinary_memory = if schema_recovery {
+        90_000_000
+    } else {
+        5_000_000
+    };
     let ordinary = if large_compaction_pool {
         ResourceAmounts::new([
-            5_000_000, 32, 32, 5_000_000, 2_048, 32, 32, 32, 64, 32, 2_000_000,
+            ordinary_memory,
+            32,
+            32,
+            5_000_000,
+            2_048,
+            32,
+            32,
+            32,
+            64,
+            32,
+            2_000_000,
         ])
     } else {
         ResourceAmounts::new([
-            5_000_000, 32, 32, 5_000_000, 2_048, 32, 32, 32, 32, 32, 2_000_000,
+            ordinary_memory,
+            32,
+            32,
+            5_000_000,
+            2_048,
+            32,
+            32,
+            32,
+            32,
+            32,
+            2_000_000,
         ])
     };
     let raw = add(

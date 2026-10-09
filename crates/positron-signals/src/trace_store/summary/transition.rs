@@ -169,8 +169,7 @@ fn find_sorted_observed<T, K: Ord + Copy>(
             .observe_work(1)
             .map_err(TraceStoreFailure::observation)?;
         let middle = lower
-            .checked_add(upper - lower)
-            .and_then(|sum| sum.checked_div(2))
+            .checked_add((upper - lower) / 2)
             .ok_or_else(TraceStoreFailure::limit_exceeded)?;
         let value = values
             .get(middle)
@@ -179,7 +178,7 @@ fn find_sorted_observed<T, K: Ord + Copy>(
             std::cmp::Ordering::Less => upper = middle,
             std::cmp::Ordering::Equal => return Ok(Ok(middle)),
             std::cmp::Ordering::Greater => {
-                lower = lower
+                lower = middle
                     .checked_add(1)
                     .ok_or_else(TraceStoreFailure::limit_exceeded)?;
             },
@@ -207,4 +206,56 @@ fn semantic_equal_observed(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ScanObservationFailureCode, ScanObserver};
+    use std::cell::Cell;
+
+    struct WorkMeter(Cell<u64>);
+
+    impl ScanObserver for WorkMeter {
+        fn observe_work(&self, units: u64) -> Result<(), ScanObservationFailureCode> {
+            self.0.set(self.0.get().saturating_add(units));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn sorted_lookup_finds_every_span_and_insertion_boundary() {
+        let values = [2_u64, 4, 6, 8, 10];
+        let meter = WorkMeter(Cell::new(0));
+        for key in 0..=12 {
+            let actual = find_sorted_observed(
+                &values,
+                key,
+                |value| *value,
+                &super::super::super::scan::NeverCancelled,
+                &meter,
+            )
+            .expect("bounded lookup");
+            assert_eq!(actual, values.binary_search(&key), "key {key}");
+        }
+    }
+
+    #[test]
+    fn sorted_lookup_work_is_logarithmic_for_a_late_insertion() {
+        let values: Vec<u64> = (0..4_096).collect();
+        let meter = WorkMeter(Cell::new(0));
+        assert_eq!(
+            find_sorted_observed(
+                &values,
+                4_096,
+                |value| *value,
+                &super::super::super::scan::NeverCancelled,
+                &meter,
+            )
+            .expect("bounded lookup"),
+            Err(4_096)
+        );
+        assert!(meter.0.get() <= 13, "lookup work {}", meter.0.get());
+        println!("4096-span end insertion: {} comparisons", meter.0.get());
+    }
 }
