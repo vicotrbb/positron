@@ -1,5 +1,5 @@
 {
-  "schema_digest": "204391aa83d0ed56d7d4ba510a2b03946ec40a75815f7c28c5357f4b770ce21c",
+  "schema_digest": "f51bd93ab150a68e061355ac98b90204ccfecd7e343e1d92e662694b5be63624",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -922,6 +922,141 @@
         {"json":"resource_generation","type":"uint64","minimum":1,"description":"current policy generation"},
         {"json":"semantic_diff","type":"string","minimum_length":1,"maximum_length":1024,"description":"redacted policy generation change"}
       ]
-    }
+    },
+{
+      "rpc": "positron.v1.MaintenanceService/AbandonSegment",
+      "method": "POST",
+      "path": "/v1/maintenance:abandon-segment",
+      "request": "SegmentAbandonmentRequest",
+      "response": "SegmentAbandonmentResponse",
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 768,
+      "max_response_bytes": 65536,
+      "unknown_fields": "reject",
+      "request_fields": [
+            {
+                  "proto": "tenant",
+                  "json": "tenant",
+                  "type": "string",
+                  "number": 1,
+                  "deprecated": false
+            },
+            {
+                  "proto": "signal",
+                  "json": "signal",
+                  "type": "string",
+                  "number": 2,
+                  "deprecated": false
+            },
+            {
+                  "proto": "shard",
+                  "json": "shard",
+                  "type": "uint32",
+                  "number": 3,
+                  "deprecated": false
+            },
+            {
+                  "proto": "segment",
+                  "json": "segment",
+                  "type": "string",
+                  "number": 4,
+                  "deprecated": false
+            },
+            {
+                  "proto": "expected_catalog_generation",
+                  "json": "expected_catalog_generation",
+                  "type": "uint64",
+                  "number": 5,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "confirmation",
+                  "json": "confirmation",
+                  "type": "string",
+                  "number": 6,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "idempotency_key",
+                  "json": "idempotency_key",
+                  "type": "string",
+                  "number": 7,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "accept_data_loss",
+                  "json": "accept_data_loss",
+                  "type": "bool",
+                  "number": 8,
+                  "deprecated": false
+            },
+            {
+                  "proto": "operation_id",
+                  "json": "operation_id",
+                  "type": "string",
+                  "number": 9,
+                  "deprecated": false,
+                  "optional": true
+            }
+      ],
+      "response_fields": [
+            {
+                  "proto": "catalog_generation",
+                  "json": "catalog_generation",
+                  "type": "uint64",
+                  "number": 1,
+                  "deprecated": false
+            },
+            {
+                  "proto": "status",
+                  "json": "status",
+                  "type": "string",
+                  "number": 2,
+                  "deprecated": false
+            },
+            {
+                  "proto": "irreversible_boundary",
+                  "json": "irreversible_boundary",
+                  "type": "string",
+                  "number": 3,
+                  "deprecated": false
+            },
+            {
+                  "proto": "confirmation",
+                  "json": "confirmation",
+                  "type": "string",
+                  "number": 4,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "operation_id",
+                  "json": "operation_id",
+                  "type": "string",
+                  "number": 5,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "finding",
+                  "json": "finding",
+                  "type": "IntegrityQuarantineFinding",
+                  "number": 6,
+                  "deprecated": false
+            }
+      ],
+      "responses": {
+            "200": "SegmentAbandonmentResponse",
+            "400": "invalid_request",
+            "401": "authentication_rejected",
+            "404": "source_unavailable",
+            "409": "precondition_failed or idempotency_conflict",
+            "503": "administration_unavailable"
+      }
+}
+
   ]
 }

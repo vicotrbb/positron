@@ -27,6 +27,13 @@ impl CatalogSnapshot {
                 scopes.push(metadata.scope);
             }
         }
+        for finding in crate::integrity_abandonment_findings(self)
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
+        {
+            if finding.scope().tenant_id() == tenant && finding.scope().signal_kind() == signal {
+                scopes.push(finding.scope());
+            }
+        }
         scopes.sort_unstable();
         scopes.dedup();
         Ok(scopes)

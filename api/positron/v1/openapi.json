@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "204391aa83d0ed56d7d4ba510a2b03946ec40a75815f7c28c5357f4b770ce21c"
+    "x-positron-schema-digest": "f51bd93ab150a68e061355ac98b90204ccfecd7e343e1d92e662694b5be63624"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -601,6 +601,38 @@
           "401": {"description": "Tenant-administration authentication failed."},
           "409": {"description": "The resource generation is stale or the idempotency key binds different content."},
           "503": {"description": "Policy administration is unavailable."}
+        }
+      }
+    },
+    "/v1/maintenance:abandon-segment": {
+      "post": {
+        "operationId": "AbandonSegment",
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SegmentAbandonmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Explicit loss preview or durable receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentAbandonmentResponse"
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -1749,8 +1781,81 @@
             ]
           }
         }
+      },
+    "SegmentAbandonmentRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tenant",
+        "signal",
+        "shard",
+        "segment",
+        "accept_data_loss"
+      ],
+      "properties": {
+        "tenant": {
+          "type": "string"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "shard": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "segment": {
+          "type": "string"
+        },
+        "expected_catalog_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "confirmation": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "accept_data_loss": {
+          "type": "boolean"
+        },
+        "operation_id": {
+          "type": "string"
+        }
       }
     },
+    "SegmentAbandonmentResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalog_generation",
+        "status",
+        "irreversible_boundary",
+        "finding"
+      ],
+      "properties": {
+        "catalog_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string"
+        },
+        "irreversible_boundary": {
+          "type": "string"
+        },
+        "confirmation": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "finding": {
+          "$ref": "#/components/schemas/IntegrityQuarantineFinding"
+        }
+      }
+    }
+  },
     "securitySchemes": {
       "apiKeyBearer": {
         "type": "http",

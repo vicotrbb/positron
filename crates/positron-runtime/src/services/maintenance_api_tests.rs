@@ -84,3 +84,6 @@ mod status;
 mod verification;
 #[path = "maintenance_api_tests/window.rs"]
 mod window;
+
+#[path = "maintenance_api_tests/abandonment.rs"]
+mod abandonment;

@@ -46,7 +46,17 @@ impl ServiceHandle {
                 .catalog_secret(instance.instance)
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
         )
-        .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)
+        .map_err(|failure| {
+            if matches!(
+                failure.code(),
+                positron_kernel::CatalogFailureCode::IntegrityCorruption
+                    | positron_kernel::CatalogFailureCode::AuthenticationFailed
+                    | positron_kernel::CatalogFailureCode::UnsupportedFormat
+            ) {
+                self.request_integrity_fence();
+            }
+            MaintenanceServiceFailure::AdministrationUnavailable
+        })
     }
 
     pub(super) fn maintenance_status_now(&self) -> Result<u64, MaintenanceServiceFailure> {

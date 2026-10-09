@@ -46,6 +46,18 @@ pub(super) fn reconstruct(
             if base != frontier || end < base {
                 return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
             }
+            // Empty sealed restart markers can share the lost segment's base.
+            // Authenticate their emptiness before advancing across the hole.
+            while let Some(marker) = segments.next_if(|candidate| candidate.base_position == base) {
+                if marker.state != SegmentState::Sealed {
+                    return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+                }
+                let (_, recovered) =
+                    storage.recover_segment_with_mode(marker, protection, instance, mode)?;
+                if recovered.frontier != base || !recovered.blocks.is_empty() {
+                    return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+                }
+            }
             frontier = end;
             continue;
         }

@@ -65,6 +65,11 @@ const TENANT_ALIAS_METHODS: &[MethodSpec] = &[MethodSpec {
 }];
 const MAINTENANCE_METHODS: &[MethodSpec] = &[
     MethodSpec {
+        name: "AbandonSegment",
+        input: ".positron.v1.SegmentAbandonmentRequest",
+        output: ".positron.v1.SegmentAbandonmentResponse",
+    },
+    MethodSpec {
         name: "Status",
         input: ".positron.v1.MaintenanceStatusRequest",
         output: ".positron.v1.MaintenanceStatusResponse",

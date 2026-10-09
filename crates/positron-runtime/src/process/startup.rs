@@ -162,7 +162,9 @@ impl ApplicationRuntime {
                             ));
                         },
                     };
-                    state.transition(ProcessPhase::Fenced);
+                    state
+                        .health()
+                        .record_integrity_fence(bootstrap_fence_reason(failure.failure.code()));
                     return Ok(RunningProcess {
                         state,
                         listeners: std::sync::Mutex::new(listeners),
@@ -566,7 +568,11 @@ fn restricted_fenced_process(
             &mut tasks,
         ));
     }
-    state.transition(ProcessPhase::Fenced);
+    let reason = match failure {
+        ExitOutcome::StartupUnavailable(code) => bootstrap_fence_reason(code),
+        _ => IntegrityFenceReason::AmbiguousIntegrity,
+    };
+    state.health().record_integrity_fence(reason);
     Ok(RunningProcess {
         state,
         listeners: std::sync::Mutex::new(listeners),
@@ -584,6 +590,15 @@ fn restricted_fenced_process(
         drain_deadline,
         terminal_cleanup_complete: false,
     })
+}
+
+const fn bootstrap_fence_reason(code: BootstrapFailureCode) -> IntegrityFenceReason {
+    match code {
+        BootstrapFailureCode::InconsistentRoots => IntegrityFenceReason::UnreliableOwnership,
+        BootstrapFailureCode::IdentityMismatch => IntegrityFenceReason::IdentityMismatch,
+        BootstrapFailureCode::LedgerUnavailable => IntegrityFenceReason::DurabilityAmbiguity,
+        _ => IntegrityFenceReason::AmbiguousIntegrity,
+    }
 }
 
 const fn fences(code: BootstrapFailureCode) -> bool {

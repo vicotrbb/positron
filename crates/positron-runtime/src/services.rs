@@ -29,6 +29,7 @@ pub(crate) mod policy;
 mod query;
 mod schema_bootstrap;
 mod schema_maintenance;
+mod segment_abandonment;
 pub(crate) mod tenant_aliases;
 pub(crate) mod tenant_lifecycle;
 pub(crate) mod tenant_quotas;
@@ -256,7 +257,16 @@ impl ServiceHandle {
     /// integrity ambiguity. This method never changes listeners, tasks, or
     /// volume ownership itself.
     pub fn request_integrity_fence(&self) {
-        self.mark_integrity_fenced();
+        self.request_integrity_fence_with(crate::IntegrityFenceReason::AmbiguousIntegrity);
+    }
+
+    /// Requests retirement for one trusted, typed unsafe-state finding.
+    pub fn request_integrity_fence_with(&self, reason: crate::IntegrityFenceReason) {
+        if let Ok(target) = self.integrity_health.lock()
+            && let Some(health) = target.as_ref()
+        {
+            health.request_integrity_fence(reason);
+        }
     }
 
     #[cfg(test)]

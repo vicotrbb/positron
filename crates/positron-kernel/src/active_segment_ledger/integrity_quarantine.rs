@@ -70,6 +70,7 @@ pub fn integrity_quarantine_findings(
         findings.push(IntegrityQuarantineFinding {
             scope,
             segment,
+            abandoned: object.starts_with(super::super::abandonment::ABANDONMENT_MAGIC),
             base_position,
             sealed_frontier,
             event_range,

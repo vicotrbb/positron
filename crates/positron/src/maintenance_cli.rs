@@ -6,7 +6,7 @@ use positron_api::maintenance::{
     MaintenancePauseRequest, MaintenanceResumeRequest, MaintenanceRunRequest,
     MaintenanceServiceClient, MaintenanceServiceClientFailure, MaintenanceStatusRequest,
     MaintenanceTaskAcknowledgement, MaintenanceTaskStatus, MaintenanceTransport,
-    MaintenanceWindowRequest,
+    MaintenanceWindowRequest, SegmentAbandonmentRequest,
 };
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
@@ -20,6 +20,30 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
     let client =
         MaintenanceServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     match command {
+        Command::AbandonSegment(request) => {
+            let response = client
+                .abandon_segment(bearer, &request)
+                .map_err(client_failure)?;
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            use std::io::Write;
+            writeln!(
+                &mut output,
+                "status={} catalog_generation={} irreversible_boundary={}",
+                response.status, response.catalog_generation, response.irreversible_boundary
+            )
+            .map_err(|_| "abandonment output unavailable")?;
+            write_integrity_finding(&mut output, &response.finding)?;
+            if let Some(confirmation) = response.confirmation {
+                writeln!(&mut output, "confirmation={confirmation}")
+                    .map_err(|_| "abandonment output unavailable")?;
+            }
+            if let Some(operation) = response.operation_id {
+                writeln!(&mut output, "operation_id={operation}")
+                    .map_err(|_| "abandonment output unavailable")?;
+            }
+            flush_integrity_findings(&mut output)?;
+        },
         Command::Status => {
             let completed = complete_status(&client, bearer)?;
             println!(
@@ -299,6 +323,7 @@ enum Command {
     Pause(MaintenancePauseRequest),
     Resume(MaintenanceResumeRequest),
     Window(MaintenanceWindowRequest),
+    AbandonSegment(SegmentAbandonmentRequest),
 }
 
 fn parse(
@@ -307,14 +332,22 @@ fn parse(
     let operation = arguments.next().ok_or(USAGE)?;
     if !matches!(
         operation.as_str(),
-        "status" | "explain" | "run" | "pause" | "resume" | "window"
+        "status" | "explain" | "run" | "pause" | "resume" | "window" | "abandon-segment"
     ) {
         return Err(USAGE);
     }
     let mut options = BTreeMap::new();
     let mut credential_stdin = false;
     let mut allow_plaintext = false;
+    let mut accept_data_loss = false;
     while let Some(option) = arguments.next() {
+        if option == "--accept-data-loss" {
+            if accept_data_loss {
+                return Err("duplicate maintenance option");
+            }
+            accept_data_loss = true;
+            continue;
+        }
         if option == "--credential-stdin" {
             if credential_stdin {
                 return Err("duplicate maintenance option");
@@ -334,6 +367,9 @@ fn parse(
             "--endpoint"
                 | "--server-name"
                 | "--trust-file"
+                | "--segment"
+                | "--confirmation"
+                | "--operation-id"
                 | "--task-id"
                 | "--tenant"
                 | "--signal"
@@ -357,7 +393,26 @@ fn parse(
         );
     }
     let transport = crate::administrative_cli::transport(&mut options, allow_plaintext, take)?;
+    if accept_data_loss && operation != "abandon-segment" {
+        return Err("option does not apply to maintenance operation");
+    }
     let command = match operation.as_str() {
+        "abandon-segment" => Command::AbandonSegment(SegmentAbandonmentRequest {
+            tenant: take(&mut options, "--tenant")?,
+            signal: take(&mut options, "--signal")?,
+            shard: take(&mut options, "--shard")?
+                .parse()
+                .map_err(|_| "invalid shard")?,
+            segment: take(&mut options, "--segment")?,
+            expected_catalog_generation: options
+                .remove("--expected-catalog-generation")
+                .map(|value| value.parse().map_err(|_| "invalid catalog generation"))
+                .transpose()?,
+            confirmation: options.remove("--confirmation"),
+            idempotency_key: options.remove("--idempotency-key"),
+            accept_data_loss,
+            operation_id: options.remove("--operation-id"),
+        }),
         "status" => Command::Status,
         "explain" => Command::Explain(MaintenanceExplainRequest {
             identity: take(&mut options, "--task-id")?,
@@ -405,6 +460,7 @@ fn parse(
     }
     match &command {
         Command::Status | Command::Explain(_) => {},
+        Command::AbandonSegment(request) => request.validate().map_err(|_| "invalid abandonment request; confirmation requires --accept-data-loss and exact preview")?,
         Command::Run(request) => request
             .validate()
             .map_err(|_| "invalid maintenance run request")?,
@@ -427,7 +483,7 @@ fn take(options: &mut BTreeMap<String, String>, name: &str) -> Result<String, &'
         .ok_or("required maintenance option absent")
 }
 
-const USAGE: &str = "usage: positron maintenance status|explain|run|pause|resume|window --endpoint IP:PORT --credential-stdin [operation options] [--server-name NAME --trust-file PATH | --allow-plaintext]";
+const USAGE: &str = "usage: positron maintenance status|explain|run|pause|resume|window|abandon-segment --endpoint IP:PORT --credential-stdin [operation options] [--server-name NAME --trust-file PATH | --allow-plaintext]";
 
 #[cfg(test)]
 mod tests {
@@ -451,6 +507,38 @@ mod tests {
                 latest_unix_nanos: Some(10),
             },
         }
+    }
+
+    #[test]
+    fn abandonment_cli_accepts_preview_and_refuses_unacknowledged_confirmation() {
+        let base = [
+            "abandon-segment",
+            "--endpoint",
+            "127.0.0.1:4318",
+            "--allow-plaintext",
+            "--credential-stdin",
+            "--tenant",
+            "64646464-6464-6464-6464-646464646464",
+            "--signal",
+            "logs",
+            "--shard",
+            "1",
+            "--segment",
+            "abababababababababababababababab",
+        ];
+        assert!(parse(base.into_iter().map(str::to_owned)).is_ok());
+        let mut confirmation = base.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        confirmation.extend([
+            "--confirmation".to_owned(),
+            "ab".repeat(32),
+            "--expected-catalog-generation".to_owned(),
+            "1".to_owned(),
+            "--idempotency-key".to_owned(),
+            "abababab-abab-abab-abab-abababababab".to_owned(),
+        ]);
+        assert!(parse(confirmation.clone().into_iter()).is_err());
+        confirmation.push("--accept-data-loss".to_owned());
+        assert!(parse(confirmation.into_iter()).is_ok());
     }
 
     #[test]

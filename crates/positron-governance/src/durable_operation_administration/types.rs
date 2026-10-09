@@ -18,6 +18,8 @@ pub enum DurableOperationKind {
     CatalogFormatMigration,
     /// A tenant-scoped Query export whose output manifest is the irreversible receipt.
     QueryExport,
+    /// Explicit, confirmed unpublication of one unrecoverable quarantined segment.
+    SegmentAbandonment,
 }
 
 impl DurableOperationKind {
@@ -27,6 +29,7 @@ impl DurableOperationKind {
         match self {
             Self::CatalogFormatMigration => DurableOperationBoundary::CatalogGenerationPublished,
             Self::QueryExport => DurableOperationBoundary::ExportManifestPublished,
+            Self::SegmentAbandonment => DurableOperationBoundary::CatalogGenerationPublished,
         }
     }
 
@@ -34,6 +37,7 @@ impl DurableOperationKind {
         match self {
             Self::CatalogFormatMigration => 1,
             Self::QueryExport => 2,
+            Self::SegmentAbandonment => 3,
         }
     }
 
@@ -41,6 +45,7 @@ impl DurableOperationKind {
         match code {
             1 => Ok(Self::CatalogFormatMigration),
             2 => Ok(Self::QueryExport),
+            3 => Ok(Self::SegmentAbandonment),
             _ => Err(DurableOperationFailure::PersistenceUnavailable),
         }
     }
@@ -128,7 +133,7 @@ impl DurableOperationRequest {
                 }
                 hasher.update(accepted_generation.to_be_bytes());
             },
-            DurableOperationKind::QueryExport => {
+            DurableOperationKind::QueryExport | DurableOperationKind::SegmentAbandonment => {
                 hasher.update(
                     applicable_tenant
                         .ok_or(DurableOperationFailure::InvalidInput)?
@@ -247,6 +252,48 @@ impl DurableOperationRequest {
         Ok(request)
     }
 
+    /// Binds a system-authorized explicit loss confirmation to one segment.
+    pub fn segment_abandonment(
+        principal: PrincipalId,
+        tenant: TenantId,
+        idempotency: AdministrativeIdempotencyKey,
+        target_identity: [u8; 16],
+        accepted_generation: u64,
+        accepted_at_unix_seconds: u64,
+        query_export_request_digest: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        if accepted_generation == 0
+            || accepted_at_unix_seconds == 0
+            || target_identity.iter().all(|byte| *byte == 0)
+            || query_export_request_digest.iter().all(|byte| *byte == 0)
+        {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        let kind = DurableOperationKind::SegmentAbandonment;
+        let mut hasher = Sha256::new();
+        hasher.update(REQUEST_DOMAIN);
+        hasher.update(principal.to_bytes());
+        hasher.update(idempotency.to_bytes());
+        hasher.update([kind.code()]);
+        hasher.update(tenant.to_bytes());
+        hasher.update(target_identity);
+        // The confirmation binds the exact source generation and data-loss range.
+        hasher.update(query_export_request_digest);
+        let digest: [u8; 32] = hasher.finalize().into();
+        let request = Self {
+            principal,
+            idempotency,
+            kind,
+            target_identity: Some(target_identity),
+            applicable_tenant: Some(tenant),
+            accepted_generation,
+            accepted_at_unix_seconds,
+            query_export_request_digest: Some(query_export_request_digest),
+            digest,
+        };
+        Ok(request)
+    }
+
     #[must_use]
     pub fn operation_id(&self) -> OperationId {
         OperationId::from_request(self)
@@ -289,7 +336,11 @@ impl DurableOperationRequest {
     /// Returns the full Query request commitment retained for durable resume.
     #[must_use]
     pub const fn query_export_request_digest(self) -> Option<[u8; 32]> {
-        self.query_export_request_digest
+        match self.kind {
+            DurableOperationKind::QueryExport => self.query_export_request_digest,
+            DurableOperationKind::CatalogFormatMigration
+            | DurableOperationKind::SegmentAbandonment => None,
+        }
     }
 
     /// Returns the tenant explicitly bound to a tenant-scoped operation.
@@ -329,6 +380,21 @@ impl DurableOperationRequest {
                 .target_identity
                 .and_then(|target_identity| {
                     Self::query_export(
+                        self.principal,
+                        self.applicable_tenant?,
+                        self.idempotency,
+                        target_identity,
+                        self.accepted_generation,
+                        self.accepted_at_unix_seconds,
+                        self.query_export_request_digest?,
+                    )
+                    .ok()
+                })
+                .is_some_and(|canonical| canonical == self),
+            DurableOperationKind::SegmentAbandonment => self
+                .target_identity
+                .and_then(|target_identity| {
+                    Self::segment_abandonment(
                         self.principal,
                         self.applicable_tenant?,
                         self.idempotency,

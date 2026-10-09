@@ -568,3 +568,41 @@ fn first_signal_closes_admission_joins_registered_tasks_and_releases_ownership_l
 const fn control_plane() -> &'static [ListenerRole] {
     &[ListenerRole::Control, ListenerRole::Operations]
 }
+
+#[test]
+fn typed_unsafe_state_fences_close_admission_before_retiring_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    for reason in [
+        positron_runtime::IntegrityFenceReason::UnreliableOwnership,
+        positron_runtime::IntegrityFenceReason::IdentityMismatch,
+        positron_runtime::IntegrityFenceReason::KeyEnvelopeMismatch,
+        positron_runtime::IntegrityFenceReason::DurabilityAmbiguity,
+    ] {
+        let roots = TestRoots::new("typed-unsafe-fence")?;
+        let listeners = ObservingListeners::default();
+        let tasks = ObservingTasks::default();
+        let mut process = ApplicationRuntime::start(
+            ServeConfiguration::new(
+                roots.bootstrap_paths()?,
+                InitializationMode::InitializeIfEmpty,
+            ),
+            HostInputs::new(&listeners, &tasks),
+        )?;
+        let services = process.services().ok_or("services")?;
+        services.request_integrity_fence_with(reason);
+        assert_eq!(
+            process.health().readiness(),
+            positron_runtime::Readiness::NotReady
+        );
+        drop(services);
+        assert!(process.apply_pending_integrity_fence());
+        assert_eq!(process.health().integrity_fence_reason(), Some(reason));
+        assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+        assert!(roots.acquire_volume_again().is_ok());
+        assert_eq!(
+            process.shutdown(ShutdownTrigger::FirstSignal),
+            positron_runtime::ExitOutcome::Graceful
+        );
+    }
+    Ok(())
+}

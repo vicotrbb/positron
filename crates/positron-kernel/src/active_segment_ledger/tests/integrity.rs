@@ -645,3 +645,161 @@ fn unavailable_or_mismatched_segment_key_fences_without_quarantine() -> Result<(
     assert_eq!(report.quarantined_segment(), None);
     Ok(())
 }
+
+#[test]
+fn confirmed_abandonment_preserves_evidence_and_explicit_read_holes() -> Result<(), Box<dyn Error>>
+{
+    let root = TemporaryRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(root.path(), MountQualification::LocalHost)?;
+    let authority = establish_authority(volume)?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new([0xc1; 16])?,
+        CatalogSecret::from_owned(Box::new([0xc2; 32]), Box::new([0xc3; 32])),
+    )?;
+    let scope = SegmentScope::new(
+        TenantId::from_bytes([0x64; 16])?,
+        SignalKind::Logs,
+        VirtualShardId::new(1)?,
+    );
+    let key = || SegmentProtectionKey::from_owned(Box::new([0xc5; 32]));
+    let ledger = ActiveSegmentLedger::open(&authority, &catalog, scope, key())?;
+    let empty = ledger.seal()?;
+    let ledger = ActiveSegmentLedger::open(&authority, &catalog, scope, key())?;
+    ledger.append(PreparedStoreBlock::new_with_authenticated_ranges_for_test(
+        scope,
+        StoreBlockIdentity::new([0xc6; 16])?,
+        b"lost".to_vec(),
+        AuthenticatedEventRange::known(UnixNanoseconds::new(1), UnixNanoseconds::new(2))
+            .map_err(|_| "range")?,
+        crate::IngestTime::from_authenticated_durable(UnixNanoseconds::new(30)),
+    )?)?;
+    let sealed = ledger.seal()?;
+    let path = root
+        .path()
+        .join("segments/sealed")
+        .join(segment_name(sealed.segment_id()));
+    fs::write(&path, b"corrupt evidence")?;
+    ActiveSegmentLedger::verify_catalog_integrity(
+        &authority,
+        &catalog,
+        catalog_integrity_request(
+            scope,
+            key(),
+            IntegrityVerificationMode::Online,
+            IntegrityScrubBudget::new(8).map_err(|_| "budget")?,
+            &IntegrityCancellation::new(),
+            TransactionId::new([0xc7; 16])?,
+            None,
+        ),
+    )?;
+    let snapshot = catalog.pin()?;
+    let plan = crate::SegmentAbandonmentPlan::preflight(&snapshot, scope, sealed.segment_id())?;
+    assert!(
+        crate::SegmentAbandonmentPlan::preflight(&snapshot, scope, sealed.segment_id())?
+            .confirm([0; 32])
+            .is_err(),
+        "implicit data loss is refused"
+    );
+    let confirmation = plan.confirmation_digest();
+    let objects = plan.confirm(confirmation)?;
+    let proposal = crate::CatalogProposal::new(
+        TransactionId::new([0xc8; 16])?,
+        snapshot.format_epoch().ok_or("epoch")?,
+        objects,
+    )?;
+    catalog.commit(
+        snapshot.identity(),
+        proposal,
+        Some(crate::AuditIntent::new(b"confirmed data loss".to_vec())?),
+    )?;
+    let current = catalog.pin()?;
+    assert_eq!(crate::integrity_abandonment_findings(&current)?.len(), 1);
+    assert_eq!(fs::read(&path)?, b"corrupt evidence");
+    let observed = CommittedLedgerReader::open(&authority, &catalog, scope, key())?.snapshot()?;
+    assert!(observed.blocks().is_empty());
+    assert_eq!(observed.quarantined_holes().len(), 1);
+    assert_eq!(observed.frontier(), sealed.frontier());
+    let reopened = ActiveSegmentLedger::open(&authority, &catalog, scope, key())?;
+    assert_eq!(reopened.snapshot()?.quarantined_holes().len(), 1);
+    drop(reopened);
+    let empty_path = root
+        .path()
+        .join("segments/sealed")
+        .join(segment_name(empty.segment_id()));
+    let original_empty = fs::read(&empty_path)?;
+    fs::write(&empty_path, b"malformed empty marker")?;
+    assert!(
+        CommittedLedgerReader::open(&authority, &catalog, scope, key())?
+            .snapshot()
+            .is_err()
+    );
+    fs::write(&empty_path, original_empty)?;
+
+    // A separately authenticated nonempty sibling at the same base must never
+    // be mistaken for an empty restart marker and silently omitted.
+    let sibling_root = TemporaryRoot::new()?;
+    let sibling_authority = establish_authority(PrimaryDataVolume::acquire(
+        sibling_root.path(),
+        MountQualification::LocalHost,
+    )?)?;
+    let sibling_catalog = Catalog::open(
+        &sibling_authority,
+        InstanceId::new([0xc1; 16])?,
+        CatalogSecret::from_owned(Box::new([0xc2; 32]), Box::new([0xc3; 32])),
+    )?;
+    let sibling = ActiveSegmentLedger::open(&sibling_authority, &sibling_catalog, scope, key())?;
+    sibling.append(PreparedStoreBlock::new_with_authenticated_ranges_for_test(
+        scope,
+        StoreBlockIdentity::new([0xcb; 16])?,
+        b"overlapping acknowledged block".to_vec(),
+        AuthenticatedEventRange::known(UnixNanoseconds::new(1), UnixNanoseconds::new(2))
+            .map_err(|_| "range")?,
+        crate::IngestTime::from_authenticated_durable(UnixNanoseconds::new(30)),
+    )?)?;
+    let sibling = sibling.seal()?;
+    for name in [
+        segment_name(sibling.segment_id()),
+        super::super::recovery::frontier_name(sibling.segment_id()),
+    ] {
+        fs::copy(
+            sibling_root.path().join("segments/sealed").join(&name),
+            root.path().join("segments/sealed").join(&name),
+        )?;
+    }
+    let basis = catalog.pin()?;
+    let mut objects = basis
+        .object_identities()
+        .map(|id| {
+            crate::CatalogObject::new(
+                basis
+                    .object(id)?
+                    .ok_or(crate::CatalogFailure::new(
+                        crate::CatalogFailureCode::InvalidInput,
+                    ))?
+                    .to_vec(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let sibling_basis = sibling_catalog.pin()?;
+    for bytes in sibling_basis.plaintext_objects() {
+        if super::super::format::decode_metadata(bytes)?.is_some() {
+            objects.push(crate::CatalogObject::new(bytes.to_vec())?);
+        }
+    }
+    catalog.commit(
+        basis.identity(),
+        crate::CatalogProposal::new(
+            TransactionId::new([0xcc; 16])?,
+            basis.format_epoch().ok_or("epoch")?,
+            objects,
+        )?,
+        None,
+    )?;
+    assert!(
+        CommittedLedgerReader::open(&authority, &catalog, scope, key())?
+            .snapshot()
+            .is_err()
+    );
+    Ok(())
+}

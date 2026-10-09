@@ -112,9 +112,10 @@ pub use active_segment_ledger::{
     MAX_SNAPSHOT_LEASE_TTL_SECONDS, OnlineQuarantinePublication, PreparedCompactionTask,
     PreparedStoreBlock, RetentionBucket, RetentionEvaluation, RetentionImpactPreview,
     RetentionImpactTimeRange, RetentionReclamation, RetentionReclamationEstimate, SealedSegment,
-    SegmentId, SegmentProtectionKey, SegmentScope, SnapshotLeaseAttempt, SnapshotLeaseGrant,
-    SnapshotLeaseId, SnapshotLeaseReplacement, SnapshotLeaseUsage, StoreBlockIdentity,
-    StoreBlockPreparation, integrity_quarantine_findings,
+    SegmentAbandonmentPlan, SegmentId, SegmentProtectionKey, SegmentScope, SnapshotLeaseAttempt,
+    SnapshotLeaseGrant, SnapshotLeaseId, SnapshotLeaseReplacement, SnapshotLeaseUsage,
+    StoreBlockIdentity, StoreBlockPreparation, integrity_abandonment_findings,
+    integrity_quarantine_findings,
 };
 
 pub use catalog::integrity_scrub_resource_claim;

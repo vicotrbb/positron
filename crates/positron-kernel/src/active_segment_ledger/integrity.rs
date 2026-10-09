@@ -115,6 +115,7 @@ pub enum IntegrityVerificationOutcome {
 pub struct IntegrityQuarantineFinding {
     scope: SegmentScope,
     segment: SegmentId,
+    abandoned: bool,
     base_position: u64,
     sealed_frontier: positron_domain::routing::CommitPosition,
     event_range: super::AuthenticatedEventRange,
@@ -122,6 +123,39 @@ pub struct IntegrityQuarantineFinding {
 }
 
 impl IntegrityQuarantineFinding {
+    /// Encodes only authenticated identity and loss ranges, without telemetry.
+    pub fn encode_evidence(self) -> Result<Vec<u8>, IntegrityFailure> {
+        encode_quarantine(super::format::SegmentMetadata {
+            scope: self.scope,
+            id: self.segment,
+            state: super::format::SegmentState::Sealed,
+            base_position: super::format::position_from_value(self.base_position)
+                .map_err(map_ledger_failure)?,
+            sealed_frontier: Some(self.sealed_frontier),
+            event_range: self.event_range,
+            ingest_range: self.ingest_range,
+        })
+    }
+    /// Decodes the bounded evidence carried by an authenticated audit record.
+    pub fn decode_evidence(bytes: &[u8]) -> Result<Self, IntegrityFailure> {
+        let (scope, segment, base_position, sealed_frontier, event_range, ingest_range) =
+            decode_quarantine(bytes)?
+                .ok_or(IntegrityFailure(IntegrityFailureCode::InvalidInput))?;
+        Ok(Self {
+            scope,
+            segment,
+            base_position,
+            sealed_frontier,
+            event_range,
+            ingest_range,
+            abandoned: bytes.starts_with(super::abandonment::ABANDONMENT_MAGIC),
+        })
+    }
+
+    #[must_use]
+    pub const fn is_abandoned(self) -> bool {
+        self.abandoned
+    }
     #[must_use]
     pub const fn scope(self) -> SegmentScope {
         self.scope
@@ -425,7 +459,7 @@ pub enum IntegrityFailureCode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct IntegrityFailure(IntegrityFailureCode);
+pub struct IntegrityFailure(pub(in crate::active_segment_ledger) IntegrityFailureCode);
 
 impl IntegrityFailure {
     #[must_use]
@@ -479,6 +513,7 @@ pub(super) fn localized_finding(
     metadata: super::format::SegmentMetadata,
 ) -> Option<IntegrityQuarantineFinding> {
     Some(IntegrityQuarantineFinding {
+        abandoned: false,
         scope,
         segment: metadata.id,
         base_position: metadata.base_position.value(),
@@ -507,6 +542,10 @@ pub(super) fn fuzz_quarantine_record(data: &[u8]) {
         ingest_range,
     };
     let encoded = encode_quarantine(metadata).expect("decoded quarantine record encodes");
-    assert_eq!(encoded, data);
+    assert_eq!(
+        encoded,
+        data.strip_prefix(super::abandonment::ABANDONMENT_MAGIC)
+            .unwrap_or(data)
+    );
     assert_eq!(decode_quarantine(&encoded), Ok(Some(record)));
 }

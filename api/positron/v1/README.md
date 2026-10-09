@@ -213,3 +213,22 @@ failures are `invalid_request` (400), `authentication_rejected` (401),
 `tenant_unavailable` (404), `stale_generation`, `idempotency_conflict`,
 `alias_already_bound`, or `alias_conflict` (409), and
 `administration_unavailable` (503).
+
+`MaintenanceService.AbandonSegment` is served by the authenticated `api`
+listener at `POST /v1/maintenance:abandon-segment`. System Administration
+credentials are revalidated for preview, confirmation, status, and retries.
+The 768-byte request names immutable tenant, signal, shard, and segment.
+Preview returns exact authenticated Event Time and Ingest Time loss ranges,
+Catalog generation, and a confirmation digest without publishing state.
+Confirmation requires that digest, expected Catalog generation, idempotency
+key, and explicit `accept_data_loss: true`. The live segment reference,
+permanent incomplete-data evidence, succeeded operation, and exact loss audit
+are published atomically. Segment bytes remain quarantined evidence; this
+command neither repairs bytes nor claims complete query results over lost data.
+Exact retries return the original receipt. Status supplies the same scope and
+segment with `operation_id`, without confirmation fields.
+
+The CLI is `positron maintenance abandon-segment --tenant UUID --signal logs|traces
+--shard N --segment HEX`, using the existing credential-stdin and TLS transport
+contract. Add `--expected-generation N --confirmation HEX --idempotency-key UUID
+--accept-data-loss` to confirm, or `--operation-id HEX` to inspect the receipt.

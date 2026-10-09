@@ -67,6 +67,9 @@ pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
         positron_api::maintenance::WINDOW_HTTP_PATH => {
             positron_api::maintenance::MAX_WINDOW_REQUEST_BYTES
         },
+        positron_api::maintenance::ABANDON_HTTP_PATH => {
+            positron_api::maintenance::MAX_ABANDON_REQUEST_BYTES
+        },
         positron_api::maintenance::VERIFY_HTTP_PATH => {
             positron_api::maintenance::MAX_VERIFY_REQUEST_BYTES
         },
@@ -108,6 +111,7 @@ fn api_path_is_known(path: &str) -> bool {
             | positron_api::maintenance::RESUME_HTTP_PATH
             | positron_api::maintenance::WINDOW_HTTP_PATH
             | positron_api::maintenance::VERIFY_HTTP_PATH
+            | positron_api::maintenance::ABANDON_HTTP_PATH
             | positron_api::tenant_aliases::HTTP_PATH
             | positron_api::tenant_service::CREATE_HTTP_PATH
             | positron_api::tenant_service::INSPECT_HTTP_PATH
@@ -352,6 +356,27 @@ pub(super) fn route<S: Read + Write>(
                 positron_api::maintenance::MAX_VERIFY_REQUEST_BYTES,
             )?;
             match services.verify_online_integrity(&bearer, &body) {
+                Ok(response) => Ok(Response {
+                    status: 200,
+                    content_type: "application/json",
+                    body: response.encode().map_err(|_| Response::empty(503))?,
+                    retry_after_seconds: None,
+                    diagnostics_reservation: None,
+                }),
+                Err(failure) => Ok(maintenance_failure_response(failure)),
+            }
+        },
+        (ListenerRole::Api, "POST", positron_api::maintenance::ABANDON_HTTP_PATH) => {
+            let services = services.ok_or_else(|| Response::empty(503))?;
+            let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
+                Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+            })?);
+            let body = read_body(
+                stream,
+                head.content_length,
+                positron_api::maintenance::MAX_ABANDON_REQUEST_BYTES,
+            )?;
+            match services.abandon_segment(&bearer, &body) {
                 Ok(response) => Ok(Response {
                     status: 200,
                     content_type: "application/json",

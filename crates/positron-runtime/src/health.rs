@@ -31,12 +31,20 @@ pub enum ProcessPhase {
 #[repr(u8)]
 pub enum IntegrityFenceReason {
     AmbiguousIntegrity = 1,
+    UnreliableOwnership = 2,
+    IdentityMismatch = 3,
+    KeyEnvelopeMismatch = 4,
+    DurabilityAmbiguity = 5,
 }
 
 impl IntegrityFenceReason {
     const fn from_byte(value: u8) -> Option<Self> {
         match value {
             1 => Some(Self::AmbiguousIntegrity),
+            2 => Some(Self::UnreliableOwnership),
+            3 => Some(Self::IdentityMismatch),
+            4 => Some(Self::KeyEnvelopeMismatch),
+            5 => Some(Self::DurabilityAmbiguity),
             _ => None,
         }
     }
@@ -45,6 +53,10 @@ impl IntegrityFenceReason {
     pub const fn redacted_label(self) -> &'static str {
         match self {
             Self::AmbiguousIntegrity => "ambiguous_integrity",
+            Self::UnreliableOwnership => "unreliable_storage_ownership",
+            Self::IdentityMismatch => "instance_identity_mismatch",
+            Self::KeyEnvelopeMismatch => "key_envelope_mismatch",
+            Self::DurabilityAmbiguity => "durability_frontier_ambiguity",
         }
     }
 }

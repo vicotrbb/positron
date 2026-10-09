@@ -1,4 +1,6 @@
 //! Direct encrypted active-segment append and authenticated durability frontiers.
+mod abandonment;
+pub use abandonment::{SegmentAbandonmentPlan, integrity_abandonment_findings};
 
 mod append;
 mod capacity;
@@ -305,6 +307,13 @@ fn validate_quarantine_holes(
     holes: &[IntegrityQuarantineFinding],
 ) -> Result<(), LedgerFailure> {
     for hole in holes {
+        if hole.is_abandoned()
+            && !metadata
+                .iter()
+                .any(|candidate| candidate.id == hole.segment())
+        {
+            continue;
+        }
         let matching = metadata
             .iter()
             .find(|candidate| candidate.id == hole.segment())

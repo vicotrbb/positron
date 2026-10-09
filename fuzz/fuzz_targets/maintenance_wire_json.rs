@@ -7,13 +7,21 @@ use positron_api::maintenance::{
     MaintenanceControlResponse, MaintenanceExplainRequest, MaintenanceExplainResponse,
     MaintenancePauseRequest, MaintenanceResumeRequest, MaintenanceRunRequest, MaintenanceWindowRequest,
     MaintenanceRunResponse, MaintenanceStatusRequest, MaintenanceStatusResponse,
-    OnlineVerificationReport, OnlineVerificationRequest,
+    OnlineVerificationReport, OnlineVerificationRequest, SegmentAbandonmentRequest, SegmentAbandonmentResponse,
 };
 use positron_kernel::IntegrityScrubContinuation;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_RESPONSE_BYTES.saturating_add(1) {
         return;
+    }
+    if let Ok(request) = SegmentAbandonmentRequest::decode(data) {
+        let encoded = request.encode().expect("accepted abandonment request encodes");
+        assert_eq!(SegmentAbandonmentRequest::decode(&encoded), Ok(request));
+    }
+    if let Ok(response) = SegmentAbandonmentResponse::decode(data) {
+        let encoded = response.encode().expect("accepted abandonment response encodes");
+        assert_eq!(SegmentAbandonmentResponse::decode(&encoded), Ok(response));
     }
     if data.len() <= MAX_REQUEST_BYTES {
         let _ = MaintenanceStatusRequest::decode(data);
