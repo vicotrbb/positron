@@ -16,12 +16,13 @@ mod tests;
 pub(crate) use operation::recover_initial_ledgers;
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::GovernanceTestFixture;
-pub(crate) use types::TenantRetentionPreviewConfirmation;
 pub use types::{
     BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
-    BootstrapPaths, BootstrapState, DoctorRuntimeFacts, InitializationPlan, InitializedInstance,
-    OfflineSupportBundleFailure, OfflineSupportBundleInspection, TenantRetentionImpactPreview,
+    BootstrapPaths, BootstrapState, DoctorRuntimeFacts, GracefulShutdownRecord, InitializationPlan,
+    InitializedInstance, OfflineSupportBundleFailure, OfflineSupportBundleInspection,
+    TenantRetentionImpactPreview,
 };
+pub(crate) use types::{ShutdownPublicationFailure, TenantRetentionPreviewConfirmation};
 
 /// The sole Application Runtime authority for classifying and initializing an instance.
 pub enum InstanceBootstrap {}

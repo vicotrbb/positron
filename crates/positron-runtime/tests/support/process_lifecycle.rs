@@ -35,6 +35,8 @@ pub(crate) struct ObservingTasks {
     pub(crate) fail_registration: Option<TaskRole>,
     pub(crate) fail_spawn: Option<TaskRole>,
     pub(crate) fail_join: Option<TaskRole>,
+    pub(crate) pending_join: Option<TaskRole>,
+    pub(crate) fail_recovery_join: Option<TaskRole>,
     pub(crate) fail_abort: Option<TaskRole>,
     pub(crate) fail_abort_also: Option<TaskRole>,
     pub(crate) fail_abort_all: bool,
@@ -116,6 +118,8 @@ impl TaskRegistrar for ObservingTasks {
             events: Rc::clone(&self.events),
             fail_spawn: self.fail_spawn == Some(role),
             fail_join: self.fail_join == Some(role),
+            pending_join: self.pending_join == Some(role),
+            fail_recovery_join: self.fail_recovery_join == Some(role),
             fail_abort: self.fail_abort_all
                 || self.fail_abort == Some(role)
                 || self.fail_abort_also == Some(role),
@@ -129,6 +133,8 @@ struct ObservedRegisteredTask {
     events: Rc<RefCell<Vec<TaskEvent>>>,
     fail_spawn: bool,
     fail_join: bool,
+    pending_join: bool,
+    fail_recovery_join: bool,
     fail_abort: bool,
     fail_abort_once: bool,
 }
@@ -150,6 +156,8 @@ impl RegisteredTask for ObservedRegisteredTask {
             cancellation,
             health,
             fail_join: self.fail_join,
+            pending_join: self.pending_join,
+            fail_recovery_join: self.fail_recovery_join,
             fail_abort: self.fail_abort,
             fail_abort_once: self.fail_abort_once,
             abort_attempts: 0,
@@ -163,6 +171,8 @@ struct ObservedRunningTask {
     cancellation: TaskCancellation,
     health: positron_runtime::HealthState,
     fail_join: bool,
+    pending_join: bool,
+    fail_recovery_join: bool,
     fail_abort: bool,
     fail_abort_once: bool,
     abort_attempts: u8,
@@ -170,7 +180,19 @@ struct ObservedRunningTask {
 
 impl RunningTask for ObservedRunningTask {
     fn poll_join(&mut self) -> Result<Option<TaskJoinOutcome>, TaskFailure> {
-        self.join_within(std::time::Duration::ZERO).map(Some)
+        if self.health.phase() == ProcessPhase::Recovering {
+            if self.fail_recovery_join {
+                Err(TaskFailure::JoinUnavailable)
+            } else {
+                Ok(None)
+            }
+        } else if self.pending_join
+            || (self.health.phase() == ProcessPhase::Serving && !self.fail_join)
+        {
+            Ok(None)
+        } else {
+            self.join_within(std::time::Duration::ZERO).map(Some)
+        }
     }
 
     fn join_within(

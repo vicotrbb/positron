@@ -3,6 +3,7 @@ use super::{CatalogGenerationId, CatalogSnapshot, GovernanceAuditRecord};
 #[derive(Clone, Debug)]
 pub struct CatalogCommit {
     pub(crate) snapshot: CatalogSnapshot,
+    pub(crate) predecessor: CatalogGenerationId,
     pub(crate) audit: Option<GovernanceAuditRecord>,
 }
 
@@ -32,6 +33,12 @@ impl CatalogRotation {
 }
 
 impl CatalogCommit {
+    /// Authenticated predecessor of this exact committed transaction.
+    #[must_use]
+    pub const fn predecessor(&self) -> CatalogGenerationId {
+        self.predecessor
+    }
+
     #[must_use]
     pub fn identity(&self) -> CatalogGenerationId {
         self.snapshot.identity()

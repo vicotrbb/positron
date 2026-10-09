@@ -31,7 +31,7 @@ impl GovernorInner {
         state: &mut super::accounting::AccountingState,
     ) -> Result<super::ResourceReservation<'_>, AdmissionFailure> {
         let class = WorkClass::DurabilityRecovery;
-        if state.lifecycle == GovernorLifecycle::ShuttingDown
+        if state.lifecycle.get() == GovernorLifecycle::ShuttingDown
             && !claim.kind.retains_capacity_on_resize_failure()
         {
             return Err(shutdown_failure(class, state.disk_pressure));
@@ -61,36 +61,36 @@ impl GovernorInner {
             state.disk_pressure,
         )?;
         let Some(total_candidate) = state.total_usage.checked_add(claim.amounts) else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         };
         let Some(recovery_candidate) = state.recovery_usage.checked_add(claim.amounts) else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         };
         let Some(ordinary_usage) = state.total_usage.checked_sub(state.recovery_usage) else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         };
         let recovery_tenant_candidate = if let Some(index) = tenant_index {
             let Some(usage) = state.recovery_tenant_usage.get(index).copied() else {
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 return Err(internal_failure_at_pressure(class, state.disk_pressure));
             };
             let Some(candidate) = usage.checked_add(claim.amounts) else {
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 return Err(internal_failure_at_pressure(class, state.disk_pressure));
             };
             let Some(ordinary_usage) = state.ordinary_tenant_usage.get(index).copied() else {
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 return Err(internal_failure_at_pressure(class, state.disk_pressure));
             };
             let Some(quota) = state.tenant_quotas.get(index) else {
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 return Err(internal_failure_at_pressure(class, state.disk_pressure));
             };
             let combined_usage = ordinary_usage.checked_add(usage).ok_or_else(|| {
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 internal_failure_at_pressure(class, state.disk_pressure)
             })?;
             refuse_exceeded(
@@ -167,7 +167,7 @@ impl GovernorInner {
                     state.disk_pressure,
                 );
                 if failure.code() == AdmissionFailureCode::InternalFenced {
-                    state.lifecycle = GovernorLifecycle::Fenced;
+                    state.lifecycle.set(GovernorLifecycle::Fenced);
                 }
                 return Err(failure);
             },
@@ -181,7 +181,7 @@ impl GovernorInner {
             .checked_add(recovery_pools)
             .ok_or_else(|| internal_failure_at_pressure(class, state.disk_pressure))?;
         let Some(recovery_count) = state.outstanding_recovery.checked_add(1) else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         };
         let uninterruptible_count = if claim.kind.retains_capacity_on_resize_failure() {
@@ -190,7 +190,7 @@ impl GovernorInner {
                     .outstanding_uninterruptible
                     .checked_add(1)
                     .ok_or_else(|| {
-                        state.lifecycle = GovernorLifecycle::Fenced;
+                        state.lifecycle.set(GovernorLifecycle::Fenced);
                         internal_failure_at_pressure(class, state.disk_pressure)
                     })?,
             )
@@ -198,7 +198,7 @@ impl GovernorInner {
             None
         };
         let Some((class_index, class_count)) = Self::next_class_count(state, class) else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         };
         let recovery_tenant_count = if let Some(index) = tenant_index {
@@ -209,7 +209,7 @@ impl GovernorInner {
                     .copied()
                     .and_then(|count| count.checked_add(1))
                     .ok_or_else(|| {
-                        state.lifecycle = GovernorLifecycle::Fenced;
+                        state.lifecycle.set(GovernorLifecycle::Fenced);
                         internal_failure_at_pressure(class, state.disk_pressure)
                     })?,
             )
@@ -227,21 +227,21 @@ impl GovernorInner {
         };
         let Some(record) = super::ledger::GrantRecord::new(owner, identity, claim.amounts, None)
         else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         };
         let Some(reservation_slot) = self.activate_slot(state, record) else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         };
         if let (Some(index), Some(candidate)) = (tenant_index, recovery_tenant_candidate) {
             let Some(usage) = state.recovery_tenant_usage.get_mut(index) else {
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 return Err(internal_failure_at_pressure(class, state.disk_pressure));
             };
             *usage = candidate;
             let Some(pool_usage) = state.recovery_tenant_pool_usage.get_mut(index) else {
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 return Err(internal_failure_at_pressure(class, state.disk_pressure));
             };
             *pool_usage = scope_pool_candidate;
@@ -249,7 +249,7 @@ impl GovernorInner {
             state.recovery_system_pool_usage = scope_pool_candidate;
         }
         if state.class_counts.get(class_index).is_none() {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         }
         state.total_usage = total_candidate;
@@ -258,13 +258,13 @@ impl GovernorInner {
         state.outstanding = outstanding;
         state.outstanding_recovery = recovery_count;
         let Some(class_slot) = state.class_counts.get_mut(class_index) else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         };
         *class_slot = class_count;
         if let (Some(index), Some(count)) = (tenant_index, recovery_tenant_count) {
             let Some(slot) = state.tenant_outstanding.get_mut(index) else {
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 return Err(internal_failure_at_pressure(class, state.disk_pressure));
             };
             *slot = count;

@@ -11,7 +11,7 @@ use super::{BootstrapFailure, BootstrapFailureCode};
 
 const DIMENSIONS: usize = 11;
 const DEFAULT_TENANT_QUOTA: [u64; DIMENSIONS] = [
-    90_000_000, 32, 32, 90_000_000, 70_000, 32, 32, 32, 32, 32, 40_000_000,
+    90_000_000, 32, 32, 90_000_000, 70_000, 32, 32, 32, 128, 32, 40_000_000,
 ];
 // These are conservative engineering defaults under the existing tenant and
 // class-pool policy, not product-specified constants. The tenant ceiling also
@@ -128,6 +128,15 @@ fn resource_sizing(max_registered_tenants: u16) -> Result<ResourceSizing, Bootst
     })
 }
 
+fn ordinary_pool_policy() -> Result<OrdinaryPoolPolicy, positron_kernel::GovernorFailure> {
+    // Preserve the established 8:6:4:2 lane proportions in each actual
+    // dimension. Byte budgets must reserve bytes, rather than unit counts.
+    let lane = |weight: u64| {
+        ResourceAmounts::new(DEFAULT_TENANT_QUOTA.map(|capacity| capacity / 32 * weight))
+    };
+    OrdinaryPoolPolicy::new(lane(8), lane(6), lane(4), lane(2))
+}
+
 fn resource_configuration(
     tenant: TenantId,
     sizing: ResourceSizing,
@@ -156,8 +165,7 @@ fn resource_configuration(
             TenantQuota::new(tenant, 1, sizing.per_tenant_ordinary_capacity)
                 .map_err(resource_failure)?,
         ],
-        OrdinaryPoolPolicy::new(uniform(8), uniform(6), uniform(4), uniform(2))
-            .map_err(resource_failure)?,
+        ordinary_pool_policy().map_err(resource_failure)?,
     )
     .map_err(resource_failure)?
     .with_principal_quota(
@@ -193,10 +201,7 @@ fn system_diagnostics_resource_configuration(
         .map_err(resource_failure)?,
     )
     .map_err(resource_failure)?;
-    let policy = GovernorPolicy::system_only(
-        OrdinaryPoolPolicy::new(uniform(8), uniform(6), uniform(4), uniform(2))
-            .map_err(resource_failure)?,
-    );
+    let policy = GovernorPolicy::system_only(ordinary_pool_policy().map_err(resource_failure)?);
     ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(resource_failure)
 }
 

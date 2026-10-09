@@ -855,26 +855,36 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
         .ok_or("newly sealed block-bearing segment")?;
     let damaged_bytes = b"online verification corruption";
     fs::write(&damaged_segment, damaged_bytes)?;
-    let report = (0..4)
-        .find_map(|_| {
-            let expected_generation = open_catalog(&initialized).ok()?.pin().ok()?.number();
-            let candidate = services
-                .verify_online_integrity(
-                    &administrator,
-                    &OnlineVerificationRequest::new(
-                        initialized.default_tenant_id().to_canonical_text(),
-                        "logs".to_owned(),
-                        scope.shard_id().value(),
-                        Some(expected_generation),
-                        None,
-                    )
-                    .encode()
-                    .ok()?,
+    let mut report = None;
+    let mut stale_bases = Vec::new();
+    for _ in 0..4 {
+        let expected_generation = open_catalog(&initialized)?.pin()?.number();
+        let candidate = services
+            .verify_online_integrity(
+                &administrator,
+                &OnlineVerificationRequest::new(
+                    initialized.default_tenant_id().to_canonical_text(),
+                    "logs".to_owned(),
+                    scope.shard_id().value(),
+                    Some(expected_generation),
+                    None,
                 )
-                .ok()?;
-            (candidate.outcome != "stale").then_some((candidate, expected_generation))
-        })
-        .ok_or("online quarantine did not acquire a stable G0 basis")?;
+                .encode()?,
+            )
+            .map_err(|failure| {
+                format!(
+                    "online quarantine failed at Catalog basis {expected_generation}: {failure:?}"
+                )
+            })?;
+        if candidate.outcome != "stale" {
+            report = Some((candidate, expected_generation));
+            break;
+        }
+        stale_bases.push((expected_generation, candidate.catalog_generation));
+    }
+    let report = report.ok_or_else(|| {
+        format!("online quarantine did not acquire a stable G0 basis: {stale_bases:?}")
+    })?;
 
     assert_eq!(
         report.0.catalog_generation, report.1,

@@ -51,7 +51,6 @@ const EXIT_OK: u8 = 0;
 const EXIT_CONFIGURATION: u8 = 2;
 const EXIT_STARTUP: u8 = 3;
 const EXIT_FORCED: u8 = 4;
-const STARTUP_RECOVERY_DEADLINE: Duration = Duration::from_secs(3);
 
 pub fn run_native(
     arguments: impl IntoIterator<Item = String>,
@@ -123,7 +122,19 @@ pub fn run_native(
         return config_cli::run(arguments, environment);
     }
     match run(arguments, environment) {
-        Ok(outcome) => exit_code(outcome),
+        Ok(outcome) => {
+            if let ExitOutcome::InternalCleanupFailure(failure) = outcome {
+                for role in failure.failed_roles() {
+                    match report_runtime_diagnostic(std::format_args!(
+                        "positron: runtime cleanup failed role={role:?}"
+                    )) {
+                        RuntimeDiagnosticDelivery::Delivered
+                        | RuntimeDiagnosticDelivery::Unavailable => {},
+                    }
+                }
+            }
+            exit_code(outcome)
+        },
         Err(failure) => {
             eprintln!("positron: {}", failure.message());
             ExitCode::from(failure.code())
@@ -280,27 +291,26 @@ fn pending_termination_trigger(signals: &mut Signals) -> Option<ShutdownTrigger>
 
 impl RecoveryAttemptHost for NativeRecovery {
     fn after_failure(&self, attempt: RecoveryAttempt) -> RecoveryDecision {
-        if attempt.number() >= 32 || self.started.elapsed() >= STARTUP_RECOVERY_DEADLINE {
-            return RecoveryDecision::Exhausted;
-        }
-        let delay =
-            Duration::from_millis(10_u64.saturating_mul(u64::from(attempt.number())).min(100));
+        let jitter = u64::from(self.started.elapsed().subsec_nanos() % 17);
+        let delay = Duration::from_millis(
+            10_u64.saturating_mul(u64::from(attempt.number())).min(100) + jitter,
+        );
         let wait_until = Instant::now() + delay;
-        while Instant::now() < wait_until && self.started.elapsed() < STARTUP_RECOVERY_DEADLINE {
-            let trigger = self
-                .signals
-                .lock()
-                .ok()
-                .and_then(|mut signals| signals.as_mut().and_then(Self::pending_trigger));
+        loop {
+            let trigger = match self.signals.lock() {
+                Ok(mut signals) => match signals.as_mut() {
+                    Some(signals) => Self::pending_trigger(signals),
+                    None => return RecoveryDecision::Terminate(ShutdownTrigger::SecondSignal),
+                },
+                Err(_) => return RecoveryDecision::Terminate(ShutdownTrigger::SecondSignal),
+            };
             if let Some(trigger) = trigger {
                 return RecoveryDecision::Terminate(trigger);
             }
+            if Instant::now() >= wait_until {
+                return RecoveryDecision::Retry;
+            }
             std::thread::sleep(Duration::from_millis(5));
-        }
-        if self.started.elapsed() >= STARTUP_RECOVERY_DEADLINE {
-            RecoveryDecision::Exhausted
-        } else {
-            RecoveryDecision::Retry
         }
     }
 }
@@ -360,11 +370,20 @@ fn wait_for_shutdown(
                     }
                 }
             }
-            termination_count
+            if termination_count == 0 {
+                process.poll()?;
+            }
+            Ok::<_, ExitOutcome>(termination_count)
         }));
         match iteration {
-            Ok(termination_count) if termination_count > 0 => break termination_count > 1,
-            Ok(_) => std::thread::sleep(Duration::from_millis(5)),
+            Ok(Ok(termination_count)) if termination_count > 0 => break termination_count > 1,
+            Ok(Ok(_)) => std::thread::sleep(Duration::from_millis(5)),
+            Ok(Err(_)) => {
+                return Ok(preserve_runtime_outcome(
+                    capture_runtime_failure(&process, "serving", "runtime_critical_worker_failed"),
+                    process.shutdown(ShutdownTrigger::DeadlineExpired),
+                ));
+            },
             Err(_) => {
                 return Ok(preserve_runtime_outcome(
                     capture_runtime_failure(&process, "serving", "runtime_serving_loop_panicked"),
@@ -373,11 +392,11 @@ fn wait_for_shutdown(
             },
         }
     };
+    let deadline_at = Instant::now() + deadline;
     let mut draining = process.begin_shutdown();
     if second_termination_seen {
         return Ok(draining.finish(ShutdownTrigger::SecondSignal));
     }
-    let deadline_at = Instant::now() + deadline;
     loop {
         if pending_termination_trigger(&mut signals).is_some() {
             return Ok(draining.finish(ShutdownTrigger::SecondSignal));
@@ -396,7 +415,12 @@ fn wait_for_shutdown(
                     draining.finish(ShutdownTrigger::DeadlineExpired),
                 ));
             },
-            Ok(Ok(true)) => return Ok(draining.finish(ShutdownTrigger::FirstSignal)),
+            Ok(Ok(true)) => {
+                return Ok(draining
+                    .finish_with_termination_probe(ShutdownTrigger::FirstSignal, || {
+                        pending_termination_trigger(&mut signals).is_some()
+                    }));
+            },
             Ok(Ok(false)) => std::thread::yield_now(),
             Ok(Err(failure)) => {
                 let finding_code = if failure == positron_runtime::TaskFailure::JoinPanicked {
@@ -733,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn native_recovery_retries_then_exhausts_at_the_attempt_bound()
+    fn native_recovery_keeps_retrying_after_the_old_attempt_bound()
     -> Result<(), Box<dyn std::error::Error>> {
         let recovery = NativeRecovery::new(Signals::new(std::iter::empty::<i32>())?);
 
@@ -743,7 +767,7 @@ mod tests {
         );
         assert_eq!(
             recovery.after_failure(RecoveryAttempt::for_test(32)),
-            RecoveryDecision::Exhausted
+            RecoveryDecision::Retry
         );
         assert!(recovery.into_signals().is_ok());
         Ok(())

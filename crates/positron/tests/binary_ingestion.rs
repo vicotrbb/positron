@@ -297,9 +297,19 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         )?;
         encoded_bytes += batch.len();
         let response = request(otlp, "/v1/logs", &headers, &batch)?;
+        let diagnostic = if response.starts_with("HTTP/1.1 200 ") {
+            String::new()
+        } else {
+            request(
+                operations,
+                "/status",
+                &[("Authorization", admin.as_str())],
+                b"",
+            )?
+        };
         assert!(
             response.starts_with("HTTP/1.1 200 "),
-            "workload response: {response}"
+            "workload response: {response}; public status: {diagnostic}"
         );
     }
     let elapsed = started.elapsed();
@@ -328,10 +338,16 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             .status()?
             .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let shutdown_started = Instant::now();
+    let deadline = shutdown_started + Duration::from_secs(10);
     loop {
         if let Some(status) = child.try_wait()? {
-            assert_eq!(status.code(), Some(0));
+            assert_eq!(
+                status.code(),
+                Some(0),
+                "shutdown elapsed {:?}",
+                shutdown_started.elapsed()
+            );
             break;
         }
         if Instant::now() >= deadline {

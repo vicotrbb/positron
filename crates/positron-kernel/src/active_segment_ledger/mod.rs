@@ -328,6 +328,13 @@ fn validate_quarantine_holes(
     Ok(())
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LedgerOpenPurpose {
+    Ingest,
+    Maintenance,
+    Query,
+}
+
 impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
     fn lease_operation_time(&self, fallback: u64) -> Result<u64, LedgerFailure> {
         self.retention_time.map_or(Ok(fallback), |authority| {
@@ -395,7 +402,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             scope,
             protection,
             None,
-            false,
+            LedgerOpenPurpose::Ingest,
         )
     }
 
@@ -417,7 +424,28 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             scope,
             protection,
             None,
-            true,
+            LedgerOpenPurpose::Maintenance,
+        )
+    }
+
+    /// Reopens an authenticated source for bounded queries without rolling its
+    /// active segment. Repair still retains the protected recovery authority;
+    /// ordinary source memory is charged to the query lane.
+    pub fn open_for_query_with_retention_time(
+        authority: &'kernel StorageKernelResourceAuthority,
+        retention_time: &'kernel crate::RetentionTimeAuthority,
+        catalog: &'catalog Catalog<'kernel>,
+        scope: SegmentScope,
+        protection: SegmentProtectionKey,
+    ) -> Result<Self, LedgerFailure> {
+        Self::open_at(
+            authority,
+            Some(retention_time),
+            catalog,
+            scope,
+            protection,
+            None,
+            LedgerOpenPurpose::Query,
         )
     }
 
@@ -443,7 +471,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             scope,
             protection,
             Some(now),
-            false,
+            LedgerOpenPurpose::Ingest,
         )
     }
 
@@ -454,8 +482,9 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         scope: SegmentScope,
         protection: SegmentProtectionKey,
         lifecycle_now: Option<u64>,
-        preserve_active: bool,
+        purpose: LedgerOpenPurpose,
     ) -> Result<Self, LedgerFailure> {
+        let preserve_active = purpose != LedgerOpenPurpose::Ingest;
         let writer = authority
             .acquire_active_segment_ledger(scope.lease_key())
             .map_err(|failure| match failure {
@@ -473,7 +502,14 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .recovery()
             .reserve(claim)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
-        let base_claim = WorkClaim::tenant(scope.tenant, WorkKind::Ingest, retained_claim(0, 0)?)
+        // Nonrolling reopen retains authenticated source state only. Any later
+        // append or new segment still acquires its own durability reservation.
+        let retained_kind = if purpose == LedgerOpenPurpose::Query {
+            WorkKind::InteractiveQueryTail
+        } else {
+            WorkKind::Ingest
+        };
+        let base_claim = WorkClaim::tenant(scope.tenant, retained_kind, retained_claim(0, 0)?)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
         let mut retained_capacity = authority
             .governor()

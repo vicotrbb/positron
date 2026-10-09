@@ -129,15 +129,21 @@ impl ActivationGate {
 pub(super) struct NativeGenerationActivation {
     pub(super) gate: Arc<ActivationGate>,
     pub(super) task_count: usize,
+    pub(super) prepared: bool,
 }
 
 impl ListenerGenerationActivation for NativeGenerationActivation {
     fn prepare_and_wait_ready(&self) -> Result<(), ListenerFailure> {
+        if !self.prepared {
+            return Err(ListenerFailure::BindUnavailable);
+        }
         self.gate.open_and_wait_ready(self.task_count)
     }
 
     fn open_admission(&self) {
-        self.gate.open_admission();
+        if self.prepared {
+            self.gate.open_admission();
+        }
     }
 }
 

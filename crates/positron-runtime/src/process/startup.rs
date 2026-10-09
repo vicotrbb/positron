@@ -27,22 +27,20 @@ impl ApplicationRuntime {
         // this boundary. Validate that it is a complete generation now, but
         // do not open data sockets until bootstrap has established ownership,
         // integrity, identity, and the catalog below.
-        let _candidate = complete_candidate(host.listeners);
+        complete_candidate(host.listeners)?;
         let mut listeners = Vec::with_capacity(6);
-        bind(
-            ListenerRole::Control,
-            &state,
-            host.listeners,
-            &mut listeners,
-        )?;
-        bind(
-            ListenerRole::Operations,
-            &state,
-            host.listeners,
-            &mut listeners,
-        )?;
-        state.transition(ProcessPhase::Recovering);
         let cancellation = TaskCancellation::new();
+        for role in [ListenerRole::Control, ListenerRole::Operations] {
+            if let Err(failure) = bind(role, &state, host.listeners, &mut listeners) {
+                return Err(cleanup_startup(
+                    failure,
+                    &cancellation,
+                    &mut listeners,
+                    &mut Vec::new(),
+                ));
+            }
+        }
+        state.transition(ProcessPhase::Recovering);
         let control_registered = match register_control_tasks(host.tasks) {
             Ok(registered) => registered,
             Err(failure) => {
@@ -175,6 +173,7 @@ impl ApplicationRuntime {
                         listener_generation_factory,
                         reload_lock: std::sync::Mutex::new(()),
                         tasks: std::sync::Mutex::new(tasks),
+                        retired_tasks: std::sync::Mutex::new(Vec::new()),
                         listener_task_cancellations: std::sync::Mutex::new(Vec::new()),
                         cancellation,
                         instance: None,
@@ -184,6 +183,7 @@ impl ApplicationRuntime {
                         configuration_publication: None,
                         cleanup: CleanupAccumulator::empty(),
                         drain_deadline,
+                        next_resource_observation: std::time::Instant::now(),
                         terminal_cleanup_complete: false,
                     });
                 }
@@ -194,8 +194,20 @@ impl ApplicationRuntime {
                     &mut tasks,
                 ));
             }
+            state.record_dependency_status(Some(failure.failure.code()));
             attempt = attempt.saturating_add(1);
-            let retained_volume = configuration.paths.retain_volume().ok();
+            let retained_volume = match configuration.paths.retain_volume() {
+                Ok(volume) => Some(volume),
+                Err(ownership_failure) if recoverable(ownership_failure.code()) => None,
+                Err(ownership_failure) => {
+                    return Err(cleanup_startup(
+                        ExitOutcome::StartupUnavailable(ownership_failure.code()),
+                        &cancellation,
+                        &mut listeners,
+                        &mut tasks,
+                    ));
+                },
+            };
             let decision = host.recovery.after_failure(RecoveryAttempt {
                 number: attempt,
                 failure: failure.failure.code(),
@@ -203,7 +215,17 @@ impl ApplicationRuntime {
             });
             drop(retained_volume);
             match decision {
-                RecoveryDecision::Retry => {},
+                RecoveryDecision::Retry => {
+                    if let Some(role) = critical_task_failure(&mut tasks) {
+                        state.fail_critical_worker();
+                        return Err(cleanup_startup(
+                            ExitOutcome::TaskUnavailable(role),
+                            &cancellation,
+                            &mut listeners,
+                            &mut tasks,
+                        ));
+                    }
+                },
                 RecoveryDecision::Exhausted => {
                     return Err(cleanup_startup(
                         ExitOutcome::StartupUnavailable(failure.failure.code()),
@@ -227,6 +249,9 @@ impl ApplicationRuntime {
                 },
             }
         };
+        if attempt > 0 {
+            state.record_dependency_status(None);
+        }
         for intent in &plaintext_listener_intents {
             if let Err(failure) = instance.activate_public_plaintext_api_transport(*intent) {
                 return Err(cleanup_startup(
@@ -377,6 +402,7 @@ impl ApplicationRuntime {
             listener_generation_factory,
             reload_lock: std::sync::Mutex::new(()),
             tasks: std::sync::Mutex::new(tasks),
+            retired_tasks: std::sync::Mutex::new(Vec::new()),
             listener_task_cancellations: std::sync::Mutex::new(Vec::new()),
             cancellation,
             instance: Some(instance),
@@ -386,23 +412,31 @@ impl ApplicationRuntime {
             configuration_publication,
             cleanup: CleanupAccumulator::empty(),
             drain_deadline,
+            next_resource_observation: std::time::Instant::now(),
             terminal_cleanup_complete: false,
         })
     }
 }
 
-fn complete_candidate(factory: &dyn ListenerFactory) -> Option<crate::ValidatedListenerSet> {
-    let [control, operations, api, otlp_grpc, otlp_http, loki_push] =
-        ListenerRole::all().map(|role| factory.profile_for(role));
-    crate::ValidatedListenerSet::new([
-        control?,
-        operations?,
-        api?,
-        otlp_grpc?,
-        otlp_http?,
-        loki_push?,
-    ])
-    .ok()
+fn complete_candidate(factory: &dyn ListenerFactory) -> Result<(), ExitOutcome> {
+    let profiles = ListenerRole::all().map(|role| factory.profile_for(role));
+    if profiles.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    let [
+        Some(control),
+        Some(operations),
+        Some(api),
+        Some(otlp_grpc),
+        Some(otlp_http),
+        Some(loki_push),
+    ] = profiles
+    else {
+        return Err(ExitOutcome::InvalidConfiguration);
+    };
+    crate::ValidatedListenerSet::new([control, operations, api, otlp_grpc, otlp_http, loki_push])
+        .map(|_| ())
+        .map_err(|_| ExitOutcome::InvalidConfiguration)
 }
 
 type RegisteredTasks = Vec<(TaskRole, Box<dyn RegisteredTask>)>;
@@ -532,10 +566,11 @@ fn bind(
     let listener = factory
         .bind(request)
         .map_err(|_| ExitOutcome::ListenerUnavailable(role))?;
-    if listener.endpoint().role() != role {
+    let actual_role = listener.endpoint().role();
+    listeners.push(listener);
+    if actual_role != role {
         return Err(ExitOutcome::ListenerUnavailable(role));
     }
-    listeners.push(listener);
     state.record_bound_listener(role);
     Ok(())
 }
@@ -583,6 +618,7 @@ fn restricted_fenced_process(
         listener_generation_factory: None,
         reload_lock: std::sync::Mutex::new(()),
         tasks: std::sync::Mutex::new(tasks),
+        retired_tasks: std::sync::Mutex::new(Vec::new()),
         listener_task_cancellations: std::sync::Mutex::new(Vec::new()),
         cancellation,
         instance: Some(instance),
@@ -592,6 +628,7 @@ fn restricted_fenced_process(
         configuration_publication: None,
         cleanup: CleanupAccumulator::empty(),
         drain_deadline,
+        next_resource_observation: std::time::Instant::now(),
         terminal_cleanup_complete: false,
     })
 }

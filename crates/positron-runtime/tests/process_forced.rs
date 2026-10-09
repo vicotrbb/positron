@@ -627,3 +627,34 @@ fn drain_diagnostic_reports_closed_poll_join_context_to_stderr()
     );
     Ok(())
 }
+
+#[test]
+fn elapsed_drain_deadline_is_not_restarted_by_finish() -> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("retained-drain-deadline")?;
+    let host = Host::default();
+    let effective = positron_config::resolve(
+        positron_config::ConfigurationInputs::try_from_sources(
+            None,
+            std::iter::empty::<(String, String)>(),
+            [("runtime.shutdown_grace_seconds", "1")],
+        )
+        .map_err(|error| format!("configuration input: {error:?}"))?,
+    )?;
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        )
+        .with_effective_configuration(std::sync::Arc::new(effective)),
+        HostInputs::new(&host, &host),
+    )?;
+    let draining = process.begin_shutdown();
+    std::thread::sleep(Duration::from_millis(1_100));
+    assert_eq!(
+        draining.finish(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Forced,
+        "finishing after the configured deadline must never publish graceful completion"
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
+}

@@ -595,3 +595,166 @@ fn authenticated_status_reports_protected_recovery_reserve_capacity()
     assert_eq!(observed.recovery_impact, None);
     Ok(())
 }
+
+#[test]
+fn clock_uncertainty_fails_readiness_without_failing_liveness()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, query, _) = fixture.initialized_with_admin()?;
+    let mut initialized = Arc::try_unwrap(initialized).map_err(|_| "retained fixture")?;
+    let wall = Arc::new(Mutex::new(UnixNanoseconds::new(10_000_000_000)));
+    initialized.install_retention_time_for_test(RetentionTimeAuthority::establish_with_source(
+        MutableWallClock(Arc::clone(&wall)),
+        LifecycleClockPolicy::new(1_000_000_000)?,
+    )?)?;
+    let initialized = Arc::new(initialized);
+    let operations = crate::health::ProcessState::starting();
+    operations.set_inspection_authority(Arc::clone(&initialized))?;
+    operations.transition(crate::ProcessPhase::Serving);
+    let health = operations.health();
+    assert_eq!(
+        health.readiness(),
+        crate::Readiness::Ready,
+        "clock={:?} resources={:?}",
+        initialized.retention_time.status(),
+        initialized.resource_governor().inspect()
+    );
+    *wall.lock().map_err(|_| "wall clock")? = UnixNanoseconds::new(5_000_000_000);
+    let scope = SegmentScope::new(
+        initialized.default_tenant_id(),
+        SignalKind::Logs,
+        positron_domain::routing::VirtualShardId::new(1)?,
+    );
+    initialized.retention_time.governance_time_seconds(scope)?;
+    assert_eq!(health.readiness(), crate::Readiness::NotReady);
+    initialized
+        ._authority
+        .with_control_contention_for_test(|| {
+            assert_eq!(health.readiness(), crate::Readiness::NotReady)
+        })?;
+    assert_eq!(health.liveness(), crate::Liveness::Live);
+    assert_eq!(health.phase(), crate::ProcessPhase::Serving);
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    services.attach_health(health.clone());
+    let outcome =
+        services.ingest_otlp_logs(&ingest, request("uncertain-safe-ingest").encode_to_vec())?;
+    assert_eq!(
+        outcome.accepted_records(),
+        1,
+        "ingestion outcome: {outcome:?}"
+    );
+    assert_eq!(
+        services.query_log_bodies(
+            &query,
+            "logs | range query_time 0 100 | limit 16",
+            QueryBudget::new(1_000_000, 100, 100, 1_000_000, 1_000_000, 10)?
+                .with_cpu_work_units(16)?
+        )?,
+        ["uncertain-safe-ingest"]
+    );
+    Ok(())
+}
+
+#[test]
+fn disk_pressure_fails_readiness_and_restores_it_without_a_process_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, query, _) = fixture.initialized_with_admin()?;
+    let operations = crate::health::ProcessState::starting();
+    operations.set_inspection_authority(Arc::clone(&initialized))?;
+    operations.transition(crate::ProcessPhase::Serving);
+    let health = operations.health();
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    services.attach_health(health.clone());
+    assert_eq!(
+        services
+            .ingest_otlp_logs(&ingest, request("pressure-safe-read").encode_to_vec())?
+            .accepted_records(),
+        1
+    );
+    let usable = initialized
+        .resource_governor()
+        .inspect()?
+        .usable_disk_bytes();
+    assert_eq!(health.readiness(), crate::Readiness::Ready);
+    let recovery_disk = initialized
+        .resource_governor()
+        .inspect()?
+        .recovery_reserve_capacity(positron_kernel::ResourceDimension::DiskHeadroomBytes);
+    initialized
+        ._authority
+        .observe_disk_for_fuzz(positron_kernel::DiskObservation::new(
+            recovery_disk.saturating_sub(1),
+        ))?;
+    assert_eq!(
+        initialized.resource_governor().inspect()?.disk_pressure(),
+        positron_kernel::DiskPressureState::HardPressure
+    );
+    assert_eq!(health.readiness(), crate::Readiness::NotReady);
+    initialized
+        ._authority
+        .with_control_contention_for_test(|| {
+            assert_eq!(health.readiness(), crate::Readiness::NotReady)
+        })?;
+    assert_eq!(health.liveness(), crate::Liveness::Live);
+    let result = services.query_log_bodies(
+        &query,
+        "logs | range query_time 0 100 | limit 16",
+        QueryBudget::new(1_000_000, 100, 100, 1_000_000, 1_000_000, 10)?.with_cpu_work_units(16)?,
+    );
+    assert_eq!(
+        result,
+        Ok(vec!["pressure-safe-read".to_owned()]),
+        "resources={:?}",
+        initialized.resource_governor().inspect()
+    );
+    let denied =
+        services.ingest_otlp_logs(&ingest, request("pressure-refused-ingest").encode_to_vec());
+    assert!(
+        matches!(
+            denied,
+            Err(super::super::super::ServiceFailure::CapacityUnavailable)
+        ),
+        "disk-growing ingestion: {denied:?}"
+    );
+    initialized
+        ._authority
+        .observe_disk_for_fuzz(positron_kernel::DiskObservation::new(usable))?;
+    assert_eq!(health.readiness(), crate::Readiness::Ready);
+    assert_eq!(health.phase(), crate::ProcessPhase::Serving);
+    Ok(())
+}
+
+#[test]
+fn contended_canonical_fence_and_shutdown_keep_serving_health_not_ready()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _, _) = fixture.initialized_with_admin()?;
+    let state = crate::health::ProcessState::starting();
+    state.set_inspection_authority(initialized.clone())?;
+    state.transition(crate::ProcessPhase::Serving);
+    let health = state.health();
+    assert_eq!(health.readiness(), crate::Readiness::Ready);
+    initialized
+        ._authority
+        .with_fenced_control_contention_for_test(|| {
+            assert_eq!(health.phase(), crate::ProcessPhase::Serving);
+            assert_eq!(health.readiness(), crate::Readiness::NotReady);
+            assert!(matches!(
+                initialized.resource_governor().inspect(),
+                Err(positron_kernel::GovernorFailure::GovernorContended {
+                    pressure: positron_kernel::DiskPressureState::Healthy
+                })
+            ));
+        })?;
+    let stopping_fixture = Fixture::new()?;
+    let (stopping, _, _, _) = stopping_fixture.initialized_with_admin()?;
+    let state = crate::health::ProcessState::starting();
+    state.set_inspection_authority(stopping.clone())?;
+    state.transition(crate::ProcessPhase::Serving);
+    stopping._authority.begin_shutdown()?;
+    stopping._authority.with_control_contention_for_test(|| {
+        assert_eq!(state.health().readiness(), crate::Readiness::NotReady)
+    })?;
+    Ok(())
+}

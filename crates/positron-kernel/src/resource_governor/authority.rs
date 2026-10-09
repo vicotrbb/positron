@@ -2,6 +2,20 @@ use positron_domain::identity::TenantId;
 
 use super::*;
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    static VOLUME_OBSERVATION_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(feature = "test-support")]
+struct ObservationFaultReset(bool);
+#[cfg(feature = "test-support")]
+impl Drop for ObservationFaultReset {
+    fn drop(&mut self) {
+        VOLUME_OBSERVATION_FAILURE.with(|fault| fault.set(self.0));
+    }
+}
+
 impl StorageKernelResourceAuthority {
     pub(super) fn from_configuration(
         ownership: KernelOwnership,
@@ -143,6 +157,51 @@ impl StorageKernelResourceAuthority {
         self.governor().inspect()
     }
 
+    /// Runs a test action while the canonical control operation is in progress.
+    /// The action must remain bounded and must not wait for governor admission.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_control_contention_for_test<T>(
+        &self,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, GovernorFailure> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let _control = loop {
+            match self.inner.try_lock_for_control() {
+                Ok(control) => break control,
+                Err(GovernorFailure::GovernorContended { .. })
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::yield_now();
+                },
+                Err(failure) => return Err(failure),
+            }
+        };
+        Ok(action())
+    }
+
+    /// Injects an unavailable volume observation only within this test action.
+    /// Exercises a terminal canonical fence while control inspection is busy.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_fenced_control_contention_for_test<T>(
+        &self,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, GovernorFailure> {
+        self.with_control_contention_for_test(|| {
+            self.inner.lifecycle.set(GovernorLifecycle::Fenced);
+            action()
+        })
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn with_volume_observation_failure_for_test<T>(&self, action: impl FnOnce() -> T) -> T {
+        let _reset =
+            ObservationFaultReset(VOLUME_OBSERVATION_FAILURE.with(|fault| fault.replace(true)));
+        action()
+    }
+
     /// Re-observes the retained Primary Data Volume and applies disk pressure.
     pub fn observe_disk(&self) -> Result<DiskPressureState, GovernorFailure> {
         let volume = match &self.inner.ownership {
@@ -152,6 +211,10 @@ impl StorageKernelResourceAuthority {
                 return Err(GovernorFailure::PrimaryVolumeObservationUnavailable);
             },
         };
+        #[cfg(feature = "test-support")]
+        if VOLUME_OBSERVATION_FAILURE.with(std::cell::Cell::get) {
+            return Err(GovernorFailure::PrimaryVolumeObservationUnavailable);
+        }
         let usable_bytes = capacity_observation::observe_disk_bytes(volume)
             .map_err(|_| GovernorFailure::PrimaryVolumeObservationUnavailable)?;
         self.inner
@@ -166,7 +229,7 @@ impl StorageKernelResourceAuthority {
         self.inner.apply_disk_observation(observation)
     }
 
-    #[cfg(fuzzing)]
+    #[cfg(any(fuzzing, feature = "test-support"))]
     #[doc(hidden)]
     pub fn observe_disk_for_fuzz(
         &self,

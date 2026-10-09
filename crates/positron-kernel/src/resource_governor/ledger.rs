@@ -359,24 +359,24 @@ impl GovernorInner {
                     .checked_mul(64)
                     .and_then(|base| base.checked_add(bit_index))
                 else {
-                    state.lifecycle = super::GovernorLifecycle::Fenced;
+                    state.lifecycle.set(super::GovernorLifecycle::Fenced);
                     continue;
                 };
                 let Some(signal) = self.drop_ledger.slot_signals.get(index) else {
-                    state.lifecycle = super::GovernorLifecycle::Fenced;
+                    state.lifecycle.set(super::GovernorLifecycle::Fenced);
                     continue;
                 };
                 if signal.load(Ordering::Acquire) != SLOT_RELEASE_PENDING {
-                    state.lifecycle = super::GovernorLifecycle::Fenced;
+                    state.lifecycle.set(super::GovernorLifecycle::Fenced);
                     continue;
                 }
                 let Ok(slot) = u16::try_from(index) else {
-                    state.lifecycle = super::GovernorLifecycle::Fenced;
+                    state.lifecycle.set(super::GovernorLifecycle::Fenced);
                     continue;
                 };
                 let released = self.release_slot_locked(state, false, slot);
                 if !released.applied {
-                    state.lifecycle = super::GovernorLifecycle::Fenced;
+                    state.lifecycle.set(super::GovernorLifecycle::Fenced);
                     continue;
                 }
             }

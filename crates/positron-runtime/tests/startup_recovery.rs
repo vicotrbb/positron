@@ -188,6 +188,18 @@ fn safely_acquired_ownership_is_retained_during_key_outage_backoff()
 
     assert_eq!(recovery.attempts.get(), 1);
     assert_eq!(process.health().phase(), ProcessPhase::Serving);
+    let events = process
+        .health()
+        .operational_log_snapshot()
+        .map_err(|failure| format!("operational health: {failure:?}"))?;
+    assert!(
+        events.contains("dependency_key_unavailable"),
+        "outage detail: {events}"
+    );
+    assert!(
+        events.contains("dependency_restored"),
+        "restoration detail: {events}"
+    );
     assert_eq!(listeners.bound.borrow().len(), 6);
     Ok(())
 }
@@ -234,7 +246,8 @@ fn corrupted_startup_frontier_rederives_the_fence_after_restart()
                 .is_some_and(|extension| extension == "segment")
         })
         .ok_or("initialized active segment")?;
-    std::fs::write(active, b"corrupt acknowledged frontier")?;
+    let damaged_bytes = b"corrupt acknowledged frontier";
+    std::fs::write(&active, damaged_bytes)?;
 
     let control = std::env::temp_dir().join(format!(
         "positron-fenced-control-{}.sock",
@@ -300,10 +313,20 @@ fn corrupted_startup_frontier_rederives_the_fence_after_restart()
     )?;
     assert!(response.starts_with("HTTP/1.1 404"));
 
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        ExitOutcome::Graceful
-    );
+    let assert_damaged_shutdown = |outcome| {
+        let ExitOutcome::InternalCleanupFailure(failure) = outcome else {
+            panic!("damaged acknowledged frontier cannot complete Drain: {outcome:?}");
+        };
+        assert_eq!(failure.primary(), positron_runtime::CleanupPrimary::Forced);
+        assert_eq!(
+            failure.failed_roles().collect::<Vec<_>>(),
+            [positron_runtime::CleanupRole::DurableShutdown(
+                BootstrapFailureCode::CatalogUnavailable
+            )]
+        );
+    };
+    assert_damaged_shutdown(process.shutdown(ShutdownTrigger::FirstSignal));
+    assert_eq!(std::fs::read(&active)?, damaged_bytes);
     assert!(roots.acquire_volume_again().is_ok());
     let restarted_control = std::env::temp_dir().join(format!(
         "positron-fenced-restarted-control-{}.sock",
@@ -327,10 +350,9 @@ fn corrupted_startup_frontier_rederives_the_fence_after_restart()
         "restart derives its restricted phase from the unchanged bad frontier"
     );
     assert!(restarted.services().is_none());
-    assert_eq!(
-        restarted.shutdown(ShutdownTrigger::FirstSignal),
-        ExitOutcome::Graceful
-    );
+    assert_damaged_shutdown(restarted.shutdown(ShutdownTrigger::FirstSignal));
+    assert_eq!(std::fs::read(&active)?, damaged_bytes);
+    assert!(roots.acquire_volume_again().is_ok());
     Ok(())
 }
 
@@ -623,27 +645,31 @@ fn close_control_before_response(
 }
 
 #[test]
-fn default_recovery_attempt_host_exhausts_its_published_bound()
+fn default_recovery_stays_alive_until_ownership_is_restored_after_the_old_bound()
 -> Result<(), Box<dyn std::error::Error>> {
-    let roots = TestRoots::new("default-recovery-bound")?;
+    let roots = TestRoots::new("default-recovery-restoration")?;
     let held = roots.bootstrap_paths()?.retain_volume_for_test()?;
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        drop(held);
+    });
     let listeners = ObservingListeners::default();
     let tasks = ObservingTasks::default();
-
-    let outcome = ApplicationRuntime::start(
+    let result = ApplicationRuntime::start(
         ServeConfiguration::new(
             roots.bootstrap_paths()?,
             InitializationMode::InitializeIfEmpty,
         ),
         HostInputs::new(&listeners, &tasks),
-    )
-    .expect_err("default recovery must stop at its attempt bound");
-
-    assert_eq!(
-        outcome,
-        ExitOutcome::StartupUnavailable(BootstrapFailureCode::StorageUnavailable)
     );
-    drop(held);
+    release.join().map_err(|_| "ownership release worker")?;
+    let process = result?;
+    assert_eq!(process.health().phase(), ProcessPhase::Serving);
+    assert_eq!(process.health().readiness(), Readiness::Ready);
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        ExitOutcome::Graceful
+    );
     assert!(roots.acquire_volume_again().is_ok());
     Ok(())
 }
@@ -676,4 +702,53 @@ fn first_signal_terminates_recovery_gracefully() -> Result<(), Box<dyn std::erro
 
 const fn control_plane() -> &'static [ListenerRole] {
     &[ListenerRole::Control, ListenerRole::Operations]
+}
+
+#[test]
+fn failed_health_worker_during_dependency_retry_exits_instead_of_claiming_liveness()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct RetryUnavailable(Cell<u8>);
+    impl RecoveryAttemptHost for RetryUnavailable {
+        fn prerequisite_status(&self) -> Result<(), BootstrapFailureCode> {
+            if self.0.get() == 0 {
+                Err(BootstrapFailureCode::KeyCustodyUnavailable)
+            } else {
+                Ok(())
+            }
+        }
+        fn after_failure(&self, _: RecoveryAttempt) -> RecoveryDecision {
+            self.0.set(self.0.get() + 1);
+            RecoveryDecision::Retry
+        }
+    }
+    let roots = TestRoots::new("recovery-worker-failure")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks {
+        fail_recovery_join: Some(positron_runtime::TaskRole::Operations),
+        ..ObservingTasks::default()
+    };
+    let recovery = RetryUnavailable(Cell::new(0));
+    let result = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::with_recovery(&listeners, &tasks, &recovery),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(ExitOutcome::TaskUnavailable(
+                positron_runtime::TaskRole::Operations
+            ))
+        ),
+        "failed recovery health worker outcome: {result:?}"
+    );
+    assert_eq!(recovery.0.get(), 1);
+    for health in &*listeners.health.borrow() {
+        assert_eq!(health.readiness(), Readiness::NotReady);
+        assert_eq!(health.liveness(), positron_runtime::Liveness::Dead);
+    }
+    assert!(roots.acquire_volume_again().is_ok());
+    Ok(())
 }

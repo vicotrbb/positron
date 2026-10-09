@@ -42,7 +42,7 @@ fn operations_status_exposes_a_fenced_configuration_drift() -> Result<(), Box<dy
     let claim = InstanceBootstrap::claim(&paths)?;
     let active = effective_configuration(None)?;
     let host = NativeHost::new(bindings(&roots, "cfg-status")?);
-    let process = ApplicationRuntime::start(
+    let mut process = ApplicationRuntime::start(
         ServeConfiguration::new(paths, InitializationMode::ExistingOnly)
             .with_effective_configuration(Arc::clone(&active)),
         HostInputs::new(&host, &host),
@@ -181,6 +181,47 @@ fn operations_status_exposes_a_fenced_configuration_drift() -> Result<(), Box<dy
     assert_ne!(
         quoted_status_value(&status, "effective_digest")?,
         quoted_status_value(&status, "desired_digest")?
+    );
+    assert_eq!(
+        process.health().readiness(),
+        positron_runtime::Readiness::NotReady
+    );
+    assert!(
+        process.apply_pending_integrity_fence(),
+        "durable drift must request owner retirement"
+    );
+    assert!(process.services().is_none());
+    assert!(process.configuration().is_none());
+    assert_eq!(
+        process
+            .bound_endpoints()
+            .into_iter()
+            .map(|endpoint| endpoint.role())
+            .collect::<Vec<_>>(),
+        [
+            positron_runtime::ListenerRole::Control,
+            positron_runtime::ListenerRole::Operations
+        ]
+    );
+    assert_status(http(operations, "GET", "/health/live", &[], &[])?, 200);
+    assert_status(http(operations, "GET", "/health/ready", &[], &[])?, 503);
+    assert_status(
+        http(
+            operations,
+            "GET",
+            "/status",
+            &[("Authorization", &authorization)],
+            &[],
+        )?,
+        503,
+    );
+    assert!(
+        positron_kernel::PrimaryDataVolume::acquire(
+            &roots.data,
+            positron_kernel::MountQualification::LocalHost
+        )
+        .is_ok(),
+        "retired configuration releases mutable authority"
     );
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),

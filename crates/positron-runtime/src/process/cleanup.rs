@@ -7,6 +7,8 @@ pub enum CleanupRole {
     Task(TaskRole),
     Listener(ListenerRole),
     SchemaCheckpoint,
+    DurableShutdown(BootstrapFailureCode),
+    OwnershipRelease,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +33,8 @@ pub struct CleanupFailure {
     task_failures: u8,
     listener_failures: u8,
     schema_checkpoint_failed: bool,
+    durable_shutdown_failed: bool,
+    ownership_release_failed: bool,
     overflowed: bool,
 }
 
@@ -52,6 +56,8 @@ impl CleanupFailure {
             task_failures: 0,
             listener_failures: 0,
             schema_checkpoint_failed: false,
+            durable_shutdown_failed: false,
+            ownership_release_failed: false,
             overflowed: false,
         }
     }
@@ -65,7 +71,10 @@ impl CleanupFailure {
     pub fn first_task(self) -> Option<TaskRole> {
         self.failed_roles().find_map(|role| match role {
             CleanupRole::Task(role) => Some(role),
-            CleanupRole::Listener(_) | CleanupRole::SchemaCheckpoint => None,
+            CleanupRole::Listener(_)
+            | CleanupRole::SchemaCheckpoint
+            | CleanupRole::DurableShutdown(_)
+            | CleanupRole::OwnershipRelease => None,
         })
     }
 
@@ -82,6 +91,14 @@ impl CleanupFailure {
     #[must_use]
     pub const fn schema_checkpoint_failed(self) -> bool {
         self.schema_checkpoint_failed
+    }
+    #[must_use]
+    pub const fn durable_shutdown_failed(self) -> bool {
+        self.durable_shutdown_failed
+    }
+    #[must_use]
+    pub const fn ownership_release_failed(self) -> bool {
+        self.ownership_release_failed
     }
 
     pub fn failed_roles(self) -> impl Iterator<Item = CleanupRole> {
@@ -166,10 +183,14 @@ impl CleanupAccumulator {
         self.failure.task_failures = self.failure.task_mask.count_ones() as u8;
         self.failure.listener_failures = self.failure.listener_mask.count_ones() as u8;
         self.failure.schema_checkpoint_failed |= other.schema_checkpoint_failed;
+        self.failure.durable_shutdown_failed |= other.durable_shutdown_failed;
+        self.failure.ownership_release_failed |= other.ownership_release_failed;
         self.failure.overflowed |= other.overflowed
             || self.failure.task_failures
                 + self.failure.listener_failures
                 + u8::from(self.failure.schema_checkpoint_failed)
+                + u8::from(self.failure.durable_shutdown_failed)
+                + u8::from(self.failure.ownership_release_failed)
                 > self.failure.role_count;
     }
 
@@ -187,6 +208,15 @@ impl CleanupAccumulator {
         self.failure.task_failures > 0
             || self.failure.listener_failures > 0
             || self.failure.schema_checkpoint_failed
+            || self.failure.durable_shutdown_failed
+            || self.failure.ownership_release_failed
+    }
+
+    pub(crate) fn record_durable_shutdown(&mut self, code: BootstrapFailureCode) {
+        self.record(CleanupRole::DurableShutdown(code));
+    }
+    pub(crate) fn record_ownership_release(&mut self) {
+        self.record(CleanupRole::OwnershipRelease);
     }
 
     pub(crate) fn record_schema_checkpoint(&mut self) {
@@ -218,6 +248,18 @@ impl CleanupAccumulator {
                 }
                 self.failure.listener_mask |= bit;
                 self.failure.listener_failures = self.failure.listener_mask.count_ones() as u8;
+            },
+            CleanupRole::DurableShutdown(_) => {
+                if self.failure.durable_shutdown_failed {
+                    return;
+                }
+                self.failure.durable_shutdown_failed = true;
+            },
+            CleanupRole::OwnershipRelease => {
+                if self.failure.ownership_release_failed {
+                    return;
+                }
+                self.failure.ownership_release_failed = true;
             },
             CleanupRole::SchemaCheckpoint => {
                 if self.failure.schema_checkpoint_failed {

@@ -51,7 +51,7 @@ impl GovernorInner {
         observation: DiskObservation,
     ) -> Result<DiskPressureState, GovernorFailure> {
         let mut state = self.try_lock_for_control()?;
-        if state.lifecycle == GovernorLifecycle::Fenced {
+        if state.lifecycle.get() == GovernorLifecycle::Fenced {
             return Err(GovernorFailure::InternalFenced);
         }
         let pressure = self
@@ -63,7 +63,7 @@ impl GovernorInner {
                 .pressure_transition_count
                 .checked_add(1)
                 .ok_or_else(|| {
-                    state.lifecycle = GovernorLifecycle::Fenced;
+                    state.lifecycle.set(GovernorLifecycle::Fenced);
                     GovernorFailure::InternalFenced
                 })?;
             state.disk_pressure = pressure;

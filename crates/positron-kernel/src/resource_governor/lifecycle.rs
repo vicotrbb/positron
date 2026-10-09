@@ -14,6 +14,51 @@ pub enum GovernorLifecycle {
     Fenced,
 }
 
+/// The accounting lock and read-only contention diagnostics share this one
+/// lifecycle value. Transitions remain serialized by the accounting lock.
+#[derive(Clone, Debug)]
+pub(super) struct LifecycleState(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl LifecycleState {
+    pub(super) fn new() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)))
+    }
+    pub(super) fn get(&self) -> GovernorLifecycle {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            0 => GovernorLifecycle::Open,
+            1 => GovernorLifecycle::ShuttingDown,
+            _ => GovernorLifecycle::Fenced,
+        }
+    }
+    pub(super) fn set(&self, lifecycle: GovernorLifecycle) {
+        let value = match lifecycle {
+            GovernorLifecycle::Open => 0,
+            GovernorLifecycle::ShuttingDown => 1,
+            GovernorLifecycle::Fenced => 2,
+        };
+        self.0.store(value, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl super::ResourceGovernor<'_> {
+    /// Reads the single canonical lifecycle without waiting for control work.
+    /// A pending fence or poisoned accounting lock is already unavailable.
+    #[must_use]
+    pub fn lifecycle(&self) -> GovernorLifecycle {
+        if self.inner.state.is_poisoned()
+            || self
+                .inner
+                .drop_ledger
+                .pending_fence
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            GovernorLifecycle::Fenced
+        } else {
+            self.inner.lifecycle.get()
+        }
+    }
+}
+
 /// Exact result of an explicit release.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReleaseOutcome {
@@ -142,9 +187,9 @@ impl ShutdownReconciliation {
 
 impl GovernorInner {
     pub(super) fn begin_shutdown(&self) -> Result<AccountingSnapshot, GovernorFailure> {
-        let mut state = self.try_lock_for_control()?;
-        match state.lifecycle {
-            GovernorLifecycle::Open => state.lifecycle = GovernorLifecycle::ShuttingDown,
+        let state = self.try_lock_for_control()?;
+        match state.lifecycle.get() {
+            GovernorLifecycle::Open => state.lifecycle.set(GovernorLifecycle::ShuttingDown),
             GovernorLifecycle::ShuttingDown => {},
             GovernorLifecycle::Fenced => return Err(GovernorFailure::InternalFenced),
         }

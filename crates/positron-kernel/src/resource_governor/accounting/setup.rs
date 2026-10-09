@@ -159,7 +159,7 @@ impl GovernorInner {
             disk_pressure: initial_pressure,
             usable_disk_bytes: initial_disk.usable_bytes,
             pressure_transition_count: 0,
-            lifecycle: GovernorLifecycle::Open,
+            lifecycle: super::super::lifecycle::LifecycleState::new(),
             outstanding_ordinary: 0,
             outstanding_recovery: 0,
             outstanding_uninterruptible: 0,
@@ -204,6 +204,7 @@ impl GovernorInner {
             recovery_pool_capacities: configuration.recovery_pool_capacities,
             recovery_shared_capacity: configuration.recovery_shared_capacity,
             disk_thresholds: configuration.disk_thresholds,
+            lifecycle: configuration.state.lifecycle.clone(),
             state: Mutex::new(configuration.state),
             drop_ledger: Arc::new(super::super::ledger::DropLedger::new(
                 configuration.slot_signals,

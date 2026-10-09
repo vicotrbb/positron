@@ -1040,7 +1040,7 @@ fn security_or_storage_drift_is_durably_reported_before_the_process_fences_data_
     let active = configuration(None)?;
     let listeners = ObservingListeners::default();
     let tasks = ObservingTasks::default();
-    let process = ApplicationRuntime::start(
+    let mut process = ApplicationRuntime::start(
         ServeConfiguration::new(
             roots.bootstrap_paths()?,
             InitializationMode::InitializeIfEmpty,
@@ -1059,11 +1059,30 @@ fn security_or_storage_drift_is_durably_reported_before_the_process_fences_data_
     let drift = process.reconcile_configuration_drift(desired)?;
 
     assert_eq!(drift.disposition(), ConfigurationDriftDisposition::Fence);
-    assert_eq!(process.health().phase(), ProcessPhase::Fenced);
     assert_eq!(process.health().readiness(), Readiness::NotReady);
     let after = runtime.observed()?;
     assert_eq!(after.generation(), before.generation());
     assert_eq!(after.effective().data_directory(), active.data_directory());
+    drop(runtime);
+    assert!(
+        process.apply_pending_integrity_fence(),
+        "durable drift must reach the sole lifecycle owner"
+    );
+    assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+    assert!(process.services().is_none());
+    assert!(process.configuration().is_none());
+    assert_eq!(
+        process
+            .bound_endpoints()
+            .into_iter()
+            .map(|endpoint| endpoint.role())
+            .collect::<Vec<_>>(),
+        [ListenerRole::Control, ListenerRole::Operations]
+    );
+    assert!(
+        roots.acquire_volume_again().is_ok(),
+        "restricted inspection must not retain mutable configuration authority"
+    );
     assert!(matches!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         positron_runtime::ExitOutcome::Graceful

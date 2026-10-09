@@ -49,7 +49,7 @@ impl GovernorInner {
             preserve_existing,
         } = request;
         let class = WorkClass::DurabilityRecovery;
-        if state.lifecycle == GovernorLifecycle::Fenced {
+        if state.lifecycle.get() == GovernorLifecycle::Fenced {
             return Err(retained_resize(class, state.disk_pressure));
         }
         let Some(old_pool_charge) = owner.recovery_pools else {
@@ -104,7 +104,7 @@ impl GovernorInner {
         };
         let mut planned_pools = None;
         let admission =
-            if state.lifecycle == GovernorLifecycle::ShuttingDown
+            if state.lifecycle.get() == GovernorLifecycle::ShuttingDown
                 && !kind.retains_capacity_on_resize_failure()
                 && !new.is_at_most(old)
             {

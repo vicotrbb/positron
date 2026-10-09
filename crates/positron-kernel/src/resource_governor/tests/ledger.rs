@@ -150,6 +150,6 @@ fn unreconstructable_drop_record_fences_without_applying_a_release() {
     let status = governor.inner.release_record_locked(&mut state, corrupt);
     assert_eq!(status.result, Err(GovernorFailure::InternalFenced));
     assert!(!status.applied);
-    assert_eq!(state.lifecycle, GovernorLifecycle::Fenced);
+    assert_eq!(state.lifecycle.get(), GovernorLifecycle::Fenced);
     assert_eq!(state.outstanding, 0);
 }

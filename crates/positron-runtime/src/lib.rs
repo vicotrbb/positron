@@ -4,6 +4,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+extern crate self as positron_runtime;
+
 mod configuration;
 mod configuration_catalog;
 mod health;
@@ -12,6 +15,8 @@ mod integrity_verification;
 mod listener;
 mod native_host;
 mod process;
+#[cfg(fuzzing)]
+mod process_fuzz;
 mod services;
 #[cfg(fuzzing)]
 mod tail_fuzz;
@@ -32,9 +37,9 @@ pub use health::{
 pub use instance_bootstrap::GovernanceTestFixture;
 pub use instance_bootstrap::{
     BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
-    BootstrapPaths, BootstrapState, DoctorRuntimeFacts, InitializationPlan, InitializedInstance,
-    InstanceBootstrap, OfflineSupportBundleFailure, OfflineSupportBundleInspection,
-    TenantRetentionImpactPreview,
+    BootstrapPaths, BootstrapState, DoctorRuntimeFacts, GracefulShutdownRecord, InitializationPlan,
+    InitializedInstance, InstanceBootstrap, OfflineSupportBundleFailure,
+    OfflineSupportBundleInspection, TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
     OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityAggregateOutcome,
@@ -70,6 +75,7 @@ pub use task::{
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub fn fuzz_process_inputs(data: &[u8]) {
+    process_fuzz::run(data);
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::path::PathBuf;
 

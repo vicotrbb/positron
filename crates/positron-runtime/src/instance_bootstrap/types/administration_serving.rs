@@ -109,7 +109,13 @@ impl InitializedInstance {
     pub(crate) fn begin_shutdown(&self) -> Result<(), BootstrapFailure> {
         self._authority
             .begin_shutdown()
-            .map(|_| ())
+            .and_then(|reconciliation| {
+                if reconciliation.complete() {
+                    Ok(())
+                } else {
+                    Err(positron_kernel::GovernorFailure::InvalidConfiguration)
+                }
+            })
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
     }
 

@@ -696,7 +696,7 @@ impl<'authority> Catalog<'authority> {
                 .operation
                 .lock()
                 .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
-            self.commit_unreserved(expected, proposal, audit, None)
+            self.commit_unreserved_interruptibly(expected, proposal, audit, None, &mut || false)
         };
         drop(_reservation);
         #[cfg(any(test, feature = "test-support"))]
@@ -727,7 +727,7 @@ impl<'authority> Catalog<'authority> {
             .operation
             .lock()
             .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
-        self.commit_unreserved(expected, proposal, None, None)
+        self.commit_unreserved_interruptibly(expected, proposal, None, None, &mut || false)
     }
 
     /// Publishes an administrative proposal whose retry identity is fixed before
@@ -754,7 +754,13 @@ impl<'authority> Catalog<'authority> {
                 .operation
                 .lock()
                 .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
-            self.commit_unreserved(expected, proposal, Some(audit), Some(request_digest))
+            self.commit_unreserved_interruptibly(
+                expected,
+                proposal,
+                Some(audit),
+                Some(request_digest),
+                &mut || false,
+            )
         };
         drop(_reservation);
         result
@@ -841,9 +847,98 @@ impl<'authority> Catalog<'authority> {
                     .checked_add(additional_history_bytes)
                     .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
                 Ok(PreparedTransactionResolution::Resumed(CatalogCommit {
+                    predecessor: prepared.record.predecessor,
                     snapshot,
                     audit: Some(prepared.audit),
                 }))
+            },
+        }
+    }
+
+    /// Publishes a final durable completion, checking interruption before each
+    /// unpublished write and the sole visibility marker. A visible exact
+    /// transaction is success even when its acknowledgement was lost.
+    /// `None` means interruption was confirmed before publication.
+    pub fn commit_interruptibly(
+        &self,
+        expected: CatalogGenerationId,
+        proposal: CatalogProposal,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<CatalogCommit>, CatalogFailure> {
+        if !proposal.format_epoch.is_catalog_writable() {
+            return Err(CatalogFailure::new(CatalogFailureCode::UnsupportedFormat));
+        }
+        let mut identities = Vec::new();
+        identities
+            .try_reserve_exact(proposal.objects.len())
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::ResourceAdmissionRefused))?;
+        identities.extend(proposal.objects.iter().map(CatalogObject::identity));
+        let digest = transaction_digest(proposal.format_epoch, &identities, None)?;
+        let transaction = proposal.transaction;
+        let claim = RecoveryWorkClaim::system(
+            RecoveryWorkKind::DurabilityCompletion,
+            commit_resource_claim(&proposal, None)?,
+        )
+        .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let _reservation = self
+            .authority
+            .recovery()
+            .reserve(claim)
+            .map_err(CatalogFailure::admission)?;
+        let mut interrupted = false;
+        let result = {
+            let _operation = self
+                .operation
+                .lock()
+                .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+            self.commit_unreserved_interruptibly(expected, proposal, None, None, &mut || {
+                interrupted = cancelled();
+                interrupted
+            })
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if result
+            .as_ref()
+            .is_err_and(|failure| failure.code() == CatalogFailureCode::StorageUnavailable)
+        {
+            storage::after_ambiguous_publication(self);
+        }
+        match result {
+            Ok(commit) => Ok(Some(commit)),
+            Err(failure) => {
+                // Confirm only the attempted transaction: never replay or
+                // initiate another publication after interruption.
+                if let Some(commit) = self.committed_transaction(transaction)? {
+                    let _operation = self
+                        .operation
+                        .lock()
+                        .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+                    let outcome = state.transactions.get(&transaction).ok_or_else(|| {
+                        CatalogFailure::new(CatalogFailureCode::IntegrityCorruption)
+                    })?;
+                    if outcome.digest != digest || commit.predecessor() != expected {
+                        return Err(CatalogFailure::new(CatalogFailureCode::IdempotencyConflict));
+                    }
+                    let secret = self
+                        .secret
+                        .lock()
+                        .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+                    self.storage.confirm_visible_publication(
+                        &secret,
+                        self.instance,
+                        &outcome.record,
+                        outcome.audit.as_ref(),
+                    )?;
+                    Ok(Some(commit))
+                } else if interrupted {
+                    Ok(None)
+                } else {
+                    Err(failure)
+                }
             },
         }
     }
@@ -876,9 +971,55 @@ impl<'authority> Catalog<'authority> {
         };
         let snapshot = load_snapshot(&self.storage, &secret, self.instance, &outcome.record)?;
         Ok(Some(CatalogCommit {
+            predecessor: outcome.record.predecessor,
             snapshot,
             audit: outcome.audit.clone(),
         }))
+    }
+
+    /// Confirms the durability of one already visible authenticated transaction.
+    /// This synchronizes existing artifacts and its exact marker; it never
+    /// creates a marker, replays a proposal, or changes the current generation.
+    pub fn confirm_committed_transaction(
+        &self,
+        transaction: TransactionId,
+    ) -> Result<Option<CatalogCommit>, CatalogFailure> {
+        let claim = RecoveryWorkClaim::system(
+            RecoveryWorkKind::DurabilityCompletion,
+            recovery_resource_claim(),
+        )
+        .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let _reservation = self
+            .authority
+            .recovery()
+            .reserve(claim)
+            .map_err(CatalogFailure::admission)?;
+        let Some(commit) = self.committed_transaction(transaction)? else {
+            return Ok(None);
+        };
+        let _operation = self
+            .operation
+            .lock()
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+        let outcome = state
+            .transactions
+            .get(&transaction)
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
+        let secret = self
+            .secret
+            .lock()
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+        self.storage.confirm_visible_publication(
+            &secret,
+            self.instance,
+            &outcome.record,
+            outcome.audit.as_ref(),
+        )?;
+        Ok(Some(commit))
     }
 
     /// Inspects one exact unpublished proposal without making it visible.
@@ -976,6 +1117,23 @@ impl<'authority> Catalog<'authority> {
         audit: Option<AuditIntent>,
         prepared_request: Option<[u8; 32]>,
     ) -> Result<CatalogCommit, CatalogFailure> {
+        self.commit_unreserved_interruptibly(
+            expected,
+            proposal,
+            audit,
+            prepared_request,
+            &mut || false,
+        )
+    }
+
+    fn commit_unreserved_interruptibly(
+        &self,
+        expected: CatalogGenerationId,
+        proposal: CatalogProposal,
+        audit: Option<AuditIntent>,
+        prepared_request: Option<[u8; 32]>,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<CatalogCommit, CatalogFailure> {
         let mut state = self
             .state
             .lock()
@@ -1011,6 +1169,7 @@ impl<'authority> Catalog<'authority> {
                 outcome.audit.as_ref(),
             )?;
             return Ok(CatalogCommit {
+                predecessor: outcome.record.predecessor,
                 snapshot: load_snapshot(&self.storage, &secret, self.instance, &outcome.record)?,
                 audit: outcome.audit.clone(),
             });
@@ -1093,6 +1252,11 @@ impl<'authority> Catalog<'authority> {
 
         let mut objects = BTreeMap::new();
         for object in proposal.objects {
+            if cancelled() {
+                return Err(CatalogFailure::new(
+                    CatalogFailureCode::ResourceAdmissionRefused,
+                ));
+            }
             self.storage.publish_object(
                 &transaction,
                 &secret,
@@ -1103,11 +1267,21 @@ impl<'authority> Catalog<'authority> {
             )?;
             objects.insert(object.identity, Arc::from(object.plaintext));
         }
+        if cancelled() {
+            return Err(CatalogFailure::new(
+                CatalogFailureCode::ResourceAdmissionRefused,
+            ));
+        }
         if let Some((record, encoded)) = &prepared_audit {
             self.storage
                 .publish_audit(&transaction, &secret, self.instance, record, encoded)?;
         }
 
+        if cancelled() {
+            return Err(CatalogFailure::new(
+                CatalogFailureCode::ResourceAdmissionRefused,
+            ));
+        }
         self.storage.publish_commit(
             &transaction,
             &secret,
@@ -1115,14 +1289,25 @@ impl<'authority> Catalog<'authority> {
             record.generation,
             &encoded_commit,
         )?;
-        self.storage
-            .publish_marker(&transaction, &secret, number, record.generation)?;
+        if cancelled() {
+            return Err(CatalogFailure::new(
+                CatalogFailureCode::ResourceAdmissionRefused,
+            ));
+        }
+        self.storage.publish_marker_interruptibly(
+            &transaction,
+            &secret,
+            number,
+            record.generation,
+            cancelled,
+        )?;
 
         let snapshot = snapshot_from_record(&record, objects);
         let visible_audit = prepared_audit.map(|(record, _)| record);
         if let Some(record) = &visible_audit {
             state.audit.push(record.clone());
         }
+        let committed_predecessor = record.predecessor;
         state.transactions.insert(
             proposal.transaction,
             TransactionOutcome {
@@ -1137,6 +1322,7 @@ impl<'authority> Catalog<'authority> {
             .checked_add(additional_history_bytes)
             .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
         Ok(CatalogCommit {
+            predecessor: committed_predecessor,
             snapshot,
             audit: visible_audit,
         })
@@ -1350,7 +1536,13 @@ impl<'authority> Catalog<'authority> {
                 .operation
                 .lock()
                 .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
-            self.commit_unreserved(basis.identity(), proposal, None, None)
+            self.commit_unreserved_interruptibly(
+                basis.identity(),
+                proposal,
+                None,
+                None,
+                &mut || false,
+            )
         };
         drop(reservation);
         #[cfg(any(test, feature = "test-support"))]
@@ -1516,7 +1708,13 @@ impl<'authority> Catalog<'authority> {
                 .operation
                 .lock()
                 .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
-            self.commit_unreserved(basis.identity(), proposal, Some(publication.audit), None)
+            self.commit_unreserved_interruptibly(
+                basis.identity(),
+                proposal,
+                Some(publication.audit),
+                None,
+                &mut || false,
+            )
         };
         drop(reservation);
         #[cfg(any(test, feature = "test-support"))]

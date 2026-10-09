@@ -481,12 +481,24 @@ fn online_integrity_fence_retires_data_ownership_but_keeps_reauthenticated_inspe
             })
             .collect::<Vec<_>>(),
         [
-            TaskRole::Maintenance,
             TaskRole::Api,
             TaskRole::OtlpGrpc,
             TaskRole::OtlpHttp,
             TaskRole::LokiPush,
         ]
+    );
+    assert_eq!(
+        tasks
+            .events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                TaskEvent::Aborted(role, ProcessPhase::Fenced, false) => Some(*role),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [TaskRole::Maintenance],
+        "deterministic abort confirms Maintenance termination without a second join"
     );
 
     assert!(!process.apply_pending_integrity_fence());
