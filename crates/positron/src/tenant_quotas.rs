@@ -1,44 +1,18 @@
-use std::io::{IsTerminal, Read};
-use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use positron_api::tenant_quotas::{
     TenantQuotaResources, TenantQuotaServiceClient, TenantQuotaServiceClientFailure,
     TenantQuotaTransport, TenantQuotaUpdateRequest,
 };
-use zeroize::Zeroizing;
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
-    match execute(arguments) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("positron: {message}");
-            ExitCode::from(2)
-        },
-    }
+    crate::administrative_cli::exit(execute(arguments))
 }
 
 fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> {
     let (transport, request) = parse(arguments)?;
-    let input = std::io::stdin();
-    if input.is_terminal() {
-        return Err("credential input must be a pipe; terminal input is refused to prevent echo");
-    }
-    let mut credential = Zeroizing::new(String::new());
-    input
-        .take(1025)
-        .read_to_string(&mut credential)
-        .map_err(|_| "credential input unavailable")?;
+    let credential = crate::administrative_cli::credential()?;
     let bearer = credential.trim_end_matches(['\r', '\n']);
-    if credential.len() > 1024
-        || bearer.is_empty()
-        || bearer.len() > 1024
-        || !bearer
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-    {
-        return Err("invalid credential input");
-    }
     let client =
         TenantQuotaServiceClient::new(transport).map_err(|_| "API endpoint unavailable")?;
     let response = client.update(bearer, &request).map_err(client_failure)?;
@@ -127,31 +101,12 @@ fn parse(
             "--credential-stdin is required; secrets are never accepted as arguments or environment variables",
         );
     }
-    let endpoint: SocketAddr = options
-        .remove("--endpoint")
-        .ok_or("--endpoint is required")?
-        .parse()
-        .map_err(|_| "invalid API endpoint")?;
-    if endpoint.port() == 0 {
-        return Err("invalid API endpoint");
-    }
-    let transport = if allow_plaintext {
-        if options.contains_key("--trust-file") || options.contains_key("--server-name") {
-            return Err("TLS options do not apply to plaintext opt-out");
-        }
-        TenantQuotaTransport::PlaintextOptOut { endpoint }
-    } else {
-        TenantQuotaTransport::Tls {
-            endpoint,
-            server_name: options
-                .remove("--server-name")
-                .ok_or("--server-name is required for TLS")?,
-            trust_file: options
-                .remove("--trust-file")
-                .ok_or("--trust-file is required unless --allow-plaintext is explicit")?
-                .into(),
-        }
-    };
+    let transport = crate::administrative_cli::transport(
+        &mut options,
+        allow_plaintext,
+        crate::administrative_cli::required_transport_option,
+    )?;
+
     let request = TenantQuotaUpdateRequest::new(
         options.remove("--tenant").ok_or("--tenant is required")?,
         take_u64(&mut options, "--expected-generation")?,

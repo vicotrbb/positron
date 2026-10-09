@@ -162,7 +162,7 @@ fn decode_sealed_frontier(
     }
 }
 
-fn encode_event_range(bytes: &mut Vec<u8>, range: AuthenticatedEventRange) {
+pub(super) fn encode_event_range(bytes: &mut Vec<u8>, range: AuthenticatedEventRange) {
     match range {
         AuthenticatedEventRange::Known { earliest, latest } => {
             bytes.push(1);
@@ -181,7 +181,7 @@ fn encode_event_range(bytes: &mut Vec<u8>, range: AuthenticatedEventRange) {
     }
 }
 
-fn encode_ingest_range(bytes: &mut Vec<u8>, range: AuthenticatedIngestRange) {
+pub(super) fn encode_ingest_range(bytes: &mut Vec<u8>, range: AuthenticatedIngestRange) {
     match range {
         AuthenticatedIngestRange::Known { earliest, latest } => {
             bytes.push(1);

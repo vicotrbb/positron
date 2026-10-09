@@ -1,6 +1,6 @@
 //! Bounded PQUAR2 evidence codec for quarantined sealed segments.
 
-use super::super::format;
+use super::super::format::{self, encode_event_range, encode_ingest_range};
 use super::super::{AuthenticatedEventRange, AuthenticatedIngestRange, EventRangeUnavailable};
 use super::{IntegrityFailure, IntegrityFailureCode, SegmentId, SegmentScope};
 
@@ -100,38 +100,6 @@ pub(in crate::active_segment_ledger) fn decode_quarantine(
         event_range,
         ingest_range,
     )))
-}
-
-fn encode_event_range(bytes: &mut Vec<u8>, range: AuthenticatedEventRange) {
-    match range {
-        AuthenticatedEventRange::Known { earliest, latest } => {
-            bytes.push(1);
-            bytes.extend_from_slice(&earliest.value().to_be_bytes());
-            bytes.extend_from_slice(&latest.value().to_be_bytes());
-        },
-        AuthenticatedEventRange::Unavailable(EventRangeUnavailable::MissingSourceTime) => {
-            bytes.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        },
-        AuthenticatedEventRange::Unavailable(EventRangeUnavailable::InvalidSourceTime) => {
-            bytes.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        },
-        AuthenticatedEventRange::Unavailable(EventRangeUnavailable::LegacyFormat) => {
-            bytes.extend_from_slice(&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        },
-    }
-}
-
-fn encode_ingest_range(bytes: &mut Vec<u8>, range: AuthenticatedIngestRange) {
-    match range {
-        AuthenticatedIngestRange::Known { earliest, latest } => {
-            bytes.push(1);
-            bytes.extend_from_slice(&earliest.value().to_be_bytes());
-            bytes.extend_from_slice(&latest.value().to_be_bytes());
-        },
-        AuthenticatedIngestRange::Unavailable => {
-            bytes.extend_from_slice(&[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        },
-    }
 }
 
 fn decode_event_range(

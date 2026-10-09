@@ -492,5 +492,21 @@ pub(super) fn localized_finding(
 pub(super) fn fuzz_quarantine_record(data: &[u8]) {
     // The record is catalog-authenticated in production; fuzzing still proves
     // malformed retained evidence cannot panic or manufacture a valid scope.
-    let _ = decode_quarantine(data);
+    let Ok(Some(record)) = decode_quarantine(data) else {
+        return;
+    };
+    let (scope, id, base_position, sealed_frontier, event_range, ingest_range) = record;
+    let metadata = super::format::SegmentMetadata {
+        scope,
+        id,
+        state: super::format::SegmentState::Sealed,
+        base_position: super::format::position_from_value(base_position)
+            .expect("decoded quarantine position is representable"),
+        sealed_frontier: Some(sealed_frontier),
+        event_range,
+        ingest_range,
+    };
+    let encoded = encode_quarantine(metadata).expect("decoded quarantine record encodes");
+    assert_eq!(encoded, data);
+    assert_eq!(decode_quarantine(&encoded), Ok(Some(record)));
 }

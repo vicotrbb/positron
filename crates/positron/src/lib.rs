@@ -17,6 +17,7 @@ use positron_runtime::{
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
+mod administrative_cli;
 mod config_cli;
 #[cfg(unix)]
 mod control_socket;

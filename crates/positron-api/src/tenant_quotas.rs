@@ -4,6 +4,7 @@ pub use crate::api_keys::ApiKeyTransport as TenantQuotaTransport;
 pub use crate::api_keys::protobuf::{
     TenantQuotaUpdateRequest as WireRequest, TenantQuotaUpdateResponse,
 };
+use crate::validation::identifier;
 
 mod client {
     include!(concat!(env!("OUT_DIR"), "/tenant_quota_service_client.rs"));
@@ -155,16 +156,4 @@ impl TenantQuotaUpdateRequest {
         self.validate()?;
         serde_json::to_vec(&self.0).map_err(|_| TenantQuotaWireFailure)
     }
-}
-
-fn identifier(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(i, b)| {
-            if matches!(i, 8 | 13 | 18 | 23) {
-                b == b'-'
-            } else {
-                b.is_ascii_digit() || matches!(b, b'a'..=b'f')
-            }
-        })
-        && value.bytes().any(|b| matches!(b,b'1'..=b'9'|b'a'..=b'f'))
 }

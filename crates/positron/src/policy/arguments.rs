@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::net::SocketAddr;
 
 use positron_api::policy::{
     MAX_ACTIVATE_REQUEST_BYTES, MAX_DIFF_REQUEST_BYTES, MAX_EXPLAIN_REQUEST_BYTES,
@@ -66,31 +65,12 @@ pub(super) fn parse(
             "--credential-stdin is required; secrets are never accepted as arguments or environment variables",
         );
     }
-    let endpoint: SocketAddr = options
-        .remove("--endpoint")
-        .ok_or("--endpoint is required")?
-        .parse()
-        .map_err(|_| "invalid API endpoint")?;
-    if endpoint.port() == 0 {
-        return Err("invalid API endpoint");
-    }
-    let transport = if allow_plaintext {
-        if options.contains_key("--trust-file") || options.contains_key("--server-name") {
-            return Err("TLS options do not apply to plaintext opt-out");
-        }
-        PolicyPreviewTransport::PlaintextOptOut { endpoint }
-    } else {
-        PolicyPreviewTransport::Tls {
-            endpoint,
-            server_name: options
-                .remove("--server-name")
-                .ok_or("--server-name is required for TLS")?,
-            trust_file: options
-                .remove("--trust-file")
-                .ok_or("--trust-file is required unless --allow-plaintext is explicit")?
-                .into(),
-        }
-    };
+    let transport = crate::administrative_cli::transport(
+        &mut options,
+        allow_plaintext,
+        crate::administrative_cli::required_transport_option,
+    )?;
+
     let request = match command.as_str() {
         "validate" => {
             let request = PolicyPreviewRequest::new(read_file(

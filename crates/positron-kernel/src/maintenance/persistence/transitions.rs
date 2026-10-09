@@ -165,60 +165,26 @@ impl SnapshotLeaseExpiryTaskReplacement {
         self,
         coordinator: &MaintenanceCoordinator,
     ) -> Result<(), MaintenanceFailure> {
-        let mut state = coordinator
-            .state
-            .lock()
-            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        if !state
-            .pending_task_transitions
-            .contains(&self.before.task.identity)
-            || state.tasks.get(&self.before.task.identity) != Some(&self.before)
-        {
-            return Err(MaintenanceFailure::PreconditionFailed);
-        }
-        state
-            .pending_task_transitions
-            .remove(&self.before.task.identity);
-        state.tasks.insert(self.after.task.identity, self.after);
-        state.next_terminal_order = state.next_terminal_order.max(self.next_terminal_order);
-        Ok(())
+        install_transition(
+            coordinator,
+            self.before,
+            self.after,
+            self.next_terminal_order,
+        )
     }
 
     pub(crate) fn discard(
         &self,
         coordinator: &MaintenanceCoordinator,
     ) -> Result<(), MaintenanceFailure> {
-        let mut state = coordinator
-            .state
-            .lock()
-            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        state
-            .pending_task_transitions
-            .remove(&self.before.task.identity);
-        Ok(())
+        discard_transition(coordinator, self.before.task.identity)
     }
 
     pub(crate) fn install_running_completion(
         self,
         coordinator: &MaintenanceCoordinator,
     ) -> Result<(), MaintenanceFailure> {
-        let mut state = coordinator
-            .state
-            .lock()
-            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        if !state
-            .pending_task_transitions
-            .contains(&self.before.task.identity)
-            || state.tasks.get(&self.before.task.identity) != Some(&self.before)
-        {
-            return Err(MaintenanceFailure::PreconditionFailed);
-        }
-        state
-            .pending_task_transitions
-            .remove(&self.before.task.identity);
-        state.tasks.insert(self.after.task.identity, self.after);
-        state.next_terminal_order = state.next_terminal_order.max(self.next_terminal_order);
-        Ok(())
+        self.install(coordinator)
     }
 
     pub(crate) fn install_reconciled_running_completion(
@@ -247,23 +213,12 @@ impl RetentionReclamationTaskReplacement {
         self,
         coordinator: &MaintenanceCoordinator,
     ) -> Result<(), MaintenanceFailure> {
-        let mut state = coordinator
-            .state
-            .lock()
-            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        if !state
-            .pending_task_transitions
-            .contains(&self.before.task.identity)
-            || state.tasks.get(&self.before.task.identity) != Some(&self.before)
-        {
-            return Err(MaintenanceFailure::PreconditionFailed);
-        }
-        state
-            .pending_task_transitions
-            .remove(&self.before.task.identity);
-        state.tasks.insert(self.after.task.identity, self.after);
-        state.next_terminal_order = state.next_terminal_order.max(self.next_terminal_order);
-        Ok(())
+        install_transition(
+            coordinator,
+            self.before,
+            self.after,
+            self.next_terminal_order,
+        )
     }
 
     pub(crate) fn install_reconciled(
@@ -290,14 +245,7 @@ impl RetentionReclamationTaskReplacement {
         &self,
         coordinator: &MaintenanceCoordinator,
     ) -> Result<(), MaintenanceFailure> {
-        let mut state = coordinator
-            .state
-            .lock()
-            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        state
-            .pending_task_transitions
-            .remove(&self.before.task.identity);
-        Ok(())
+        discard_transition(coordinator, self.before.task.identity)
     }
 }
 
@@ -310,23 +258,12 @@ impl CompactionTaskReplacement {
         self,
         coordinator: &MaintenanceCoordinator,
     ) -> Result<(), MaintenanceFailure> {
-        let mut state = coordinator
-            .state
-            .lock()
-            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        if !state
-            .pending_task_transitions
-            .contains(&self.before.task.identity)
-            || state.tasks.get(&self.before.task.identity) != Some(&self.before)
-        {
-            return Err(MaintenanceFailure::PreconditionFailed);
-        }
-        state
-            .pending_task_transitions
-            .remove(&self.before.task.identity);
-        state.tasks.insert(self.after.task.identity, self.after);
-        state.next_terminal_order = state.next_terminal_order.max(self.next_terminal_order);
-        Ok(())
+        install_transition(
+            coordinator,
+            self.before,
+            self.after,
+            self.next_terminal_order,
+        )
     }
 
     pub(crate) fn install_reconciled(
@@ -352,14 +289,7 @@ impl CompactionTaskReplacement {
         &self,
         coordinator: &MaintenanceCoordinator,
     ) -> Result<(), MaintenanceFailure> {
-        let mut state = coordinator
-            .state
-            .lock()
-            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
-        state
-            .pending_task_transitions
-            .remove(&self.before.task.identity);
-        Ok(())
+        discard_transition(coordinator, self.before.task.identity)
     }
 }
 
@@ -454,4 +384,39 @@ pub(super) fn matches_catalog_reclamation_predecessor(
     recovered.phase = MaintenanceTaskPhase::Cancelled;
     recovered.last_progress_at = None;
     Ok(encode_record(&recovered)?.as_bytes() == live_record.as_bytes())
+}
+
+fn install_transition(
+    coordinator: &MaintenanceCoordinator,
+    before: TaskState,
+    after: TaskState,
+    next_terminal_order: u64,
+) -> Result<(), MaintenanceFailure> {
+    let mut state = coordinator
+        .state
+        .lock()
+        .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+    if !state
+        .pending_task_transitions
+        .contains(&before.task.identity)
+        || state.tasks.get(&before.task.identity) != Some(&before)
+    {
+        return Err(MaintenanceFailure::PreconditionFailed);
+    }
+    state.pending_task_transitions.remove(&before.task.identity);
+    state.tasks.insert(after.task.identity, after);
+    state.next_terminal_order = state.next_terminal_order.max(next_terminal_order);
+    Ok(())
+}
+
+fn discard_transition(
+    coordinator: &MaintenanceCoordinator,
+    identity: MaintenanceTaskId,
+) -> Result<(), MaintenanceFailure> {
+    let mut state = coordinator
+        .state
+        .lock()
+        .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+    state.pending_task_transitions.remove(&identity);
+    Ok(())
 }
