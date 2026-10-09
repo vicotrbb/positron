@@ -423,3 +423,270 @@ fn listener_document(
         control.display(),
     )
 }
+
+#[derive(Clone, Copy)]
+enum RetirementFailure {
+    Close,
+    Drain,
+}
+
+struct RetirementHost {
+    native: NativeHost,
+    failure: RetirementFailure,
+    closed: Arc<std::sync::Mutex<Vec<ListenerRole>>>,
+}
+impl positron_runtime::ListenerFactory for RetirementHost {
+    fn bind(
+        &self,
+        request: positron_runtime::ListenerRequest,
+    ) -> Result<Box<dyn positron_runtime::BoundListener>, positron_runtime::ListenerFailure> {
+        let role = request.role();
+        Ok(Box::new(RetirementListener {
+            inner: self.native.bind(request)?,
+            role,
+            failure: self.failure,
+            closed: Arc::clone(&self.closed),
+        }))
+    }
+    fn profile_for(&self, role: ListenerRole) -> Option<positron_runtime::ListenerProfile> {
+        self.native.profile_for(role)
+    }
+    fn generation_factory(&self) -> Option<Arc<dyn positron_runtime::ListenerGenerationFactory>> {
+        self.native.generation_factory()
+    }
+}
+struct RetirementListener {
+    inner: Box<dyn positron_runtime::BoundListener>,
+    role: ListenerRole,
+    failure: RetirementFailure,
+    closed: Arc<std::sync::Mutex<Vec<ListenerRole>>>,
+}
+impl positron_runtime::BoundListener for RetirementListener {
+    fn endpoint(&self) -> &positron_runtime::BoundEndpoint {
+        self.inner.endpoint()
+    }
+    fn close(&mut self) -> Result<(), positron_runtime::ListenerFailure> {
+        self.closed
+            .lock()
+            .map_err(|_| positron_runtime::ListenerFailure::BindUnavailable)?
+            .push(self.role);
+        self.inner.close()?;
+        if self.role == ListenerRole::Api && matches!(self.failure, RetirementFailure::Close) {
+            Err(positron_runtime::ListenerFailure::BindUnavailable)
+        } else {
+            Ok(())
+        }
+    }
+    fn drain_within(
+        &mut self,
+        remaining: Duration,
+    ) -> Result<bool, positron_runtime::ListenerFailure> {
+        let drained = self.inner.drain_within(remaining)?;
+        if self.role == ListenerRole::Api && matches!(self.failure, RetirementFailure::Drain) {
+            Err(positron_runtime::ListenerFailure::BindUnavailable)
+        } else {
+            Ok(drained)
+        }
+    }
+}
+
+#[test]
+fn committed_successor_close_failure_retains_only_inspection_and_releases_mutable_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    retirement_failure(RetirementFailure::Close, "close")
+}
+
+#[test]
+fn committed_successor_drain_failure_retains_only_inspection_and_releases_mutable_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    retirement_failure(RetirementFailure::Drain, "drain")
+}
+
+fn retirement_failure(
+    failure: RetirementFailure,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let roots = roots::TestRoots::new(&format!("committed-successor-{label}"))?;
+    let paths = roots.bootstrap_paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        positron_runtime::InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let control = std::env::temp_dir().join(format!("p84-{label}-{}.sock", std::process::id()));
+    let initial = configuration(
+        &listener_document(&control, "plaintext", "plaintext", 0).replace(
+            "operations_transport = \"tls\"",
+            "operations_transport = \"plaintext\"",
+        ),
+    )?;
+    let host = RetirementHost {
+        native: NativeHost::new(NativeBindings::from_effective(&initial)?),
+        failure,
+        closed: Arc::new(std::sync::Mutex::new(Vec::new())),
+    };
+    let mut process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths.clone(), InitializationMode::ExistingOnly)
+            .with_effective_configuration(Arc::clone(&initial)),
+        HostInputs::new(&host, &host.native),
+    )?;
+    let runtime = process.configuration().ok_or("configuration")?;
+    let predecessor = runtime.observed()?.generation();
+    let successor = configuration(&listener_document(&control, "tls", "tls", 0).replace(
+        "operations_transport = \"tls\"",
+        "operations_transport = \"plaintext\"",
+    ))?;
+    assert_eq!(
+        process
+            .reload_configuration(successor)
+            .expect_err("old generation retirement fails"),
+        ConfigurationRuntimeFailure::ListenerUnavailable
+    );
+    assert!(
+        runtime.observed()?.generation() > predecessor,
+        "the published successor cannot be rolled back"
+    );
+    drop(runtime);
+    assert_eq!(process.health().readiness(), Readiness::NotReady);
+    let services = process
+        .services()
+        .ok_or("serving authority before owner reconciliation")?;
+    assert!(
+        matches!(
+            services.ingest_otlp_logs(
+                claim.ingest_secret().ok_or("ingest credential")?,
+                vec![10, 4, 18, 2, 18, 0]
+            ),
+            Err(positron_runtime::ServiceFailure::CapacityUnavailable)
+        ),
+        "pending fence must block data before owner reconciliation"
+    );
+    drop(services);
+    assert!(
+        process.apply_pending_integrity_fence(),
+        "failed retirement must reach the process owner"
+    );
+    assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+    assert_eq!(
+        process.health().liveness(),
+        positron_runtime::Liveness::Live
+    );
+    assert!(process.services().is_none());
+    assert!(process.configuration().is_none());
+    assert_eq!(
+        process
+            .bound_endpoints()
+            .into_iter()
+            .map(|endpoint| endpoint.role())
+            .collect::<Vec<_>>(),
+        [ListenerRole::Control, ListenerRole::Operations]
+    );
+    for endpoint in process.bound_endpoints() {
+        match endpoint {
+            positron_runtime::BoundEndpoint::Control { path } => {
+                let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                assert!(
+                    inspection_response(&mut stream, "/control/fenced/inspection", claim.secret())?
+                        .starts_with("HTTP/1.1 200 ")
+                );
+            },
+            positron_runtime::BoundEndpoint::Tcp {
+                role: ListenerRole::Operations,
+                address,
+            } => {
+                // Configuration status is unavailable after its authority is
+                // retired; owner-local fenced inspection remains on Control.
+                for (path, status) in [
+                    ("/health/live", 200),
+                    ("/health/ready", 503),
+                    ("/status", 503),
+                ] {
+                    let mut stream = std::net::TcpStream::connect(address)?;
+                    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    let response = inspection_response(&mut stream, path, claim.secret())?;
+                    assert!(
+                        response.starts_with(&format!("HTTP/1.1 {status} ")),
+                        "{path}: {response}"
+                    );
+                }
+            },
+            _ => return Err("unexpected data endpoint after fencing".into()),
+        }
+    }
+    let closed = host.closed.lock().map_err(|_| "close observation")?;
+    for role in ListenerRole::all() {
+        assert!(
+            closed.contains(&role),
+            "old {role:?} must close despite another failure"
+        );
+    }
+    drop(closed);
+    let volume = roots
+        .acquire_volume_again()
+        .map_err(|failure| format!("fenced mutable ownership: {failure:?}"))?;
+    drop(volume);
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    drop(reopened);
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}
+
+fn inspection_response(
+    stream: &mut (impl std::io::Read + std::io::Write),
+    path: &str,
+    credential: &str,
+) -> Result<String, std::io::Error> {
+    use std::io::Read;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.take(8192).read_to_string(&mut response)?;
+    Ok(response)
+}
+
+#[test]
+fn failed_native_worker_preparation_returns_owned_non_admitting_candidate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = roots::TestRoots::new("owned-failed-native-stage")?;
+    let control = std::env::temp_dir().join(format!("p84-stage-{}.sock", std::process::id()));
+    let configuration = configuration(&listener_document(&control, "plaintext", "plaintext", 0))?;
+    let host = NativeHost::new(NativeBindings::from_effective(&configuration)?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        )
+        .with_effective_configuration(configuration.clone()),
+        HostInputs::new(&host, &host),
+    )?;
+    let endpoints = process.bound_endpoints();
+    let factory = positron_runtime::ListenerFactory::generation_factory(&host)
+        .ok_or("native generation factory")?;
+    let candidate = factory
+        .stage(&configuration, process.health(), None)
+        .map_err(|error| {
+            format!("failed preparation must transfer its owned workers: {error:?}")
+        })?;
+    assert_eq!(
+        candidate.prepare_tasks(),
+        Err(positron_runtime::ListenerFailure::BindUnavailable)
+    );
+    assert_eq!(
+        candidate.discard(),
+        Err(positron_runtime::ListenerFailure::BindUnavailable),
+        "the terminated gRPC preparation error remains explicit"
+    );
+    assert_eq!(process.bound_endpoints(), endpoints);
+    assert_eq!(process.health().phase(), ProcessPhase::Serving);
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    Ok(())
+}

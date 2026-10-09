@@ -108,9 +108,16 @@ fn assert_real_fence(
         let inspection: serde_json::Value = serde_json::from_str(body)?;
         assert_eq!(inspection["reason"], label);
         assert_eq!(inspection["readiness"], "not_ready");
+        let outcome = process.shutdown(ShutdownTrigger::FirstSignal);
+        let crate::ExitOutcome::InternalCleanupFailure(failure) = outcome else {
+            panic!("damaged durable state cannot complete Drain: {outcome:?}");
+        };
+        assert_eq!(failure.primary(), crate::CleanupPrimary::Forced);
         assert_eq!(
-            process.shutdown(ShutdownTrigger::FirstSignal),
-            crate::ExitOutcome::Graceful
+            failure.failed_roles().collect::<Vec<_>>(),
+            [crate::CleanupRole::DurableShutdown(
+                crate::BootstrapFailureCode::CatalogUnavailable
+            )]
         );
     }
     Ok(())

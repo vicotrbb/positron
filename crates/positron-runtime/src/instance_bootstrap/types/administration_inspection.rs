@@ -247,6 +247,13 @@ impl InitializedInstance {
         &self,
         actor: positron_governance::AuthorizedContext,
     ) -> Result<positron_kernel::GovernanceAuditCheckpoint, BootstrapFailure> {
+        self.checkpoint_governance(Some(actor))
+    }
+
+    pub(crate) fn checkpoint_governance(
+        &self,
+        actor: Option<positron_governance::AuthorizedContext>,
+    ) -> Result<positron_kernel::GovernanceAuditCheckpoint, BootstrapFailure> {
         let secret = self
             .key
             .catalog_secret(self.instance)
@@ -270,9 +277,11 @@ impl InitializedInstance {
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         let identity = positron_governance::Identity::open(view.snapshot())
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
-        identity
-            .inspect(actor, &[])
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ApiKeyUnauthorized))?;
+        if let Some(actor) = actor {
+            identity
+                .inspect(actor, &[])
+                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ApiKeyUnauthorized))?;
+        }
         let (_, governance) = view
             .snapshot()
             .governance_object()

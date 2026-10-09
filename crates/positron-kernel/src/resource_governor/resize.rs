@@ -87,7 +87,7 @@ impl GovernorInner {
             new,
             preserve_existing,
         } = request;
-        if state.lifecycle == GovernorLifecycle::Fenced {
+        if state.lifecycle.get() == GovernorLifecycle::Fenced {
             return Err(retained_resize(class, state.disk_pressure));
         }
         let Some(old_pools) = owner.pools else {
@@ -173,7 +173,7 @@ impl GovernorInner {
                             recovery_shared_usage: state.recovery_pool_usage.shared(),
                             recovery_tenant_shared_usage: recovery_shared_usage,
                             pressure: state.disk_pressure,
-                            lifecycle: state.lifecycle,
+                            lifecycle: state.lifecycle.get(),
                             tenant_limit: state
                                 .tenant_limits
                                 .get(tenant_index)
@@ -319,7 +319,7 @@ impl GovernorInner {
             },
             Err(failure) => {
                 if failure.code == ResizeFailureCode::InternalFenced {
-                    state.lifecycle = GovernorLifecycle::Fenced;
+                    state.lifecycle.set(GovernorLifecycle::Fenced);
                 }
                 return Err(failure);
             },
@@ -456,7 +456,7 @@ pub(super) fn fence_resize(
     state: &mut super::accounting::AccountingState,
     class: WorkClass,
 ) -> ResizeFailure {
-    state.lifecycle = GovernorLifecycle::Fenced;
+    state.lifecycle.set(GovernorLifecycle::Fenced);
     retained_resize(class, state.disk_pressure)
 }
 

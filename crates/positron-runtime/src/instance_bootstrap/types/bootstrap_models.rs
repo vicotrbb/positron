@@ -278,7 +278,7 @@ impl BootstrapPaths {
         self.storage
             .acquire()
             .map(|(volume, _)| volume)
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
+            .map_err(super::super::storage::storage_failure)
     }
 
     #[doc(hidden)]

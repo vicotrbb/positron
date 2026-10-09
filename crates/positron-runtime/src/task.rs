@@ -103,6 +103,9 @@ pub trait RunningTask {
         &mut self,
         remaining: std::time::Duration,
     ) -> Result<TaskJoinOutcome, TaskFailure>;
+    /// Returns success only after this worker has deterministically stopped.
+    /// An unavailable abort leaves the handle owned until a later join or abort
+    /// confirms termination.
     fn abort(&mut self) -> Result<(), TaskFailure>;
 }
 

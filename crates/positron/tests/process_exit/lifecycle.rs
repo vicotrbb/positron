@@ -689,7 +689,7 @@ fn terminate_and_describe_child(child: &mut std::process::Child, authorization: 
 
 #[cfg(unix)]
 #[test]
-fn sighup_during_recovery_does_not_interrupt_native_startup()
+fn native_recovery_survives_the_old_deadline_and_sighup_then_restores_readiness()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -746,7 +746,16 @@ fn sighup_during_recovery_does_not_interrupt_native_startup()
             .status()?
             .success()
     );
-    assert!(child.try_wait()?.is_none());
+    std::thread::sleep(Duration::from_millis(3_200));
+    assert!(
+        child.try_wait()?.is_none(),
+        "recoverable dependency outage must remain alive after the old deadline"
+    );
+    wait_for_readiness(operations_port, "HTTP/1.1 503 ")?;
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", api_port)).is_err(),
+        "data listener must remain unbound throughout the dependency outage"
+    );
 
     drop(ownership);
     wait_for_ready(operations_port)?;

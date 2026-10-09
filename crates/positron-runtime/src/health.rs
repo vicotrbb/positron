@@ -294,6 +294,8 @@ impl HealthWarning {
 #[derive(Clone)]
 pub struct HealthState {
     phase: Arc<AtomicU8>,
+    critical_worker_failed: Arc<AtomicBool>,
+    dependency_unavailable: Arc<AtomicBool>,
     pending_integrity_fence: Arc<AtomicU8>,
     integrity_fence_reason: Arc<AtomicU8>,
     integrity_degraded: Arc<AtomicBool>,
@@ -503,7 +505,38 @@ impl HealthState {
     /// can expose or alter tenant data.
     #[must_use]
     pub(crate) fn admits_data_or_mutation(&self) -> bool {
-        self.phase() == ProcessPhase::Serving && self.pending_integrity_fence_request().is_none()
+        self.phase() == ProcessPhase::Serving
+            && self.pending_integrity_fence_request().is_none()
+            && !self.dependency_unavailable.load(Ordering::Acquire)
+    }
+
+    fn required_resources_ready(&self) -> bool {
+        let Some(inspection) = self.inspection_authority.get() else {
+            // Serving is published only after runtime startup establishes all
+            // authorities. Standalone phase views do not own an instance.
+            return true;
+        };
+        let Some(authority) = inspection.upgrade() else {
+            return false;
+        };
+        if authority.retention_time.status().state() == LifecycleClockState::ClockUncertain {
+            return false;
+        }
+        let governor = authority.resource_governor();
+        if governor.lifecycle() != positron_kernel::GovernorLifecycle::Open {
+            return false;
+        }
+        match governor.inspect() {
+            Ok(resources) => {
+                resources.disk_pressure() != positron_kernel::DiskPressureState::HardPressure
+                    && resources.lifecycle() == positron_kernel::GovernorLifecycle::Open
+            },
+            Err(positron_kernel::GovernorFailure::GovernorContended { pressure }) => {
+                pressure != positron_kernel::DiskPressureState::HardPressure
+                    && governor.lifecycle() == positron_kernel::GovernorLifecycle::Open
+            },
+            Err(_) => false,
+        }
     }
 
     /// Reports localized immutable-data corruption while preserving the
@@ -515,7 +548,7 @@ impl HealthState {
 
     #[must_use]
     pub fn readiness(&self) -> Readiness {
-        if self.admits_data_or_mutation() {
+        if self.admits_data_or_mutation() && self.required_resources_ready() {
             Readiness::Ready
         } else {
             Readiness::NotReady
@@ -524,7 +557,9 @@ impl HealthState {
 
     #[must_use]
     pub fn liveness(&self) -> Liveness {
-        if self.phase() == ProcessPhase::Stopped {
+        if self.phase() == ProcessPhase::Stopped
+            || self.critical_worker_failed.load(Ordering::Acquire)
+        {
             Liveness::Dead
         } else {
             Liveness::Live
@@ -920,6 +955,8 @@ impl ProcessState {
         Self {
             health: HealthState {
                 phase: Arc::new(AtomicU8::new(ProcessPhase::Starting as u8)),
+                critical_worker_failed: Arc::new(AtomicBool::new(false)),
+                dependency_unavailable: Arc::new(AtomicBool::new(false)),
                 pending_integrity_fence: Arc::new(AtomicU8::new(0)),
                 integrity_fence_reason: Arc::new(AtomicU8::new(0)),
                 integrity_degraded: Arc::new(AtomicBool::new(false)),
@@ -936,6 +973,44 @@ impl ProcessState {
 
     pub(crate) fn health(&self) -> HealthState {
         self.health.clone()
+    }
+
+    pub(crate) fn record_resource_observation_deferred(&self) {
+        self.health
+            .record_operational_event("resource_observation_deferred");
+    }
+
+    pub(crate) fn record_dependency_status(&self, failure: Option<crate::BootstrapFailureCode>) {
+        let previously_unavailable = self
+            .health
+            .dependency_unavailable
+            .swap(failure.is_some(), Ordering::AcqRel);
+        if failure.is_none() && !previously_unavailable {
+            return;
+        }
+        self.health.record_operational_event(match failure {
+            Some(crate::BootstrapFailureCode::StorageUnavailable) => {
+                "dependency_storage_unavailable"
+            },
+            Some(crate::BootstrapFailureCode::KeyCustodyUnavailable) => {
+                "dependency_key_unavailable"
+            },
+            Some(crate::BootstrapFailureCode::ResourceUnavailable) => {
+                "dependency_resources_unavailable"
+            },
+            Some(crate::BootstrapFailureCode::CatalogUnavailable) => {
+                "dependency_catalog_unavailable"
+            },
+            Some(_) => "dependency_recovery_unavailable",
+            None => "dependency_restored",
+        });
+    }
+
+    pub(crate) fn fail_critical_worker(&self) {
+        self.health
+            .critical_worker_failed
+            .store(true, Ordering::Release);
+        self.transition(ProcessPhase::Stopping);
     }
 
     pub(crate) fn transition(&self, phase: ProcessPhase) {

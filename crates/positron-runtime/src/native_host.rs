@@ -1202,20 +1202,27 @@ impl ListenerGenerationFactory for NativeHost {
         let registered = register_staged_tasks(&configured, &admissions, Arc::clone(&gate))?;
         let cancellation = TaskCancellation::new();
         let mut tasks = Vec::with_capacity(registered.len());
+        let mut preparation_failed = false;
         for (role, task) in registered {
-            match task.spawn(cancellation.clone(), health.clone(), services.clone()) {
+            // Safe inspection workers use the process health/owner-local view,
+            // as at startup. They must not retain mutable instance authority
+            // when a committed generation is subsequently fenced.
+            let role_services = match role {
+                TaskRole::Control | TaskRole::Operations => None,
+                _ => services.clone(),
+            };
+            match task.spawn(cancellation.clone(), health.clone(), role_services) {
                 Ok(task) => tasks.push((role, task)),
                 Err(_) => {
                     cancellation.cancel();
-                    abort_tasks(&mut tasks)?;
-                    return Err(ListenerFailure::BindUnavailable);
+                    preparation_failed = true;
+                    break;
                 },
             }
         }
-        if gate.wait_parked(ListenerRole::all().len()).is_err() {
+        if !preparation_failed && gate.wait_parked(ListenerRole::all().len()).is_err() {
             cancellation.cancel();
-            abort_tasks(&mut tasks)?;
-            return Err(ListenerFailure::BindUnavailable);
+            preparation_failed = true;
         }
         Ok(generation.with_staged_tasks(
             tasks,
@@ -1223,16 +1230,10 @@ impl ListenerGenerationFactory for NativeHost {
             Box::new(NativeGenerationActivation {
                 gate,
                 task_count: ListenerRole::all().len(),
+                prepared: !preparation_failed,
             }),
         ))
     }
-}
-
-fn abort_tasks(tasks: &mut [(TaskRole, Box<dyn RunningTask>)]) -> Result<(), ListenerFailure> {
-    for (_, task) in tasks {
-        task.abort().map_err(|_| ListenerFailure::BindUnavailable)?;
-    }
-    Ok(())
 }
 
 type NativeRegisteredTasks = Vec<(TaskRole, Box<dyn RegisteredTask>)>;

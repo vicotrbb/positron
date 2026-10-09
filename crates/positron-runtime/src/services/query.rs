@@ -61,7 +61,7 @@ pub(super) fn query_events_for_test(
         positron_governance::Identity::open(&snapshot).map_err(|_| ServiceFailure::CorruptState)?;
     let scope = SegmentScope::new(instance.tenant, SignalKind::Logs, shard);
     let protection = super::tenant_segment_key(instance, &identity, scope)?;
-    let ledger = ActiveSegmentLedger::open_with_retention_time(
+    let ledger = ActiveSegmentLedger::open_for_query_with_retention_time(
         &instance._authority,
         &instance.retention_time,
         &catalog,
@@ -126,7 +126,7 @@ pub(super) fn resume_query_events_for_test(
         positron_governance::Identity::open(&snapshot).map_err(|_| ServiceFailure::CorruptState)?;
     let scope = SegmentScope::new(instance.tenant, SignalKind::Logs, shard);
     let protection = super::tenant_segment_key(instance, &identity, scope)?;
-    let ledger = ActiveSegmentLedger::open_with_retention_time(
+    let ledger = ActiveSegmentLedger::open_for_query_with_retention_time(
         &instance._authority,
         &instance.retention_time,
         &catalog,
@@ -190,7 +190,7 @@ pub(super) fn query_log_bodies(
     let tenant = super::context_tenant(context)?;
     let scope = SegmentScope::new(tenant, SignalKind::Logs, shard);
     let protection = super::tenant_segment_key(instance, &identity, scope)?;
-    let ledger = ActiveSegmentLedger::open_with_retention_time(
+    let ledger = ActiveSegmentLedger::open_for_query_with_retention_time(
         &instance._authority,
         &instance.retention_time,
         &catalog,

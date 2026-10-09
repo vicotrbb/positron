@@ -464,8 +464,9 @@ impl ListenerGeneration {
 
     /// Releases the listener-owned sockets after admission is closed.
     pub fn drain(mut self) -> Result<(), ListenerFailure> {
-        self.cancel_staged_tasks()?;
-        self.stop_admission()
+        let tasks = self.cancel_staged_tasks();
+        let listeners = self.stop_admission();
+        tasks.and(listeners)
     }
 
     #[must_use]
@@ -514,20 +515,52 @@ impl ListenerGeneration {
 
     /// Cancels and joins a discarded candidate before its descriptors are
     /// released. A candidate never borrows the active generation's tasks.
+    pub(crate) fn discard_retaining(mut self) -> (Result<(), ListenerFailure>, ListenerTasks) {
+        if let Some(cancellation) = self.cancellation.as_ref() {
+            cancellation.cancel();
+        }
+        let mut failed = false;
+        self.tasks.retain_mut(|(_, task)| {
+            let aborted = task.abort().is_ok();
+            let joined = matches!(task.poll_join(), Ok(Some(crate::TaskJoinOutcome::Joined)));
+            if !aborted && !joined {
+                failed = true;
+                true
+            } else {
+                false
+            }
+        });
+        let listeners = self.stop_admission();
+        let result = if failed {
+            Err(ListenerFailure::BindUnavailable)
+        } else {
+            listeners
+        };
+        (result, std::mem::take(&mut self.tasks))
+    }
+
     pub fn discard(mut self) -> Result<(), ListenerFailure> {
-        self.cancel_staged_tasks()?;
-        self.stop_admission()
+        let tasks = self.cancel_staged_tasks();
+        let listeners = self.stop_admission();
+        tasks.and(listeners)
     }
 
     fn cancel_staged_tasks(&mut self) -> Result<(), ListenerFailure> {
         if let Some(cancellation) = self.cancellation.as_ref() {
             cancellation.cancel();
         }
+        let mut failed = false;
         for (_, task) in &mut self.tasks {
-            task.abort().map_err(|_| ListenerFailure::BindUnavailable)?;
+            if task.abort().is_err() {
+                failed = true;
+            }
         }
         self.tasks.clear();
-        Ok(())
+        if failed {
+            Err(ListenerFailure::BindUnavailable)
+        } else {
+            Ok(())
+        }
     }
 
     /// Transfers exactly one complete listener generation to the runtime.
@@ -766,6 +799,77 @@ mod tests {
         ListenerRequest, ListenerRole, ListenerTransport, ValidatedListenerSet,
     };
     use crate::health::ProcessState;
+
+    #[test]
+    fn discarded_generation_retires_every_worker_and_listener_after_abort_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let host = BindingHost::default();
+        let state = ProcessState::starting();
+        let cancellation = crate::TaskCancellation::new();
+        let aborted = Rc::new(RefCell::new(Vec::new()));
+        let tasks = [crate::TaskRole::Control, crate::TaskRole::Operations]
+            .into_iter()
+            .map(|role| {
+                (
+                    role,
+                    Box::new(DiscardTask {
+                        role,
+                        cancellation: cancellation.clone(),
+                        aborted: Rc::clone(&aborted),
+                    }) as Box<dyn crate::RunningTask>,
+                )
+            })
+            .collect();
+        let generation = ListenerGeneration::activate(
+            candidate(PathBuf::from("/run/positron/discard.sock"))?,
+            &host,
+            state.health(),
+        )?
+        .with_staged_tasks(tasks, cancellation, Box::new(DiscardActivation));
+        assert_eq!(
+            generation.discard(),
+            Err(super::ListenerFailure::BindUnavailable)
+        );
+        assert_eq!(
+            *aborted.borrow(),
+            [crate::TaskRole::Control, crate::TaskRole::Operations]
+        );
+        assert_eq!(host.closed.borrow().len(), ListenerRole::all().len());
+        Ok(())
+    }
+
+    struct DiscardActivation;
+    impl super::ListenerGenerationActivation for DiscardActivation {
+        fn prepare_and_wait_ready(&self) -> Result<(), super::ListenerFailure> {
+            Ok(())
+        }
+        fn open_admission(&self) {}
+    }
+    struct DiscardTask {
+        role: crate::TaskRole,
+        cancellation: crate::TaskCancellation,
+        aborted: Rc<RefCell<Vec<crate::TaskRole>>>,
+    }
+    impl crate::RunningTask for DiscardTask {
+        fn poll_join(&mut self) -> Result<Option<crate::TaskJoinOutcome>, crate::TaskFailure> {
+            Ok(None)
+        }
+        fn join_within(
+            &mut self,
+            _: std::time::Duration,
+        ) -> Result<crate::TaskJoinOutcome, crate::TaskFailure> {
+            Ok(crate::TaskJoinOutcome::DeadlineExpired)
+        }
+        fn abort(&mut self) -> Result<(), crate::TaskFailure> {
+            assert!(self.cancellation.is_cancelled());
+            self.aborted.borrow_mut().push(self.role);
+            if self.role == crate::TaskRole::Control {
+                Err(crate::TaskFailure::AbortUnavailable)
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     #[test]
     fn failed_candidate_keeps_the_active_generation_bound() -> Result<(), Box<dyn std::error::Error>>

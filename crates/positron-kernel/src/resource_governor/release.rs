@@ -66,7 +66,7 @@ impl GovernorInner {
                 },
                 amounts,
             );
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return ReleaseStatus {
                 applied: status.applied,
                 result: Err(GovernorFailure::InternalFenced),
@@ -361,7 +361,7 @@ impl GovernorInner {
             };
             *slot = candidate;
         }
-        let fenced = poisoned || state.lifecycle == GovernorLifecycle::Fenced;
+        let fenced = poisoned || state.lifecycle.get() == GovernorLifecycle::Fenced;
         ReleaseStatus {
             applied: true,
             result: if fenced {
@@ -374,7 +374,7 @@ impl GovernorInner {
 }
 
 fn fence(state: &mut super::accounting::AccountingState) -> ReleaseStatus {
-    state.lifecycle = GovernorLifecycle::Fenced;
+    state.lifecycle.set(GovernorLifecycle::Fenced);
     ReleaseStatus {
         applied: false,
         result: Err(GovernorFailure::InternalFenced),

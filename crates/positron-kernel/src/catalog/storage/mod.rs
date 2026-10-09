@@ -247,6 +247,39 @@ impl CatalogStorage {
         record: &super::codec::CommitRecord,
         audit: Option<&GovernanceAuditRecord>,
     ) -> Result<(), CatalogFailure> {
+        self.confirm_publication_artifacts(secret, instance, record, audit)?;
+        self.publish_marker(&self.staging, secret, record.number, record.generation)
+    }
+
+    pub(super) fn confirm_visible_publication(
+        &self,
+        secret: &CatalogSecret,
+        instance: InstanceId,
+        record: &super::codec::CommitRecord,
+        audit: Option<&GovernanceAuditRecord>,
+    ) -> Result<(), CatalogFailure> {
+        let name = marker_name(record.number, record.generation);
+        let encoded = read_exact_file(&self.generations, &name, MARKER_BYTES)?;
+        match decode_marker(secret, &encoded)? {
+            MarkerDecode::Published(number, generation)
+                if number == record.number && generation == record.generation => {},
+            _ => return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption)),
+        }
+        self.confirm_publication_artifacts(secret, instance, record, audit)?;
+        synchronize_existing(
+            &self.generations,
+            &name,
+            CatalogFileEvent::SynchronizeGenerationDirectory,
+        )
+    }
+
+    pub(super) fn confirm_publication_artifacts(
+        &self,
+        secret: &CatalogSecret,
+        instance: InstanceId,
+        record: &super::codec::CommitRecord,
+        audit: Option<&GovernanceAuditRecord>,
+    ) -> Result<(), CatalogFailure> {
         for identity in &record.objects {
             let name = object_name(record.format_epoch, *identity);
             self.read_object(secret, instance, *identity, record.format_epoch)?;
@@ -272,7 +305,7 @@ impl CatalogStorage {
             &commit,
             CatalogFileEvent::SynchronizeCommitDirectory,
         )?;
-        self.publish_marker(&self.staging, secret, record.number, record.generation)
+        Ok(())
     }
 
     pub(super) fn open(volume: &OwnedPrimaryDataVolume) -> Result<Self, CatalogFailure> {
@@ -803,6 +836,17 @@ impl CatalogStorage {
         number: u64,
         generation: CatalogGenerationId,
     ) -> Result<(), CatalogFailure> {
+        self.publish_marker_interruptibly(transaction, secret, number, generation, &mut || false)
+    }
+
+    pub(super) fn publish_marker_interruptibly(
+        &self,
+        transaction: &File,
+        secret: &CatalogSecret,
+        number: u64,
+        generation: CatalogGenerationId,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), CatalogFailure> {
         let final_name = marker_name(number, generation);
         if entry_exists(&self.generations, &final_name)? {
             let encoded = read_exact_file(&self.generations, &final_name, MARKER_BYTES)?;
@@ -838,6 +882,11 @@ impl CatalogStorage {
         emit_event(CatalogFileEvent::SynchronizeMarker)?;
         synchronize_named_file(transaction, "commit.marker")?;
         synchronize(transaction)?;
+        if cancelled() {
+            return Err(CatalogFailure::new(
+                CatalogFailureCode::ResourceAdmissionRefused,
+            ));
+        }
         emit_event(CatalogFileEvent::RenameMarker)?;
         unix_fs::renameat(transaction, "commit.marker", &self.generations, &final_name)
             .map_err(|_| CatalogFailure::new(CatalogFailureCode::StorageUnavailable))?;

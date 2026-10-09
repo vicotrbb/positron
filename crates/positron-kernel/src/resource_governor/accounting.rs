@@ -45,6 +45,7 @@ pub(super) struct GovernorInner {
     pub(super) disk_thresholds: DiskPressureThresholds,
     pub(super) state: Mutex<AccountingState>,
     pub(super) drop_ledger: Arc<super::ledger::DropLedger>,
+    pub(super) lifecycle: super::lifecycle::LifecycleState,
     last_pressure: AtomicU8,
     contention_count: AtomicU64,
 }
@@ -122,7 +123,7 @@ pub(super) struct AccountingState {
     pub(super) disk_pressure: DiskPressureState,
     pub(super) usable_disk_bytes: u64,
     pub(super) pressure_transition_count: u64,
-    pub(super) lifecycle: GovernorLifecycle,
+    pub(super) lifecycle: super::lifecycle::LifecycleState,
     pub(super) outstanding_ordinary: u32,
     pub(super) outstanding_recovery: u32,
     pub(super) outstanding_uninterruptible: u32,
@@ -160,19 +161,13 @@ impl StagedTenantQuotaUpdate<'_> {
         let mut state = match governor.state.lock() {
             Ok(state) => state,
             Err(poisoned) => {
-                let mut state = poisoned.into_inner();
-                state.lifecycle = GovernorLifecycle::Fenced;
+                let state = poisoned.into_inner();
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 state
             },
         };
         governor.drain_pending(&mut state);
-        if governor
-            .drop_ledger
-            .pending_fence
-            .swap(false, Ordering::AcqRel)
-        {
-            state.lifecycle = GovernorLifecycle::Fenced;
-        }
+        governor.consume_pending_fence(&state);
         state.tenant_quotas = successor.tenant_quotas;
         state.tenant_fair_capacities = successor.tenant_fair_capacities;
         state.recovery_tenant_shared_fair = successor.recovery_tenant_shared_fair;
@@ -446,9 +441,7 @@ impl GovernorInner {
         match self.state.try_lock() {
             Ok(mut state) => {
                 self.drain_pending(&mut state);
-                if self.drop_ledger.pending_fence.swap(false, Ordering::AcqRel) {
-                    state.lifecycle = GovernorLifecycle::Fenced;
-                }
+                self.consume_pending_fence(&state);
                 Ok(state)
             },
             Err(TryLockError::WouldBlock) => {
@@ -460,8 +453,8 @@ impl GovernorInner {
                 Err(contention_failure(class, self.last_pressure()))
             },
             Err(TryLockError::Poisoned(poisoned)) => {
-                let mut state = poisoned.into_inner();
-                state.lifecycle = GovernorLifecycle::Fenced;
+                let state = poisoned.into_inner();
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 Err(internal_failure_at_pressure(class, state.disk_pressure))
             },
         }
@@ -480,22 +473,34 @@ impl GovernorInner {
             .store(pressure_index(pressure), Ordering::Release);
     }
 
+    fn consume_pending_fence(&self, state: &AccountingState) {
+        if self.drop_ledger.pending_fence.load(Ordering::Acquire) {
+            // Publish the terminal canonical value before clearing its request,
+            // so nonblocking inspection never observes an intervening Open.
+            state.lifecycle.set(GovernorLifecycle::Fenced);
+            self.drop_ledger
+                .pending_fence
+                .store(false, Ordering::Release);
+        }
+    }
+
     pub(super) fn try_lock_for_control(
         &self,
     ) -> Result<MutexGuard<'_, AccountingState>, GovernorFailure> {
         match self.state.try_lock() {
             Ok(mut state) => {
                 self.drain_pending(&mut state);
-                if self.drop_ledger.pending_fence.swap(false, Ordering::AcqRel) {
-                    state.lifecycle = GovernorLifecycle::Fenced;
-                }
+                self.consume_pending_fence(&state);
                 Ok(state)
             },
             Err(TryLockError::WouldBlock) => Err(GovernorFailure::GovernorContended {
                 pressure: self.last_pressure(),
             }),
             Err(TryLockError::Poisoned(poisoned)) => {
-                poisoned.into_inner().lifecycle = GovernorLifecycle::Fenced;
+                poisoned
+                    .into_inner()
+                    .lifecycle
+                    .set(GovernorLifecycle::Fenced);
                 Err(GovernorFailure::InternalFenced)
             },
         }
@@ -520,13 +525,13 @@ impl GovernorInner {
             .copied()
             .and_then(|count| count.checked_add(1));
         if sum.and_then(|total| total.checked_add(1)).is_none() || candidate.is_none() {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
             return;
         }
         if let (Some(slot), Some(candidate)) = (state.rejection_counts.get_mut(index), candidate) {
             *slot = candidate;
         } else {
-            state.lifecycle = GovernorLifecycle::Fenced;
+            state.lifecycle.set(GovernorLifecycle::Fenced);
         }
     }
 
@@ -536,7 +541,7 @@ impl GovernorInner {
         class: WorkClass,
         tenant_index: Option<usize>,
     ) -> Result<u32, AdmissionFailure> {
-        if state.lifecycle == GovernorLifecycle::Fenced {
+        if state.lifecycle.get() == GovernorLifecycle::Fenced {
             return Err(internal_failure_at_pressure(class, state.disk_pressure));
         }
         let candidate = state

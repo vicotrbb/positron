@@ -389,3 +389,37 @@ fn every_control_and_explicit_reservation_mutation_is_immediate_under_contention
         0
     );
 }
+
+#[test]
+fn canonical_lifecycle_is_readable_under_control_and_fails_closed() {
+    let (authority, _) = governor();
+    let view = authority.governor();
+    {
+        let state = authority.inner.state.lock().expect("healthy control lock");
+        assert_eq!(view.lifecycle(), GovernorLifecycle::Open);
+        state.lifecycle.set(GovernorLifecycle::Fenced);
+        assert_eq!(view.lifecycle(), GovernorLifecycle::Fenced);
+        assert!(matches!(
+            view.inspect(),
+            Err(GovernorFailure::GovernorContended { .. })
+        ));
+    }
+    let (pending, _) = governor();
+    let _control = pending.inner.state.lock().expect("healthy control lock");
+    pending
+        .inner
+        .drop_ledger
+        .pending_fence
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert_eq!(pending.governor().lifecycle(), GovernorLifecycle::Fenced);
+    let (poisoned, _) = governor();
+    assert!(catch_unwind(AssertUnwindSafe(|| poisoned.inner.poison_for_test())).is_err());
+    assert_eq!(poisoned.governor().lifecycle(), GovernorLifecycle::Fenced);
+    let (stopping, _) = governor();
+    stopping.begin_shutdown().expect("bounded shutdown begins");
+    let _control = stopping.inner.state.lock().expect("healthy control lock");
+    assert_eq!(
+        stopping.governor().lifecycle(),
+        GovernorLifecycle::ShuttingDown
+    );
+}

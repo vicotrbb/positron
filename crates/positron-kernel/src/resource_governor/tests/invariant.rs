@@ -825,7 +825,8 @@ fn pre_fenced_and_poisoned_resize_retain_existing_capacity() {
             .state
             .lock()
             .expect("test lock is healthy")
-            .lifecycle = GovernorLifecycle::Fenced;
+            .lifecycle
+            .set(GovernorLifecycle::Fenced);
         assert_internal_resize(ordinary);
     });
 
@@ -845,7 +846,8 @@ fn pre_fenced_and_poisoned_resize_retain_existing_capacity() {
         .state
         .lock()
         .expect("test lock is healthy")
-        .lifecycle = GovernorLifecycle::Fenced;
+        .lifecycle
+        .set(GovernorLifecycle::Fenced);
     assert_internal_resize(recovery_grant);
 
     let (poisoned_governor, _) = established();

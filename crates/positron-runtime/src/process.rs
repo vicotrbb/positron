@@ -9,6 +9,9 @@ use positron_kernel::OwnedPrimaryDataVolume;
 use sha2::{Digest, Sha256};
 
 use crate::health::ProcessState;
+#[cfg(test)]
+#[path = "process/candidate_cleanup_tests.rs"]
+mod candidate_cleanup_tests;
 use crate::{
     BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BoundEndpoint, BoundListener,
     CatalogConfigurationPublication, ConfigurationReloadOutcome, ConfigurationRuntimeFailure,
@@ -379,11 +382,9 @@ static BOUNDED_RECOVERY: BoundedRecovery = BoundedRecovery;
 
 impl RecoveryAttemptHost for BoundedRecovery {
     fn after_failure(&self, attempt: RecoveryAttempt) -> RecoveryDecision {
-        if attempt.number >= 32 {
-            return RecoveryDecision::Exhausted;
-        }
         std::thread::sleep(std::time::Duration::from_millis(
-            10_u64.saturating_mul(u64::from(attempt.number)).min(100),
+            10_u64.saturating_mul(u64::from(attempt.number)).min(100)
+                + u64::from(std::process::id() % 17),
         ));
         RecoveryDecision::Retry
     }
@@ -424,6 +425,7 @@ pub struct RunningProcess {
     listener_generation_factory: Option<Arc<dyn ListenerGenerationFactory>>,
     reload_lock: Mutex<()>,
     tasks: Mutex<RunningTasks>,
+    retired_tasks: Mutex<RunningTasks>,
     listener_task_cancellations: Mutex<Vec<TaskCancellation>>,
     cancellation: TaskCancellation,
     instance: Option<Arc<crate::InitializedInstance>>,
@@ -433,11 +435,12 @@ pub struct RunningProcess {
     configuration_publication: Option<CatalogConfigurationPublication>,
     cleanup: CleanupAccumulator,
     drain_deadline: std::time::Duration,
+    next_resource_observation: std::time::Instant,
     terminal_cleanup_complete: bool,
 }
 
 /// A process that has stopped data admission and awaits one terminal trigger.
-pub struct DrainingProcess(RunningProcess);
+pub struct DrainingProcess(RunningProcess, std::time::Instant);
 
 /// Closed crash evidence available only while the runtime still owns its
 /// instance. It deliberately exposes no catalog contents or operation data.
@@ -453,6 +456,15 @@ impl CrashInspection {
 }
 
 type RunningTasks = Vec<(TaskRole, Box<dyn RunningTask>)>;
+
+fn critical_task_failure(tasks: &mut RunningTasks) -> Option<TaskRole> {
+    tasks
+        .iter_mut()
+        .find_map(|(role, task)| match task.poll_join() {
+            Ok(None) => None,
+            Ok(Some(_)) | Err(_) => Some(*role),
+        })
+}
 
 mod cleanup;
 use cleanup::CleanupAccumulator;
@@ -511,6 +523,55 @@ impl RunningProcess {
     #[must_use]
     pub fn health(&self) -> HealthState {
         self.state.health()
+    }
+
+    /// Reconciles critical workers and pending safety findings at their sole
+    /// owner. A worker that finishes while admission is open is a runtime
+    /// failure, even when its thread returned successfully.
+    pub fn poll(&mut self) -> Result<(), ExitOutcome> {
+        self.apply_pending_integrity_fence();
+        let has_retirees = !self
+            .retired_tasks
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty();
+        if self.state.health().phase() == ProcessPhase::Fenced && has_retirees {
+            self.reconcile_retired_tasks();
+        }
+        let failed_role = {
+            let mut tasks = self.tasks();
+            critical_task_failure(&mut tasks)
+        };
+        if let Some(role) = failed_role {
+            self.state.fail_critical_worker();
+            let failure = ExitOutcome::TaskUnavailable(role);
+            self.cleanup.set_primary(failure);
+            return Err(failure);
+        }
+        if std::time::Instant::now() >= self.next_resource_observation {
+            self.next_resource_observation =
+                std::time::Instant::now() + std::time::Duration::from_secs(1);
+            if let Some(instance) = self.instance.as_ref() {
+                match instance._authority.observe_disk() {
+                    Ok(_) => self.state.record_dependency_status(None),
+                    Err(
+                        positron_kernel::GovernorFailure::ObservedVolumeMismatch
+                        | positron_kernel::GovernorFailure::InternalFenced,
+                    ) => {
+                        self.apply_integrity_fence(IntegrityFenceReason::UnreliableOwnership);
+                    },
+                    Err(positron_kernel::GovernorFailure::GovernorContended { .. }) => {
+                        // Control contention defers this sample; it does not
+                        // invalidate the previous verified dependency state.
+                        self.state.record_resource_observation_deferred();
+                    },
+                    Err(_) => self
+                        .state
+                        .record_dependency_status(Some(BootstrapFailureCode::ResourceUnavailable)),
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns only the stable crash context available while this process
@@ -641,6 +702,8 @@ impl RunningProcess {
         {
             self.cleanup.set_primary(ExitOutcome::Fenced);
         }
+        self.retain_retired_tasks(&mut retired_maintenance);
+        self.retain_retired_tasks(&mut retired_data);
         self.services.take();
         // A fenced process has retired its active Configuration generation.
         // Keeping its publication would retain the just-shut-down instance,
@@ -648,8 +711,51 @@ impl RunningProcess {
         // than reopen the current durable owner-local view.
         self.configuration_publication.take();
         self.configuration.take();
-        self.instance.take();
-        self.fenced_volume.take();
+        self.reconcile_retired_tasks();
+    }
+
+    fn retain_retired_tasks(&self, tasks: &mut RunningTasks) {
+        self.retired_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .append(tasks);
+    }
+
+    fn reconcile_retired_tasks(&mut self) {
+        let tasks = self
+            .retired_tasks
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Reconciliation does not restart the original retirement deadline.
+        // Native abort is bounded; retain handles until it or a join confirms
+        // termination, and avoid aborting an already joined worker.
+        tasks.retain_mut(|(_, task)| {
+            if matches!(task.poll_join(), Ok(Some(TaskJoinOutcome::Joined))) {
+                return false;
+            }
+            let abort_failed = task.abort().is_err();
+            let pending =
+                abort_failed && !matches!(task.poll_join(), Ok(Some(TaskJoinOutcome::Joined)));
+            if abort_failed && pending {
+                self.cleanup.set_primary(ExitOutcome::Fenced);
+            }
+            pending
+        });
+        if tasks.is_empty() {
+            self.instance.take();
+            self.fenced_volume.take();
+        }
+    }
+
+    fn absorb_retired_tasks(&mut self) {
+        let retired = self
+            .retired_tasks
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.tasks
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .append(retired);
     }
 
     /// Returns the only complete Configuration generation visible to runtime
@@ -666,6 +772,15 @@ impl RunningProcess {
         candidate: Arc<EffectiveConfiguration>,
     ) -> Result<ConfigurationReloadOutcome, ConfigurationRuntimeFailure> {
         let _reload = self.reload_lock();
+        if self.state.health().phase() != ProcessPhase::Serving
+            || self
+                .state
+                .health()
+                .pending_integrity_fence_request()
+                .is_some()
+        {
+            return Err(ConfigurationRuntimeFailure::Unavailable);
+        }
         let runtime = self
             .configuration
             .as_ref()
@@ -711,9 +826,7 @@ impl RunningProcess {
         };
         if staged.prepare_tasks().is_err() {
             let material_identity = staged.material_identity();
-            staged
-                .discard()
-                .map_err(|_| ConfigurationRuntimeFailure::ListenerUnavailable)?;
+            self.discard_listener_candidate(staged)?;
             if plan != ConfigurationDiffPlan::NoChange {
                 self.with_catalog_operation(|| {
                     publication.record_rejected_listener_staging(observed.effective(), &candidate)
@@ -735,17 +848,23 @@ impl RunningProcess {
         if plan == ConfigurationDiffPlan::NoChange
             && let Some(listener_set) = tls_material_listener_set
         {
-            let material_identity = staged
+            let publication_result = staged
                 .material_identity()
-                .ok_or(ConfigurationRuntimeFailure::ListenerUnavailable)?;
-            self.with_catalog_operation(|| {
-                publication.record_tls_material_reload(
-                    listener_set,
-                    positron_governance::TlsMaterialReloadOutcome::Applied,
-                    crate::configuration_catalog::configuration_digest(&candidate),
-                    material_identity,
-                )
-            })?;
+                .ok_or(ConfigurationRuntimeFailure::ListenerUnavailable)
+                .and_then(|material_identity| {
+                    self.with_catalog_operation(|| {
+                        publication.record_tls_material_reload(
+                            listener_set,
+                            positron_governance::TlsMaterialReloadOutcome::Applied,
+                            crate::configuration_catalog::configuration_digest(&candidate),
+                            material_identity,
+                        )
+                    })
+                });
+            if let Err(failure) = publication_result {
+                self.discard_listener_candidate(staged)?;
+                return Err(failure);
+            }
         }
         let outcome = match self.with_catalog_operation(|| {
             if plan == ConfigurationDiffPlan::NoChange {
@@ -764,9 +883,7 @@ impl RunningProcess {
                 outcome
             },
             Err(error) => {
-                staged
-                    .discard()
-                    .map_err(|_| ConfigurationRuntimeFailure::ListenerUnavailable)?;
+                self.discard_listener_candidate(staged)?;
                 return Err(error);
             },
         };
@@ -795,14 +912,11 @@ impl RunningProcess {
             std::mem::take(&mut *active)
         };
         let retirement_deadline = std::time::Instant::now() + self.drain_deadline;
-        if close_listeners(&mut retired).is_err() {
-            let abort_failed =
-                abort_retired_tasks(&mut retired_tasks, retirement_deadline).is_err();
-            self.state.transition(ProcessPhase::Fenced);
-            if abort_failed {
-                return Err(ConfigurationRuntimeFailure::ListenerUnavailable);
-            }
-            return Err(ConfigurationRuntimeFailure::ListenerUnavailable);
+        let close_failed = close_listeners(&mut retired).is_err();
+        if close_failed {
+            self.state
+                .health()
+                .request_integrity_fence(IntegrityFenceReason::UnreliableOwnership);
         }
         staged.open_admission();
         let (successor, mut successor_tasks, successor_cancellation) = staged.into_active();
@@ -824,18 +938,38 @@ impl RunningProcess {
         for cancellation in retired_cancellations {
             cancellation.cancel();
         }
+        if close_failed {
+            if abort_retired_tasks(&mut retired_tasks, retirement_deadline).is_err() {
+                self.retain_retired_tasks(&mut retired_tasks);
+            }
+            return Err(ConfigurationRuntimeFailure::ListenerUnavailable);
+        }
         if drain_listeners_until(&mut retired, retirement_deadline).is_err()
             || join_retired_tasks_until(&mut retired_tasks, retirement_deadline).is_err()
         {
-            let abort_failed =
-                abort_retired_tasks(&mut retired_tasks, retirement_deadline).is_err();
-            self.state.transition(ProcessPhase::Fenced);
-            if abort_failed {
-                return Err(ConfigurationRuntimeFailure::ListenerUnavailable);
+            self.state
+                .health()
+                .request_integrity_fence(IntegrityFenceReason::UnreliableOwnership);
+            if abort_retired_tasks(&mut retired_tasks, retirement_deadline).is_err() {
+                self.retain_retired_tasks(&mut retired_tasks);
             }
             return Err(ConfigurationRuntimeFailure::ListenerUnavailable);
         }
         Ok(outcome)
+    }
+
+    fn discard_listener_candidate(
+        &self,
+        candidate: crate::ListenerGeneration,
+    ) -> Result<(), ConfigurationRuntimeFailure> {
+        let (result, mut unresolved) = candidate.discard_retaining();
+        self.retain_retired_tasks(&mut unresolved);
+        result.map_err(|_| {
+            self.state
+                .health()
+                .request_integrity_fence(IntegrityFenceReason::UnreliableOwnership);
+            ConfigurationRuntimeFailure::ListenerUnavailable
+        })
     }
 
     fn rejected_tls_attempt_identity(listener_set_identity: [u8; 32]) -> [u8; 32] {
@@ -906,6 +1040,9 @@ impl RunningProcess {
                 let drift = self.with_catalog_operation(|| {
                     runtime.record_fenced_drift_with(Arc::clone(&desired), publication)
                 })?;
+                self.state
+                    .health()
+                    .request_integrity_fence(IntegrityFenceReason::UnreliableOwnership);
                 self.state.transition(ProcessPhase::Fenced);
                 Ok(drift)
             },
@@ -922,6 +1059,8 @@ impl RunningProcess {
 
     #[must_use]
     pub fn begin_shutdown(mut self) -> DrainingProcess {
+        let deadline = std::time::Instant::now() + self.drain_deadline;
+        self.absorb_retired_tasks();
         self.state.transition(ProcessPhase::Draining);
         let failed_roles = {
             let mut listeners = self.listeners();
@@ -955,7 +1094,7 @@ impl RunningProcess {
         }
         self.cancellation.cancel();
         self.cancel_listener_tasks();
-        DrainingProcess(self)
+        DrainingProcess(self, deadline)
     }
 }
 
@@ -972,10 +1111,13 @@ fn split_listener_tasks(tasks: RunningTasks) -> (RunningTasks, RunningTasks) {
 }
 
 fn close_listeners(listeners: &mut [Box<dyn BoundListener>]) -> Result<(), ()> {
+    let mut failed = false;
     for listener in &mut *listeners {
-        listener.close().map_err(|_| ())?;
+        if listener.close().is_err() {
+            failed = true;
+        }
     }
-    Ok(())
+    if failed { Err(()) } else { Ok(()) }
 }
 
 fn drain_listeners_until(
@@ -998,31 +1140,36 @@ fn join_retired_tasks_until(
     deadline: std::time::Instant,
 ) -> Result<(), ()> {
     let mut failed = false;
-    for (_, task) in &mut *tasks {
+    tasks.retain_mut(|(_, task)| {
         let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
             failed = true;
-            continue;
+            return true;
         };
         match task.join_within(remaining) {
-            Ok(TaskJoinOutcome::Joined) => {},
+            Ok(TaskJoinOutcome::Joined) => false,
             Ok(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal) | Err(_) => {
                 failed = true;
+                true
             },
         }
-    }
+    });
     if failed { Err(()) } else { Ok(()) }
 }
 
 fn abort_retired_tasks(tasks: &mut RunningTasks, deadline: std::time::Instant) -> Result<(), ()> {
     let mut failed = false;
-    for (_, task) in &mut *tasks {
+    tasks.retain_mut(|(_, task)| {
         if task.abort().is_err() {
             failed = true;
+            true
+        } else {
+            false
         }
-    }
+    });
     if join_retired_tasks_until(tasks, deadline).is_err() {
         failed = true;
     }
+    tasks.retain_mut(|(_, task)| !matches!(task.poll_join(), Ok(Some(TaskJoinOutcome::Joined))));
     if failed { Err(()) } else { Ok(()) }
 }
 
@@ -1364,6 +1511,7 @@ impl DrainingProcess {
             .tasks
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut complete = true;
         for (role, task) in &mut *tasks {
             let joined = match task.poll_join() {
                 Ok(joined) => joined,
@@ -1377,23 +1525,34 @@ impl DrainingProcess {
             match joined {
                 Some(TaskJoinOutcome::Joined) => {},
                 Some(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal) => {
-                    return Ok(false);
+                    complete = false;
                 },
-                None => return Ok(false),
+                None => complete = false,
             }
         }
-        Ok(true)
+        Ok(complete)
     }
 
     #[must_use]
-    pub fn finish(mut self, trigger: ShutdownTrigger) -> ExitOutcome {
+    pub fn finish(self, trigger: ShutdownTrigger) -> ExitOutcome {
+        self.finish_with_termination_probe(trigger, || false)
+    }
+
+    /// Retains the host's termination authority throughout final durable
+    /// publication. Every publication boundary shares the original deadline.
+    pub fn finish_with_termination_probe(
+        mut self,
+        trigger: ShutdownTrigger,
+        mut termination_requested: impl FnMut() -> bool,
+    ) -> ExitOutcome {
         if trigger != ShutdownTrigger::FirstSignal
+            || std::time::Instant::now() >= self.1
             || self.0.state.health().phase() == ProcessPhase::Stopping
         {
             return self.0.abort_shutdown();
         }
         if trigger == ShutdownTrigger::FirstSignal {
-            let deadline = std::time::Instant::now() + self.0.drain_deadline;
+            let deadline = self.1;
             let late_failure = {
                 let tasks = self
                     .0
@@ -1459,12 +1618,39 @@ impl DrainingProcess {
         }) {
             self.0.cleanup.record_schema_checkpoint();
         }
-        if self
-            .0
-            .instance
-            .as_ref()
-            .is_some_and(|instance| instance.begin_shutdown().is_err())
+        self.0.services.take();
+        if self.0.cleanup.has_failures() {
+            // Preserve the attempted graceful cleanup context, while its
+            // typed failure prevents a success outcome or durable marker.
+            self.0.cleanup.set_primary(ExitOutcome::Graceful);
+            return self.0.abort_shutdown();
+        }
+        // Retire process-owned configuration adapters before testing whether
+        // external capabilities still retain the instance authority.
+        self.0.configuration_publication.take();
+        self.0.configuration.take();
+        let owned_instance = match self.0.instance.take() {
+            Some(instance) => match Arc::try_unwrap(instance) {
+                Ok(instance) => Some(instance),
+                Err(instance) => {
+                    self.0.instance = Some(instance);
+                    self.0.cleanup.record_ownership_release();
+                    return self.0.abort_shutdown();
+                },
+            },
+            None => None,
+        };
+        let deadline = self.1;
+        let mut cancelled = || std::time::Instant::now() >= deadline || termination_requested();
+        if let Some(instance) = owned_instance.as_ref()
+            && let Err(failure) = instance.publish_graceful_shutdown(&mut cancelled)
         {
+            match failure {
+                crate::instance_bootstrap::ShutdownPublicationFailure::Interrupted => {},
+                crate::instance_bootstrap::ShutdownPublicationFailure::Publication(failure) => {
+                    self.0.cleanup.record_durable_shutdown(failure.code());
+                },
+            }
             return self.0.abort_shutdown();
         }
         self.0.state.transition(ProcessPhase::Stopping);
@@ -1480,6 +1666,7 @@ impl DrainingProcess {
 
 impl RunningProcess {
     fn abort_shutdown(&mut self) -> ExitOutcome {
+        self.absorb_retired_tasks();
         self.state.transition(ProcessPhase::Stopping);
         self.cleanup.set_primary(ExitOutcome::Forced);
         self.cancel_listener_tasks();
@@ -1505,6 +1692,7 @@ impl Drop for RunningProcess {
         if self.terminal_cleanup_complete {
             return;
         }
+        self.absorb_retired_tasks();
         self.state.transition(ProcessPhase::Stopping);
         self.cancel_listener_tasks();
         self.cleanup.cleanup_tasks(
@@ -1533,3 +1721,7 @@ impl Drop for RunningProcess {
 pub enum ApplicationRuntime {}
 
 mod startup;
+
+#[cfg(all(test, feature = "test-support"))]
+#[path = "process/resource_observation_tests.rs"]
+mod resource_observation_tests;

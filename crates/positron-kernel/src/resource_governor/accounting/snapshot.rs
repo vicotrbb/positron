@@ -7,9 +7,7 @@ impl GovernorInner {
         let state = match self.state.try_lock() {
             Ok(mut state) => {
                 self.drain_pending(&mut state);
-                if self.drop_ledger.pending_fence.swap(false, Ordering::AcqRel) {
-                    state.lifecycle = GovernorLifecycle::Fenced;
-                }
+                self.consume_pending_fence(&state);
                 state
             },
             Err(TryLockError::WouldBlock) => {
@@ -20,7 +18,7 @@ impl GovernorInner {
             Err(TryLockError::Poisoned(poisoned)) => {
                 let mut state = poisoned.into_inner();
                 self.drain_pending(&mut state);
-                state.lifecycle = GovernorLifecycle::Fenced;
+                state.lifecycle.set(GovernorLifecycle::Fenced);
                 state
             },
         };
@@ -65,7 +63,7 @@ impl GovernorInner {
             pool_usage: state.pool_usage,
             disk_pressure: state.disk_pressure,
             pressure_transition_count: state.pressure_transition_count,
-            lifecycle: state.lifecycle,
+            lifecycle: state.lifecycle.get(),
             total_usage: state.total_usage,
             outstanding_ordinary: state.outstanding_ordinary,
             outstanding_recovery: state.outstanding_recovery,

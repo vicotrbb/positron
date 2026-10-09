@@ -257,17 +257,17 @@ fn authenticated_http_log_attribute_marker_reports_insufficient_governor_headroo
     let before = initialized.resource_governor().inspect()?;
     assert_eq!(
         before.ordinary_capacity(ResourceDimension::CpuWorkUnits),
-        32,
-        "this headroom scenario registers one 32-unit tenant CPU quota"
+        128,
+        "this headroom scenario registers one canonical tenant CPU quota"
     );
     assert_eq!(
         before.pool_capacity(OrdinaryPool::Shared, ResourceDimension::CpuWorkUnits),
-        12,
-        "ordinary pool policy reserves 8+6+4+2 CPU units"
+        48,
+        "ordinary pool policy reserves 8+6+4+2 thirty-seconds of capacity"
     );
     assert_eq!(
         before.pool_capacity(OrdinaryPool::Ingest, ResourceDimension::CpuWorkUnits),
-        6,
+        24,
         "ingest class headroom is fixed by the runtime bootstrap policy"
     );
     let body = ExportLogsServiceRequest {
@@ -318,6 +318,26 @@ fn authenticated_http_log_attribute_marker_reports_insufficient_governor_headroo
     let decoded = ExportLogsServiceResponse::decode(response.body())?;
     assert!(decoded.partial_success.is_none());
 
+    // Hold real competing ingest work, leaving one CPU work unit available.
+    // The canonical quota may grow without making this refusal fixture depend
+    // on its former implicit 32-unit capacity.
+    let ingest_headroom = before
+        .pool_capacity(OrdinaryPool::Ingest, ResourceDimension::CpuWorkUnits)
+        .checked_add(before.pool_capacity(OrdinaryPool::Shared, ResourceDimension::CpuWorkUnits))
+        .and_then(|capacity| capacity.checked_sub(1))
+        .ok_or("ingest CPU headroom")?;
+    let competing_work =
+        initialized
+            .resource_governor()
+            .reserve(positron_kernel::WorkClaim::tenant(
+                initialized.tenant,
+                positron_kernel::WorkKind::Ingest,
+                positron_kernel::ResourceAmounts::only(
+                    ResourceDimension::CpuWorkUnits,
+                    ingest_headroom,
+                )?,
+            )?)?;
+
     // A source-shaped record near the bounded native value limit must retain
     // the typed retry outcome: candidate-aware admission is not a universal
     // capacity exemption for expensive policy work.
@@ -358,6 +378,7 @@ fn authenticated_http_log_attribute_marker_reports_insufficient_governor_headroo
     .map_err(|_| "expensive log HTTP response was rejected")?;
     assert_eq!(expensive_response.status(), 429);
     assert_eq!(expensive_response.retry_after_seconds(), Some(1));
+    drop(competing_work);
     drop(expensive_client);
     drop(client);
     drop(services);
