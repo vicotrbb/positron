@@ -74,12 +74,12 @@ pub(super) fn exercise(selector: u8) {
     )
     .expect("quarantine");
     let basis = catalog.pin().expect("basis");
-    let plan =
-        SegmentAbandonmentPlan::preflight(&basis, scope, sealed.segment_id()).expect("preview");
+    let mut plan = SegmentAbandonmentPlan::preflight(&catalog, &basis, scope, sealed.segment_id())
+        .expect("preview");
     let mut wrong = plan.confirmation_digest();
     wrong[usize::from(selector) % 32] ^= 1;
     assert!(
-        SegmentAbandonmentPlan::preflight(&basis, scope, sealed.segment_id())
+        SegmentAbandonmentPlan::preflight(&catalog, &basis, scope, sealed.segment_id())
             .expect("preview")
             .confirm(wrong)
             .is_err()

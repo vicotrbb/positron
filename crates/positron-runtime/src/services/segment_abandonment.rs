@@ -59,10 +59,14 @@ impl ServiceHandle {
             return abandonment_response(&basis, scope, segment, operation);
         }
         let Some(confirmation) = input.confirmation else {
-            let plan =
-                SegmentAbandonmentPlan::preflight(&basis, scope, segment).map_err(|failure| {
+            let plan = SegmentAbandonmentPlan::preflight(&catalog, &basis, scope, segment)
+                .map_err(|failure| {
                     if failure.code() == positron_kernel::IntegrityFailureCode::AmbiguousIntegrity {
                         self.request_integrity_fence();
+                        MaintenanceServiceFailure::AdministrationUnavailable
+                    } else if failure.code()
+                        == positron_kernel::IntegrityFailureCode::FindingCapacity
+                    {
                         MaintenanceServiceFailure::AdministrationUnavailable
                     } else {
                         MaintenanceServiceFailure::SourceUnavailable

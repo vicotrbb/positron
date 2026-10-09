@@ -50,15 +50,21 @@ impl DurableOperationAdministration {
                 .ok_or(DurableOperationFailure::InvalidInput)?,
         )
         .map_err(|_| DurableOperationFailure::InvalidInput)?;
-        let plan = SegmentAbandonmentPlan::preflight(&snapshot, scope, segment)
-            .map_err(|_| DurableOperationFailure::InvalidState)?;
+        let mut plan = SegmentAbandonmentPlan::preflight(catalog, &snapshot, scope, segment)
+            .map_err(|failure| {
+                if failure.code() == positron_kernel::IntegrityFailureCode::FindingCapacity {
+                    DurableOperationFailure::CapacityExceeded
+                } else {
+                    DurableOperationFailure::InvalidState
+                }
+            })?;
         // Reuse the operation registry's bounded admission and expiry rules.
         let finding = plan.finding();
         let retained = retained_objects(&snapshot, operation.operation_id(), now)?;
         let mut objects = plan
             .confirm(
                 request
-                    .query_export_request_digest
+                    .operation_request_digest
                     .ok_or(DurableOperationFailure::InvalidInput)?,
             )
             .map_err(|_| DurableOperationFailure::InvalidInput)?;

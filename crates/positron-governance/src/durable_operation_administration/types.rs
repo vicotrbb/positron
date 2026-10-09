@@ -101,7 +101,7 @@ pub struct DurableOperationRequest {
     /// Full Query-owned request binding for a Query export. The generic
     /// administrative idempotency key is only 128 bits, so it is not enough
     /// to stand in for this authenticated 256-bit request commitment.
-    pub(super) query_export_request_digest: Option<[u8; 32]>,
+    pub(super) operation_request_digest: Option<[u8; 32]>,
     pub(super) digest: [u8; 32],
 }
 
@@ -113,7 +113,7 @@ impl DurableOperationRequest {
         target_identity: Option<[u8; 16]>,
         accepted_generation: u64,
         applicable_tenant: Option<TenantId>,
-        query_export_request_digest: Option<[u8; 32]>,
+        operation_request_digest: Option<[u8; 32]>,
     ) -> Result<OperationId, DurableOperationFailure> {
         if accepted_generation == 0 {
             return Err(DurableOperationFailure::InvalidInput);
@@ -125,7 +125,7 @@ impl DurableOperationRequest {
         hasher.update([kind.code()]);
         match kind {
             DurableOperationKind::CatalogFormatMigration => {
-                if applicable_tenant.is_some() || query_export_request_digest.is_some() {
+                if applicable_tenant.is_some() || operation_request_digest.is_some() {
                     return Err(DurableOperationFailure::InvalidInput);
                 }
                 if let Some(target_identity) = target_identity {
@@ -140,9 +140,8 @@ impl DurableOperationRequest {
                         .to_bytes(),
                 );
                 hasher.update(target_identity.ok_or(DurableOperationFailure::InvalidInput)?);
-                hasher.update(
-                    query_export_request_digest.ok_or(DurableOperationFailure::InvalidInput)?,
-                );
+                hasher
+                    .update(operation_request_digest.ok_or(DurableOperationFailure::InvalidInput)?);
             },
         }
         let digest: [u8; 32] = hasher.finalize().into();
@@ -154,7 +153,7 @@ impl DurableOperationRequest {
             applicable_tenant,
             accepted_generation,
             accepted_at_unix_seconds: 1,
-            query_export_request_digest,
+            operation_request_digest,
             digest,
         }))
     }
@@ -198,7 +197,7 @@ impl DurableOperationRequest {
             applicable_tenant: None,
             accepted_generation,
             accepted_at_unix_seconds,
-            query_export_request_digest: None,
+            operation_request_digest: None,
             digest,
         };
         if request.operation_id() != operation_id {
@@ -216,12 +215,12 @@ impl DurableOperationRequest {
         target_identity: [u8; 16],
         accepted_generation: u64,
         accepted_at_unix_seconds: u64,
-        query_export_request_digest: [u8; 32],
+        operation_request_digest: [u8; 32],
     ) -> Result<Self, DurableOperationFailure> {
         if accepted_generation == 0
             || accepted_at_unix_seconds == 0
             || target_identity.iter().all(|byte| *byte == 0)
-            || query_export_request_digest.iter().all(|byte| *byte == 0)
+            || operation_request_digest.iter().all(|byte| *byte == 0)
         {
             return Err(DurableOperationFailure::InvalidInput);
         }
@@ -236,7 +235,7 @@ impl DurableOperationRequest {
         // Query catalog generation is a fresh-request precondition. It is not
         // part of the durable idempotency intent: an exact caller retry must
         // retain the originally accepted snapshot after catalog advances.
-        hasher.update(query_export_request_digest);
+        hasher.update(operation_request_digest);
         let digest: [u8; 32] = hasher.finalize().into();
         let request = Self {
             principal,
@@ -246,7 +245,7 @@ impl DurableOperationRequest {
             applicable_tenant: Some(tenant),
             accepted_generation,
             accepted_at_unix_seconds,
-            query_export_request_digest: Some(query_export_request_digest),
+            operation_request_digest: Some(operation_request_digest),
             digest,
         };
         Ok(request)
@@ -260,12 +259,12 @@ impl DurableOperationRequest {
         target_identity: [u8; 16],
         accepted_generation: u64,
         accepted_at_unix_seconds: u64,
-        query_export_request_digest: [u8; 32],
+        confirmation_digest: [u8; 32],
     ) -> Result<Self, DurableOperationFailure> {
         if accepted_generation == 0
             || accepted_at_unix_seconds == 0
             || target_identity.iter().all(|byte| *byte == 0)
-            || query_export_request_digest.iter().all(|byte| *byte == 0)
+            || confirmation_digest.iter().all(|byte| *byte == 0)
         {
             return Err(DurableOperationFailure::InvalidInput);
         }
@@ -278,7 +277,7 @@ impl DurableOperationRequest {
         hasher.update(tenant.to_bytes());
         hasher.update(target_identity);
         // The confirmation binds the exact source generation and data-loss range.
-        hasher.update(query_export_request_digest);
+        hasher.update(confirmation_digest);
         let digest: [u8; 32] = hasher.finalize().into();
         let request = Self {
             principal,
@@ -288,7 +287,7 @@ impl DurableOperationRequest {
             applicable_tenant: Some(tenant),
             accepted_generation,
             accepted_at_unix_seconds,
-            query_export_request_digest: Some(query_export_request_digest),
+            operation_request_digest: Some(confirmation_digest),
             digest,
         };
         Ok(request)
@@ -337,7 +336,7 @@ impl DurableOperationRequest {
     #[must_use]
     pub const fn query_export_request_digest(self) -> Option<[u8; 32]> {
         match self.kind {
-            DurableOperationKind::QueryExport => self.query_export_request_digest,
+            DurableOperationKind::QueryExport => self.operation_request_digest,
             DurableOperationKind::CatalogFormatMigration
             | DurableOperationKind::SegmentAbandonment => None,
         }
@@ -357,7 +356,7 @@ impl DurableOperationRequest {
             && self.applicable_tenant == other.applicable_tenant
             && (self.kind == DurableOperationKind::QueryExport
                 || self.accepted_generation == other.accepted_generation)
-            && self.query_export_request_digest == other.query_export_request_digest
+            && self.operation_request_digest == other.operation_request_digest
             && self.digest == other.digest
     }
 
@@ -386,7 +385,7 @@ impl DurableOperationRequest {
                         target_identity,
                         self.accepted_generation,
                         self.accepted_at_unix_seconds,
-                        self.query_export_request_digest?,
+                        self.operation_request_digest?,
                     )
                     .ok()
                 })
@@ -401,7 +400,7 @@ impl DurableOperationRequest {
                         target_identity,
                         self.accepted_generation,
                         self.accepted_at_unix_seconds,
-                        self.query_export_request_digest?,
+                        self.operation_request_digest?,
                     )
                     .ok()
                 })

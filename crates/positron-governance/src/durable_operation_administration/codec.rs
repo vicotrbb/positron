@@ -37,7 +37,7 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
     encoded.extend_from_slice(
         &operation
             .request
-            .query_export_request_digest
+            .operation_request_digest
             .unwrap_or([0; 32]),
     );
     encoded.extend_from_slice(&operation.request.digest);
@@ -91,7 +91,7 @@ pub(super) fn encode_expired_binding(request: DurableOperationRequest) -> Vec<u8
             .map_or([0; 16], TenantId::to_bytes),
     );
     encoded.extend_from_slice(&request.accepted_generation.to_be_bytes());
-    encoded.extend_from_slice(&request.query_export_request_digest.unwrap_or([0; 32]));
+    encoded.extend_from_slice(&request.operation_request_digest.unwrap_or([0; 32]));
     encoded.extend_from_slice(&request.digest);
     encoded
 }
@@ -135,7 +135,7 @@ pub(super) fn decode_expired_binding(
         None
     };
     let accepted_generation = take_u64(encoded, &mut offset)?;
-    let query_export_request_digest = if v2 || v3 {
+    let operation_request_digest = if v2 || v3 {
         let digest = take_array(encoded, &mut offset)?;
         (!digest.iter().all(|byte| *byte == 0)).then_some(digest)
     } else {
@@ -153,7 +153,7 @@ pub(super) fn decode_expired_binding(
         applicable_tenant,
         accepted_generation,
         accepted_at_unix_seconds: 1,
-        query_export_request_digest,
+        operation_request_digest,
         digest,
     };
     if !request.is_valid_persisted_request() {
@@ -204,7 +204,7 @@ pub(super) fn decode_operation(
     };
     let accepted_generation = take_u64(encoded, &mut offset)?;
     let accepted_at_unix_seconds = take_u64(encoded, &mut offset)?;
-    let query_export_request_digest = if v2 || v3 || v4 {
+    let operation_request_digest = if v2 || v3 || v4 {
         let digest = take_array(encoded, &mut offset)?;
         (!digest.iter().all(|byte| *byte == 0)).then_some(digest)
     } else {
@@ -219,7 +219,7 @@ pub(super) fn decode_operation(
         applicable_tenant,
         accepted_generation,
         accepted_at_unix_seconds,
-        query_export_request_digest,
+        operation_request_digest,
         digest,
     };
     if request.operation_id().to_bytes() != operation_id
@@ -341,7 +341,7 @@ pub(super) fn encode_audit(operation: DurableOperation) -> Vec<u8> {
     encoded.extend_from_slice(
         &operation
             .request
-            .query_export_request_digest
+            .operation_request_digest
             .unwrap_or([0; 32]),
     );
     encoded.push(operation.progress_percent);

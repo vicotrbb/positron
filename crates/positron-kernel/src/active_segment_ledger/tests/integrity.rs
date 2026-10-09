@@ -694,15 +694,57 @@ fn confirmed_abandonment_preserves_evidence_and_explicit_read_holes() -> Result<
         ),
     )?;
     let snapshot = catalog.pin()?;
-    let plan = crate::SegmentAbandonmentPlan::preflight(&snapshot, scope, sealed.segment_id())?;
+    let governor = authority.governor();
+    let capacity = governor.inspect()?;
+    let mut blockers = Vec::new();
+    let mut exhausted = false;
+    for _ in 0..capacity.maximum_outstanding_reservations() {
+        let claim = crate::WorkClaim::system_diagnostics(crate::ResourceAmounts::new([
+            1_048_576, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]))?;
+        match governor.reserve(claim) {
+            Ok(reservation) => blockers.push(reservation),
+            Err(_) => {
+                exhausted = true;
+                break;
+            },
+        }
+    }
+    assert!(exhausted, "bounded maintenance pool can be exhausted");
+    let refusal =
+        crate::SegmentAbandonmentPlan::preflight(&catalog, &snapshot, scope, sealed.segment_id());
     assert!(
-        crate::SegmentAbandonmentPlan::preflight(&snapshot, scope, sealed.segment_id())?
+        matches!(refusal, Err(failure) if failure.code() == crate::IntegrityFailureCode::FindingCapacity),
+        "abandonment must refuse exhausted maintenance capacity"
+    );
+    assert_eq!(catalog.pin()?.identity(), snapshot.identity());
+    assert_eq!(fs::read(&path)?, b"corrupt evidence");
+    drop(blockers);
+    let mut plan =
+        crate::SegmentAbandonmentPlan::preflight(&catalog, &snapshot, scope, sealed.segment_id())?;
+    assert!(
+        crate::SegmentAbandonmentPlan::preflight(&catalog, &snapshot, scope, sealed.segment_id())?
             .confirm([0; 32])
             .is_err(),
         "implicit data loss is refused"
     );
+    assert!(
+        authority
+            .governor()
+            .inspect()?
+            .outstanding_for(crate::WorkClass::OrdinaryMaintenanceBackup)
+            > 0,
+        "preview retains its administration reservation"
+    );
     let confirmation = plan.confirmation_digest();
     let objects = plan.confirm(confirmation)?;
+    assert!(
+        governor
+            .inspect()?
+            .outstanding_for(crate::WorkClass::OrdinaryMaintenanceBackup)
+            > 0,
+        "confirmation retains capacity through publication"
+    );
     let proposal = crate::CatalogProposal::new(
         TransactionId::new([0xc8; 16])?,
         snapshot.format_epoch().ok_or("epoch")?,
@@ -713,6 +755,13 @@ fn confirmed_abandonment_preserves_evidence_and_explicit_read_holes() -> Result<
         proposal,
         Some(crate::AuditIntent::new(b"confirmed data loss".to_vec())?),
     )?;
+    drop(plan);
+    assert_eq!(
+        governor
+            .inspect()?
+            .outstanding_for(crate::WorkClass::OrdinaryMaintenanceBackup),
+        0
+    );
     let current = catalog.pin()?;
     assert_eq!(crate::integrity_abandonment_findings(&current)?.len(), 1);
     assert_eq!(fs::read(&path)?, b"corrupt evidence");

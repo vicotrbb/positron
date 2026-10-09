@@ -230,5 +230,5 @@ segment with `operation_id`, without confirmation fields.
 
 The CLI is `positron maintenance abandon-segment --tenant UUID --signal logs|traces
 --shard N --segment HEX`, using the existing credential-stdin and TLS transport
-contract. Add `--expected-generation N --confirmation HEX --idempotency-key UUID
+contract. Add `--expected-catalog-generation N --confirmation HEX --idempotency-key UUID
 --accept-data-loss` to confirm, or `--operation-id HEX` to inspect the receipt.

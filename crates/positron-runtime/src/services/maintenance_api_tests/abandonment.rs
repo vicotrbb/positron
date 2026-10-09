@@ -43,8 +43,12 @@ fn abandonment_jointly_records_loss_operation_and_audit_and_exactly_replays()
         .map_err(|e| format!("verify {e:?}"))?;
     let catalog = open_catalog(&initialized)?;
     let snapshot = catalog.pin()?;
-    let plan =
-        positron_kernel::SegmentAbandonmentPlan::preflight(&snapshot, scope, sealed.segment_id())?;
+    let plan = positron_kernel::SegmentAbandonmentPlan::preflight(
+        &catalog,
+        &snapshot,
+        scope,
+        sealed.segment_id(),
+    )?;
     let actor = services
         .authorize_system_administration(&administrator)
         .map_err(|e| format!("actor {e:?}"))?;
@@ -57,6 +61,7 @@ fn abandonment_jointly_records_loss_operation_and_audit_and_exactly_replays()
         17,
         plan.confirmation_digest(),
     )?;
+    drop(plan);
     let before_audit = snapshot.governance_audit_frontier();
     let result = positron_governance::DurableOperationAdministration::abandon_segment(
         &catalog, actor, scope, request,
@@ -207,7 +212,31 @@ fn administrative_abandonment_preview_is_read_only_and_confirmation_reauthentica
         accept_data_loss: false,
         operation_id: None,
     };
+    fn exhaust_maintenance(
+        authority: &positron_kernel::StorageKernelResourceAuthority,
+    ) -> Result<Vec<positron_kernel::ResourceReservation<'_>>, Box<dyn std::error::Error>> {
+        let governor = authority.governor();
+        let maximum = governor.inspect()?.maximum_outstanding_reservations();
+        let mut reservations = Vec::new();
+        for _ in 0..maximum {
+            let claim = positron_kernel::WorkClaim::system_diagnostics(
+                positron_kernel::ResourceAmounts::new([1_048_576, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            )?;
+            match governor.reserve(claim) {
+                Ok(reservation) => reservations.push(reservation),
+                Err(_) => return Ok(reservations),
+            }
+        }
+        Err("maintenance pool did not exhaust".into())
+    }
     let before = open_catalog(&initialized)?.pin()?.number();
+    let blockers = exhaust_maintenance(&initialized._authority)?;
+    assert!(matches!(
+        services.abandon_segment(&administrator, &body.encode()?),
+        Err(super::MaintenanceServiceFailure::AdministrationUnavailable)
+    ));
+    assert_eq!(open_catalog(&initialized)?.pin()?.number(), before);
+    drop(blockers);
     let preview = services
         .abandon_segment(&administrator, &body.encode()?)
         .map_err(|e| format!("preview {e:?}"))?;
@@ -218,6 +247,14 @@ fn administrative_abandonment_preview_is_read_only_and_confirmation_reauthentica
     confirm.confirmation = preview.confirmation;
     confirm.idempotency_key = Some("bcbcbcbc-bcbc-bcbc-bcbc-bcbcbcbcbcbc".into());
     confirm.accept_data_loss = true;
+    let blockers = exhaust_maintenance(&initialized._authority)?;
+    assert!(matches!(
+        services.abandon_segment(&administrator, &confirm.encode()?),
+        Err(super::MaintenanceServiceFailure::AdministrationUnavailable)
+    ));
+    assert_eq!(open_catalog(&initialized)?.pin()?.number(), before);
+    drop(blockers);
+
     assert_eq!(
         services.abandon_segment(&ingest, &confirm.encode()?),
         Err(MaintenanceServiceFailure::AuthenticationRejected)

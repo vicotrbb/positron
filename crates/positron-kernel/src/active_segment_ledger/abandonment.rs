@@ -7,24 +7,35 @@ use super::integrity::{decode_quarantine, integrity_quarantine_findings};
 use super::{
     IntegrityFailure, IntegrityFailureCode, IntegrityQuarantineFinding, SegmentId, SegmentScope,
 };
-use crate::{CatalogObject, CatalogSnapshot};
+use crate::{Catalog, CatalogObject, CatalogSnapshot, ResourceReservation};
 
 pub(super) const ABANDONMENT_MAGIC: &[u8; 8] = b"PABAND01";
 
 /// A read-only, generation-bound preview of the exact acknowledged data lost.
 /// Confirming returns a proposal, never writes files or fabricates valid bytes.
-pub struct SegmentAbandonmentPlan {
+pub struct SegmentAbandonmentPlan<'reservation> {
+    _reservation: ResourceReservation<'reservation>,
     finding: IntegrityQuarantineFinding,
     confirmation: [u8; 32],
     objects: Vec<CatalogObject>,
 }
 
-impl SegmentAbandonmentPlan {
+impl<'reservation> SegmentAbandonmentPlan<'reservation> {
     pub fn preflight(
+        catalog: &'reservation Catalog<'_>,
         snapshot: &CatalogSnapshot,
         scope: SegmentScope,
         segment: SegmentId,
     ) -> Result<Self, IntegrityFailure> {
+        let reservation = catalog
+            .reserve_segment_abandonment(snapshot)
+            .map_err(|failure| {
+                if failure.code() == crate::CatalogFailureCode::ResourceAdmissionRefused {
+                    IntegrityFailure(IntegrityFailureCode::FindingCapacity)
+                } else {
+                    super::integrity::map_catalog_failure(failure)
+                }
+            })?;
         let finding = integrity_quarantine_findings(snapshot)?
             .into_iter()
             .find(|finding| {
@@ -82,6 +93,7 @@ impl SegmentAbandonmentPlan {
             return Err(IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity));
         }
         Ok(Self {
+            _reservation: reservation,
             finding,
             confirmation: digest.finalize().into(),
             objects,
@@ -99,11 +111,14 @@ impl SegmentAbandonmentPlan {
 
     /// Requires the complete preview commitment. Administration must jointly
     /// publish these objects with its durable operation and governance audit.
-    pub fn confirm(self, confirmation: [u8; 32]) -> Result<Vec<CatalogObject>, IntegrityFailure> {
-        if confirmation != self.confirmation {
+    pub fn confirm(
+        &mut self,
+        confirmation: [u8; 32],
+    ) -> Result<Vec<CatalogObject>, IntegrityFailure> {
+        if confirmation != self.confirmation || self.objects.is_empty() {
             return Err(IntegrityFailure(IntegrityFailureCode::InvalidInput));
         }
-        Ok(self.objects)
+        Ok(std::mem::take(&mut self.objects))
     }
 }
 
