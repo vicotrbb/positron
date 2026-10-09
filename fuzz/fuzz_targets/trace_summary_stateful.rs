@@ -300,6 +300,16 @@ fn run_once(data: &[u8], root: &std::path::Path) -> Result<(), Box<dyn Error>> {
             &lifecycle_clock,
         )?;
         assert_visible_summary_counts(&result, &expected);
+        if result.complete() {
+            for (trace, spans) in &expected_spans {
+                let summary = result.summary(*trace).ok_or("complete summary missing")?;
+                assert_eq!(summary.logical_span_count(), spans.len());
+                assert_eq!(
+                    summary.observation_count(),
+                    spans.values().copied().sum::<u64>()
+                );
+            }
+        }
         exercise_trace_queries(
             &store,
             &authority,

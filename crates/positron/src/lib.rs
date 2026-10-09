@@ -509,12 +509,14 @@ struct Arguments {
 impl Arguments {
     fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Self, LaunchFailure> {
         let mut arguments = arguments.into_iter();
+        if arguments.next().as_deref() != Some("serve") {
+            return Err(LaunchFailure::Usage);
+        }
         let mut config = None;
         let mut overrides = Vec::new();
         let mut initialization = InitializationMode::ExistingOnly;
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
-                "serve" => {},
                 "--init-if-empty" => initialization = InitializationMode::InitializeIfEmpty,
                 "--config" if config.is_none() => {
                     config = Some(PathBuf::from(arguments.next().ok_or(LaunchFailure::Usage)?));
@@ -605,6 +607,41 @@ mod tests {
         TaskFailure, TaskJoinOutcome, TaskRegistrar, TaskRole,
     };
     use signal_hook::iterator::Signals;
+
+    #[test]
+    fn serve_arguments_require_one_leading_command() {
+        for arguments in [
+            Vec::new(),
+            vec!["--init-if-empty"],
+            vec!["serve", "serve"],
+            vec!["--init-if-empty", "serve"],
+            vec!["serve", "--init-if-empty", "serve"],
+        ] {
+            assert!(
+                matches!(
+                    super::Arguments::parse(arguments.iter().map(|value| (*value).to_owned())),
+                    Err(LaunchFailure::Usage)
+                ),
+                "invalid serve invocation was accepted: {arguments:?}"
+            );
+        }
+        assert!(super::Arguments::parse(["serve".to_owned()]).is_ok());
+        assert!(
+            super::Arguments::parse(
+                [
+                    "serve",
+                    "--init-if-empty",
+                    "--config",
+                    "positron.toml",
+                    "--set",
+                    "runtime.drain_deadline_seconds=10"
+                ]
+                .into_iter()
+                .map(str::to_owned)
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn every_typed_runtime_outcome_has_a_stable_native_exit() {

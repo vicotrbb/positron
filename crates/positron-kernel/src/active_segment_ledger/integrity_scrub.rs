@@ -490,11 +490,7 @@ fn verify_integrity_against_snapshot(
                 continuation: continuation_for(source_identity, last_segment),
             }));
         }
-        let physical = match if candidate.state == SegmentState::Sealed {
-            storage.sealed_compaction_source_bound(*candidate, protection, instance)
-        } else {
-            Ok(None)
-        } {
+        let physical = match storage.verification_source_bound(*candidate, protection, instance) {
             Ok(Some((bytes, _))) => u64::try_from(bytes)
                 .map_err(|_| IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?,
             Ok(None) => 0,

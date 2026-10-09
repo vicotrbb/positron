@@ -40,6 +40,69 @@ fn catalog_integrity_request<'a>(
 }
 
 #[test]
+fn active_integrity_verification_honors_the_byte_budget() -> Result<(), Box<dyn Error>> {
+    let root = TemporaryRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(root.path(), MountQualification::LocalHost)?;
+    let authority = establish_authority(volume)?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new([0x81; 16])?,
+        CatalogSecret::from_owned(Box::new([0x82; 32]), Box::new([0x83; 32])),
+    )?;
+    let scope = SegmentScope::new(
+        TenantId::from_bytes([0x64; 16])?,
+        SignalKind::Logs,
+        VirtualShardId::new(9)?,
+    );
+    let protection = || SegmentProtectionKey::from_owned(Box::new([0x84; 32]));
+    let ledger = ActiveSegmentLedger::open(&authority, &catalog, scope, protection())?;
+    ledger.append(PreparedStoreBlock::new(
+        scope,
+        StoreBlockIdentity::new([0x85; 16])?,
+        vec![0x86; 1024],
+    )?)?;
+    for mode in [
+        IntegrityVerificationMode::Startup,
+        IntegrityVerificationMode::Offline,
+    ] {
+        let limited = ActiveSegmentLedger::verify_catalog_integrity(
+            &authority,
+            &catalog,
+            catalog_integrity_request(
+                scope,
+                protection(),
+                mode,
+                IntegrityScrubBudget::with_bytes(1, 1).map_err(|_| "valid bounded budget")?,
+                &IntegrityCancellation::new(),
+                TransactionId::new([0x87; 16])?,
+                None,
+            ),
+        )?;
+        assert_eq!(limited.outcome(), IntegrityVerificationOutcome::Incomplete);
+        assert_eq!(limited.examined_segments(), 0);
+        assert_eq!(limited.omitted_segments(), 1);
+        assert!(!limited.is_success());
+        let complete = ActiveSegmentLedger::verify_catalog_integrity(
+            &authority,
+            &catalog,
+            catalog_integrity_request(
+                scope,
+                protection(),
+                mode,
+                IntegrityScrubBudget::new(1).map_err(|_| "valid complete budget")?,
+                &IntegrityCancellation::new(),
+                TransactionId::new([0x88; 16])?,
+                None,
+            ),
+        )?;
+        assert_eq!(complete.outcome(), IntegrityVerificationOutcome::Verified);
+        assert_eq!(complete.examined_segments(), 1);
+        assert!(complete.examined_bytes() >= 1024);
+    }
+    Ok(())
+}
+
+#[test]
 fn sealed_damage_is_durably_quarantined_and_other_scopes_remain_readable()
 -> Result<(), Box<dyn Error>> {
     let root = TemporaryRoot::new()?;

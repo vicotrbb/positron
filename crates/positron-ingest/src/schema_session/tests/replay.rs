@@ -750,6 +750,55 @@ fn reachable_index_collection_honors_cancellation_before_publication() {
 }
 
 #[test]
+fn bootstrap_worker_retains_peak_capacity_and_releases_every_grant() {
+    let fixture = crate::tests::support::fixture_with_ordinary_memory(40_000_000)
+        .expect("worker-capable fixture");
+    let before = fixture.authority.governor().inspect().expect("governor");
+    let builder =
+        crate::SchemaReplayBuilder::new(fixture.tenant, None, fixture.authority.recovery())
+            .expect("bootstrap worker");
+    let during = fixture.authority.governor().inspect().expect("governor");
+    assert_eq!(
+        during.usage(ResourceDimension::CpuWorkUnits)
+            - before.usage(ResourceDimension::CpuWorkUnits),
+        1
+    );
+    assert_eq!(
+        during.usage(ResourceDimension::TaskSlots) - before.usage(ResourceDimension::TaskSlots),
+        1
+    );
+    assert!(
+        during.usage(ResourceDimension::MemoryBytes) - before.usage(ResourceDimension::MemoryBytes)
+            >= u64::try_from(
+                positron_signals::SchemaBudget::replay_working_memory_bytes(1_048_576)
+                    .expect("bounded peak")
+            )
+            .expect("memory amount")
+    );
+    drop(builder);
+    let after = fixture.authority.governor().inspect().expect("governor");
+    assert_eq!(after.outstanding_total(), before.outstanding_total());
+    for dimension in ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+}
+
+#[test]
+fn bootstrap_worker_refuses_insufficient_peak_memory_without_leaking_capacity() {
+    let fixture = crate::tests::support::fixture().expect("memory-limited fixture");
+    let before = fixture.authority.governor().inspect().expect("governor");
+    assert!(matches!(
+        crate::SchemaReplayBuilder::new(fixture.tenant, None, fixture.authority.recovery()),
+        Err(SchemaSessionFailure::StateUnavailable)
+    ));
+    let after = fixture.authority.governor().inspect().expect("governor");
+    assert_eq!(after.outstanding_total(), before.outstanding_total());
+    for dimension in ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+}
+
+#[test]
 fn bootstrap_finish_observes_reachable_index_retention() {
     let fixture = crate::tests::support::fixture_with_ordinary_memory(40_000_000).expect("fixture");
     let catalog = Catalog::open(

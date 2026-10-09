@@ -30,8 +30,11 @@ rustix = { version = "=1.1.4", default-features = false, features = ["fs", "std"
 tokio = { version = "=1.53.1", default-features = false, features = ["net", "rt", "time"] }
 
 [dev-dependencies]
+opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic", "logs"] }
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen"] }
+positron-query = { path = "../positron-query" }
 positron-runtime = { path = "../positron-runtime", features = ["test-support"] }
-rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 
 [lib]
 name = "positron"

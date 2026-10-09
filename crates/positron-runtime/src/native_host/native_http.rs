@@ -139,11 +139,16 @@ fn serve_checked<S: Read + Write + TimeoutStream>(
         protection.idle_deadline(),
     );
     let head = io::read_head(&mut header)?;
-    let body_deadline = Instant::now() + protection.body_deadline();
     let request_deadline = started + protection.request_deadline();
-    let deadline = body_deadline.min(request_deadline);
-    let mut request =
-        DeadlineStream::new(header.into_inner(), deadline, protection.idle_deadline());
+    // Attribution and admission may wait for internal Catalog ownership. The
+    // body phase starts when the receiver can first read it; the total request
+    // deadline still includes those waits and is never refreshed.
+    let mut request = DeadlineStream::for_body(
+        header.into_inner(),
+        request_deadline,
+        protection.body_deadline(),
+        protection.idle_deadline(),
+    );
     let response = dispatch::route(
         &mut request,
         role,
@@ -188,6 +193,7 @@ impl TimeoutStream for rustls::StreamOwned<rustls::ServerConnection, TcpStream> 
 struct DeadlineStream<'stream, S> {
     stream: &'stream mut S,
     deadline: Instant,
+    pending_body_timeout: Option<Duration>,
     idle_deadline: Duration,
 }
 
@@ -196,6 +202,21 @@ impl<'stream, S> DeadlineStream<'stream, S> {
         Self {
             stream,
             deadline,
+            pending_body_timeout: None,
+            idle_deadline,
+        }
+    }
+
+    fn for_body(
+        stream: &'stream mut S,
+        request_deadline: Instant,
+        body_timeout: Duration,
+        idle_deadline: Duration,
+    ) -> Self {
+        Self {
+            stream,
+            deadline: request_deadline,
+            pending_body_timeout: Some(body_timeout),
             idle_deadline,
         }
     }
@@ -207,6 +228,9 @@ impl<'stream, S> DeadlineStream<'stream, S> {
 
 impl<S: TimeoutStream> DeadlineStream<'_, S> {
     fn configure_next_io(&mut self) -> std::io::Result<()> {
+        if let Some(timeout) = self.pending_body_timeout.take() {
+            self.deadline = self.deadline.min(Instant::now() + timeout);
+        }
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(std::io::Error::new(

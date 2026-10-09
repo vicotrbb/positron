@@ -9,11 +9,9 @@ use crate::{
 fn missing_leased_block_in_a_valid_empty_retired_artifact_is_snapshot_expired()
 -> Result<(), Box<dyn Error>> {
     use crate::active_segment_ledger::format::{SegmentState, decode_header};
-    use crate::active_segment_ledger::recovery::{
-        FrontierPublication, frontier_name, publish_frontier, segment_name,
-    };
+    use crate::active_segment_ledger::publish_segments;
+    use crate::active_segment_ledger::recovery::{frontier_name, segment_name};
     use crate::active_segment_ledger::storage::LedgerStorage;
-    use crate::active_segment_ledger::{SegmentRetention, publish_segments};
 
     let root = TemporaryRoot::new()?;
     let volume = PrimaryDataVolume::acquire(root.path(), MountQualification::LocalHost)?;
@@ -30,6 +28,11 @@ fn missing_leased_block_in_a_valid_empty_retired_artifact_is_snapshot_expired()
     );
     let protection = || SegmentProtectionKey::from_owned(Box::new([0x44; 32]));
     let ledger = ActiveSegmentLedger::open(&authority, &catalog, scope, protection())?;
+    let initial_frontier = std::fs::read(
+        root.path()
+            .join("segments/active")
+            .join(frontier_name(ledger.active_segment_id()?)),
+    )?;
     let receipt = ledger.append(prepared(scope, b"leased-block")?)?;
     let lease = ledger.create_snapshot_lease(100, 200)?;
     let lease_identity = lease.identity();
@@ -43,7 +46,6 @@ fn missing_leased_block_in_a_valid_empty_retired_artifact_is_snapshot_expired()
     )?;
     let basis = catalog.pin()?;
     let sealed = storage.catalog_segments(&basis, scope)?[0];
-    let (segment_key, _) = storage.recover_segment(sealed, &protection(), catalog.instance())?;
     let sealed_directory = root.path().join("segments/sealed");
     let segment_path = sealed_directory.join(segment_name(sealed.id));
     let segment_bytes = std::fs::read(&segment_path)?;
@@ -54,20 +56,14 @@ fn missing_leased_block_in_a_valid_empty_retired_artifact_is_snapshot_expired()
     segment_file.set_len(u64::try_from(header_bytes)?)?;
     segment_file.sync_all()?;
     let sealed_handle = std::fs::File::open(&sealed_directory)?;
-    publish_frontier(
-        &sealed_handle,
-        sealed.id,
-        &segment_key,
-        FrontierPublication {
-            durable_bytes: u64::try_from(header_bytes)?,
-            next_sequence: 0,
-            position: sealed.base_position,
-            retention: SegmentRetention::Empty,
-            event_range: crate::active_segment_ledger::AuthenticatedEventRange::unavailable(
-                crate::active_segment_ledger::EventRangeUnavailable::LegacyFormat,
-            ),
-        },
+    // Replay the original authenticated empty prefix without protecting a
+    // second plaintext under its already-used DEK/nonce.
+    std::fs::write(
+        sealed_directory.join(frontier_name(sealed.id)),
+        initial_frontier,
     )?;
+    std::fs::File::open(sealed_directory.join(frontier_name(sealed.id)))?.sync_all()?;
+    sealed_handle.sync_all()?;
     assert!(sealed_directory.join(frontier_name(sealed.id)).is_file());
     publish_segments(
         &catalog,

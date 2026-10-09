@@ -21,8 +21,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     FIXTURE.with(|fixture| {
-        if let Some(fixture) = fixture.borrow().as_ref() {
-            fixture.exercise(data);
-        }
+        let fixture = fixture.borrow();
+        let fixture = fixture
+            .as_ref()
+            .expect("bounded schema fixture is available");
+        fixture.exercise(data);
     });
 });

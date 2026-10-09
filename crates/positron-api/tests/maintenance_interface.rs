@@ -96,6 +96,11 @@ fn generated_client_sends_a_bounded_authenticated_online_resume()
                 Err(error) => return Err(error),
             }
         };
+        // Accepted sockets can inherit nonblocking mode on this platform.
+        // Acceptance does not establish that request bytes have arrived yet.
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
         let mut request = [0_u8; 2_048];
         let read = stream.read(&mut request)?;
         let request = String::from_utf8_lossy(&request[..read]);

@@ -28,6 +28,25 @@ fn prepared(
 }
 
 #[test]
+fn recovery_fences_a_missing_acknowledged_frontier_and_preserves_payload()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new(0x6a)?;
+    let catalog = fixture.catalog()?;
+    let ledger = fixture.open(&catalog, [0x7a; 32])?;
+    let receipt = ledger.append(prepared(fixture.scope, 10, b"acknowledged-data")?)?;
+    drop(ledger);
+    let path = active_segment(fixture.root.path(), receipt.segment_id());
+    let original = fs::read(&path)?;
+    fs::remove_file(active_frontier(fixture.root.path(), receipt.segment_id()))?;
+    let failure = fixture
+        .open(&catalog, [0x7a; 32])
+        .expect_err("missing acknowledged proof must fence restart");
+    assert_eq!(failure.code(), LedgerFailureCode::IntegrityCorruption);
+    assert_eq!(fs::read(path)?, original);
+    Ok(())
+}
+
+#[test]
 fn recovery_rejects_the_wrong_segment_wrapping_key() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new(0x61)?;
     let catalog = fixture.catalog()?;

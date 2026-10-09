@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn startup_recovers_an_accepted_multi_block_history_without_a_shutdown_checkpoint()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, _) = fixture.initialized()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    for index in 0..64 {
+        assert_eq!(
+            services
+                .ingest_otlp_logs(
+                    &ingest,
+                    request(&format!("accepted-{index}")).encode_to_vec()
+                )?
+                .accepted_records(),
+            1
+        );
+    }
+    drop(services);
+    drop(initialized);
+    let initialized = fixture.reopen()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let catalog = open_catalog(&initialized)?;
+    let checkpoint = load_schema_checkpoint(
+        &catalog.pin()?,
+        initialized.tenant,
+        initialized.resource_governor(),
+    )
+    .map_err(|_| "recovered schema checkpoint load")?
+    .ok_or("recovered schema checkpoint")?;
+    assert!(!checkpoint.is_empty());
+    drop((catalog, services));
+    Ok(())
+}
+
+#[test]
 fn service_startup_restores_catalog_backed_maintenance_before_serving() -> Result<(), Box<dyn Error>>
 {
     let fixture = Fixture::new()?;

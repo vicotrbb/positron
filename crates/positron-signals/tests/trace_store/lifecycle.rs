@@ -1,6 +1,107 @@
 use super::*;
 
 #[test]
+fn summary_matches_logical_scan_for_late_span_retries_and_conflicts() -> Result<(), Box<dyn Error>>
+{
+    let root = TestRoot::new()?;
+    let authority = authority(PrimaryDataVolume::acquire(
+        root.path(),
+        MountQualification::LocalHost,
+    )?)?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new([0xc1; 16])?,
+        CatalogSecret::from_owned(Box::new([0xc2; 32]), Box::new([0xc3; 32])),
+    )?;
+    let tenant = TenantId::from_bytes([0x84; 16])?;
+    let scope = SegmentScope::new(tenant, SignalKind::Traces, VirtualShardId::new(9)?);
+    let (retention, _) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(100));
+    let ledger = ActiveSegmentLedger::open_with_retention_time(
+        &authority,
+        &retention,
+        &catalog,
+        scope,
+        SegmentProtectionKey::from_owned(Box::new([0xc4; 32])),
+    )?;
+    let store = TraceStore::new();
+    let mut summaries = TraceSummaryMaintainer::new(
+        authority.governor(),
+        scope,
+        TraceQuietPeriod::new(1)?,
+        ScanLimit::new(16)?,
+    )?;
+    for (identity, observations) in [
+        (
+            0xc5,
+            vec![
+                trace_observation([2; 8], "two")?,
+                trace_observation([4; 8], "four")?,
+                trace_observation([6; 8], "six")?,
+                trace_observation([8; 8], "eight")?,
+            ],
+        ),
+        (
+            0xc6,
+            vec![
+                trace_observation([8; 8], "eight")?,
+                trace_observation([8; 8], "conflicting eight")?,
+                trace_observation([7; 8], "seven")?,
+                trace_observation([7; 8], "seven")?,
+            ],
+        ),
+    ] {
+        ledger.append(
+            store
+                .prepare(
+                    ledger.begin_store_block(
+                        preparation_capacity(&authority, tenant)?,
+                        positron_kernel::StoreBlockIdentity::new([identity; 16])?,
+                    )?,
+                    observations,
+                )?
+                .into_store_block(),
+        )?;
+        let snapshot = ledger.snapshot()?;
+        let maintained = summaries.maintain(
+            &store,
+            &snapshot,
+            &NeverCancelled,
+            &Unobserved,
+            &LifecycleClock::new(FixedLifecycleClockSource::new(UnixNanoseconds::new(200))),
+        )?;
+        let logical = store.trace_by_id_with_summary(
+            authority.governor(),
+            tenant,
+            &snapshot,
+            [0x79; 16],
+            positron_signals::TraceSearch::all(ScanLimit::new(16)?),
+            &maintained,
+        )?;
+        assert!(logical.complete());
+        let (summary, _) = logical.summary().available().ok_or("summary unavailable")?;
+        assert_eq!(summary.logical_span_count(), logical.spans().len());
+        assert_eq!(
+            summary.observation_count(),
+            logical
+                .spans()
+                .iter()
+                .map(|span| span.observation_count())
+                .sum::<u64>()
+        );
+        assert_eq!(
+            summary.conflicted_span_count(),
+            logical
+                .spans()
+                .iter()
+                .filter(|span| span.conflicted())
+                .count()
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn native_trace_compaction_preserves_manifest_snapshots_and_restart_visibility()
 -> Result<(), Box<dyn Error>> {
     let root = TestRoot::new()?;
@@ -246,6 +347,21 @@ fn public_trace_store_retention_uses_kernel_ingest_time() -> Result<(), Box<dyn 
         key(),
     )?;
     let pinned = active.snapshot()?;
+    let mut summaries = TraceSummaryMaintainer::new(
+        authority.governor(),
+        scope,
+        TraceQuietPeriod::new(1)?,
+        ScanLimit::new(16)?,
+    )?;
+    summaries.maintain(
+        &store,
+        &pinned,
+        &NeverCancelled,
+        &Unobserved,
+        &LifecycleClock::new(FixedLifecycleClockSource::new(UnixNanoseconds::new(
+            3_000_000_000,
+        ))),
+    )?;
     let outcome = store.enforce_retention(
         &active,
         tenant,
@@ -253,6 +369,21 @@ fn public_trace_store_retention_uses_kernel_ingest_time() -> Result<(), Box<dyn 
     )?;
     assert_eq!(outcome.expired_segments(), 1);
     assert!(active.snapshot()?.blocks().is_empty());
+    let expired_snapshot = active.snapshot()?;
+    let maintained = summaries.maintain(
+        &store,
+        &expired_snapshot,
+        &NeverCancelled,
+        &Unobserved,
+        &LifecycleClock::new(FixedLifecycleClockSource::new(UnixNanoseconds::new(
+            3_000_000_000,
+        ))),
+    )?;
+    assert!(maintained.complete());
+    assert!(
+        maintained.summary([0x79; 16]).is_none(),
+        "retired spans must leave the current summary"
+    );
     let pinned_scan = store.scan_physical(
         authority.governor(),
         tenant,

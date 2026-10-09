@@ -225,7 +225,10 @@ fn offline_verification_fences_corruption_at_an_active_durability_frontier()
     let active = fs::read_dir(root.join("data/segments/active"))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .next()
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "segment")
+        })
         .ok_or("active segment")?;
     fs::write(&active, b"corrupt at acknowledged frontier")?;
     let before = file_tree(&root)?;
@@ -274,7 +277,10 @@ fn offline_verification_leaves_an_active_nondurable_tail_untouched()
     let active = fs::read_dir(root.join("data/segments/active"))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .next()
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "segment")
+        })
         .ok_or("active segment")?;
     std::fs::OpenOptions::new()
         .append(true)

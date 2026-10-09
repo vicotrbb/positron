@@ -29,6 +29,8 @@ use crate::{
 
 mod api_http;
 mod connection_admission;
+#[cfg(unix)]
+mod control_socket;
 mod cors;
 mod generation;
 mod h2_observer;
@@ -1050,8 +1052,7 @@ impl ListenerFactory for NativeHost {
                     std::fs::create_dir_all(parent)
                         .map_err(|_| ListenerFailure::BindUnavailable)?;
                 }
-                let listener = UnixListener::bind(&self.bindings.control)
-                    .map_err(|_| ListenerFailure::BindUnavailable)?;
+                let listener = control_socket::bind(&self.bindings.control)?;
                 std::fs::set_permissions(
                     &self.bindings.control,
                     std::fs::Permissions::from_mode(0o600),

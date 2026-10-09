@@ -19,6 +19,61 @@ use crate::catalog::InstanceId;
 use crate::{MountQualification, PrimaryDataVolume};
 
 #[test]
+fn acknowledged_append_with_missing_frontier_fails_closed_without_truncation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let mut storage = LedgerStorage::open(&fixture.volume)?;
+    let current = metadata(CommitPosition::origin());
+    let key = storage.create_active(current, &wrapping_key(), instance()?)?;
+    let context = key.object.frame(
+        crate::data_protection::SegmentFramePurpose::StoreBlock,
+        crate::data_protection::FrameSequence::new(1),
+    )?;
+    let mut payload = vec![0x51; 16];
+    payload.push(1);
+    payload.extend_from_slice(&0_i64.to_be_bytes());
+    payload.push(4);
+    payload.extend_from_slice(&[0; 16]);
+    payload.extend_from_slice(b"acknowledged");
+    let limits = crate::data_protection::FrameLimits::new(
+        crate::active_segment_ledger::MAX_ENCODED_FRAME_BYTES,
+    )?;
+    let frame =
+        crate::data_protection::DataProtection::protect_frame(&key, context, &payload, limits)?;
+    storage
+        .append_and_commit(
+            &key,
+            crate::active_segment_ledger::storage::NextFrontier {
+                sequence: 0,
+                position: CommitPosition::origin().next()?,
+                segment_retention: crate::active_segment_ledger::SegmentRetention::Unavailable,
+                segment_event_range: crate::AuthenticatedEventRange::unavailable(
+                    crate::EventRangeUnavailable::LegacyFormat,
+                ),
+            },
+            u32::try_from(frame.as_bytes().len())?,
+            || Ok(frame),
+            || Ok(()),
+        )
+        .map_err(|_| "append must commit")?;
+    let directory = fixture.root.path().join("segments/active");
+    let segment = directory.join(segment_name(current.id));
+    let committed_bytes = fs::read(&segment)?;
+    fs::remove_file(directory.join(frontier_name(current.id)))?;
+    let failure = storage
+        .recover_segment(current, &wrapping_key(), instance()?)
+        .err()
+        .expect("a missing authenticated frontier must fence recovery");
+    assert_eq!(failure.code(), LedgerFailureCode::IntegrityCorruption);
+    assert_eq!(
+        fs::read(segment)?,
+        committed_bytes,
+        "preserve ambiguous evidence"
+    );
+    Ok(())
+}
+
+#[test]
 fn creation_rejects_sealed_metadata_and_wrapped_context_mismatch() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let mut storage = LedgerStorage::open(&fixture.volume)?;

@@ -619,10 +619,12 @@ pub(in crate::native_host) fn write_response<S: Write>(
 ) -> Result<(), std::io::Error> {
     let reason = match response.status {
         200 => "OK",
+        204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        408 => "Request Timeout",
         409 => "Conflict",
         413 => "Content Too Large",
         415 => "Unsupported Media Type",
@@ -635,16 +637,21 @@ pub(in crate::native_host) fn write_response<S: Write>(
     let retry_after = response
         .retry_after_seconds
         .map_or_else(String::new, |seconds| format!("Retry-After: {seconds}\r\n"));
+    let content_length = if response.status == 204 {
+        String::new()
+    } else {
+        format!("Content-Length: {}\r\n", response.body.len())
+    };
     let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
-        response.status,
-        reason,
-        response.content_type,
-        response.body.len(),
-        retry_after
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n{}{}Connection: close\r\n\r\n",
+        response.status, reason, response.content_type, content_length, retry_after
     );
     stream.write_all(header.as_bytes())?;
-    let outcome = stream.write_all(&response.body);
+    let outcome = if response.status == 204 {
+        Ok(())
+    } else {
+        stream.write_all(&response.body)
+    };
     drop(response.diagnostics_reservation.take());
     outcome
 }
@@ -693,6 +700,24 @@ mod tests {
         fn set_timeouts(&mut self, _timeout: std::time::Duration) -> Result<(), std::io::Error> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn native_http_success_and_timeout_status_lines_are_truthful() -> Result<(), std::io::Error> {
+        for (status, reason) in [(204, "No Content"), (408, "Request Timeout")] {
+            let mut output = Vec::new();
+            super::write_response(&mut output, super::Response::empty(status))?;
+            let response = std::str::from_utf8(&output).expect("HTTP response");
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} {reason}\r\n")),
+                "{response}"
+            );
+            assert!(response.ends_with("\r\n\r\n"));
+            if status == 204 {
+                assert!(!response.contains("Content-Length:"), "{response}");
+            }
+        }
+        Ok(())
     }
 
     #[test]
