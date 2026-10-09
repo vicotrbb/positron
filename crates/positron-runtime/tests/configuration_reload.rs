@@ -529,7 +529,8 @@ fn same_endpoint_reload_drains_accepted_old_work_before_the_successor_serves()
 #[test]
 fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_request()
 -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write;
+    use positron_kernel::{CatalogPublicationFault, with_catalog_publication_event_hook_after};
+    use std::io::{Read, Write};
 
     let roots = TestRoots::new("configuration-listener-catalog-drain")?;
     let operations_port = available_loopback_port()?;
@@ -583,19 +584,20 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
         .and_then(|endpoint| endpoint.socket_address())
         .ok_or("API endpoint missing")?;
     let body = br#"{"policy_json":"{\"generation\":2,\"rules\":[{\"id\":\"reload-drain\",\"predicates\":[{\"receiver\":\"otlp_http_json\"}],\"action\":\"reject\"}]}","expected_generation":1,"idempotency_key":"82828282-8282-8282-8282-828282828282"}"#;
-    let mut old = std::net::TcpStream::connect(api)?;
-    old.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let request_head = format!(
-        "POST /v1/policies:activate HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {administrator_secret}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    );
-    old.write_all(request_head.as_bytes())?;
     let candidate = configuration(Some(&format!(
         "{}\n[listener.operations]\ntrusted_proxy_cidrs = [\"127.0.0.1/32\"]\nforwarded_hops = 1\n",
         listener_configuration(control_path, operations_port)
     )))?;
+    let request_head = format!(
+        "POST /v1/policies:activate HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {administrator_secret}\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let (accepted, request) = mpsc::sync_channel::<Result<std::net::TcpStream, String>>(1);
     let observed = Arc::clone(&runtime);
     let released_request = std::thread::spawn(move || -> Result<(), String> {
+        let mut old = request
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| error.to_string())??;
         let deadline = Instant::now() + Duration::from_secs(2);
         while observed
             .observed()
@@ -637,8 +639,33 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
         );
         Ok(())
     });
+    let outcome = with_catalog_publication_event_hook_after(
+        CatalogPublicationFault::SynchronizeCommit,
+        0,
+        move || {
+            let predecessor_request = (|| -> Result<_, String> {
+                let mut old =
+                    std::net::TcpStream::connect(api).map_err(|error| error.to_string())?;
+                old.set_read_timeout(Some(Duration::from_secs(2)))
+                    .map_err(|error| error.to_string())?;
+                old.write_all(request_head.as_bytes())
+                    .map_err(|error| error.to_string())?;
+                let mut interim = [0; b"HTTP/1.1 100 Continue\r\n\r\n".len()];
+                old.read_exact(&mut interim)
+                    .map_err(|error| error.to_string())?;
+                if interim != *b"HTTP/1.1 100 Continue\r\n\r\n" {
+                    return Err("predecessor did not accept the request body".to_owned());
+                }
+                Ok(old)
+            })();
+            accepted
+                .send(predecessor_request)
+                .expect("request observer remains active");
+        },
+        || process.reload_configuration(candidate),
+    )?;
     assert!(matches!(
-        process.reload_configuration(candidate)?,
+        outcome,
         ConfigurationReloadOutcome::PublishedLive { .. }
     ));
     released_request

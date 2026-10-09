@@ -94,9 +94,14 @@ impl positron_runtime::RunningTask for BlockedTaskHandle {
 
     fn join_within(
         &mut self,
-        _: std::time::Duration,
+        remaining: std::time::Duration,
     ) -> Result<positron_runtime::TaskJoinOutcome, positron_runtime::TaskFailure> {
-        panic!("blocked child join must remain interruptible")
+        assert!(
+            remaining <= std::time::Duration::from_millis(10),
+            "blocked child join must remain interruptible"
+        );
+        std::thread::sleep(remaining);
+        Ok(positron_runtime::TaskJoinOutcome::DeadlineExpired)
     }
 
     fn abort(&mut self) -> Result<(), positron_runtime::TaskFailure> {

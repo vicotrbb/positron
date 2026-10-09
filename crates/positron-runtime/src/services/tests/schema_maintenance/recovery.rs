@@ -127,7 +127,7 @@ fn serving_updates_live_schema_without_catalog_publication() -> Result<(), Box<d
     );
 
     services.prepare_shutdown_schema_checkpoint()?;
-    services.publish_prepared_shutdown_schema_checkpoint()?;
+    services.publish_prepared_shutdown_schema_checkpoint(&mut || false)?;
     assert_eq!(schema_audit_count(&initialized)?, initial_audits + 1);
     Ok(())
 }

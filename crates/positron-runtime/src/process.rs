@@ -1545,8 +1545,10 @@ impl DrainingProcess {
         trigger: ShutdownTrigger,
         mut termination_requested: impl FnMut() -> bool,
     ) -> ExitOutcome {
+        let deadline = self.1;
+        let mut cancelled = || std::time::Instant::now() >= deadline || termination_requested();
         if trigger != ShutdownTrigger::FirstSignal
-            || std::time::Instant::now() >= self.1
+            || cancelled()
             || self.0.state.health().phase() == ProcessPhase::Stopping
         {
             return self.0.abort_shutdown();
@@ -1560,28 +1562,37 @@ impl DrainingProcess {
                     .get_mut()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let mut late_failure = None;
-                for (role, task) in &mut *tasks {
-                    let Some(remaining) =
-                        deadline.checked_duration_since(std::time::Instant::now())
-                    else {
-                        return self.0.abort_shutdown();
-                    };
-                    match task.join_within(remaining) {
-                        Ok(TaskJoinOutcome::Joined) => {},
-                        Ok(TaskJoinOutcome::DeadlineExpired | TaskJoinOutcome::SecondSignal) => {
+                'tasks: for (role, task) in &mut *tasks {
+                    loop {
+                        if cancelled() {
                             return self.0.abort_shutdown();
-                        },
-                        Err(failure) => {
-                            late_failure = Some(preserve_drain_task_failure(
-                                report_drain_task_failure(
-                                    DrainFailureSite::JoinWithin,
-                                    *role,
+                        }
+                        let Some(remaining) =
+                            deadline.checked_duration_since(std::time::Instant::now())
+                        else {
+                            return self.0.abort_shutdown();
+                        };
+                        // Short waits preserve the host's second-signal authority
+                        // without extending the one absolute Drain deadline.
+                        match task.join_within(remaining.min(std::time::Duration::from_millis(10)))
+                        {
+                            Ok(TaskJoinOutcome::Joined) => break,
+                            Ok(TaskJoinOutcome::DeadlineExpired) => {},
+                            Ok(TaskJoinOutcome::SecondSignal) => {
+                                return self.0.abort_shutdown();
+                            },
+                            Err(failure) => {
+                                late_failure = Some(preserve_drain_task_failure(
+                                    report_drain_task_failure(
+                                        DrainFailureSite::JoinWithin,
+                                        *role,
+                                        failure,
+                                    ),
                                     failure,
-                                ),
-                                failure,
-                            ));
-                            break;
-                        },
+                                ));
+                                break 'tasks;
+                            },
+                        }
                     }
                 }
                 late_failure
@@ -1611,14 +1622,20 @@ impl DrainingProcess {
             .clear();
         let mut listeners = self.0.take_listeners();
         self.0.cleanup.cleanup_listeners(&mut listeners);
-        if self.0.services.as_ref().is_some_and(|services| {
-            services
-                .publish_prepared_shutdown_schema_checkpoint()
-                .is_err()
-        }) {
-            self.0.cleanup.record_schema_checkpoint();
+        if cancelled() {
+            return self.0.abort_shutdown();
+        }
+        if let Some(services) = self.0.services.as_ref() {
+            match services.publish_prepared_shutdown_schema_checkpoint(&mut cancelled) {
+                Ok(()) => {},
+                Err(crate::services::ServiceFailure::Cancelled) => return self.0.abort_shutdown(),
+                Err(_) => self.0.cleanup.record_schema_checkpoint(),
+            }
         }
         self.0.services.take();
+        if cancelled() {
+            return self.0.abort_shutdown();
+        }
         if self.0.cleanup.has_failures() {
             // Preserve the attempted graceful cleanup context, while its
             // typed failure prevents a success outcome or durable marker.
@@ -1640,8 +1657,6 @@ impl DrainingProcess {
             },
             None => None,
         };
-        let deadline = self.1;
-        let mut cancelled = || std::time::Instant::now() >= deadline || termination_requested();
         if let Some(instance) = owned_instance.as_ref()
             && let Err(failure) = instance.publish_graceful_shutdown(&mut cancelled)
         {

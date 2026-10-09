@@ -99,6 +99,8 @@ pub trait RegisteredTask {
 
 pub trait RunningTask {
     fn poll_join(&mut self) -> Result<Option<TaskJoinOutcome>, TaskFailure>;
+    /// Waits no longer than `remaining`. Expiry retains the worker for another
+    /// bounded wait or abort; it never terminates the worker implicitly.
     fn join_within(
         &mut self,
         remaining: std::time::Duration,

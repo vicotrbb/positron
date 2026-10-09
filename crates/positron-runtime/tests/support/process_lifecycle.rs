@@ -32,10 +32,12 @@ pub(crate) enum TaskEvent {
 #[derive(Default)]
 pub(crate) struct ObservingTasks {
     pub(crate) events: Rc<RefCell<Vec<TaskEvent>>>,
+    pub(crate) join_limits: Rc<RefCell<Vec<std::time::Duration>>>,
     pub(crate) fail_registration: Option<TaskRole>,
     pub(crate) fail_spawn: Option<TaskRole>,
     pub(crate) fail_join: Option<TaskRole>,
     pub(crate) pending_join: Option<TaskRole>,
+    pub(crate) first_join_expired: Option<TaskRole>,
     pub(crate) fail_recovery_join: Option<TaskRole>,
     pub(crate) fail_abort: Option<TaskRole>,
     pub(crate) fail_abort_also: Option<TaskRole>,
@@ -116,9 +118,11 @@ impl TaskRegistrar for ObservingTasks {
         Ok(Box::new(ObservedRegisteredTask {
             role,
             events: Rc::clone(&self.events),
+            join_limits: Rc::clone(&self.join_limits),
             fail_spawn: self.fail_spawn == Some(role),
             fail_join: self.fail_join == Some(role),
             pending_join: self.pending_join == Some(role),
+            first_join_expired: self.first_join_expired == Some(role),
             fail_recovery_join: self.fail_recovery_join == Some(role),
             fail_abort: self.fail_abort_all
                 || self.fail_abort == Some(role)
@@ -131,9 +135,11 @@ impl TaskRegistrar for ObservingTasks {
 struct ObservedRegisteredTask {
     role: TaskRole,
     events: Rc<RefCell<Vec<TaskEvent>>>,
+    join_limits: Rc<RefCell<Vec<std::time::Duration>>>,
     fail_spawn: bool,
     fail_join: bool,
     pending_join: bool,
+    first_join_expired: bool,
     fail_recovery_join: bool,
     fail_abort: bool,
     fail_abort_once: bool,
@@ -153,10 +159,12 @@ impl RegisteredTask for ObservedRegisteredTask {
         Ok(Box::new(ObservedRunningTask {
             role: self.role,
             events: Rc::clone(&self.events),
+            join_limits: Rc::clone(&self.join_limits),
             cancellation,
             health,
             fail_join: self.fail_join,
             pending_join: self.pending_join,
+            first_join_expired: self.first_join_expired,
             fail_recovery_join: self.fail_recovery_join,
             fail_abort: self.fail_abort,
             fail_abort_once: self.fail_abort_once,
@@ -168,10 +176,12 @@ impl RegisteredTask for ObservedRegisteredTask {
 struct ObservedRunningTask {
     role: TaskRole,
     events: Rc<RefCell<Vec<TaskEvent>>>,
+    join_limits: Rc<RefCell<Vec<std::time::Duration>>>,
     cancellation: TaskCancellation,
     health: positron_runtime::HealthState,
     fail_join: bool,
     pending_join: bool,
+    first_join_expired: bool,
     fail_recovery_join: bool,
     fail_abort: bool,
     fail_abort_once: bool,
@@ -197,13 +207,17 @@ impl RunningTask for ObservedRunningTask {
 
     fn join_within(
         &mut self,
-        _remaining: std::time::Duration,
+        remaining: std::time::Duration,
     ) -> Result<TaskJoinOutcome, TaskFailure> {
+        self.join_limits.borrow_mut().push(remaining);
         self.events.borrow_mut().push(TaskEvent::Joined(
             self.role,
             self.health.phase(),
             self.cancellation.is_cancelled(),
         ));
+        if std::mem::take(&mut self.first_join_expired) {
+            return Ok(TaskJoinOutcome::DeadlineExpired);
+        }
         if self.fail_join {
             Err(TaskFailure::JoinUnavailable)
         } else {
