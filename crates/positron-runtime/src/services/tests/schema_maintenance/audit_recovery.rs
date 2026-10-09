@@ -461,7 +461,7 @@ fn shutdown_capacity_is_reserved_before_admission_closes_and_released_after_publ
         .prepare_shutdown_schema_checkpoint()
         .map_err(|failure| format!("prepare shutdown checkpoint: {failure:?}"))?;
     services
-        .publish_prepared_shutdown_schema_checkpoint()
+        .publish_prepared_shutdown_schema_checkpoint(&mut || false)
         .map_err(|failure| format!("publish shutdown checkpoint: {failure:?}"))?;
     let after = initialized._authority.begin_shutdown()?;
     assert_eq!(
@@ -479,7 +479,7 @@ fn unchanged_session_skips_shutdown_checkpoint_publication() -> Result<(), Box<d
     let initial_audits = schema_audit_count(&initialized)?;
 
     services.prepare_shutdown_schema_checkpoint()?;
-    services.publish_prepared_shutdown_schema_checkpoint()?;
+    services.publish_prepared_shutdown_schema_checkpoint(&mut || false)?;
 
     assert_eq!(schema_audit_count(&initialized)?, initial_audits);
     let after = initialized._authority.begin_shutdown()?;
@@ -506,7 +506,7 @@ fn failed_shutdown_publication_releases_its_pre_admitted_capacity() -> Result<()
     initialized._authority.begin_shutdown()?;
     assert!(
         services
-            .publish_prepared_shutdown_schema_checkpoint()
+            .publish_prepared_shutdown_schema_checkpoint(&mut || false)
             .is_err()
     );
     let after = initialized._authority.begin_shutdown()?;

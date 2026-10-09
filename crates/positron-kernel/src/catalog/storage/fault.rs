@@ -80,6 +80,7 @@ struct CatalogFault {
     remaining: usize,
     fail: bool,
     hook: Option<Box<CatalogFaultHook>>,
+    event_hook: Option<Box<dyn Fn()>>,
 }
 
 #[cfg(any(test, fuzzing, feature = "test-support"))]
@@ -112,27 +113,30 @@ fn should_inject(event: CatalogFileEvent, catalog: Option<&crate::catalog::Catal
     }) {
         return fail;
     }
-    let (fail, hook) = CATALOG_FAULT.with(|fault| {
+    let (fail, hook, event_hook) = CATALOG_FAULT.with(|fault| {
         let mut fault = fault.borrow_mut();
         let Some(selected) = fault.as_mut() else {
-            return (false, None);
+            return (false, None, None);
         };
         if selected.event != event {
-            return (false, None);
+            return (false, None, None);
         }
         if selected.remaining > 0 {
             selected.remaining -= 1;
-            return (false, None);
+            return (false, None, None);
         }
         let Some(selected) = fault.take() else {
-            return (false, None);
+            return (false, None, None);
         };
-        (selected.fail, selected.hook)
+        (selected.fail, selected.hook, selected.event_hook)
     });
     if let Some(hook) = hook
         && let Some(catalog) = catalog
     {
         hook(catalog);
+    }
+    if let Some(hook) = event_hook {
+        hook();
     }
     fail
 }
@@ -154,6 +158,7 @@ pub(crate) fn with_catalog_fault_after<T>(
             remaining: preceding_occurrences,
             fail: true,
             hook: None,
+            event_hook: None,
         }));
         let result = action();
         fault.replace(previous);
@@ -174,6 +179,7 @@ pub(crate) fn with_catalog_fault_hook_after<T>(
             remaining: preceding_occurrences,
             fail: false,
             hook: Some(Box::new(hook)),
+            event_hook: None,
         }));
         let result = action();
         fault.replace(previous);
@@ -274,6 +280,28 @@ pub fn with_catalog_publication_hook_after<T>(
         hook,
         action,
     )
+}
+
+/// Observes one existing Catalog publication fault boundary without failing it.
+#[cfg(feature = "test-support")]
+pub fn with_catalog_publication_event_hook_after<T>(
+    event: CatalogPublicationFault,
+    preceding_occurrences: usize,
+    hook: impl Fn() + 'static,
+    action: impl FnOnce() -> T,
+) -> T {
+    CATALOG_FAULT.with(|fault| {
+        let previous = fault.replace(Some(CatalogFault {
+            event: event.storage_event(),
+            remaining: preceding_occurrences,
+            fail: false,
+            hook: None,
+            event_hook: Some(Box::new(hook)),
+        }));
+        let result = action();
+        fault.replace(previous);
+        result
+    })
 }
 
 /// Fails one generation-directory synchronization after marker rename, then

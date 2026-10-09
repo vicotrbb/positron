@@ -25,7 +25,7 @@ fn bootstrap_rejects_a_structurally_valid_mismatched_replay_frontier() -> Result
         1
     );
     services.prepare_shutdown_schema_checkpoint()?;
-    services.publish_prepared_shutdown_schema_checkpoint()?;
+    services.publish_prepared_shutdown_schema_checkpoint(&mut || false)?;
 
     let catalog = open_catalog(&initialized)?;
     let basis = catalog.pin()?;

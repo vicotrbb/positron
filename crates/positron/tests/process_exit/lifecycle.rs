@@ -92,6 +92,91 @@ fn first_os_signal_drains_and_exits_successfully() -> Result<(), Box<dyn std::er
 
 #[cfg(unix)]
 #[test]
+fn supervised_foreground_process_recovers_forced_exit_then_drains_after_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root =
+        std::path::Path::new("/tmp").join(format!("p-supervised-{}-{nonce}", std::process::id()));
+    let roots = ChildRoots::new(&root)?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    let ports = available_ports()?;
+    let config_path = root.join("positron.toml");
+    fs::write(
+        &config_path,
+        process_configuration(&root, &roots.data, &roots.secrets, ports).replace(
+            &root.with_extension("sock").display().to_string(),
+            &root.join("control.sock").display().to_string(),
+        ),
+    )?;
+    let paths = BootstrapPaths::new(&roots.data, &roots.secrets, MountQualification::LocalHost)?;
+    for forced in [true, false] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_positron"));
+        command.arg("serve");
+        if forced {
+            command.arg("--init-if-empty");
+        }
+        let mut child = command
+            .arg("--config")
+            .arg(&config_path)
+            .env("POSITRON__RUNTIME__SHUTDOWN_GRACE_SECONDS", "2")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Err(failure) = wait_for_ready(ports[0]) {
+            if child.try_wait()?.is_none() {
+                child.kill()?;
+            }
+            let status = child.wait()?;
+            let mut stderr = String::new();
+            if let Some(pipe) = child.stderr.take() {
+                pipe.take(16_384).read_to_string(&mut stderr)?;
+            }
+            return Err(format!(
+                "supervised readiness forced={forced} status={status}: {failure}; stderr={stderr}"
+            )
+            .into());
+        }
+        assert!(child.try_wait()?.is_none());
+        assert!(
+            InstanceBootstrap::reopen(&paths).is_err(),
+            "live supervised child owns storage"
+        );
+        if forced {
+            child.kill()?;
+        } else {
+            assert!(
+                Command::new("/bin/kill")
+                    .args(["-TERM", &child.id().to_string()])
+                    .status()?
+                    .success()
+            );
+        }
+        let status = wait_for_child(&mut child)?;
+        if forced {
+            assert_eq!(status.signal(), Some(9));
+        } else {
+            assert_eq!(status.code(), Some(0));
+        }
+        let reopened = InstanceBootstrap::reopen(&paths)?;
+        assert_eq!(
+            reopened.graceful_shutdown_record()?.is_some(),
+            !forced,
+            "the supervisor must distinguish forced recovery from completed Drain"
+        );
+        drop(reopened);
+    }
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
@@ -919,18 +1004,14 @@ fn blocked_shutdown_child_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let Some(_) = signals.forever().next() else {
         return Err("signal stream ended".into());
     };
-    let mut draining = process.begin_shutdown();
+    let draining = process.begin_shutdown();
     fs::write(root.join("draining"), b"draining")?;
-    loop {
-        if signals.pending().next().is_some() {
-            let outcome = draining.finish(ShutdownTrigger::SecondSignal);
-            std::process::exit(if outcome == positron_runtime::ExitOutcome::Forced {
-                4
-            } else {
-                3
-            });
-        }
-        assert!(!draining.poll()?);
-        std::thread::yield_now();
-    }
+    let outcome = draining.finish_with_termination_probe(ShutdownTrigger::FirstSignal, || {
+        signals.pending().next().is_some()
+    });
+    std::process::exit(if outcome == positron_runtime::ExitOutcome::Forced {
+        4
+    } else {
+        3
+    });
 }

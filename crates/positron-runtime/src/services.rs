@@ -372,7 +372,10 @@ impl ServiceHandle {
         Ok(())
     }
 
-    pub(crate) fn publish_prepared_shutdown_schema_checkpoint(&self) -> Result<(), ServiceFailure> {
+    pub(crate) fn publish_prepared_shutdown_schema_checkpoint(
+        &self,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), ServiceFailure> {
         let Some(session) = self.schema_session_with_checkpoint_changes()? else {
             return Ok(());
         };
@@ -384,7 +387,12 @@ impl ServiceHandle {
             .take()
             .ok_or(ServiceFailure::CapacityUnavailable)?;
         let checkpoint = session.checkpoint().map_err(|_| ServiceFailure::Internal)?;
-        schema_maintenance::publish_with_capacity(&self.instance, checkpoint, capacity)?;
+        schema_maintenance::publish_with_capacity(
+            &self.instance,
+            checkpoint,
+            capacity,
+            Some(cancelled),
+        )?;
         Ok(())
     }
 

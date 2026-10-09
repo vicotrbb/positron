@@ -59,8 +59,9 @@ pub use governance_object::{
 #[cfg(feature = "test-support")]
 pub use storage::{
     CatalogPublicationFault, with_catalog_generation_ambiguity_hook_after,
-    with_catalog_publication_ambiguity_hook_after, with_catalog_publication_fault_after,
-    with_catalog_publication_fault_sequence_after, with_catalog_publication_hook_after,
+    with_catalog_publication_ambiguity_hook_after, with_catalog_publication_event_hook_after,
+    with_catalog_publication_fault_after, with_catalog_publication_fault_sequence_after,
+    with_catalog_publication_hook_after,
 };
 use types::AuditFrontier;
 #[cfg(feature = "test-support")]
@@ -863,6 +864,7 @@ impl<'authority> Catalog<'authority> {
         &self,
         expected: CatalogGenerationId,
         proposal: CatalogProposal,
+        audit: Option<AuditIntent>,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<Option<CatalogCommit>, CatalogFailure> {
         if !proposal.format_epoch.is_catalog_writable() {
@@ -873,11 +875,15 @@ impl<'authority> Catalog<'authority> {
             .try_reserve_exact(proposal.objects.len())
             .map_err(|_| CatalogFailure::new(CatalogFailureCode::ResourceAdmissionRefused))?;
         identities.extend(proposal.objects.iter().map(CatalogObject::identity));
-        let digest = transaction_digest(proposal.format_epoch, &identities, None)?;
+        let digest = transaction_digest(
+            proposal.format_epoch,
+            &identities,
+            audit.as_ref().map(|intent| intent.0.as_slice()),
+        )?;
         let transaction = proposal.transaction;
         let claim = RecoveryWorkClaim::system(
             RecoveryWorkKind::DurabilityCompletion,
-            commit_resource_claim(&proposal, None)?,
+            commit_resource_claim(&proposal, audit.as_ref())?,
         )
         .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
         let _reservation = self
@@ -891,7 +897,7 @@ impl<'authority> Catalog<'authority> {
                 .operation
                 .lock()
                 .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
-            self.commit_unreserved_interruptibly(expected, proposal, None, None, &mut || {
+            self.commit_unreserved_interruptibly(expected, proposal, audit, None, &mut || {
                 interrupted = cancelled();
                 interrupted
             })

@@ -320,6 +320,114 @@ fn graceful_drain_publishes_authenticated_record_before_successful_restart()
 }
 
 #[test]
+fn pending_second_signal_skips_graceful_task_joins() -> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("pending-second-signal")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks::default();
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&listeners, &tasks),
+    )?;
+    let outcome = process
+        .begin_shutdown()
+        .finish_with_termination_probe(ShutdownTrigger::FirstSignal, || true);
+    assert_eq!(outcome, positron_runtime::ExitOutcome::Forced);
+    assert!(
+        !tasks
+            .events
+            .borrow()
+            .iter()
+            .any(|event| matches!(event, TaskEvent::Joined(..))),
+        "a pending second signal must abort instead of beginning graceful joins"
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    let reopened = positron_runtime::InstanceBootstrap::reopen(&roots.bootstrap_paths()?)?;
+    assert_eq!(reopened.graceful_shutdown_record()?, None);
+    Ok(())
+}
+
+#[test]
+fn second_signal_during_pending_join_stops_before_another_graceful_join()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("second-signal-pending-join")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks {
+        first_join_expired: Some(TaskRole::Control),
+        ..ObservingTasks::default()
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&listeners, &tasks),
+    )?;
+    assert_eq!(
+        process.begin_shutdown().finish_with_termination_probe(
+            ShutdownTrigger::FirstSignal,
+            || tasks
+                .events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, TaskEvent::Joined(..))),
+        ),
+        positron_runtime::ExitOutcome::Forced
+    );
+    assert_eq!(
+        tasks
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| matches!(event, TaskEvent::Joined(..)))
+            .count(),
+        1,
+        "second signal must prevent waiting on the next task"
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    let reopened = positron_runtime::InstanceBootstrap::reopen(&roots.bootstrap_paths()?)?;
+    assert_eq!(reopened.graceful_shutdown_record()?, None);
+    Ok(())
+}
+
+#[test]
+fn pending_task_waits_are_bounded_and_retry_until_the_original_drain_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("bounded-drain-wait")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks {
+        first_join_expired: Some(TaskRole::Control),
+        ..ObservingTasks::default()
+    };
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&listeners, &tasks),
+    )?;
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful,
+        "one short wait expiring must not exhaust the whole drain budget"
+    );
+    assert!(
+        tasks
+            .join_limits
+            .borrow()
+            .iter()
+            .all(|limit| *limit <= std::time::Duration::from_millis(10)),
+        "each wait must return promptly to the termination authority"
+    );
+    assert!(roots.acquire_volume_again().is_ok());
+    let reopened = positron_runtime::InstanceBootstrap::reopen(&roots.bootstrap_paths()?)?;
+    assert!(reopened.graceful_shutdown_record()?.is_some());
+    Ok(())
+}
+
+#[test]
 fn second_signal_before_final_visibility_leaves_no_drain_record()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("graceful-interrupted")?;
@@ -332,21 +440,165 @@ fn second_signal_before_final_visibility_leaves_no_drain_record()
         ),
         HostInputs::new(&listeners, &tasks),
     )?;
-    let mut boundaries = 0;
-    let outcome = process.begin_shutdown().finish_with_termination_probe(
-        ShutdownTrigger::FirstSignal,
+    let signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let injected = signal.clone();
+    let outcome = positron_kernel::with_catalog_publication_event_hook_after(
+        positron_kernel::CatalogPublicationFault::SynchronizeCommit,
+        5,
+        move || {
+            injected.store(true, std::sync::atomic::Ordering::Release);
+        },
         || {
-            boundaries += 1;
-            boundaries >= 9
+            process
+                .begin_shutdown()
+                .finish_with_termination_probe(ShutdownTrigger::FirstSignal, || {
+                    signal.load(std::sync::atomic::Ordering::Acquire)
+                })
         },
     );
     assert_eq!(outcome, positron_runtime::ExitOutcome::Forced);
-    assert_eq!(
-        boundaries, 9,
-        "second signal must end the graceful attempt at its publication boundary"
+    assert!(
+        signal.load(std::sync::atomic::Ordering::Acquire),
+        "the second signal must arrive at the final publication boundary"
     );
     let reopened = positron_runtime::InstanceBootstrap::reopen(&roots.bootstrap_paths()?)?;
     assert_eq!(reopened.graceful_shutdown_record()?, None);
+    Ok(())
+}
+
+#[test]
+fn second_signal_during_schema_checkpoint_prevents_visibility_and_recovers_acknowledged_data()
+-> Result<(), Box<dyn std::error::Error>> {
+    for acknowledgement_failure in [false, true] {
+        let roots = TestRoots::new("schema-checkpoint-signal")?;
+        let paths = roots.bootstrap_paths()?;
+        drop(positron_runtime::InstanceBootstrap::initialize(
+            &paths,
+            positron_runtime::InitializationPlan::non_interactive(),
+        )?);
+        let claim = positron_runtime::InstanceBootstrap::claim(&paths)?;
+        let ingest = claim.ingest_secret().ok_or("ingest credential")?.to_owned();
+        let query = claim.query_secret().ok_or("query credential")?.to_owned();
+        let listeners = ObservingListeners::default();
+        let tasks = ObservingTasks::default();
+        let process = ApplicationRuntime::start(
+            ServeConfiguration::new(paths.clone(), InitializationMode::ExistingOnly),
+            HostInputs::new(&listeners, &tasks),
+        )?;
+        {
+            use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+            use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+            use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
+            use prost::Message;
+            let request = ExportLogsServiceRequest {
+                resource_logs: vec![ResourceLogs {
+                    scope_logs: vec![ScopeLogs {
+                        log_records: vec![LogRecord {
+                            time_unix_nano: 42,
+                            body: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(
+                                    "acknowledged-before-signal".to_owned(),
+                                )),
+                            }),
+                            attributes: vec![KeyValue {
+                                key: "application".to_owned(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue(
+                                        "shutdown-checkpoint".to_owned(),
+                                    )),
+                                }),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+            };
+            assert_eq!(
+                process
+                    .services()
+                    .ok_or("services")?
+                    .ingest_otlp_logs(&ingest, request.encode_to_vec())?
+                    .accepted_records(),
+                1
+            );
+        }
+        let signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let injected = signal.clone();
+        let finish = || {
+            process
+                .begin_shutdown()
+                .finish_with_termination_probe(ShutdownTrigger::FirstSignal, || {
+                    signal.load(std::sync::atomic::Ordering::Acquire)
+                })
+        };
+        let outcome = if acknowledgement_failure {
+            positron_kernel::with_catalog_publication_ambiguity_hook_after(
+                positron_kernel::CatalogPublicationFault::SynchronizeCommit,
+                0,
+                move |_| {
+                    injected.store(true, std::sync::atomic::Ordering::Release);
+                },
+                finish,
+            )
+        } else {
+            positron_kernel::with_catalog_publication_event_hook_after(
+                positron_kernel::CatalogPublicationFault::SynchronizeCommit,
+                0,
+                move || {
+                    injected.store(true, std::sync::atomic::Ordering::Release);
+                },
+                finish,
+            )
+        };
+        assert!(
+            signal.load(std::sync::atomic::Ordering::Acquire),
+            "schema publication hook must fire"
+        );
+        assert_eq!(outcome, positron_runtime::ExitOutcome::Forced);
+        let reopened = positron_runtime::InstanceBootstrap::reopen(&paths)?;
+        let administrator = reopened.attribute(
+            positron_governance::PresentedCredential::parse(claim.secret())?,
+            positron_governance::RequestedIntent::SystemAdministration,
+            positron_governance::CompatibilityHints::none(),
+        )?;
+        assert_eq!(
+            reopened
+                .inspect_governance_audit_history(administrator)?
+                .records()
+                .iter()
+                .filter_map(positron_governance::GovernanceAuditEntry::as_schema_checkpoint)
+                .count(),
+            0,
+            "second signal during unpublished checkpoint writes must stop publication"
+        );
+        assert_eq!(reopened.graceful_shutdown_record()?, None);
+        drop(reopened);
+        let restarted = ApplicationRuntime::start(
+            ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+            HostInputs::new(&listeners, &tasks),
+        )?;
+        assert_eq!(
+            restarted
+                .services()
+                .ok_or("restarted services")?
+                .query_log_bodies(
+                    &query,
+                    "logs | range query_time 0 100 | limit 16",
+                    positron_query::QueryBudget::new(
+                        1_000_000, 100, 100, 1_000_000, 1_000_000, 10
+                    )?
+                    .with_cpu_work_units(16)?,
+                )?,
+            ["acknowledged-before-signal"]
+        );
+        assert_eq!(
+            restarted.shutdown(ShutdownTrigger::FirstSignal),
+            positron_runtime::ExitOutcome::Graceful
+        );
+    }
     Ok(())
 }
 

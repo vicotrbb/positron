@@ -23,7 +23,7 @@ pub(super) fn publish_quiescent_checkpoint(
     )
     .map_err(|_| ServiceFailure::CapacityUnavailable)?;
     let capacity = reserve_capacity(instance, initial_memory)?;
-    publish_with_capacity(instance, checkpoint, capacity.transfer())
+    publish_with_capacity(instance, checkpoint, capacity.transfer(), None)
 }
 
 pub(super) fn reserve_shutdown_capacity(
@@ -44,6 +44,7 @@ pub(super) fn publish_with_capacity(
     instance: &crate::InitializedInstance,
     checkpoint: TenantSchemaCheckpoint,
     transferred: TransferredResourceReservation,
+    mut cancelled: Option<&mut dyn FnMut() -> bool>,
 ) -> Result<(), ServiceFailure> {
     let mut capacity = transferred
         .reclaim(instance.resource_governor())
@@ -61,6 +62,9 @@ pub(super) fn publish_with_capacity(
     let catalog = open_catalog(instance)?;
 
     for _ in 0..MAX_ATTEMPTS {
+        if cancelled.as_mut().is_some_and(|probe| probe()) {
+            return Err(ServiceFailure::Cancelled);
+        }
         let snapshot = catalog.pin().map_err(map_catalog)?;
         let current =
             load_schema_checkpoint(&snapshot, instance.tenant, instance.resource_governor())
@@ -85,12 +89,18 @@ pub(super) fn publish_with_capacity(
                 .map_err(|_| ServiceFailure::CapacityUnavailable)?;
         }
         let proposal = replacement(&snapshot, current.as_deref(), &bytes, transaction)?;
-        match catalog.commit(
-            snapshot.identity(),
-            proposal,
-            Some(AuditIntent::new(audit.clone()).map_err(map_catalog)?),
-        ) {
-            Ok(_) => return Ok(()),
+        let audit = Some(AuditIntent::new(audit.clone()).map_err(map_catalog)?);
+        let result = match cancelled.as_mut() {
+            Some(probe) => {
+                catalog.commit_interruptibly(snapshot.identity(), proposal, audit, probe)
+            },
+            None => catalog
+                .commit(snapshot.identity(), proposal, audit)
+                .map(Some),
+        };
+        match result {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => return Err(ServiceFailure::Cancelled),
             Err(failure)
                 if matches!(
                     failure.code(),

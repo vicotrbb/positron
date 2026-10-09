@@ -102,6 +102,23 @@ fn run_checked(data: &[u8]) -> Result<(), String> {
                 assert_eq!(health.liveness(), Liveness::Dead);
                 return Ok(());
             },
+            6 => {
+                failure.store(3, Ordering::Release);
+                let draining = process.begin_shutdown();
+                assert_eq!(health.phase(), ProcessPhase::Draining);
+                assert_eq!(health.readiness(), Readiness::NotReady);
+                assert_eq!(
+                    draining
+                        .finish_with_termination_probe(ShutdownTrigger::FirstSignal, || failure
+                            .load(Ordering::Acquire)
+                            == 4,),
+                    ExitOutcome::Forced
+                );
+                assert_eq!(health.phase(), ProcessPhase::Stopped);
+                let reopened = InstanceBootstrap::reopen(&root.paths()?).map_err(describe)?;
+                assert_eq!(reopened.graceful_shutdown_record().map_err(describe)?, None);
+                return Ok(());
+            },
             _ => {
                 let mut draining = process.begin_shutdown();
                 assert_eq!(health.phase(), ProcessPhase::Draining);
@@ -222,7 +239,12 @@ impl RunningTask for Running {
             _ => Ok(None),
         }
     }
-    fn join_within(&mut self, _: Duration) -> Result<TaskJoinOutcome, TaskFailure> {
+    fn join_within(&mut self, remaining: Duration) -> Result<TaskJoinOutcome, TaskFailure> {
+        if self.selected && self.failure.load(Ordering::Acquire) == 3 {
+            assert!(remaining <= Duration::from_millis(10));
+            self.failure.store(4, Ordering::Release);
+            return Ok(TaskJoinOutcome::DeadlineExpired);
+        }
         Ok(TaskJoinOutcome::Joined)
     }
     fn abort(&mut self) -> Result<(), TaskFailure> {

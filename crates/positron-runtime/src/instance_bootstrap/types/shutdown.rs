@@ -132,7 +132,7 @@ impl InitializedInstance {
         // protected durability transaction. Its marker is Drain completion.
         self.begin_shutdown()?;
         match catalog
-            .commit_interruptibly(basis.identity(), proposal, cancelled)
+            .commit_interruptibly(basis.identity(), proposal, None, cancelled)
             .map_err(|_| unavailable())?
         {
             Some(_) => Ok(()),
