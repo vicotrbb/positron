@@ -27,10 +27,13 @@ fn online_key_mismatch_immediately_closes_data_admission() -> Result<(), Box<dyn
         )
         .encode()?,
     );
-    assert!(matches!(
-        outcome,
-        Err(MaintenanceServiceFailure::AdministrationUnavailable)
-    ));
+    assert!(
+        matches!(
+            outcome,
+            Err(MaintenanceServiceFailure::AdministrationUnavailable)
+        ),
+        "key substitution verification outcome: {outcome:?}"
+    );
     assert_eq!(
         process.health().readiness(),
         crate::Readiness::NotReady,
