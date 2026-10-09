@@ -1393,15 +1393,22 @@ fn complete_maintenance_worker(
 ) -> Result<(), TaskFailure> {
     match worker() {
         Ok(()) => Ok(()),
-        Err(failure) => complete_maintenance_failure(services, report_maintenance_failure(failure)),
+        Err(failure) => {
+            complete_maintenance_failure(services, failure, report_maintenance_failure(failure))
+        },
     }
 }
 
 fn complete_maintenance_failure(
     services: &ServiceHandle,
+    failure: crate::ServiceFailure,
     delivery: MaintenanceDiagnosticDelivery,
 ) -> Result<(), TaskFailure> {
-    services.request_integrity_fence();
+    services.request_integrity_fence_with(
+        failure
+            .integrity_fence_reason()
+            .unwrap_or(crate::IntegrityFenceReason::AmbiguousIntegrity),
+    );
     match delivery {
         MaintenanceDiagnosticDelivery::Delivered => Err(TaskFailure::JoinUnavailable),
         // A terminal primary worker failure has already reached this
@@ -2372,7 +2379,7 @@ mod tests {
             report_maintenance_failure_to(&mut closed_sink, crate::ServiceFailure::CorruptState);
         assert_eq!(delivery, MaintenanceDiagnosticDelivery::Unavailable);
         assert!(matches!(
-            complete_maintenance_failure(&services, delivery),
+            complete_maintenance_failure(&services, crate::ServiceFailure::CorruptState, delivery),
             Err(TaskFailure::JoinUnavailable)
         ));
         let worker_services = services.clone();

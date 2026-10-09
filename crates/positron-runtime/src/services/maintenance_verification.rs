@@ -181,8 +181,13 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
             let identity = Identity::open(&snapshot)
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
-            let protection = tenant_segment_key(&self.instance, &identity, scope)
-                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let protection =
+                tenant_segment_key(&self.instance, &identity, scope).map_err(|failure| {
+                    if let Some(reason) = failure.integrity_fence_reason() {
+                        self.request_integrity_fence_with(reason);
+                    }
+                    MaintenanceServiceFailure::AdministrationUnavailable
+                })?;
             let transaction =
                 online_verification_transaction(scope, snapshot.identity().to_bytes())?;
             let cancellation = IntegrityCancellation::new();

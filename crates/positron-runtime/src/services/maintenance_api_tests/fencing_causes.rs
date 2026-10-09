@@ -45,35 +45,7 @@ fn missing_acknowledged_tail_exposes_durability_fence() -> Result<(), Box<dyn st
 fn mismatched_tenant_envelope_exposes_key_fence() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new()?;
     let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
-    let catalog = open_catalog(&initialized)?;
-    let basis = catalog.pin()?;
-    let mut changed = false;
-    let mut objects = Vec::new();
-    for id in basis.object_identities() {
-        let mut bytes = basis.object(id)?.ok_or("catalog object")?.to_vec();
-        if bytes.starts_with(b"POSGOV") {
-            let offset = bytes
-                .windows(8)
-                .position(|value| value == b"POSTKE01")
-                .ok_or("tenant envelope")?;
-            // Substituting the envelope's bound key identity preserves the
-            // authenticated Catalog and envelope shape, but invalidates AEAD.
-            *bytes.get_mut(offset + 8).ok_or("key identity")? ^= 1;
-            changed = true;
-        }
-        objects.push(positron_kernel::CatalogObject::new(bytes)?);
-    }
-    assert!(changed);
-    catalog.commit(
-        basis.identity(),
-        positron_kernel::CatalogProposal::new(
-            positron_kernel::TransactionId::new([0xee; 16])?,
-            basis.format_epoch().ok_or("epoch")?,
-            objects,
-        )?,
-        None,
-    )?;
-    drop(catalog);
+    substitute_tenant_envelope(&initialized)?;
     drop(initialized);
     assert_real_fence(
         &fixture,
@@ -141,5 +113,40 @@ fn assert_real_fence(
             crate::ExitOutcome::Graceful
         );
     }
+    Ok(())
+}
+
+pub(super) fn substitute_tenant_envelope(
+    initialized: &crate::InitializedInstance,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let catalog = open_catalog(initialized)?;
+    let basis = catalog.pin()?;
+    let mut changed = false;
+    let mut objects = Vec::new();
+    for id in basis.object_identities() {
+        let mut bytes = basis.object(id)?.ok_or("catalog object")?.to_vec();
+        if bytes.starts_with(b"POSGOV") {
+            let offset = bytes
+                .windows(8)
+                .position(|value| value == b"POSTKE01")
+                .ok_or("tenant envelope")?;
+            // Substituting the envelope's bound key identity preserves the
+            // authenticated Catalog and envelope shape, but invalidates AEAD.
+            *bytes.get_mut(offset + 8).ok_or("key identity")? ^= 1;
+            changed = true;
+        }
+        objects.push(positron_kernel::CatalogObject::new(bytes)?);
+    }
+    assert!(changed);
+    catalog.commit(
+        basis.identity(),
+        positron_kernel::CatalogProposal::new(
+            positron_kernel::TransactionId::new([0xee; 16])?,
+            basis.format_epoch().ok_or("epoch")?,
+            objects,
+        )?,
+        None,
+    )?;
+    drop(catalog);
     Ok(())
 }

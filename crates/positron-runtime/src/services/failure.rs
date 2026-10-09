@@ -275,6 +275,17 @@ impl Display for ServiceFailure {
 impl Error for ServiceFailure {}
 
 impl ServiceFailure {
+    pub(crate) const fn integrity_fence_reason(self) -> Option<crate::IntegrityFenceReason> {
+        match self {
+            Self::KeyEnvelopeMismatch => Some(crate::IntegrityFenceReason::KeyEnvelopeMismatch),
+            Self::DurabilityFrontierAmbiguity => {
+                Some(crate::IntegrityFenceReason::DurabilityAmbiguity)
+            },
+            Self::CorruptState => Some(crate::IntegrityFenceReason::AmbiguousIntegrity),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn bootstrap_code(self) -> crate::BootstrapFailureCode {
         match self {
             Self::DurabilityFrontierAmbiguity => {
