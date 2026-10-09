@@ -26,7 +26,7 @@ fn ordinary_ingest_fails_closed_when_its_tenant_envelope_is_corrupt() -> Result<
     assert!(
         matches!(
             ServiceHandle::new(Arc::clone(&initialized)),
-            Err(ServiceFailure::KeyUnavailable)
+            Err(ServiceFailure::KeyEnvelopeMismatch)
         ),
         "ordinary services must not recover or admit data with a corrupt authenticated tenant envelope"
     );
