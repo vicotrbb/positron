@@ -211,7 +211,7 @@ fn assert_data_closed(process: &crate::RunningProcess) -> Result<(), Box<dyn std
     Ok(())
 }
 
-struct ForegroundTasks<'host>(&'host NativeHost);
+pub(super) struct ForegroundTasks<'host>(pub(super) &'host NativeHost);
 
 impl crate::TaskRegistrar for ForegroundTasks<'_> {
     fn register(
