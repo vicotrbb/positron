@@ -24,8 +24,22 @@ pub struct CommittedLedgerReader<'kernel, 'catalog, 'ledger> {
     pub(super) catalog: &'catalog Catalog<'kernel>,
     pub(super) scope: SegmentScope,
     pub(super) storage: LedgerStorage,
-    pub(super) protection: SegmentProtectionKey,
+    pub(super) protection: ReaderProtection<'ledger>,
     lease_authority: Option<&'ledger ActiveSegmentLedger<'kernel, 'catalog>>,
+}
+
+pub(super) enum ReaderProtection<'ledger> {
+    Owned(SegmentProtectionKey),
+    Borrowed(&'ledger SegmentProtectionKey),
+}
+impl std::ops::Deref for ReaderProtection<'_> {
+    type Target = SegmentProtectionKey;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(key) => key,
+            Self::Borrowed(key) => key,
+        }
+    }
 }
 
 impl std::fmt::Debug for CommittedLedgerReader<'_, '_, '_> {
@@ -54,7 +68,7 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
             catalog,
             scope,
             storage: LedgerStorage::open_observed(volume)?,
-            protection,
+            protection: ReaderProtection::Owned(protection),
             lease_authority: None,
         })
     }
@@ -62,14 +76,18 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
     pub(crate) fn open_with_lease_authority(
         ledger: &'ledger ActiveSegmentLedger<'kernel, 'catalog>,
     ) -> Result<Self, LedgerFailure> {
-        let mut reader = Self::open(
-            ledger.authority,
-            ledger.catalog,
-            ledger.scope,
-            ledger.protection.clone(),
-        )?;
-        reader.lease_authority = Some(ledger);
-        Ok(reader)
+        let volume = ledger
+            .authority
+            .primary_data_volume()
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::StorageUnavailable))?;
+        Ok(Self {
+            authority: ledger.authority,
+            catalog: ledger.catalog,
+            scope: ledger.scope,
+            storage: LedgerStorage::open_observed(volume)?,
+            protection: ReaderProtection::Borrowed(&ledger.protection),
+            lease_authority: Some(ledger),
+        })
     }
 
     /// Returns the internal lease authority for a reader created by an active
@@ -124,10 +142,12 @@ impl<'kernel, 'catalog, 'ledger> CommittedLedgerReader<'kernel, 'catalog, 'ledge
                 &self.protection,
                 self.catalog.instance(),
                 RecoveryMode::Observe,
+                &basis,
             )?;
             let protection_claim = SnapshotProtection::with_barrier(
                 self.authority.snapshot_protection(),
                 barrier,
+                &basis,
                 reconstruction.blocks.iter().map(|block| block.segment_id()),
             )?;
             self.catalog.refresh_state()?;

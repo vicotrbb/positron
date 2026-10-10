@@ -399,6 +399,7 @@ fn receipt_for_pruned_entry(
         GovernanceAuditEntry::RecoveryBundle(_)
         | GovernanceAuditEntry::Initialization(_)
         | GovernanceAuditEntry::CatalogRootRotation(_)
+        | GovernanceAuditEntry::TenantKeyRotation(_)
         | GovernanceAuditEntry::SchemaCheckpoint(_)
         | GovernanceAuditEntry::DurableOperation(_)
         | GovernanceAuditEntry::MaintenanceControl(_)

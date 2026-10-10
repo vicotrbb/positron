@@ -23,6 +23,7 @@ mod tenant_provisioning;
 mod tenant_retention_administration;
 mod tenant_retention_confirmation;
 mod tenant_retention_recovery;
+mod tenant_rotation;
 mod trace_visibility;
 
 #[test]
@@ -394,3 +395,6 @@ fn query_setup_failures_use_one_catalog_and_ledger_classification_table() {
         );
     }
 }
+
+mod tenant_retirement;
+mod tenant_verification;

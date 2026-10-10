@@ -77,7 +77,7 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
                         .inspect_recovery_bundle(bundle, unlock(&options, &mut read_unlock)?)
                         .map_err(failure)?;
                     let mut output = std::io::stdout().lock();
-                    writeln!(output,"format=age-encryption.org/v1 payload_version=1 created_at={} recipients={}",metadata.created_at_unix_seconds(),metadata.recipients().join(",")).map_err(|_|"output unavailable")?;
+                    writeln!(output,"format=age-encryption.org/v1 payload_version={} created_at={} recipients={}",metadata.payload_version(),metadata.created_at_unix_seconds(),metadata.recipients().join(",")).map_err(|_|"output unavailable")?;
                 },
                 _ => return Err(USAGE),
             }

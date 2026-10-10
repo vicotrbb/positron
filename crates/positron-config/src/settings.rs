@@ -315,6 +315,7 @@ pub enum Setting {
     ListenerLokiPushForwardedHops,
     StorageDataDirectory,
     StorageSecretsDirectory,
+    SecurityKeyCacheLeaseSeconds,
     SecurityLocalKeyFile,
     ExportDestinations,
     DiagnosticsTraceOtlpGrpcAddress,

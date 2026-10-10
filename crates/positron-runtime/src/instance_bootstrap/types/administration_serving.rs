@@ -107,15 +107,25 @@ impl InitializedInstance {
     }
 
     pub(crate) fn begin_shutdown(&self) -> Result<(), BootstrapFailure> {
+        self.close_ordinary_admission().and_then(|reconciliation| {
+            if reconciliation.complete() {
+                Ok(())
+            } else {
+                Err(BootstrapFailure::new(
+                    BootstrapFailureCode::ResourceUnavailable,
+                ))
+            }
+        })
+    }
+
+    /// Fencing stops ordinary admission while retained Control still owns
+    /// protected inspection and key-cache residency. Final Drain separately
+    /// requires complete reconciliation after custody has been closed.
+    pub(crate) fn close_ordinary_admission(
+        &self,
+    ) -> Result<positron_kernel::ShutdownReconciliation, BootstrapFailure> {
         self._authority
             .begin_shutdown()
-            .and_then(|reconciliation| {
-                if reconciliation.complete() {
-                    Ok(())
-                } else {
-                    Err(positron_kernel::GovernorFailure::InvalidConfiguration)
-                }
-            })
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
     }
 

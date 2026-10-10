@@ -351,6 +351,10 @@ impl GovernanceAuditEntry {
             return InitializationAuditEntry::decode_intent(position, intent)
                 .map(Self::Initialization);
         }
+        if intent.starts_with(super::tenant_rotation::TENANT_ROTATION_MAGIC) {
+            return TenantKeyRotationAuditEntry::decode_intent(position, transaction_id, intent)
+                .map(Self::TenantKeyRotation);
+        }
         if intent.starts_with(ROOT_ROTATION_MAGIC) {
             return CatalogRootRotationAuditEntry::decode_intent(position, transaction_id, intent)
                 .map(Self::CatalogRootRotation);

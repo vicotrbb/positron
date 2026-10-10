@@ -14,6 +14,7 @@ use crate::ResourceReservation;
 
 mod failure;
 mod prepared;
+#[cfg(test)]
 mod protection_clone;
 pub use failure::{LedgerCompletionState, LedgerFailure, LedgerFailureCode};
 pub use prepared::{PreparedStoreBlock, StoreBlockPreparation};
@@ -319,22 +320,116 @@ impl StoreBlockIdentity {
 
 pub(super) type SegmentKeyRoute = SegmentEnvelopeRoute;
 
+pub(super) enum SegmentKeyAccess<'a> {
+    Borrowed(&'a SecretKeyBytes),
+    Owned(SecretKeyBytes),
+}
+impl std::ops::Deref for SegmentKeyAccess<'_> {
+    type Target = SecretKeyBytes;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(key) => key,
+            Self::Owned(key) => key,
+        }
+    }
+}
+
 /// A one-shot secret capability and its non-secret provider recovery route.
 pub struct SegmentProtectionKey {
-    pub(super) key: SecretKeyBytes,
+    key: Option<SecretKeyBytes>,
+    local_source: Option<crate::data_protection::LocalSegmentKeySource>,
     pub(super) route: SegmentKeyRoute,
+    retained: Vec<(SegmentKeyRoute, SecretKeyBytes)>,
+    capacity: Option<Box<crate::TransferredResourceReservation>>,
 }
 
 impl SegmentProtectionKey {
+    pub(crate) fn is_only_epoch(&self, epoch: u64) -> bool {
+        self.route.provider_key_epoch == epoch
+            && self.retained.is_empty()
+            && self
+                .local_source
+                .as_ref()
+                .is_none_or(|source| matches!(source.is_single_route(self.route), Ok(true)))
+    }
+
+    pub(crate) fn from_local_source(
+        source: crate::data_protection::LocalSegmentKeySource,
+        route: SegmentKeyRoute,
+    ) -> Self {
+        Self {
+            key: None,
+            local_source: Some(source),
+            route,
+            retained: Vec::new(),
+            capacity: None,
+        }
+    }
+    pub(crate) fn with_capacity(mut self, capacity: crate::TransferredResourceReservation) -> Self {
+        self.capacity = Some(Box::new(capacity));
+        self
+    }
+    pub(super) fn key_for_route(
+        &self,
+        route: SegmentKeyRoute,
+    ) -> Result<SegmentKeyAccess<'_>, LedgerFailure> {
+        if let Some(source) = &self.local_source {
+            return source
+                .key(route)
+                .map(SegmentKeyAccess::Owned)
+                .map_err(|failure| {
+                    LedgerFailure::new(match failure {
+                        crate::BootstrapKeyFailure::Authentication => {
+                            LedgerFailureCode::AuthenticationFailed
+                        },
+                        crate::BootstrapKeyFailure::LimitExceeded => {
+                            LedgerFailureCode::ResourceAdmissionRefused
+                        },
+                        _ => LedgerFailureCode::RecoveryRequired,
+                    })
+                });
+        }
+        if route == self.route {
+            return self
+                .key
+                .as_ref()
+                .map(SegmentKeyAccess::Borrowed)
+                .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::AuthenticationFailed));
+        }
+        self.retained
+            .iter()
+            .find_map(|(candidate, key)| {
+                (*candidate == route).then_some(SegmentKeyAccess::Borrowed(key))
+            })
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::AuthenticationFailed))
+    }
+    pub(super) fn predecessor_route(
+        &self,
+        before: u64,
+    ) -> Result<Option<SegmentKeyRoute>, LedgerFailure> {
+        if let Some(source) = &self.local_source {
+            return source
+                .predecessor_route(before)
+                .map_err(|_| LedgerFailure::new(LedgerFailureCode::AuthenticationFailed));
+        }
+        Ok(std::iter::once(self.route)
+            .chain(self.retained.iter().map(|(route, _)| *route))
+            .filter(|route| route.provider_key_epoch < before)
+            .max_by_key(|route| route.provider_key_epoch))
+    }
+
     #[must_use]
     pub fn from_owned(bytes: Box<[u8; 32]>) -> Self {
         Self {
-            key: SecretKeyBytes::from_owned(bytes),
+            key: Some(SecretKeyBytes::from_owned(bytes)),
+            local_source: None,
             route: SegmentKeyRoute {
                 provider_family: 1,
                 provider_reference: [1; 16],
                 provider_key_epoch: 1,
             },
+            retained: Vec::new(),
+            capacity: None,
         }
     }
 
@@ -347,13 +442,55 @@ impl SegmentProtectionKey {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
         Ok(Self {
-            key: SecretKeyBytes::from_owned(bytes),
+            key: Some(SecretKeyBytes::from_owned(bytes)),
+            local_source: None,
             route: SegmentKeyRoute {
                 provider_family: 1,
                 provider_reference,
                 provider_key_epoch,
             },
+            retained: Vec::new(),
+            capacity: None,
         })
+    }
+
+    /// Retains bounded prior wrapping epochs for immutable segment reads.
+    pub fn retain_predecessor(mut self, predecessor: Self) -> Result<Self, LedgerFailure> {
+        if self.local_source.is_some() || predecessor.local_source.is_some() {
+            return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
+        }
+        let count = self
+            .retained
+            .len()
+            .checked_add(predecessor.retained.len())
+            .and_then(|count| count.checked_add(1))
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
+        if count >= 16 {
+            return Err(LedgerFailure::new(LedgerFailureCode::LimitExceeded));
+        }
+        for route in std::iter::once(&predecessor.route)
+            .chain(predecessor.retained.iter().map(|(route, _)| route))
+        {
+            if route.provider_key_epoch >= self.route.provider_key_epoch
+                || self.retained.iter().any(|(existing, _)| existing == route)
+            {
+                return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
+            }
+        }
+        self.retained
+            .try_reserve_exact(count - self.retained.len())
+            .map_err(|_| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
+        self.retained.push((
+            predecessor.route,
+            predecessor
+                .key
+                .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::AuthenticationFailed))?,
+        ));
+        self.retained.extend(predecessor.retained);
+        if self.capacity.is_none() {
+            self.capacity = predecessor.capacity;
+        }
+        Ok(self)
     }
 }
 

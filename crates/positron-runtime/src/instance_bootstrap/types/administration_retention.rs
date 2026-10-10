@@ -134,10 +134,12 @@ impl InitializedInstance {
             },
         };
         let mut scopes = Vec::new();
+        let rewrap = positron_kernel::RootRewrapSession::admit(&self._authority)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))?;
         for scope in ledger_scopes {
-            let protection = self
-                .key
-                .segment_key_from_tenant_envelope(
+            let protection = rewrap
+                .tenant_segment_key(
+                    &self.key,
                     self.instance,
                     scope,
                     identity.tenant_key_envelope(tenant).map_err(|_| {

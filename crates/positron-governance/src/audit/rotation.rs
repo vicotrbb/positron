@@ -6,7 +6,10 @@ use super::ROOT_ROTATION_MAGIC;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogRootRotationStage {
     Started,
+    Cutover,
     Verified,
+    RetirementPrepared,
+    RetirementRefused,
     Completed,
 }
 
@@ -15,7 +18,10 @@ impl CatalogRootRotationStage {
     pub const fn action(self) -> &'static str {
         match self {
             Self::Started => "catalog.root-rotation.started",
+            Self::Cutover => "catalog.root-rotation.cutover",
             Self::Verified => "catalog.root-rotation.verified",
+            Self::RetirementPrepared => "catalog.root-rotation.retirement-prepared",
+            Self::RetirementRefused => "catalog.root-rotation.retirement-refused",
             Self::Completed => "catalog.root-rotation.completed",
         }
     }
@@ -46,7 +52,10 @@ impl CatalogRootRotationAuditEntry {
             .ok_or(IdentityFailure)?;
         let stage = match remaining.get(..stage_end).ok_or(IdentityFailure)? {
             b"started" => CatalogRootRotationStage::Started,
+            b"cutover" => CatalogRootRotationStage::Cutover,
             b"verified" => CatalogRootRotationStage::Verified,
+            b"retirement-prepared" => CatalogRootRotationStage::RetirementPrepared,
+            b"retirement-refused" => CatalogRootRotationStage::RetirementRefused,
             b"completed" => CatalogRootRotationStage::Completed,
             _ => return Err(IdentityFailure),
         };
@@ -114,4 +123,31 @@ impl CatalogRootRotationAuditEntry {
     pub const fn outcome(&self) -> &'static str {
         "committed"
     }
+}
+
+pub fn catalog_root_rotation_audit_intent(
+    stage: CatalogRootRotationStage,
+    provider_key_reference: [u8; 16],
+    epoch: u64,
+    administrator: positron_domain::identity::PrincipalId,
+) -> Result<positron_kernel::AuditIntent, IdentityFailure> {
+    if epoch == 0 || provider_key_reference == [0; 16] {
+        return Err(IdentityFailure);
+    }
+    let stage = match stage {
+        CatalogRootRotationStage::Started => b"started".as_slice(),
+        CatalogRootRotationStage::Cutover => b"cutover".as_slice(),
+        CatalogRootRotationStage::Verified => b"verified".as_slice(),
+        CatalogRootRotationStage::RetirementPrepared => b"retirement-prepared".as_slice(),
+        CatalogRootRotationStage::RetirementRefused => b"retirement-refused".as_slice(),
+        CatalogRootRotationStage::Completed => b"completed".as_slice(),
+    };
+    let mut bytes = Vec::with_capacity(ROOT_ROTATION_MAGIC.len() + stage.len() + 41);
+    bytes.extend_from_slice(ROOT_ROTATION_MAGIC);
+    bytes.extend_from_slice(stage);
+    bytes.push(0);
+    bytes.extend_from_slice(&provider_key_reference);
+    bytes.extend_from_slice(&epoch.to_be_bytes());
+    bytes.extend_from_slice(&administrator.to_bytes());
+    positron_kernel::AuditIntent::new(bytes).map_err(|_| IdentityFailure)
 }

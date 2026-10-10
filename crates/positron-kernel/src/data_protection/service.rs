@@ -77,6 +77,11 @@ impl DataProtection {
             .map_err(|_| FrameFailure::new(FrameFailureCode::HashFailed))
     }
 
+    /// Callers admit their bounded inspection before feeding borrowed parts.
+    pub(crate) fn begin_hash() -> Result<super::Sha256Digest, FrameFailure> {
+        Self::release().begin_hash()
+    }
+
     pub(crate) fn authenticate(
         key: &SecretKeyBytes,
         bytes: &[u8],
@@ -250,6 +255,11 @@ pub(super) struct BackendDataProtection<B> {
 }
 
 impl<B: CryptoBackend> BackendDataProtection<B> {
+    pub(super) fn begin_hash(&self) -> Result<super::Sha256Digest, FrameFailure> {
+        self.backend
+            .begin_sha256()
+            .map_err(|_| FrameFailure::new(FrameFailureCode::HashFailed))
+    }
     pub(super) fn ed25519_public_key(
         &self,
         private_seed: SecretKeyInput,

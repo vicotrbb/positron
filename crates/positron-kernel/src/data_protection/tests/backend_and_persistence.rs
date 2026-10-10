@@ -21,6 +21,14 @@ fn rust_crypto_backend_matches_nist_sha256_vector() -> Result<(), &'static str> 
     let actual = RustCryptoBackend
         .sha256(b"abc")
         .map_err(|_| "NIST SHA-256 hashing failed")?;
+    let mut incremental =
+        super::DataProtection::begin_hash().map_err(|_| "admitted incremental hashing failed")?;
+    for part in [b"a".as_slice(), b"".as_slice(), b"bc".as_slice()] {
+        incremental.update(part);
+    }
+    if incremental.finalize() != expected {
+        return Err("incremental NIST SHA-256 output differed");
+    }
 
     if actual == expected {
         Ok(())
@@ -811,6 +819,11 @@ fn owned_secret_input_is_zeroized_before_positron_releases_it() -> Result<(), &'
 fn hash_failure_is_typed_and_returns_no_frame() -> Result<(), &'static str> {
     let (_, context, limits, _) = protected_segment_fixture()?;
     let protection = super::DataProtection::with_backend(HashFailureBackend);
+    if protection.begin_hash().err().map(|failure| failure.code())
+        != Some(super::FrameFailureCode::HashFailed)
+    {
+        return Err("incremental hashing bypassed the selected backend failure");
+    }
     let key = protection.import_object_key(
         super::SecretKeyInput::from_test_bytes([b'H'; 32]),
         context.object,

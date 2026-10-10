@@ -280,3 +280,86 @@ fn recognized_entries_with_wrong_kinds_and_missing_publication_fail_closed() {
         BootstrapStorageFailure::Unavailable
     );
 }
+
+#[test]
+fn protected_successor_opens_original_bootstrap_after_predecessor_custody_is_absent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = Roots::new();
+    let storage = roots.storage();
+    let (_volume, access) = storage.acquire().map_err(|_| "bootstrap roots")?;
+    let authority = crate::data_protection::recovery_tests::authority()?;
+    let session = crate::RootRewrapSession::admit(&authority)?;
+    let original = access.initialize_key()?;
+    let instance = crate::InstanceId::new([0xd1; 16])?;
+    let identity = original.identity();
+    let protected = original.protect(
+        instance,
+        crate::BootstrapObjectPurpose::Initialized,
+        b"immutable-bootstrap-after-retirement",
+    )?;
+    let successor = session.prepare_successor(&access, 2)?;
+    let successor_identity = successor.identity();
+    session.publish_successor_routes(&access, &original, &successor, instance, 2)?;
+    let main_path = roots.secrets().join("local-root-key.v1");
+    let original_bytes = fs::read(&main_path)?;
+    fs::write(&main_path, b"corrupt-present-root")?;
+    assert!(
+        access.open_key().is_err(),
+        "present corruption cannot select a successor"
+    );
+    fs::write(&main_path, &original_bytes)?;
+    fs::remove_file(&main_path)?;
+    let bridge_path = roots
+        .data()
+        .join(BootstrapArtifact::SystemKeyEnvelope.name());
+    let bridge = fs::read(&bridge_path)?;
+    let successor_bytes = fs::read(roots.secrets().join("local-root-key.epoch-2.v1"))?;
+    let mut rejected = Vec::new();
+    let mut wrong_instance = bridge.clone();
+    wrong_instance[8] ^= 1;
+    rejected.push(wrong_instance);
+    let mut wrong_anchor = bridge.clone();
+    wrong_anchor[24] ^= 1;
+    rejected.push(wrong_anchor);
+    let mut corrupted = bridge.clone();
+    let last = corrupted.len() - 1;
+    corrupted[last] ^= 1;
+    rejected.push(corrupted);
+    rejected.push(bridge[..bridge.len() - 1].to_vec());
+    let mut trailing = bridge.clone();
+    trailing.push(0);
+    rejected.push(trailing);
+    for bytes in rejected {
+        fs::write(&bridge_path, &bytes)?;
+        assert!(access.open_key().is_err());
+        assert_eq!(
+            fs::read(&bridge_path)?,
+            bytes,
+            "rejected access is read only"
+        );
+        assert_eq!(
+            fs::read(roots.secrets().join("local-root-key.epoch-2.v1"))?,
+            successor_bytes
+        );
+        assert!(!main_path.exists());
+    }
+    fs::write(&bridge_path, &bridge)?;
+    let opened = storage
+        .inspect()
+        .map_err(|_| "bootstrap inspection")?
+        .open_key()?;
+    assert_eq!(opened.bootstrap_identity(), identity);
+    assert_eq!(opened.active_root_identity()?, successor_identity);
+    assert_eq!(opened.active_root_epoch()?, 2);
+    assert_eq!(
+        opened
+            .open_object(
+                instance,
+                crate::BootstrapObjectPurpose::Initialized,
+                &protected
+            )?
+            .as_slice(),
+        b"immutable-bootstrap-after-retirement"
+    );
+    Ok(())
+}

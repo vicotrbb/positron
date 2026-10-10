@@ -127,6 +127,7 @@ fn authenticated_inspection_releases_recovered_root_temporary_after_zeroization(
             session.inspect(&bundle, RecoveryUnlock::Identity(&recipient), pin)
         })?;
     assert_eq!(metadata.identity(), pin);
+    assert_eq!(metadata.payload_version(), 1);
     assert!(
         observed.get(),
         "recovered root temporary must be zeroized before release"
@@ -144,6 +145,12 @@ fn bounded_recovery_mutation_oracle_exercises_raw_signed_and_canonical_payloads(
         &[1, 0, 0, 0xff][..],
         &[2, 0, 20, 1][..],
         &[0, 0xff][..],
+        &[4, 0xff][..],
+        &[5][..],
+        &[6][..],
+        &[7][..],
+        &[5, 0, 0, 0xff][..],
+        &[6, 0, 20, 1][..],
     ] {
         super::fuzzing::exercise(program)?;
     }
@@ -170,12 +177,13 @@ fn signed_recovery_payload_rejects_noncanonical_recipient_order()
     recipients.sort();
     recipients.reverse();
     let metadata = RecoveryMetadata {
+        payload_version: 1,
         identity: pin,
         created: 123,
         recipients,
     };
     let plaintext = signed(
-        &encode(&metadata, custody.key.root_key.0.expose_to_backend()),
+        &custody.with_root_key(|root| encode(&metadata, root.expose_to_backend()))?,
         &seed,
     )?;
     let authority = crate::data_protection::recovery_tests::authority()?;
@@ -233,11 +241,12 @@ fn recovery_payload_requires_its_signature_purpose() -> Result<(), Box<dyn std::
     let identity = age::x25519::Identity::generate();
     let recipients = vec![identity.to_public().to_string()];
     let metadata = RecoveryMetadata {
+        payload_version: 1,
         identity: pin,
         created: 123,
         recipients: recipients.clone(),
     };
-    let payload = encode(&metadata, custody.key.root_key.0.expose_to_backend());
+    let payload = custody.with_root_key(|root| encode(&metadata, root.expose_to_backend()))?;
     // An independent reference signature is valid Ed25519, but for a different purpose.
     let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(seed.as_slice())
         .map_err(|_| "fixture signature unavailable")?;

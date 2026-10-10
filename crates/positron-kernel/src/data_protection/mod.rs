@@ -20,14 +20,16 @@ mod frame;
 mod key_envelope;
 pub(crate) mod key_provider;
 mod local_key;
+pub(crate) use local_key::LocalSegmentKeySource;
 mod service;
 
 #[cfg(test)]
-mod recovery_tests;
+pub(crate) mod recovery_tests;
 
 #[cfg(any(test, fuzzing))]
 mod fuzzing;
 
+pub(crate) use backend::Sha256Digest;
 use backend::{CryptoBackend, CryptoBackendFailure, RustCryptoBackend, SecretPlaintext};
 pub(crate) use backend::{ObjectDataKey, SecretKeyBytes, SecretKeyInput};
 use codec::{encode_associated_data, encode_authenticated_header, nonce_for, parse_frame};
@@ -56,10 +58,13 @@ use key_envelope::{
     verify_wrapped_key_payload,
 };
 pub(crate) use local_key::CrashRecordProtector;
+#[cfg(feature = "test-support")]
+pub use local_key::RootCustodyPublicationFault;
 pub use local_key::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose, RecoveryFailure, RecoveryIdentity, RecoveryMetadata,
     RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession, RecoveryUnlock,
+    RootPredecessorEnvelope, RootRewrapSession, VerifiedRootActivation,
 };
 pub(crate) use service::DataProtection;
 

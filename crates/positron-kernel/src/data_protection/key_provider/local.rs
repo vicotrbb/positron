@@ -1,12 +1,18 @@
 use super::*;
-use crate::data_protection::BootstrapKeyCustody;
+use crate::data_protection::{
+    BootstrapKeyCustody, CryptoBackend, RustCryptoBackend, SecretKeyBytes,
+};
 
 /// The real protected local-file adapter, using existing verified root custody.
 pub struct LocalKeyProvider {
-    custody: BootstrapKeyCustody,
+    root: SecretKeyBytes,
     identity: ProviderKeyUri,
 }
 impl LocalKeyProvider {
+    pub(in crate::data_protection) fn root(&self) -> &SecretKeyBytes {
+        &self.root
+    }
+
     /// Creates a new context-bound KEK envelope without returning plaintext key material.
     pub async fn create_envelope(
         &self,
@@ -27,23 +33,61 @@ impl LocalKeyProvider {
         session.verify(envelope, context).await
     }
     pub fn from_custody(custody: BootstrapKeyCustody) -> Result<Self, KeyProviderFailure> {
+        let identity = Self::identity_for_custody(
+            &custody,
+            custody
+                .active_root_epoch()
+                .map_err(|_| KeyProviderFailure::Unavailable)?,
+        )?;
+        Ok(Self {
+            identity,
+            root: custody.into_provider_root()?,
+        })
+    }
+    pub(crate) fn wrap_for_epoch(
+        custody: &BootstrapKeyCustody,
+        epoch: u64,
+        payload: SecretWrappedKeyPayload,
+        context: EnvelopeContext,
+    ) -> Result<KeyEnvelope, KeyProviderFailure> {
+        let identity = Self::identity_for_custody(custody, epoch)?;
+        let ciphertext = custody.provider_wrap(payload.as_provider_plaintext())?;
+        KeyEnvelope::from_provider_response(
+            identity,
+            context,
+            WrappingAlgorithm::Aes256Kwp,
+            ciphertext,
+        )
+    }
+    pub(crate) fn identity_for_custody(
+        custody: &BootstrapKeyCustody,
+        epoch: u64,
+    ) -> Result<ProviderKeyUri, KeyProviderFailure> {
+        if epoch == 0 {
+            return Err(KeyProviderFailure::InvalidConfiguration);
+        }
+        let active = custody
+            .active_root_identity()
+            .map_err(|_| KeyProviderFailure::Unavailable)?;
         let mut locator = String::from("local-root/");
-        for byte in custody.identity().key_id() {
+        for byte in active.key_id() {
             use std::fmt::Write;
             write!(&mut locator, "{byte:02x}")
                 .map_err(|_| KeyProviderFailure::InvalidConfiguration)?;
         }
         // Fingerprint pins key bytes even if an operator substitutes a file with the same ID.
         let mut version = String::new();
-        for byte in custody.identity().fingerprint() {
+        for byte in active.fingerprint() {
             use std::fmt::Write;
             write!(&mut version, "{byte:02x}")
                 .map_err(|_| KeyProviderFailure::InvalidConfiguration)?;
         }
-        Ok(Self {
-            identity: ProviderKeyUri::new(ProviderFamily::LocalFile, &locator, &version)?,
-            custody,
-        })
+        if epoch != 1 {
+            use std::fmt::Write;
+            write!(&mut version, ".{epoch}")
+                .map_err(|_| KeyProviderFailure::InvalidConfiguration)?;
+        }
+        ProviderKeyUri::new(ProviderFamily::LocalFile, &locator, &version)
     }
 }
 impl KeyProvider for LocalKeyProvider {
@@ -70,9 +114,9 @@ impl KeyProvider for LocalKeyProvider {
         payload: SecretWrappedKeyPayload,
         context: EnvelopeContext,
     ) -> Result<KeyEnvelope, KeyProviderFailure> {
-        let ciphertext = self
-            .custody
-            .provider_wrap(payload.as_provider_plaintext())?;
+        let ciphertext = RustCryptoBackend
+            .wrap_key_aes_256_kwp(&self.root, payload.as_provider_plaintext())
+            .map_err(|_| KeyProviderFailure::ContextMismatch)?;
         KeyEnvelope::from_provider_response(
             self.identity.clone(),
             context,
@@ -86,8 +130,9 @@ impl KeyProvider for LocalKeyProvider {
         context: EnvelopeContext,
     ) -> Result<SecretWrappedKeyPayload, KeyProviderFailure> {
         envelope.check(&self.identity, context)?;
-        self.custody
-            .provider_unwrap(envelope.ciphertext())
+        RustCryptoBackend
+            .unwrap_key_aes_256_kwp(&self.root, envelope.ciphertext())
             .map(SecretWrappedKeyPayload)
+            .map_err(|_| KeyProviderFailure::ContextMismatch)
     }
 }

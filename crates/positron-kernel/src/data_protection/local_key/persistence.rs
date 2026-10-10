@@ -9,7 +9,7 @@ use std::os::unix::fs::MetadataExt;
 use rustix::fs::{self as unix_fs, Mode, OFlags};
 
 use super::acl::{verify_directory_acl, verify_file_acl};
-use super::bootstrap::verify_key_file;
+use super::bootstrap::{verify_key_file, verify_named_key_file};
 use super::codec::{EncodedLocalKeyFile, parse_file_v1};
 use super::security_directory::open_absolute_directory;
 use super::{
@@ -140,6 +140,20 @@ pub(super) fn open_existing_local_key(
 pub(super) fn open_existing_local_key_in(
     directory: &File,
 ) -> Result<VerifiedLocalKey, LocalKeyFailure> {
+    open_named_local_key_in(directory, LOCAL_KEY_FILE_NAME)
+}
+
+pub(super) fn open_named_local_key_in(
+    directory: &File,
+    name: &str,
+) -> Result<VerifiedLocalKey, LocalKeyFailure> {
+    open_named_local_key_with_file(directory, name).map(|(_, key)| key)
+}
+
+pub(super) fn open_named_local_key_with_file(
+    directory: &File,
+    name: &str,
+) -> Result<(File, VerifiedLocalKey), LocalKeyFailure> {
     let metadata = directory
         .metadata()
         .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::InvalidLocation))?;
@@ -153,13 +167,13 @@ pub(super) fn open_existing_local_key_in(
     verify_directory_acl(directory)?;
     let mut file = unix_fs::openat(
         directory,
-        LOCAL_KEY_FILE_NAME,
+        name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::OpenKeyFileFailed))?;
-    verify_key_file(directory, &file, expected_directory.owner)?;
+    verify_named_key_file(directory, &file, expected_directory.owner, name)?;
     verify_file_acl(&file)?;
     let mut encoded = EncodedLocalKeyFile::zeroed();
     file.read_exact(encoded.bytes.as_mut())
@@ -172,9 +186,9 @@ pub(super) fn open_existing_local_key_in(
     if trailing_bytes != 0 {
         return Err(LocalKeyFailure::new(LocalKeyFailureCode::MalformedFile));
     }
-    verify_key_file(directory, &file, expected_directory.owner)?;
+    verify_named_key_file(directory, &file, expected_directory.owner, name)?;
     verify_file_acl(&file)?;
-    parse_file_v1(encoded)
+    parse_file_v1(encoded).map(|key| (file, key))
 }
 
 fn verify_opened_security_directory(

@@ -360,8 +360,9 @@ pub struct EffectiveConfiguration {
     pub(crate) data_directory: String,
     pub(crate) secrets_directory: String,
     pub(crate) local_key_file: ProtectedFileReference,
+    pub(crate) key_cache_lease_seconds: u16,
     pub(crate) export_destinations: Vec<ExportDestinationDefinition>,
-    pub(crate) sources: [SettingSource; 101],
+    pub(crate) sources: [SettingSource; 102],
 }
 
 impl EffectiveConfiguration {
@@ -600,6 +601,11 @@ impl EffectiveConfiguration {
     #[must_use]
     pub fn secrets_directory(&self) -> &str {
         &self.secrets_directory
+    }
+
+    #[must_use]
+    pub const fn key_cache_lease_seconds(&self) -> u16 {
+        self.key_cache_lease_seconds
     }
 
     #[must_use]
@@ -1003,7 +1009,9 @@ impl EffectiveConfiguration {
         rendered.push_str(&super::render_toml_basic_string(&self.data_directory));
         rendered.push_str("\nsecrets_directory = ");
         rendered.push_str(&super::render_toml_basic_string(&self.secrets_directory));
-        rendered.push_str("\n\n[security]\nlocal_key_file = \"<redacted>\"\n");
+        rendered.push_str("\n\n[security]\nkey_cache_lease_seconds = ");
+        rendered.push_str(&self.key_cache_lease_seconds.to_string());
+        rendered.push_str("\nlocal_key_file = \"<redacted>\"\n");
         rendered
     }
 
@@ -1140,6 +1148,7 @@ impl EffectiveConfiguration {
                 | Setting::ListenerLokiPushIdleDeadlineSeconds
                 | Setting::StorageDataDirectory
                 | Setting::StorageSecretsDirectory
+                | Setting::SecurityKeyCacheLeaseSeconds
                 | Setting::SecurityLocalKeyFile
                 | Setting::ExportDestinations => {},
             }
@@ -1518,6 +1527,9 @@ impl EffectiveConfiguration {
             },
             Setting::StorageDataDirectory => self.data_directory != other.data_directory,
             Setting::StorageSecretsDirectory => self.secrets_directory != other.secrets_directory,
+            Setting::SecurityKeyCacheLeaseSeconds => {
+                self.key_cache_lease_seconds != other.key_cache_lease_seconds
+            },
             Setting::SecurityLocalKeyFile => self.local_key_file != other.local_key_file,
             Setting::ExportDestinations => self.export_destinations != other.export_destinations,
         }
@@ -1530,6 +1542,7 @@ impl EffectiveConfiguration {
             Setting::DiagnosticsTraceOtlpGrpcAddress => self
                 .trace_otlp_grpc_address
                 .map_or_else(|| "disabled".to_owned(), |address| address.to_string()),
+            Setting::SecurityKeyCacheLeaseSeconds => self.key_cache_lease_seconds.to_string(),
             Setting::RuntimeShutdownGraceSeconds => self.shutdown_grace_seconds.to_string(),
             Setting::RuntimeMaxRegisteredTenants => self.max_registered_tenants.to_string(),
             Setting::ListenerControlPath => self.control_path.clone(),
@@ -1884,6 +1897,7 @@ impl EffectiveConfiguration {
             Setting::DiagnosticsTraceOtlpGrpcAddress => self
                 .trace_otlp_grpc_address
                 .map_or_else(|| "disabled".to_owned(), |address| address.to_string()),
+            Setting::SecurityKeyCacheLeaseSeconds => self.key_cache_lease_seconds.to_string(),
             Setting::RuntimeShutdownGraceSeconds => self.shutdown_grace_seconds.to_string(),
             Setting::RuntimeMaxRegisteredTenants => self.max_registered_tenants.to_string(),
             Setting::ListenerControlPath => self.control_path.clone(),
@@ -2346,6 +2360,7 @@ impl Debug for EffectiveConfiguration {
             .field("loki_push_bind_address", &self.loki_push_bind_address)
             .field("data_directory", &self.data_directory)
             .field("secrets_directory", &self.secrets_directory)
+            .field("key_cache_lease_seconds", &self.key_cache_lease_seconds)
             .field("local_key_file", &"<redacted>")
             .field("export_destination_count", &self.export_destinations.len())
             .field("sources", &self.sources)

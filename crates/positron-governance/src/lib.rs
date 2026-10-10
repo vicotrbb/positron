@@ -23,6 +23,7 @@ mod quota_administration;
 mod system_audit_retention_administration;
 mod tenant_administration;
 mod tenant_alias_administration;
+mod tenant_key_envelope;
 mod tenant_lifecycle_administration;
 mod tenant_profile_administration;
 mod tenant_quota_record;
@@ -44,9 +45,13 @@ pub use audit::{
     RecoveryBundleAction, RecoveryBundleAuditEntry, SchemaCheckpointAuditEntry,
     SystemAuditRetentionUpdateAuditEntry, TenantDisplayNameUpdateAuditEntry,
     TenantQuotaUpdateAuditEntry, TlsMaterialReloadAuditEntry, TlsMaterialReloadAuditRequest,
-    TlsMaterialReloadListenerSet, TlsMaterialReloadOutcome, integrity_quarantine_audit_intent,
-    maintenance_control_audit_intent, maintenance_run_audit_intent,
-    maintenance_window_audit_intent, recovery_bundle_audit_intent, schema_checkpoint_audit_intent,
+    TlsMaterialReloadListenerSet, TlsMaterialReloadOutcome, catalog_root_rotation_audit_intent,
+    integrity_quarantine_audit_intent, maintenance_control_audit_intent,
+    maintenance_run_audit_intent, maintenance_window_audit_intent, recovery_bundle_audit_intent,
+    schema_checkpoint_audit_intent,
+};
+pub use audit::{
+    TenantKeyRotationAuditEntry, TenantKeyRotationStage, tenant_key_rotation_audit_intent,
 };
 #[cfg(fuzzing)]
 pub use durable_operation_administration::fuzz_durable_operation_record;

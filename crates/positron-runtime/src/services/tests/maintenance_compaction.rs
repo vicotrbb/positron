@@ -406,11 +406,19 @@ fn bootstrap_reopen_requeues_a_running_maintenance_descriptor() -> Result<(), Bo
         MaintenanceTaskPhase::Queued,
         "bootstrap restores the durable descriptor and applies crash recovery before a handler can resume"
     );
+    let resources = reopened.resource_governor().inspect()?;
+    assert_eq!(resources.outstanding_total(), 1);
     assert_eq!(
-        reopened.resource_governor().inspect()?.outstanding_total(),
+        resources.outstanding_for(positron_kernel::WorkClass::SecurityLifecycle),
+        1,
+        "reopen retains its admitted native System KEK cache"
+    );
+    assert_eq!(
+        resources.outstanding_for(positron_kernel::WorkClass::OrdinaryMaintenanceBackup),
         0,
         "reopened maintenance has no inherited live reservation"
     );
+    assert_eq!(resources.outstanding_recovery(), 0);
     Ok(())
 }
 

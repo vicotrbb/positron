@@ -20,7 +20,7 @@ pub fn fuzz_recovery_bundle_payload(data: &[u8]) {
 }
 mod files;
 mod payload;
-use payload::{decode, encode, signed, verify_signed};
+use payload::{decode, encode, encode_with_system, signed, verify_signed};
 const MAX_BUNDLE: usize = 8192;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,11 +132,16 @@ pub enum RecoveryUnlock<'a> {
 /// Only non-secret authenticated inner metadata is inspectable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryMetadata {
+    payload_version: u8,
     identity: RecoveryIdentity,
     created: u64,
     recipients: Vec<String>,
 }
 impl RecoveryMetadata {
+    #[must_use]
+    pub const fn payload_version(&self) -> u8 {
+        self.payload_version
+    }
     #[must_use]
     pub const fn identity(&self) -> RecoveryIdentity {
         self.identity
@@ -259,7 +264,12 @@ impl<'a> RecoverySession<'a> {
         recipients: &[String],
         created: u64,
     ) -> Result<Zeroizing<Vec<u8>>, RecoveryFailure> {
-        if custody.identity() != pin.root || created == 0 {
+        if custody
+            .active_root_identity()
+            .map_err(|_| RecoveryFailure::Authentication)?
+            != pin.root
+            || created == 0
+        {
             return Err(RecoveryFailure::Authentication);
         }
         let seed = custody
@@ -280,11 +290,33 @@ impl<'a> RecoverySession<'a> {
             return Err(RecoveryFailure::Authentication);
         }
         let metadata = RecoveryMetadata {
+            payload_version: if custody.has_system_route() { 2 } else { 1 },
             identity: pin,
             created,
             recipients: recipients.to_vec(),
         };
-        let payload = encode(&metadata, custody.key.root_key.0.expose_to_backend());
+        let envelope = if custody.has_system_route() {
+            Some(
+                super::root_rewrap::wrap_system(custody, pin.instance)
+                    .map_err(|_| RecoveryFailure::Authentication)?,
+            )
+        } else {
+            None
+        };
+        let epoch = custody
+            .active_root_epoch()
+            .map_err(|_| RecoveryFailure::Authentication)?;
+        let system = envelope
+            .as_deref()
+            .map(|value| (custody.bootstrap_identity(), epoch, value));
+        let payload = custody
+            .with_root_key(|root| match system {
+                Some(system) => {
+                    encode_with_system(&metadata, root.expose_to_backend(), Some(system))
+                },
+                None => encode(&metadata, root.expose_to_backend()),
+            })
+            .map_err(|_| RecoveryFailure::Authentication)?;
         signed(&payload, &seed)
     }
     /// Recovers into opaque custody, validates the complete owning instance, then exclusively publishes its root.
@@ -297,6 +329,9 @@ impl<'a> RecoverySession<'a> {
         validate: impl FnOnce(&BootstrapKeyCustody) -> Result<(), RecoveryFailure>,
     ) -> Result<BootstrapKeyCustody, RecoveryFailure> {
         let (_, custody) = self.recover(ciphertext, unlock, pin)?;
+        access
+            .require_recovery_target_absent(&custody)
+            .map_err(|_| RecoveryFailure::AlreadyExists)?;
         validate(&custody)?;
         access
             .publish_recovered_key(&custody)
@@ -319,19 +354,24 @@ impl<'a> RecoverySession<'a> {
         unlock: RecoveryUnlock<'_>,
         pin: RecoveryIdentity,
     ) -> Result<RecoveryMetadata, RecoveryFailure> {
-        if custody.identity() != pin.root {
+        if custody
+            .active_root_identity()
+            .map_err(|_| RecoveryFailure::Authentication)?
+            != pin.root
+        {
             return Err(RecoveryFailure::Authentication);
         }
         let (metadata, recovered) = self.recover(ciphertext, unlock, pin)?;
         use subtle::ConstantTimeEq;
-        if !bool::from(
-            custody
-                .key
-                .root_key
-                .0
-                .expose_to_backend()
-                .ct_eq(recovered.key.root_key.0.expose_to_backend()),
-        ) {
+        let equal = custody
+            .with_root_key(|root| {
+                recovered.with_root_key(|other| {
+                    bool::from(root.expose_to_backend().ct_eq(other.expose_to_backend()))
+                })
+            })
+            .map_err(|_| RecoveryFailure::Custody)?
+            .map_err(|_| RecoveryFailure::Custody)?;
+        if !equal {
             return Err(RecoveryFailure::Authentication);
         }
         Ok(metadata)

@@ -17,4 +17,7 @@ mod tenant_provisioning;
 mod tenant_quota_admission;
 mod tenant_quota_replay;
 
+mod local_rotation_security;
 mod recovery;
+mod root_recovery;
+mod root_retirement;

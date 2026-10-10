@@ -256,6 +256,7 @@ const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
     MaintenanceTaskClass::CatalogReclamation,
     MaintenanceTaskClass::GovernanceAuditCheckpoint,
     MaintenanceTaskClass::IntegrityScrub,
+    MaintenanceTaskClass::EnvelopeVerification,
 ];
 
 // A source-bound scrub record is durable evidence for one completed pass. The
@@ -283,8 +284,15 @@ pub(super) fn wake_runtime_maintenance(
             execution
         },
     };
+    let envelope = matches!(
+        execution,
+        InstalledMaintenanceExecution::EnvelopeVerification { .. }
+    );
     let completed = complete_installed_maintenance(services, cancellation, &execution)?;
     drop(execution);
+    if envelope {
+        return Ok(completed);
+    }
     discover_after_completed_maintenance(services, cancellation, completed)
 }
 
@@ -305,6 +313,9 @@ fn discover_after_completed_maintenance(
 }
 
 enum InstalledMaintenanceExecution<'authority> {
+    EnvelopeVerification {
+        execution: MaintenanceExecution<'authority>,
+    },
     Compaction {
         execution: MaintenanceExecution<'authority>,
         scope: SegmentScope,
@@ -336,7 +347,8 @@ enum InstalledMaintenanceExecution<'authority> {
 
 fn installed_task_class(execution: &InstalledMaintenanceExecution<'_>) -> MaintenanceTaskClass {
     match execution {
-        InstalledMaintenanceExecution::Compaction { execution, .. }
+        InstalledMaintenanceExecution::EnvelopeVerification { execution }
+        | InstalledMaintenanceExecution::Compaction { execution, .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { execution }
         | InstalledMaintenanceExecution::SnapshotLeaseExpiry { execution, .. }
         | InstalledMaintenanceExecution::RetentionPublication { execution, .. }
@@ -397,6 +409,9 @@ fn start_installed_maintenance<'authority>(
         return Err(ServiceFailure::Cancelled);
     }
     let execution = match execution.task().class() {
+        MaintenanceTaskClass::EnvelopeVerification => {
+            InstalledMaintenanceExecution::EnvelopeVerification { execution }
+        },
         MaintenanceTaskClass::Compaction => {
             let scope = scope_for_segment_task(execution.task().scope())?;
             InstalledMaintenanceExecution::Compaction { execution, scope }
@@ -498,6 +513,9 @@ fn complete_installed_maintenance(
         return Ok(true);
     }
     let coordinator = instance.maintenance_coordinator();
+    if let InstalledMaintenanceExecution::EnvelopeVerification { execution } = execution {
+        return super::maintenance_envelope_verification::complete(services, &catalog, execution);
+    }
     if let InstalledMaintenanceExecution::IntegrityScrub { execution, scope } = execution {
         return complete_integrity_scrub(
             services,
@@ -514,7 +532,8 @@ fn complete_installed_maintenance(
         | InstalledMaintenanceExecution::SnapshotLeaseExpiry { scope, .. }
         | InstalledMaintenanceExecution::RetentionPublication { scope, .. }
         | InstalledMaintenanceExecution::RetentionReclamation { scope, .. } => *scope,
-        InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. }
+        InstalledMaintenanceExecution::EnvelopeVerification { .. }
+        | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. }
         | InstalledMaintenanceExecution::CatalogReclamation { .. }
         | InstalledMaintenanceExecution::IntegrityScrub { .. } => {
             return Err(ServiceFailure::Internal);
@@ -547,7 +566,8 @@ fn complete_installed_maintenance(
                 key,
             )
         },
-        InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. } => {
+        InstalledMaintenanceExecution::EnvelopeVerification { .. }
+        | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. } => {
             return Err(ServiceFailure::Internal);
         },
         InstalledMaintenanceExecution::CatalogReclamation { .. } => {
@@ -603,6 +623,9 @@ fn complete_installed_maintenance(
         return Ok(true);
     }
     let completed = match execution {
+        InstalledMaintenanceExecution::EnvelopeVerification { .. } => {
+            return Err(ServiceFailure::Internal);
+        },
         InstalledMaintenanceExecution::Compaction { .. } => return Err(ServiceFailure::Internal),
         InstalledMaintenanceExecution::SnapshotLeaseExpiry {
             execution,
@@ -1248,6 +1271,21 @@ pub(super) fn run_runtime_maintenance_worker(
                 .with_task_class(installed_task_class(&execution));
                 match complete_installed_maintenance(services, Some(cancellation), &execution) {
                     Ok(completed) => {
+                        let envelope = matches!(
+                            execution,
+                            InstalledMaintenanceExecution::EnvelopeVerification { .. }
+                        );
+                        if let InstalledMaintenanceExecution::EnvelopeVerification { execution } =
+                            &execution
+                        {
+                            completed_integrity = services
+                                .instance
+                                .maintenance_coordinator()
+                                .status(execution.task().identity())
+                                .map_err(map_failure)?
+                                .phase()
+                                == positron_kernel::MaintenanceTaskPhase::Succeeded;
+                        }
                         let continues_integrity_scrub = match &execution {
                             InstalledMaintenanceExecution::IntegrityScrub { execution, .. } => {
                                 match services
@@ -1273,16 +1311,24 @@ pub(super) fn run_runtime_maintenance_worker(
                             (completion_context, Ok(completed))
                         } else {
                             drop(execution);
-                            let (discovery_context, discovery) =
-                                discover_runtime_maintenance(services, Some(cancellation));
-                            let result = match discovery {
-                                Ok(discovered) => Ok(completed || discovered),
-                                // Completion is already durable. A cancellation observed before
-                                // the next bounded discovery must stop the worker normally.
-                                Err(ServiceFailure::Cancelled) if completed => Ok(true),
-                                Err(failure) => Err(failure),
-                            };
-                            (discovery_context, result)
+                            if envelope {
+                                // Continue this bounded source-bound pass before
+                                // discovering unrelated work. Completion uses
+                                // the existing idle cadence; ordinary writes
+                                // and later discovery still invalidate proof.
+                                (completion_context, Ok(completed))
+                            } else {
+                                let (discovery_context, discovery) =
+                                    discover_runtime_maintenance(services, Some(cancellation));
+                                let result = match discovery {
+                                    Ok(discovered) => Ok(completed || discovered),
+                                    // Completion is already durable. A cancellation observed before
+                                    // the next bounded discovery must stop the worker normally.
+                                    Err(ServiceFailure::Cancelled) if completed => Ok(true),
+                                    Err(failure) => Err(failure),
+                                };
+                                (discovery_context, result)
+                            }
                         }
                     },
                     Err(ServiceFailure::Cancelled) => break,
@@ -1383,7 +1429,7 @@ fn scope_for_segment_task(scope: MaintenanceScope) -> Result<SegmentScope, Servi
     }
 }
 
-fn map_failure(failure: MaintenanceFailure) -> ServiceFailure {
+pub(super) fn map_failure(failure: MaintenanceFailure) -> ServiceFailure {
     match failure {
         MaintenanceFailure::CatalogUnavailable => ServiceFailure::CatalogUnavailable,
         MaintenanceFailure::ResourceAdmissionRefused | MaintenanceFailure::CapacityExceeded => {

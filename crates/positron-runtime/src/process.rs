@@ -698,7 +698,7 @@ impl RunningProcess {
         if self
             .instance
             .as_ref()
-            .is_some_and(|instance| instance.begin_shutdown().is_err())
+            .is_some_and(|instance| instance.close_ordinary_admission().is_err())
         {
             self.cleanup.set_primary(ExitOutcome::Fenced);
         }

@@ -104,7 +104,7 @@ pub(super) fn recover(
     let mut replayed_blocks = false;
     for scope in scopes {
         let protection = super::tenant_segment_key(instance, &identity, scope)?;
-        let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+        let ledger = ActiveSegmentLedger::open_for_query_with_retention_time(
             &instance._authority,
             &instance.retention_time,
             &catalog,
@@ -112,8 +112,6 @@ pub(super) fn recover(
             protection,
         )
         .map_err(|failure| classify_ledger_failure_code(failure.code()))?;
-        // `replay` retains the admitted repair CPU/task reservation while the
-        // immutable snapshot is constructed and replayed.
         let snapshot = ledger
             .snapshot()
             .map_err(|failure| classify_ledger_failure_code(failure.code()))?;
@@ -122,7 +120,6 @@ pub(super) fn recover(
             .replay_snapshot_cancellable(&snapshot, cancellation)
             .map_err(classify_replay_failure)?;
         drop(snapshot);
-        drop(ledger);
     }
     if checkpoint.is_none() && !replayed_blocks {
         return Ok(RecoveredSchema {

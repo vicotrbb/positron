@@ -42,7 +42,7 @@ pub(super) fn recover_pending_replacement(
     }
     let replacement = super::super::storage::read(access, BootstrapArtifact::PendingReplacement)?;
     let record = decode_record(key, BootstrapObjectPurpose::Pending, &replacement)?;
-    require_key_identity(&record, key.identity())?;
+    require_key_identity(&record, key.bootstrap_identity())?;
     if super::super::storage::read(access, BootstrapArtifact::Pending)?
         != super::super::storage::INTENT
     {

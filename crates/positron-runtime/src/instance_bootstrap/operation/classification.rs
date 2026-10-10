@@ -34,7 +34,7 @@ fn validate_initialized(access: &BootstrapArtifactAccess) -> Result<(), Bootstra
     let key = access.open_key().map_err(key_failure)?;
     let encoded = storage::read(access, BootstrapArtifact::Initialized)?;
     let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)?;
-    require_key_identity(&record, key.identity())?;
+    require_key_identity(&record, key.bootstrap_identity())?;
     let generation = access
         .inspect_catalog(
             record.instance,

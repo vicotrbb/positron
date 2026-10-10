@@ -726,6 +726,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             &self.protection,
             self.catalog.instance(),
             RecoveryMode::Observe,
+            &basis,
         )?;
         for expected in blocks {
             let matches = recovered
@@ -1139,7 +1140,7 @@ fn compaction_source_manifest_and_bounds(
             return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
         }
         let Some((bytes, blocks)) =
-            storage.sealed_compaction_source_bound(*source, protection, instance)?
+            storage.sealed_compaction_source_bound(*source, protection, instance, Some(basis))?
         else {
             continue;
         };

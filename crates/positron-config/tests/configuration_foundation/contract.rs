@@ -136,8 +136,18 @@ fn generated_schema_covers_every_canonical_setting_with_its_declared_constraints
                 );
             },
             ValueDomain::OptionalSocketAddress(maximum) => {
-                assert_eq!(property.get("maxLength").and_then(serde_json::Value::as_u64), Some(maximum as u64));
-                assert_eq!(property.get("x-positron-address-scope").and_then(serde_json::Value::as_str), Some("disabled-or-external-numeric-otlp-grpc"));
+                assert_eq!(
+                    property
+                        .get("maxLength")
+                        .and_then(serde_json::Value::as_u64),
+                    Some(maximum as u64)
+                );
+                assert_eq!(
+                    property
+                        .get("x-positron-address-scope")
+                        .and_then(serde_json::Value::as_str),
+                    Some("disabled-or-external-numeric-otlp-grpc")
+                );
             },
             ValueDomain::AbsolutePath(maximum) | ValueDomain::ProtectedAbsolutePath(maximum) => {
                 assert_eq!(
@@ -538,6 +548,16 @@ fn exposes_the_complete_canonical_setting_contract_and_compiled_defaults()
             MutabilityClass::ImmutableAfterInitialization,
         ),
         (
+            Setting::SecurityKeyCacheLeaseSeconds,
+            "security.key_cache_lease_seconds",
+            SettingKind::Integer,
+            "900",
+            ValueDomain::UnsignedIntegerRange(0, 3600),
+            SecrecyClass::Public,
+            ProvenancePolicy::ConfigurationFileOnly,
+            MutabilityClass::RestartRequired,
+        ),
+        (
             Setting::SecurityLocalKeyFile,
             "security.local_key_file",
             SettingKind::String,
@@ -682,7 +702,7 @@ fn exposes_the_complete_canonical_setting_contract_and_compiled_defaults()
          [listener.loki_push]\ntrusted_proxy_cidrs = []\nforwarded_hops = 0\n\n\
          [storage]\ndata_directory = \"/var/lib/positron\"\n\
          secrets_directory = \"/var/lib/positron-secrets\"\n\n\
-         [security]\nlocal_key_file = \"<redacted>\"\n"
+         [security]\nkey_cache_lease_seconds = 900\nlocal_key_file = \"<redacted>\"\n"
     );
     Ok(())
 }

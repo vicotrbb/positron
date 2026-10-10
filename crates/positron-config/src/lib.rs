@@ -185,7 +185,7 @@ pub fn setting_for_path(path: &str) -> Option<Setting> {
 
 /// Returns the complete canonical contract in deterministic declaration order.
 #[must_use]
-pub const fn setting_definitions() -> [SettingDefinition; 101] {
+pub const fn setting_definitions() -> [SettingDefinition; 102] {
     contract::SETTING_DEFINITIONS
 }
 
@@ -258,8 +258,9 @@ struct Candidate {
     data_directory: String,
     secrets_directory: String,
     local_key_file: ProtectedFileReference,
+    key_cache_lease_seconds: u16,
     export_destinations: Vec<ExportDestinationDefinition>,
-    sources: [SettingSource; 101],
+    sources: [SettingSource; 102],
 }
 
 impl Candidate {
@@ -290,6 +291,8 @@ impl Candidate {
             setting_definition(Setting::ListenerLokiPushTransport).default_value();
         let data = setting_definition(Setting::StorageDataDirectory).default_value();
         let secrets = setting_definition(Setting::StorageSecretsDirectory).default_value();
+        let key_cache_lease =
+            setting_definition(Setting::SecurityKeyCacheLeaseSeconds).default_value();
         let local_key = setting_definition(Setting::SecurityLocalKeyFile).default_value();
         Ok(Self {
             schema_version: parse_schema_version(schema_version)?,
@@ -513,7 +516,8 @@ impl Candidate {
                 Setting::SecurityLocalKeyFile,
             )?,
             export_destinations: Vec::new(),
-            sources: [SettingSource::CompiledDefault; 101],
+            key_cache_lease_seconds: parse_key_cache_lease_seconds(key_cache_lease)?,
+            sources: [SettingSource::CompiledDefault; 102],
         })
     }
 
@@ -874,6 +878,9 @@ impl Candidate {
             Setting::StorageSecretsDirectory => {
                 self.secrets_directory = checked_path(value, setting)?;
             },
+            Setting::SecurityKeyCacheLeaseSeconds => {
+                self.key_cache_lease_seconds = parse_key_cache_lease_seconds(value)?;
+            },
             Setting::SecurityLocalKeyFile => {
                 self.local_key_file = ProtectedFileReference::parse(value, setting)?
             },
@@ -1121,6 +1128,7 @@ impl Candidate {
             data_directory: self.data_directory,
             secrets_directory: self.secrets_directory,
             local_key_file: self.local_key_file,
+            key_cache_lease_seconds: self.key_cache_lease_seconds,
             export_destinations: self.export_destinations,
             sources: self.sources,
         })
@@ -1164,6 +1172,24 @@ fn parse_shutdown_grace_seconds(value: &str) -> Result<u16, ConfigurationFailure
     if !(minimum..=maximum).contains(&u32::from(seconds)) {
         return Err(ConfigurationFailure::unsupported_value(
             FailureSource::RuntimeShutdownGraceSeconds,
+        ));
+    }
+    Ok(seconds)
+}
+
+fn parse_key_cache_lease_seconds(value: &str) -> Result<u16, ConfigurationFailure> {
+    let seconds = parse_canonical_u16(value, FailureSource::SecurityKeyCacheLeaseSeconds)?;
+    let ValueDomain::UnsignedIntegerRange(minimum, maximum) =
+        setting_definition(Setting::SecurityKeyCacheLeaseSeconds).domain()
+    else {
+        return Err(ConfigurationFailure::new(
+            ConfigurationFailureCode::Malformed,
+            FailureSource::SecurityKeyCacheLeaseSeconds,
+        ));
+    };
+    if !(minimum..=maximum).contains(&u32::from(seconds)) {
+        return Err(ConfigurationFailure::unsupported_value(
+            FailureSource::SecurityKeyCacheLeaseSeconds,
         ));
     }
     Ok(seconds)
@@ -1880,6 +1906,7 @@ const fn failure_source(setting: Setting) -> FailureSource {
         Setting::ListenerLokiPushForwardedHops => FailureSource::ListenerLokiPushForwardedHops,
         Setting::StorageDataDirectory => FailureSource::StorageDataDirectory,
         Setting::StorageSecretsDirectory => FailureSource::StorageSecretsDirectory,
+        Setting::SecurityKeyCacheLeaseSeconds => FailureSource::SecurityKeyCacheLeaseSeconds,
         Setting::SecurityLocalKeyFile => FailureSource::SecurityLocalKeyFile,
         Setting::ExportDestinations => FailureSource::ExportDestinations,
     }

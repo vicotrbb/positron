@@ -8,7 +8,9 @@ use crate::data_protection::{
 };
 use positron_domain::identity::TenantId;
 
-use super::{BootstrapKeyCustody, BootstrapKeyFailure, BootstrapObjectPurpose, map_frame};
+use super::{
+    BootstrapKeyCustody, BootstrapKeyFailure, BootstrapObjectPurpose, RootCustody, map_frame,
+};
 
 const DERIVATION_DOMAIN: &[u8] = b"positron-instance-bootstrap-hierarchy-v2\0";
 
@@ -74,11 +76,25 @@ impl BootstrapKeyCustody {
         ))
     }
 
-    pub(super) fn system_kek(
+    pub(in crate::data_protection::local_key) fn system_kek(
         &self,
         instance: InstanceId,
     ) -> Result<SecretKeyBytes, BootstrapKeyFailure> {
-        derive_child(&self.key.root_key.0, instance, b"system-kek", &[])
+        if let Some((bound, system, _)) = self.system.as_ref() {
+            if *bound != instance {
+                return Err(BootstrapKeyFailure::Authentication);
+            }
+            return Ok(SecretKeyBytes::from_owned(Box::new(
+                *system.expose_to_backend(),
+            )));
+        }
+        if let RootCustody::Leased(lease) = &self.key {
+            return lease
+                .lock()
+                .map_err(|_| BootstrapKeyFailure::Custody)?
+                .system_key(instance);
+        }
+        self.with_root_key(|root| derive_child(root, instance, b"system-kek", &[]))?
             .map(SecretKeyBytes::from_owned)
     }
 }

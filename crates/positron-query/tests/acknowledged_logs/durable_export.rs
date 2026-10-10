@@ -443,6 +443,35 @@ fn cancelled_pre_drain_export_retries_without_query_admission_or_audit_growth()
             )
             .expect_err("a cancelled operation must resolve before lease recovery");
         assert_eq!(direct_resume.code(), QueryFailureCode::Cancelled);
+        // The fixture's Logs and Traces ledgers retain two admitted source-state owners.
+        // Fill shared plus query headroom without assuming that owner's ABI size.
+        let governor = fixture.kernel.authority.governor();
+        let before_blocker = governor.inspect()?;
+        let pool = positron_kernel::OrdinaryPool::InteractiveQueryTail;
+        let shared = positron_kernel::OrdinaryPool::Shared;
+        let memory = positron_kernel::ResourceDimension::MemoryBytes;
+        assert_eq!(
+            before_blocker.outstanding_for(positron_kernel::WorkClass::Ingest),
+            2
+        );
+        assert_eq!(
+            before_blocker.outstanding_for(positron_kernel::WorkClass::InteractiveQueryTail),
+            0
+        );
+        assert_eq!(before_blocker.ordinary_capacity(memory), 8_000_000);
+        assert_eq!(before_blocker.pool_capacity(pool, memory), 4);
+        assert!(before_blocker.pool_usage(shared, memory) > 0);
+        let remaining = before_blocker
+            .pool_capacity(shared, memory)
+            .checked_sub(before_blocker.pool_usage(shared, memory))
+            .and_then(|available| {
+                available.checked_add(
+                    before_blocker
+                        .pool_capacity(pool, memory)
+                        .checked_sub(before_blocker.pool_usage(pool, memory))?,
+                )
+            })
+            .ok_or("ledger source exceeds ordinary query headroom")?;
         let held =
             fixture
                 .kernel
@@ -453,10 +482,23 @@ fn cancelled_pre_drain_export_retries_without_query_admission_or_audit_growth()
                     positron_kernel::WorkKind::InteractiveQueryTail,
                     positron_kernel::ResourceAmounts::only(
                         positron_kernel::ResourceDimension::MemoryBytes,
-                        7_999_600,
+                        remaining,
                     )?,
                 )?)?;
         let resources_before_retry = fixture.kernel.authority.governor().inspect()?;
+        assert_eq!(
+            resources_before_retry.pool_usage(pool, memory),
+            before_blocker.pool_capacity(pool, memory)
+        );
+        assert_eq!(
+            resources_before_retry.pool_usage(shared, memory),
+            before_blocker.pool_capacity(shared, memory)
+        );
+        assert_eq!(
+            resources_before_retry
+                .outstanding_for(positron_kernel::WorkClass::InteractiveQueryTail),
+            1
+        );
         let mut denied_retry_sink = RecordingSink::default();
         let denied_retry = service
             .export_pipeline_as_operation(
@@ -478,6 +520,20 @@ fn cancelled_pre_drain_export_retries_without_query_admission_or_audit_growth()
             resources_before_retry
         );
         drop(held);
+        let released = governor.inspect()?;
+        assert_eq!(
+            released.outstanding_reservations(),
+            before_blocker.outstanding_reservations()
+        );
+        for dimension in positron_kernel::ResourceDimension::ALL {
+            assert_eq!(released.usage(dimension), before_blocker.usage(dimension));
+            for charged_pool in [shared, pool] {
+                assert_eq!(
+                    released.pool_usage(charged_pool, dimension),
+                    before_blocker.pool_usage(charged_pool, dimension)
+                );
+            }
+        }
 
         let mut normal_retry_sink = RecordingSink::default();
         let normal_retry = service

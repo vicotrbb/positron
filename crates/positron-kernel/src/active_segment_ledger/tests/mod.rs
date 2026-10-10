@@ -1,13 +1,21 @@
 mod catalog;
 mod compaction;
+mod compaction_epoch_retirement;
+mod envelope_migration;
+mod epoch_retirement;
+mod epoch_verification_reference;
 mod faults;
 mod format;
 mod integrity;
 mod io;
+mod key_leases;
 mod reader;
 mod recovery;
 mod retention_frontier;
 mod scopes;
 mod storage;
+mod successive_envelopes;
 mod support;
 mod types;
+
+mod target_epoch_verification;

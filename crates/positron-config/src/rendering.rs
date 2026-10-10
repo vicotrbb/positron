@@ -384,6 +384,7 @@ fn reference_domain(definition: SettingDefinition) -> String {
         Setting::ListenerApiHttp2MinimumPingIntervalSeconds
         | Setting::ListenerOtlpGrpcHttp2MinimumPingIntervalSeconds => "`1..=300` seconds; minimum interval between non-ACK peer HTTP/2 PING frames; an earlier PING closes the connection".to_owned(),
         Setting::ListenerOtlpGrpcMaxMessageBytes => "`1..=16777216` bytes; transport gRPC message ceiling before decoding; an authenticated tenant's value profile may narrow it".to_owned(),
+        Setting::SecurityKeyCacheLeaseSeconds => "`0..=3600` seconds; monotonic KEK cache lease, zero retains no unwrapped KEK".to_owned(),
         Setting::SecurityLocalKeyFile => "protected absolute path under `storage.secrets_directory`, named `local-root-key.v1`; at most 256 bytes".to_owned(),
         _ => match definition.domain() {
             ValueDomain::ExactUnsignedInteger(value) => format!("exactly `{value}`"),

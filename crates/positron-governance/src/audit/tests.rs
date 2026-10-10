@@ -710,6 +710,18 @@ fn audit_schema_router_returns_one_typed_redacted_rotation_entry_or_refuses() {
 }
 
 #[test]
+fn root_retirement_preparation_is_an_explicit_redacted_audit_stage() {
+    let mut intent = b"catalog-root-rotation-v1\0retirement-prepared\0".to_vec();
+    intent.extend_from_slice(&[1; 16]);
+    intent.extend_from_slice(&2_u64.to_be_bytes());
+    intent.extend_from_slice(b"private administrator context");
+    let entry =
+        GovernanceAuditEntry::decode_fields(1, [2; 16], &intent).expect("retirement preparation");
+    assert_eq!(entry.action(), "catalog.root-rotation.retirement-prepared");
+    assert!(!format!("{entry:?}").contains("private administrator context"));
+}
+
+#[test]
 fn schema_checkpoint_audit_is_typed_tenant_bound_and_strict() {
     let tenant = TenantId::from_bytes([21; 16]).expect("tenant");
     let transaction = [22; 16];

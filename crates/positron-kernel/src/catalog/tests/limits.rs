@@ -362,7 +362,12 @@ fn audit_checkpoint_refuses_a_second_source_claim_while_the_first_is_held_then_r
     let writer_basis = catalog.pin()?;
     let generation_before_writer_refusal = writer_basis.number();
     let writer_refusal = catalog
-        .commit_admitted_maintenance_task_state(writer_basis.identity(), proposal, &execution)
+        .commit_admitted_maintenance_reservation(
+            writer_basis.identity(),
+            proposal,
+            execution.reservation(),
+            None,
+        )
         .expect_err("the admitted writer must reject the one-byte-under real proposal claim");
     assert_eq!(
         writer_refusal.code(),

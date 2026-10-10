@@ -6,7 +6,10 @@ use positron_ingest::{
     AuthenticatedOtlpLogsRequest, OtlpLogsReceiver, OtlpLogsRequestEncoding, PolicyReceiver,
     ReceiveFailure,
 };
-use positron_kernel::{MountQualification, ResourceAmounts};
+use positron_kernel::{
+    MountQualification, OrdinaryPool, ResourceAmounts, ResourceDimension, ResourceSnapshot,
+    WorkClass,
+};
 use positron_runtime::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
 
 use super::support::{fixture_with_ordinary_capacity, temporary_roots};
@@ -20,6 +23,17 @@ fn bearer_authentication_precedes_malformed_gzip_and_protobuf() -> Result<(), Bo
     InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
     let claim = InstanceBootstrap::claim(&paths)?;
     let instance = InstanceBootstrap::reopen(&paths)?;
+    let governor = instance.resource_governor();
+    let baseline = governor.inspect()?;
+    // The native System KEK cache owns one security reservation across requests.
+    assert_eq!(baseline.outstanding_reservations(), 1);
+    assert_eq!(baseline.outstanding_for(WorkClass::SecurityLifecycle), 1);
+    assert_eq!(baseline.outstanding_for(WorkClass::Ingest), 0);
+    assert!(baseline.usage(ResourceDimension::MemoryBytes) > 0);
+    assert_eq!(
+        baseline.pool_usage(OrdinaryPool::Ingest, ResourceDimension::MemoryBytes),
+        0
+    );
 
     let rejected = instance.attribute(
         PresentedCredential::parse(claim.secret())?,
@@ -27,6 +41,7 @@ fn bearer_authentication_precedes_malformed_gzip_and_protobuf() -> Result<(), Bo
         CompatibilityHints::none(),
     );
     assert!(rejected.is_err(), "system administrator cannot ingest");
+    assert_same_accounting(governor.inspect()?, baseline);
 
     let invalid_bearer = format!("pos_{}", "00".repeat(32));
     assert!(
@@ -39,6 +54,7 @@ fn bearer_authentication_precedes_malformed_gzip_and_protobuf() -> Result<(), Bo
             .is_err(),
         "invalid bearer is rejected before receiver work",
     );
+    assert_same_accounting(governor.inspect()?, baseline);
     assert!(
         instance
             .attribute(
@@ -49,24 +65,27 @@ fn bearer_authentication_precedes_malformed_gzip_and_protobuf() -> Result<(), Bo
             .is_err(),
         "conflicting external alias is rejected before receiver work",
     );
+    assert_same_accounting(governor.inspect()?, baseline);
 
     let authorized = instance.attribute(
         PresentedCredential::parse(claim.ingest_secret().expect("ingest credential"))?,
         RequestedIntent::Ingest,
         CompatibilityHints::none(),
     )?;
-    let governor = instance.resource_governor();
-    assert_eq!(governor.inspect()?.outstanding_reservations(), 0);
+    assert_same_accounting(governor.inspect()?, baseline);
     let request =
         AuthenticatedOtlpLogsRequest::otlp_grpc_gzip_protobuf(authorized, governor, vec![1, 2, 3])?;
-    assert_eq!(governor.inspect()?.outstanding_reservations(), 1);
+    let admitted = governor.inspect()?;
+    assert_eq!(admitted.outstanding_reservations(), 2);
+    assert_eq!(admitted.outstanding_for(WorkClass::SecurityLifecycle), 1);
+    assert_eq!(admitted.outstanding_for(WorkClass::Ingest), 1);
     assert_eq!(
         OtlpLogsReceiver::new()
             .decode(request)
             .expect_err("authenticated malformed gzip"),
         ReceiveFailure::MalformedCompression,
     );
-    assert_eq!(governor.inspect()?.outstanding_reservations(), 0);
+    assert_same_accounting(governor.inspect()?, baseline);
     Ok(())
 }
 
@@ -217,4 +236,38 @@ fn gzip(bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     encoder.write_all(bytes)?;
     encoder.finish()
+}
+
+fn assert_same_accounting(actual: ResourceSnapshot, baseline: ResourceSnapshot) {
+    assert_eq!(
+        actual.outstanding_reservations(),
+        baseline.outstanding_reservations()
+    );
+    for class in [
+        WorkClass::DurabilityRecovery,
+        WorkClass::SecurityLifecycle,
+        WorkClass::Ingest,
+        WorkClass::InteractiveQueryTail,
+        WorkClass::OrdinaryMaintenanceBackup,
+    ] {
+        assert_eq!(
+            actual.outstanding_for(class),
+            baseline.outstanding_for(class)
+        );
+    }
+    for dimension in ResourceDimension::ALL {
+        assert_eq!(actual.usage(dimension), baseline.usage(dimension));
+        for pool in [
+            OrdinaryPool::Shared,
+            OrdinaryPool::SecurityLifecycle,
+            OrdinaryPool::Ingest,
+            OrdinaryPool::InteractiveQueryTail,
+            OrdinaryPool::OrdinaryMaintenanceBackup,
+        ] {
+            assert_eq!(
+                actual.pool_usage(pool, dimension),
+                baseline.pool_usage(pool, dimension)
+            );
+        }
+    }
 }

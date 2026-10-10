@@ -113,6 +113,7 @@ pub(crate) fn snapshot_from_record<'kernel>(
         state,
         record,
         &recovery.segments,
+        &original_basis,
         empty_frontier_is_quarantined,
     )?;
     let bytes = blocks
@@ -132,6 +133,7 @@ pub(crate) fn snapshot_from_record<'kernel>(
         _protection: super::super::super::snapshot_protection::SnapshotProtection::for_blocks(
             ledger.authority.snapshot_protection(),
             ledger.authority.snapshot_barrier(),
+            &original_basis,
             &blocks,
         )?,
         scope: record.scope,
@@ -227,6 +229,7 @@ fn blocks_for_record<'kernel>(
     state: &super::super::super::state::LedgerState<'kernel>,
     record: &LeaseRecord,
     missing_metadata: &[super::super::super::format::SegmentMetadata],
+    original_basis: &crate::CatalogSnapshot,
     empty_frontier_is_quarantined: bool,
 ) -> Result<Vec<CommittedBlock>, LedgerFailure> {
     let mut missing_segments = BTreeSet::new();
@@ -253,6 +256,7 @@ fn blocks_for_record<'kernel>(
                 &ledger.protection,
                 ledger.catalog.instance(),
                 RecoveryMode::Observe,
+                Some(original_basis),
             )?;
             recovered.extend(recovered_segment.blocks);
         }

@@ -52,7 +52,7 @@ pub(in super::super) fn verify(
         .map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
     let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
-    require_key_identity(&record, key.identity())
+    require_key_identity(&record, key.bootstrap_identity())
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     let authority = resources::establish_system_diagnostics(volume, max_registered_tenants)
         .map_err(|_| crate::OfflineIntegrityFailure::StorageUnavailable)?;
@@ -108,6 +108,8 @@ pub(in super::super) fn verify(
         Identity::open(&snapshot).map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     let tenants = TenantAdministration::registered_tenant_ids(&snapshot)
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
+    let rewrap = positron_kernel::RootRewrapSession::admit(&authority)
+        .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;
     let mut verified_envelope_count = 0_usize;
     for tenant in &tenants {
         let envelope = identity
@@ -118,8 +120,8 @@ pub(in super::super) fn verify(
         let shard = positron_domain::routing::VirtualShardId::new(1)
             .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
         let scope = positron_kernel::SegmentScope::new(*tenant, SignalKind::Logs, shard);
-        let _ = key
-            .segment_key_from_tenant_envelope(record.instance, scope, envelope)
+        let _ = rewrap
+            .tenant_segment_key(&key, record.instance, scope, envelope)
             .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
         verified_envelope_count = verified_envelope_count
             .checked_add(1)
@@ -223,8 +225,8 @@ pub(in super::super) fn verify(
         let envelope = identity
             .tenant_key_envelope(scope.tenant_id())
             .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
-        let protection = key
-            .segment_key_from_tenant_envelope(record.instance, scope, envelope)
+        let protection = rewrap
+            .tenant_segment_key(&key, record.instance, scope, envelope)
             .map_err(|_| crate::OfflineIntegrityFailure::KeyUnavailable)?;
         let report = ActiveSegmentLedger::verify_snapshot_integrity(
             &authority,

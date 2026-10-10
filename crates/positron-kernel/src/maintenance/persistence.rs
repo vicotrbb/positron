@@ -25,6 +25,11 @@ pub(crate) fn retention_publication_record_bytes_bound() -> Result<usize, Mainte
 
 mod catalog;
 mod completions;
+mod envelope_consumption;
+mod envelope_restart;
+mod envelope_traversal;
+mod envelope_verification;
+pub use envelope_traversal::{EnvelopeVerificationProgress, EnvelopeVerificationPublication};
 mod execution;
 mod lifecycle;
 mod transitions;
@@ -189,6 +194,25 @@ impl MaintenanceCoordinator {
             now,
             clock_uncertain,
             &[MaintenanceTaskClass::IntegrityScrub],
+            Some(identity),
+        )
+    }
+
+    /// Starts only the exact durable envelope-verification handler owner.
+    pub fn start_envelope_verification_task_with_reservation_and_persist<'authority>(
+        &self,
+        catalog: &Catalog<'_>,
+        authority: &'authority StorageKernelResourceAuthority,
+        now: u64,
+        clock_uncertain: bool,
+        identity: MaintenanceTaskId,
+    ) -> Result<Option<MaintenanceExecution<'authority>>, MaintenanceFailure> {
+        self.start_next_with_reservation_and_persist_matching(
+            catalog,
+            authority,
+            now,
+            clock_uncertain,
+            &[MaintenanceTaskClass::EnvelopeVerification],
             Some(identity),
         )
     }
@@ -397,7 +421,7 @@ impl MaintenanceCoordinator {
     ) -> Result<MaintenanceTask, MaintenanceFailure> {
         let mut state = self
             .state
-            .lock()
+            .try_lock()
             .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
         if let Some(existing) = state.tasks.get(&task.identity) {
             if existing.task != task || existing.checkpoint != checkpoint {

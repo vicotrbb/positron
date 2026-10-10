@@ -306,6 +306,10 @@ impl std::fmt::Debug for Catalog<'_> {
 }
 
 impl<'authority> Catalog<'authority> {
+    pub(crate) fn resource_authority(&self) -> &StorageKernelResourceAuthority {
+        self.authority
+    }
+
     /// Admits the complete bounded offline inspection before Catalog recovery
     /// or snapshot materialization. The returned capability binds the read to
     /// this one system diagnostics reservation.
@@ -617,7 +621,7 @@ impl<'authority> Catalog<'authority> {
     /// Reserves both Catalog proposal copies and bounded registry/audit
     /// overhead before inspecting or copying objects. Publication separately
     /// reserves its protected durability-completion capacity.
-    pub(crate) fn reserve_catalog_proposal_copy(
+    pub fn reserve_catalog_proposal_copy(
         &self,
         snapshot: &CatalogSnapshot,
     ) -> Result<crate::ResourceReservation<'_>, CatalogFailure> {
@@ -711,16 +715,18 @@ impl<'authority> Catalog<'authority> {
         result
     }
 
-    pub(crate) fn commit_admitted_maintenance_task_state(
+    pub(crate) fn commit_admitted_maintenance_reservation(
         &self,
         expected: CatalogGenerationId,
         proposal: CatalogProposal,
-        execution: &MaintenanceExecution<'_>,
+        reservation: &crate::MaintenanceReservation<'_>,
+        audit: Option<AuditIntent>,
     ) -> Result<CatalogCommit, CatalogFailure> {
-        let required = commit_resource_claim(&proposal, None)?;
-        if ResourceDimension::ALL.iter().any(|dimension| {
-            execution.reservation().granted().get(*dimension) < required.get(*dimension)
-        }) {
+        let required = commit_resource_claim(&proposal, audit.as_ref())?;
+        if ResourceDimension::ALL
+            .iter()
+            .any(|dimension| reservation.granted().get(*dimension) < required.get(*dimension))
+        {
             return Err(CatalogFailure::new(
                 CatalogFailureCode::ResourceAdmissionRefused,
             ));
@@ -729,7 +735,7 @@ impl<'authority> Catalog<'authority> {
             .operation
             .lock()
             .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
-        self.commit_unreserved_interruptibly(expected, proposal, None, None, &mut || false)
+        self.commit_unreserved_interruptibly(expected, proposal, audit, None, &mut || false)
     }
 
     /// Publishes an administrative proposal whose retry identity is fixed before
@@ -1027,6 +1033,42 @@ impl<'authority> Catalog<'authority> {
             outcome.audit.as_ref(),
         )?;
         Ok(Some(commit))
+    }
+
+    /// Confirms the exact transaction owning the currently authenticated root.
+    /// Idempotent callers use this before acknowledging already-visible state.
+    pub fn confirm_current_publication(&self) -> Result<CatalogCommit, CatalogFailure> {
+        let (transaction, expected) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+            let mut matches = state
+                .transactions
+                .iter()
+                .filter(|(_, outcome)| outcome.record.generation == state.current.identity());
+            let transaction = *matches
+                .next()
+                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?
+                .0;
+            if matches.next().is_some() {
+                return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
+            }
+            (transaction, state.current.identity())
+        };
+        #[cfg(any(test, fuzzing, feature = "test-support"))]
+        storage::fault::before_current_publication_confirmation(self)?;
+        let commit = self
+            .confirm_committed_transaction(transaction)?
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+        if commit.identity() != expected || state.current.identity() != expected {
+            return Err(CatalogFailure::new(CatalogFailureCode::ConcurrentWriter));
+        }
+        Ok(commit)
     }
 
     /// Inspects one exact unpublished proposal without making it visible.

@@ -15,6 +15,7 @@ pub enum ServiceFailure {
     InvalidRequest,
     InvalidRequestWithLimit(TraceLimitViolation),
     KeyUnavailable,
+    KeyRotationInProgress,
     /// Another local runtime operation currently owns the Catalog gate.
     /// This is a scheduling condition, not a Catalog I/O failure.
     CatalogBusy,
@@ -293,7 +294,9 @@ impl ServiceFailure {
             },
             Self::KeyEnvelopeMismatch => crate::BootstrapFailureCode::KeyEnvelopeMismatch,
             Self::CorruptState => crate::BootstrapFailureCode::CorruptState,
-            Self::KeyUnavailable => crate::BootstrapFailureCode::KeyCustodyUnavailable,
+            Self::KeyUnavailable | Self::KeyRotationInProgress => {
+                crate::BootstrapFailureCode::KeyCustodyUnavailable
+            },
             Self::CatalogBusy | Self::CatalogUnavailable | Self::StorageUnavailable => {
                 crate::BootstrapFailureCode::CatalogUnavailable
             },

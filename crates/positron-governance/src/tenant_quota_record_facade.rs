@@ -188,3 +188,29 @@ pub(super) fn tenant_is_registered(
 ) -> Result<bool, TenantAdministrationFailure> {
     Ok(TenantAdministration::registered_tenant_ids(snapshot)?.contains(&tenant))
 }
+
+/// Replaces only the opaque tenant key envelope inside its canonical record.
+pub(crate) fn replace_tenant_key_envelope_record(
+    snapshot: &CatalogSnapshot,
+    tenant: TenantId,
+    envelope: &[u8],
+) -> Result<Vec<CatalogObject>, TenantAdministrationFailure> {
+    replace_tenant_record(snapshot, tenant, |bytes, record| {
+        let prefix_end = bytes
+            .len()
+            .checked_sub(record.envelope.len())
+            .and_then(|length| length.checked_sub(2))
+            .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
+        let mut successor = bytes
+            .get(..prefix_end)
+            .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?
+            .to_vec();
+        successor.extend_from_slice(
+            &u16::try_from(envelope.len())
+                .map_err(|_| TenantAdministrationFailure::InvalidInput)?
+                .to_be_bytes(),
+        );
+        successor.extend_from_slice(envelope);
+        Ok(successor)
+    })
+}

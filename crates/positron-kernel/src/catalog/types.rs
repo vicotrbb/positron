@@ -376,6 +376,10 @@ pub struct CatalogProposal {
 }
 
 impl CatalogProposal {
+    pub(crate) fn into_parts(self) -> (TransactionId, FormatEpoch, Vec<CatalogObject>) {
+        (self.transaction, self.format_epoch, self.objects)
+    }
+
     pub fn new(
         transaction: TransactionId,
         format_epoch: FormatEpoch,

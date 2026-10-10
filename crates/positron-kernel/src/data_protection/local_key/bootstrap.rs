@@ -22,6 +22,8 @@ pub(super) enum LocalKeyInitializationEvent {
     InspectSecurityDirectoryAcl,
     CreateFinalKeyFile,
     RequestEntropy,
+    #[cfg(test)]
+    PredecessorOpened,
 }
 
 pub(super) fn initialize_local_key(
@@ -33,24 +35,38 @@ pub(super) fn initialize_local_key(
     initialization_event(LocalKeyInitializationEvent::InspectSecurityDirectoryAcl);
     verify_directory_acl(directory)?;
 
-    if exists(directory, LOCAL_KEY_FILE_NAME)? {
+    initialize_named_local_key(
+        directory,
+        proof.expected_owner(),
+        LOCAL_KEY_FILE_NAME,
+        LOCAL_KEY_STAGING_FILE_NAME,
+    )
+}
+
+pub(super) fn initialize_named_local_key(
+    directory: &File,
+    expected_owner: u32,
+    final_name: &str,
+    staging_name: &str,
+) -> Result<VerifiedLocalKey, LocalKeyFailure> {
+    if exists(directory, final_name)? {
         initialization_io::synchronize_security_directory(directory).map_err(|_| {
             LocalKeyFailure::new(LocalKeyFailureCode::SynchronizeSecurityDirectoryFailed)
         })?;
-        return super::persistence::open_existing_local_key_in(directory);
+        return super::persistence::open_named_local_key_in(directory, final_name);
     }
-    if exists(directory, LOCAL_KEY_STAGING_FILE_NAME)? {
-        if let Ok(staged) = read_staged_key(directory, proof.expected_owner()) {
-            publish_staged_key(directory)?;
+    if exists(directory, staging_name)? {
+        if let Ok(staged) = read_staged_key(directory, expected_owner, staging_name) {
+            publish_staged_key(directory, final_name, staging_name)?;
             return Ok(staged);
         }
-        remove_staged_key(directory, proof.expected_owner())?;
+        remove_staged_key(directory, expected_owner, staging_name)?;
     }
 
     initialization_event(LocalKeyInitializationEvent::CreateFinalKeyFile);
     let mut file = unix_fs::openat(
         directory,
-        LOCAL_KEY_STAGING_FILE_NAME,
+        staging_name,
         OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::RUSR | Mode::WUSR,
     )
@@ -62,12 +78,7 @@ pub(super) fn initialize_local_key(
             LocalKeyFailure::new(LocalKeyFailureCode::CreateKeyFileFailed)
         }
     })?;
-    verify_named_key_file(
-        directory,
-        &file,
-        proof.expected_owner(),
-        LOCAL_KEY_STAGING_FILE_NAME,
-    )?;
+    verify_named_key_file(directory, &file, expected_owner, staging_name)?;
     verify_file_acl(&file)?;
 
     initialization_event(LocalKeyInitializationEvent::RequestEntropy);
@@ -94,16 +105,11 @@ pub(super) fn initialize_local_key(
         .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::WriteFailed))?;
     initialization_io::synchronize_key_file(&file)
         .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::SynchronizeKeyFileFailed))?;
-    verify_named_key_file(
-        directory,
-        &file,
-        proof.expected_owner(),
-        LOCAL_KEY_STAGING_FILE_NAME,
-    )?;
+    verify_named_key_file(directory, &file, expected_owner, staging_name)?;
     verify_file_acl(&file)?;
     let verified = parse_file_v1(encoded)?;
     drop(file);
-    publish_staged_key(directory)?;
+    publish_staged_key(directory, final_name, staging_name)?;
     Ok(verified)
 }
 
@@ -118,21 +124,17 @@ fn exists(directory: &File, name: &str) -> Result<bool, LocalKeyFailure> {
 fn read_staged_key(
     directory: &File,
     expected_owner: u32,
+    staging_name: &str,
 ) -> Result<VerifiedLocalKey, LocalKeyFailure> {
     let mut file = unix_fs::openat(
         directory,
-        LOCAL_KEY_STAGING_FILE_NAME,
+        staging_name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::OpenKeyFileFailed))?;
-    verify_named_key_file(
-        directory,
-        &file,
-        expected_owner,
-        LOCAL_KEY_STAGING_FILE_NAME,
-    )?;
+    verify_named_key_file(directory, &file, expected_owner, staging_name)?;
     verify_file_acl(&file)?;
     let mut encoded = EncodedLocalKeyFile::zeroed();
     file.read_exact(encoded.bytes.as_mut())
@@ -148,33 +150,36 @@ fn read_staged_key(
     parse_file_v1(encoded)
 }
 
-fn remove_staged_key(directory: &File, expected_owner: u32) -> Result<(), LocalKeyFailure> {
+fn remove_staged_key(
+    directory: &File,
+    expected_owner: u32,
+    staging_name: &str,
+) -> Result<(), LocalKeyFailure> {
     let file = unix_fs::openat(
         directory,
-        LOCAL_KEY_STAGING_FILE_NAME,
+        staging_name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
     .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::UnsafeKeyFile))?;
-    verify_named_key_file(
-        directory,
-        &file,
-        expected_owner,
-        LOCAL_KEY_STAGING_FILE_NAME,
-    )?;
-    unix_fs::unlinkat(directory, LOCAL_KEY_STAGING_FILE_NAME, AtFlags::empty())
+    verify_named_key_file(directory, &file, expected_owner, staging_name)?;
+    unix_fs::unlinkat(directory, staging_name, AtFlags::empty())
         .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::WriteFailed))?;
     initialization_io::synchronize_security_directory(directory)
         .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::SynchronizeSecurityDirectoryFailed))
 }
 
-fn publish_staged_key(directory: &File) -> Result<(), LocalKeyFailure> {
+fn publish_staged_key(
+    directory: &File,
+    final_name: &str,
+    staging_name: &str,
+) -> Result<(), LocalKeyFailure> {
     unix_fs::renameat_with(
         directory,
-        LOCAL_KEY_STAGING_FILE_NAME,
+        staging_name,
         directory,
-        LOCAL_KEY_FILE_NAME,
+        final_name,
         RenameFlags::NOREPLACE,
     )
     .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::KeyAlreadyExists))?;
@@ -190,7 +195,7 @@ pub(super) fn verify_key_file(
     verify_named_key_file(directory, file, expected_owner, LOCAL_KEY_FILE_NAME)
 }
 
-fn verify_named_key_file(
+pub(super) fn verify_named_key_file(
     directory: &File,
     file: &File,
     expected_owner: u32,
@@ -215,7 +220,7 @@ fn verify_named_key_file(
     }
 }
 
-fn initialization_event(_event: LocalKeyInitializationEvent) {
+pub(super) fn initialization_event(_event: LocalKeyInitializationEvent) {
     #[cfg(test)]
     {
         INITIALIZATION_EVENTS.with(|events| events.borrow_mut().push(_event));
@@ -265,6 +270,8 @@ pub(super) fn with_initialization_event_action<T>(
 pub(super) fn publish_recovered_local_key(
     directory: &File,
     key: &VerifiedLocalKey,
+    final_name: &str,
+    staging_name: &str,
 ) -> Result<(), LocalKeyFailure> {
     let metadata = directory
         .metadata()
@@ -275,47 +282,37 @@ pub(super) fn publish_recovered_local_key(
         ));
     }
     verify_directory_acl(directory)?;
-    if exists(directory, LOCAL_KEY_FILE_NAME)? {
+    if exists(directory, final_name)? {
         return Err(LocalKeyFailure::new(LocalKeyFailureCode::KeyAlreadyExists));
     }
-    if exists(directory, LOCAL_KEY_STAGING_FILE_NAME)? {
-        let staged = read_staged_key(directory, metadata.uid())?;
+    if exists(directory, staging_name)? {
+        let staged = read_staged_key(directory, metadata.uid(), staging_name)?;
         if staged.evidence() != key.evidence() {
             return Err(LocalKeyFailure::new(LocalKeyFailureCode::IdentityMismatch));
         }
         let file = unix_fs::openat(
             directory,
-            LOCAL_KEY_STAGING_FILE_NAME,
+            staging_name,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map(File::from)
         .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::UnsafeKeyFile))?;
-        verify_named_key_file(
-            directory,
-            &file,
-            metadata.uid(),
-            LOCAL_KEY_STAGING_FILE_NAME,
-        )?;
+        verify_named_key_file(directory, &file, metadata.uid(), staging_name)?;
         verify_file_acl(&file)?;
         initialization_io::synchronize_key_file(&file)
             .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::SynchronizeKeyFileFailed))?;
-        return publish_staged_key(directory);
+        return publish_staged_key(directory, final_name, staging_name);
     }
     let mut file = unix_fs::openat(
         directory,
-        LOCAL_KEY_STAGING_FILE_NAME,
+        staging_name,
         OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::RUSR | Mode::WUSR,
     )
     .map(File::from)
     .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::CreateKeyFileFailed))?;
-    verify_named_key_file(
-        directory,
-        &file,
-        metadata.uid(),
-        LOCAL_KEY_STAGING_FILE_NAME,
-    )?;
+    verify_named_key_file(directory, &file, metadata.uid(), staging_name)?;
     verify_file_acl(&file)?;
     let bytes = key.root_key.0.expose_to_backend();
     let encoded = encode_file_v1(
@@ -327,13 +324,8 @@ pub(super) fn publish_recovered_local_key(
         .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::WriteFailed))?;
     initialization_io::synchronize_key_file(&file)
         .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::SynchronizeKeyFileFailed))?;
-    verify_named_key_file(
-        directory,
-        &file,
-        metadata.uid(),
-        LOCAL_KEY_STAGING_FILE_NAME,
-    )?;
+    verify_named_key_file(directory, &file, metadata.uid(), staging_name)?;
     verify_file_acl(&file)?;
     drop(file);
-    publish_staged_key(directory)
+    publish_staged_key(directory, final_name, staging_name)
 }

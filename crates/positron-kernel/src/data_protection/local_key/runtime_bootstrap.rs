@@ -26,9 +26,16 @@ const ENVELOPE_HEADER_BYTES: usize = 49;
 
 mod derivation;
 mod directory;
+mod root_retirement;
+mod segment_lease;
+mod system_lease;
+mod tenant_epochs;
 use derivation::{
     derive_child, object_context, tenant_envelope_context, tenant_object_id, wrapped_context,
 };
+pub(crate) use segment_lease::LocalSegmentKeySource;
+use system_lease::RootCustody;
+pub use system_lease::VerifiedRootActivation;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapObjectPurpose {
@@ -104,7 +111,11 @@ impl Display for BootstrapKeyFailure {
 impl Error for BootstrapKeyFailure {}
 
 pub struct BootstrapKeyCustody {
-    pub(super) key: VerifiedLocalKey,
+    key: RootCustody,
+    pub(super) identity: BootstrapKeyIdentity,
+    pub(super) anchor: BootstrapKeyIdentity,
+    pub(super) system: Option<(InstanceId, SecretKeyBytes, BootstrapKeyIdentity)>,
+    pub(super) root_epoch: u64,
 }
 
 /// An opaque, instance-bound capability for authenticated crash-record frames.
@@ -259,13 +270,48 @@ impl std::fmt::Debug for BootstrapKeyCustody {
 }
 
 impl BootstrapKeyCustody {
+    pub(super) fn from_verified(key: VerifiedLocalKey) -> Self {
+        let identity = BootstrapKeyIdentity {
+            key_id: key.evidence.key_id.0,
+            fingerprint: key.evidence.fingerprint.0,
+            created_at_unix_seconds: key.evidence.creation_time.0,
+        };
+        Self {
+            key: RootCustody::Bootstrap(key),
+            identity,
+            anchor: identity,
+            system: None,
+            root_epoch: 1,
+        }
+    }
+
+    /// Immutable identity that authenticated the original bootstrap hierarchy.
+    #[must_use]
+    pub const fn root_epoch(&self) -> u64 {
+        self.root_epoch
+    }
+
+    #[must_use]
+    pub fn bootstrap_identity(&self) -> BootstrapKeyIdentity {
+        self.anchor
+    }
+    pub(in crate::data_protection) fn into_provider_root(
+        self,
+    ) -> Result<SecretKeyBytes, super::super::key_provider::KeyProviderFailure> {
+        match self.key {
+            RootCustody::Bootstrap(key) => Ok(key.root_key.0),
+            RootCustody::Leased(_) => {
+                Err(super::super::key_provider::KeyProviderFailure::InvalidConfiguration)
+            },
+        }
+    }
     pub(in crate::data_protection) fn provider_wrap(
         &self,
         payload: &[u8],
     ) -> Result<Vec<u8>, super::super::key_provider::KeyProviderFailure> {
         use super::super::{CryptoBackend, RustCryptoBackend};
-        RustCryptoBackend
-            .wrap_key_aes_256_kwp(&self.key.root_key.0, payload)
+        self.with_root_key(|root| RustCryptoBackend.wrap_key_aes_256_kwp(root, payload))
+            .map_err(|_| super::super::key_provider::KeyProviderFailure::Unavailable)?
             .map_err(|_| super::super::key_provider::KeyProviderFailure::ContextMismatch)
     }
 
@@ -274,8 +320,8 @@ impl BootstrapKeyCustody {
         ciphertext: &[u8],
     ) -> Result<super::super::SecretPlaintext, super::super::key_provider::KeyProviderFailure> {
         use super::super::{CryptoBackend, RustCryptoBackend};
-        RustCryptoBackend
-            .unwrap_key_aes_256_kwp(&self.key.root_key.0, ciphertext)
+        self.with_root_key(|root| RustCryptoBackend.unwrap_key_aes_256_kwp(root, ciphertext))
+            .map_err(|_| super::super::key_provider::KeyProviderFailure::Unavailable)?
             .map_err(|_| super::super::key_provider::KeyProviderFailure::ContextMismatch)
     }
     pub(crate) fn crash_record_protector(
@@ -293,23 +339,19 @@ impl BootstrapKeyCustody {
     pub fn initialize(secrets_root: &Path) -> Result<Self, BootstrapKeyFailure> {
         let proof = FreshInitializationRootProof::new(secrets_root).map_err(map_local)?;
         initialize_local_key(proof)
-            .map(|key| Self { key })
+            .map(Self::from_verified)
             .map_err(map_local)
     }
 
     pub fn open(secrets_root: &Path) -> Result<Self, BootstrapKeyFailure> {
         open_existing_local_key(secrets_root)
-            .map(|key| Self { key })
+            .map(Self::from_verified)
             .map_err(map_local)
     }
 
     #[must_use]
     pub const fn identity(&self) -> BootstrapKeyIdentity {
-        BootstrapKeyIdentity {
-            key_id: self.key.evidence.key_id.0,
-            fingerprint: self.key.evidence.fingerprint.0,
-            created_at_unix_seconds: self.key.evidence.creation_time.0,
-        }
+        self.identity
     }
 
     pub fn random_identifier(&self) -> Result<[u8; 16], BootstrapKeyFailure> {
@@ -335,8 +377,14 @@ impl BootstrapKeyCustody {
         instance: InstanceId,
     ) -> Result<CatalogSecret, BootstrapKeyFailure> {
         let system = self.system_kek(instance)?;
-        let marker = derive_child(&system, instance, b"catalog-marker", &[])?;
-        let wrapping = derive_child(&system, instance, b"catalog-wrapping-kek", &[])?;
+        Self::catalog_from_system(instance, &system)
+    }
+    pub(in crate::data_protection::local_key) fn catalog_from_system(
+        instance: InstanceId,
+        system: &SecretKeyBytes,
+    ) -> Result<CatalogSecret, BootstrapKeyFailure> {
+        let marker = derive_child(system, instance, b"catalog-marker", &[])?;
+        let wrapping = derive_child(system, instance, b"catalog-wrapping-kek", &[])?;
         Ok(CatalogSecret::from_owned(marker, wrapping))
     }
 
@@ -373,16 +421,7 @@ impl BootstrapKeyCustody {
         scope: SegmentScope,
         envelope: &[u8],
     ) -> Result<SegmentProtectionKey, BootstrapKeyFailure> {
-        let tenant = self.resolve_tenant_key_envelope(instance, scope.tenant_id(), envelope)?;
-        let mut context = Zeroizing::new(Vec::with_capacity(23));
-        context.extend_from_slice(&scope.tenant_id().to_bytes());
-        context.push(match scope.signal_kind() {
-            positron_domain::routing::SignalKind::Logs => 1,
-            positron_domain::routing::SignalKind::Traces => 2,
-        });
-        context.extend_from_slice(&scope.shard_id().value().to_be_bytes());
-        derive_child(&tenant, instance, b"active-segment-wrapping-kek", &context)
-            .map(SegmentProtectionKey::from_owned)
+        self.tenant_segment_keys(instance, scope, envelope)
     }
 
     pub fn tenant_key_envelope(
@@ -438,8 +477,18 @@ impl BootstrapKeyCustody {
         tenant: TenantId,
         envelope: &[u8],
     ) -> Result<SecretKeyBytes, BootstrapKeyFailure> {
+        let system = self.system_kek(instance)?;
+        Self::resolve_tenant_from_system(&system, instance, tenant, envelope)
+    }
+
+    fn resolve_tenant_from_system(
+        system: &SecretKeyBytes,
+        instance: InstanceId,
+        tenant: TenantId,
+        envelope: &[u8],
+    ) -> Result<SecretKeyBytes, BootstrapKeyFailure> {
         if envelope.get(..8) != Some(TENANT_KEK_ENVELOPE_MAGIC.as_slice()) {
-            return self.resolve_legacy_tenant_key_envelope(instance, tenant, envelope);
+            return Self::resolve_legacy_tenant_key_envelope(system, instance, tenant, envelope);
         }
         let key_id: [u8; 16] = envelope
             .get(8..24)
@@ -455,9 +504,8 @@ impl BootstrapKeyCustody {
             .get(TENANT_KEK_ENVELOPE_HEADER_BYTES..)
             .filter(|value| !value.is_empty())
             .ok_or(BootstrapKeyFailure::Authentication)?;
-        let system = self.system_kek(instance)?;
         DataProtection::unwrap_key_payload(
-            &system,
+            system,
             wrapped,
             tenant_envelope_context(instance, tenant, key_id, key_epoch)?,
             object_context(key_id)?,
@@ -470,7 +518,7 @@ impl BootstrapKeyCustody {
     /// generations. It is an explicit compatibility format, never a key
     /// derivation fallback: malformed or substituted bytes fail closed.
     fn resolve_legacy_tenant_key_envelope(
-        &self,
+        system: &SecretKeyBytes,
         instance: InstanceId,
         tenant: TenantId,
         envelope: &[u8],
@@ -478,10 +526,9 @@ impl BootstrapKeyCustody {
         if envelope.is_empty() {
             return Err(BootstrapKeyFailure::Authentication);
         }
-        let system = self.system_kek(instance)?;
         let object_id = tenant_object_id(tenant)?;
         DataProtection::unwrap_key_payload(
-            &system,
+            system,
             envelope,
             wrapped_context(instance, BootstrapObjectPurpose::Initialized, object_id)?,
             object_context(object_id)?,

@@ -15,10 +15,16 @@ use crate::{
 };
 
 mod compaction;
+mod envelope_checkpoint;
+mod envelope_verification;
+pub use envelope_checkpoint::EnvelopeVerificationCheckpoint;
+pub use persistence::{EnvelopeVerificationProgress, EnvelopeVerificationPublication};
 #[cfg(fuzzing)]
 mod fuzzing;
 mod persistence;
 mod record;
+mod root_retirement;
+pub use root_retirement::RootRetirementReferenceGuard;
 
 #[cfg(fuzzing)]
 pub use fuzzing::fuzz_maintenance_catalog_stateful;
@@ -35,6 +41,74 @@ pub(crate) fn durable_task_record_identity(
     bytes: &[u8],
 ) -> Result<Option<MaintenanceTaskId>, MaintenanceFailure> {
     record::record_identity(bytes)
+}
+
+pub(crate) fn durable_task_retains_unproved_root_reference(
+    bytes: &[u8],
+) -> Result<bool, MaintenanceFailure> {
+    if record::record_identity(bytes)?.is_none() {
+        return Ok(false);
+    }
+    let state = decode_record(bytes)?;
+    Ok(!state.task.inputs.is_empty()
+        || !state.task.outputs.is_empty()
+        || state.task.integrity_scrub_source.is_some()
+        || state.checkpoint.is_some())
+}
+
+/// An actual durable task with opaque inputs or checkpoints retains work whose
+/// epoch has not been independently proved. Terminal state is not expiration.
+pub(crate) fn durable_task_retains_unproved_tenant_reference(
+    bytes: &[u8],
+    tenant: positron_domain::identity::TenantId,
+    instance: crate::InstanceId,
+    target_epoch: u64,
+    basis: &crate::CatalogSnapshot,
+) -> Result<bool, MaintenanceFailure> {
+    if record::record_identity(bytes)?.is_none() {
+        return Ok(false);
+    }
+    let state = decode_record(bytes)?;
+    if state
+        .task
+        .scope
+        .tenant_id()
+        .is_some_and(|owner| owner != tenant)
+    {
+        return Ok(false);
+    }
+    if !state.task.inputs.is_empty()
+        || !state.task.outputs.is_empty()
+        || state.task.integrity_scrub_source.is_some()
+    {
+        return Ok(true);
+    }
+    let Some(checkpoint) = state.checkpoint.as_ref() else {
+        return Ok(false);
+    };
+    if state.task.class != MaintenanceTaskClass::EnvelopeVerification
+        || state.task.scope != MaintenanceScope::tenant(tenant)
+        || state.task.trigger != MaintenanceTrigger::Event
+        || state.task.reservations != crate::integrity_scrub_resource_claim()
+        || state.task.preconditions.resource_generation != 1
+        || state.phase != MaintenanceTaskPhase::Succeeded
+    {
+        return Ok(true);
+    }
+    let progress = EnvelopeVerificationCheckpoint::from_checkpoint(
+        checkpoint,
+        instance,
+        tenant,
+        target_epoch,
+    )?;
+    // This exact typed checkpoint contains a source digest and bounded cursor,
+    // not an old Catalog/key capability. It never authorizes retirement: the
+    // caller still inspects every other reference under the acquisition barrier.
+    Ok(!progress.is_complete()
+        || progress.source_identity()
+            != basis
+                .envelope_verification_source_identity(instance, &state.task)
+                .map_err(|_| MaintenanceFailure::CatalogUnavailable)?)
 }
 
 /// Verifies the exact queued expiry descriptor paired with one live Snapshot
@@ -1156,6 +1230,8 @@ impl MaintenanceCoordinator {
             };
             task.phase = phase;
             task.terminal_failure = terminal_failure;
+            task.active_dispatch = None;
+            task.last_progress_at = None;
         }
         assign_terminal_order(&mut state, identity)?;
         Ok(())

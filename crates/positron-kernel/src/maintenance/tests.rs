@@ -31,3 +31,6 @@ mod retention_publication;
 mod scheduling;
 #[path = "tests/support.rs"]
 mod support;
+
+#[path = "tests/envelope_verification.rs"]
+mod envelope_verification;
