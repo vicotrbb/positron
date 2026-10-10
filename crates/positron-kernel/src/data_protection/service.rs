@@ -12,6 +12,26 @@ use super::{
 pub(crate) enum DataProtection {}
 
 impl DataProtection {
+    /// Admitted provider ownership uses the Catalog's existing audit/governor authority.
+    pub(crate) fn provider<'a, 'authority, P: super::key_provider::KeyProvider>(
+        provider: &'a P,
+        lease: super::key_provider::KeyCacheLease,
+        capacity: usize,
+        reservation: crate::ResourceReservation<'a>,
+        catalog: &'a crate::Catalog<'authority>,
+    ) -> Result<
+        super::key_provider::DataProtectionProvider<'a, 'authority, P>,
+        super::key_provider::owner::ProviderAdmissionFailure,
+    > {
+        super::key_provider::DataProtectionProvider::new(
+            provider,
+            lease,
+            capacity,
+            reservation,
+            catalog,
+        )
+    }
+
     pub(super) fn release() -> BackendDataProtection<RustCryptoBackend> {
         BackendDataProtection {
             backend: RustCryptoBackend,

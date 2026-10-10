@@ -9,4 +9,4 @@ mod recovery;
 mod recovery_authority;
 mod resize;
 #[path = "support.rs"]
-mod resource_governor_test_support;
+pub(crate) mod resource_governor_test_support;

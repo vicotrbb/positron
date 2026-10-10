@@ -28,7 +28,7 @@ impl<'reservation> SegmentAbandonmentPlan<'reservation> {
         segment: SegmentId,
     ) -> Result<Self, IntegrityFailure> {
         let reservation = catalog
-            .reserve_segment_abandonment(snapshot)
+            .reserve_catalog_proposal_copy(snapshot)
             .map_err(|failure| {
                 if failure.code() == crate::CatalogFailureCode::ResourceAdmissionRefused {
                     IntegrityFailure(IntegrityFailureCode::FindingCapacity)
