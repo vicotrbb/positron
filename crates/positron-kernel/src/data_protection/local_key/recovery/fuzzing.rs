@@ -13,9 +13,9 @@ pub(crate) fn exercise(data: &[u8]) -> Result<(), RecoveryFailure> {
         SecretRootKey::from_owned(Box::new([0x82; 32])),
     )
     .map_err(|_| RecoveryFailure::Custody)?;
-    let custody = BootstrapKeyCustody {
-        key: parse_file_v1(encoded).map_err(|_| RecoveryFailure::Custody)?,
-    };
+    let custody = BootstrapKeyCustody::from_verified(
+        parse_file_v1(encoded).map_err(|_| RecoveryFailure::Custody)?,
+    );
     let seed = Zeroizing::new([0x83; 32]);
     let pin = RecoveryIdentity::new(
         InstanceId::new([0x84; 16]).map_err(|_| RecoveryFailure::InvalidInput)?,
@@ -25,14 +25,33 @@ pub(crate) fn exercise(data: &[u8]) -> Result<(), RecoveryFailure> {
             .map_err(|_| RecoveryFailure::Custody)?,
     )?;
     let metadata = RecoveryMetadata {
+        payload_version: 1,
         identity: pin,
         created: 43,
         recipients: vec!["scrypt".to_owned()],
     };
-    let mut candidate = encode(&metadata, custody.key.root_key.0.expose_to_backend());
     let (kind, commands) = data
         .split_first()
         .map_or((0, &[][..]), |(&kind, tail)| (kind, tail));
+    let system = if kind % 8 >= 4 {
+        Some(
+            super::super::root_rewrap::wrap_system(&custody, pin.instance())
+                .map_err(|_| RecoveryFailure::Authentication)?,
+        )
+    } else {
+        None
+    };
+    let mut candidate = custody
+        .with_root_key(|root| {
+            encode_with_system(
+                &metadata,
+                root.expose_to_backend(),
+                system
+                    .as_deref()
+                    .map(|envelope| (custody.bootstrap_identity(), 1, envelope)),
+            )
+        })
+        .map_err(|_| RecoveryFailure::Custody)?;
     if kind % 4 == 3 {
         let identity: age::x25519::Identity =
             include_str!("../../../../tests/testdata/recovery-age-v1/x25519.txt")

@@ -315,6 +315,7 @@ pub enum FailureSource {
     ListenerLokiPushForwardedHops,
     StorageDataDirectory,
     StorageSecretsDirectory,
+    SecurityKeyCacheLeaseSeconds,
     SecurityLocalKeyFile,
     ExportDestinations,
 }
@@ -489,6 +490,7 @@ impl FailureSource {
             Self::ListenerLokiPushForwardedHops => "listener.loki_push.forwarded_hops",
             Self::StorageDataDirectory => "storage.data_directory",
             Self::StorageSecretsDirectory => "storage.secrets_directory",
+            Self::SecurityKeyCacheLeaseSeconds => "security.key_cache_lease_seconds",
             Self::SecurityLocalKeyFile => "security.local_key_file",
             Self::ExportDestinations => "export.destination",
         }

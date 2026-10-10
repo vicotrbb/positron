@@ -287,10 +287,13 @@ fn rejects_invalid_shapes_and_values_from_each_closed_value_domain() {
         ),
     ] {
         let result = inputs(Some(document), [], []).and_then(resolve);
-        assert!(matches!(
-            result,
-            Err(error) if error.code() == code && error.source() == source
-        ), "document={document:?} result={result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(error) if error.code() == code && error.source() == source
+            ),
+            "document={document:?} result={result:?}"
+        );
     }
 
     let non_loopback = inputs(
@@ -318,7 +321,10 @@ fn rejects_invalid_shapes_and_values_from_each_closed_value_domain() {
 
     for (environment, command_line, source) in [
         (
-            vec![("POSITRON__LISTENER__API_TLS_CERTIFICATE_FILE", "/keys/certificate.pem")],
+            vec![(
+                "POSITRON__LISTENER__API_TLS_CERTIFICATE_FILE",
+                "/keys/certificate.pem",
+            )],
             Vec::new(),
             FailureSource::ListenerApiTlsCertificateFile,
         ),
@@ -413,5 +419,28 @@ fn raw_configuration_inputs_and_failures_never_format_secret_canaries() -> Resul
         protected.source_for("security.local_key_file"),
         Some(SettingSource::ConfigurationFile)
     );
+    Ok(())
+}
+
+#[test]
+fn key_cache_lease_configuration_has_the_product_default_and_hard_boundary()
+-> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        inputs(None, [], [])
+            .and_then(resolve)?
+            .key_cache_lease_seconds(),
+        900
+    );
+    for seconds in [0, 900, 3600] {
+        let document =
+            format!("schema_version = 1\n[security]\nkey_cache_lease_seconds = {seconds}\n");
+        let effective = inputs(Some(&document), [], []).and_then(resolve)?;
+        assert_eq!(effective.key_cache_lease_seconds(), seconds);
+    }
+    for value in ["-1", "3601", "65536", "\"900\""] {
+        let document =
+            format!("schema_version = 1\n[security]\nkey_cache_lease_seconds = {value}\n");
+        assert!(inputs(Some(&document), [], []).and_then(resolve).is_err());
+    }
     Ok(())
 }

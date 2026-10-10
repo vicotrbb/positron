@@ -538,7 +538,12 @@ fn public_trace_store_reopen_preserves_scalar_marker_kinds_and_actions()
     )?;
     let scope = SegmentScope::new(tenant, SignalKind::Traces, shard);
     let key = SegmentProtectionKey::from_owned(Box::new([0x5a; 32]));
-    let ledger = ActiveSegmentLedger::open(&authority, &catalog, scope, key.clone())?;
+    let ledger = ActiveSegmentLedger::open(
+        &authority,
+        &catalog,
+        scope,
+        SegmentProtectionKey::from_owned(Box::new([0x5a; 32])),
+    )?;
     ledger.append(
         TraceStore::new()
             .prepare_unretained_for_test(

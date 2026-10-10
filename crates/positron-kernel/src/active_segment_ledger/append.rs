@@ -36,6 +36,10 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
         mut block: PreparedStoreBlock<'kernel>,
         cancellation: Option<&AppendCancellation>,
     ) -> Result<CommitReceipt, LedgerFailure> {
+        let key = self
+            .key
+            .as_ref()
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::InvalidInput))?;
         if block.scope != self.scope {
             return Err(LedgerFailure::new(LedgerFailureCode::PhysicalScopeMismatch));
         }
@@ -129,8 +133,7 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
                 prior.aggregate(block.event_range)
             });
         let content_digest = block.content_digest()?;
-        let context = self
-            .key
+        let context = key
             .object
             .frame(
                 SegmentFramePurpose::StoreBlock,
@@ -164,7 +167,7 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
             .try_resize_preserving_capacity(retained_claim(retained_bytes, block_count)?)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
         let authenticator = match self.storage.append_and_commit(
-            &self.key,
+            key,
             storage::NextFrontier {
                 sequence: state.next_sequence,
                 position,
@@ -173,7 +176,7 @@ impl<'kernel> ActiveSegmentLedger<'kernel, '_> {
             },
             frame_bytes,
             || {
-                DataProtection::protect_frame(&self.key, context, &frame_plaintext, limits)
+                DataProtection::protect_frame(key, context, &frame_plaintext, limits)
                     .map_err(map_frame_failure)
             },
             || {

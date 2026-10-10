@@ -537,20 +537,31 @@ struct BootstrapAttemptFailure {
 fn bootstrap_once(
     configuration: &ServeConfiguration,
 ) -> Result<(crate::BootstrapState, crate::InitializedInstance), BootstrapAttemptFailure> {
-    let classified = InstanceBootstrap::classify(&configuration.paths).map_err(|failure| {
-        BootstrapAttemptFailure {
+    let mut paths = configuration.paths.clone();
+    if let Some(effective) = &configuration.effective_configuration {
+        let duration =
+            std::time::Duration::from_secs(u64::from(effective.key_cache_lease_seconds()));
+        let lease = positron_kernel::key_provider::KeyCacheLease::new(duration).map_err(|_| {
+            BootstrapAttemptFailure {
+                classified: None,
+                failure: BootstrapFailure::new(BootstrapFailureCode::InvalidRoots),
+            }
+        })?;
+        paths = paths.with_key_cache_lease(lease);
+    }
+    let classified =
+        InstanceBootstrap::classify(&paths).map_err(|failure| BootstrapAttemptFailure {
             classified: None,
             failure,
-        }
-    })?;
+        })?;
     let instance = match configuration.initialization {
         InitializationMode::ExistingOnly => InstanceBootstrap::reopen_with_max_registered_tenants(
-            &configuration.paths,
+            &paths,
             configuration.max_registered_tenants,
         ),
         InitializationMode::InitializeIfEmpty => {
             InstanceBootstrap::initialize_with_max_registered_tenants(
-                &configuration.paths,
+                &paths,
                 InitializationPlan::non_interactive(),
                 configuration.max_registered_tenants,
             )

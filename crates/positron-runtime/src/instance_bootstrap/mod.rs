@@ -1,6 +1,11 @@
 mod codec;
+mod local_rotation;
 mod operation;
 mod recovery;
+pub use local_rotation::{
+    LocalKeyRotationFailure, LocalKeyRotationPhase, LocalKeyRotationStatus,
+    TenantKeyMigrationProgress, TenantKeyRotationStatus, TenantKeyVerificationProgress,
+};
 mod resources;
 pub use recovery::RecoveryReadiness;
 mod storage;

@@ -80,23 +80,47 @@ fn recover_ledgers(
     let envelope = identity
         .tenant_key_envelope(tenant)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+    let session = positron_kernel::RootRewrapSession::admit(authority).map_err(key_failure)?;
+    let rotation_pending = key
+        .pending_tenant_key_epoch(instance, tenant, envelope)
+        .map_err(key_failure)?
+        .is_some();
     for signal in [SignalKind::Logs, SignalKind::Traces] {
         let scope = SegmentScope::new(tenant, signal, shard);
-        let protection = key
-            .segment_key_from_tenant_envelope(instance, scope, envelope)
+        // Sealed metadata is the durable rotation checkpoint. Reopening must
+        // not recreate a predecessor active segment after a completed roll.
+        if rotation_pending
+            && !snapshot
+                .has_active_ledger_scope(scope)
+                .map_err(|failure| ledger_open_failure(failure.code()))?
+        {
+            continue;
+        }
+        let protection = session
+            .tenant_segment_key(key, instance, scope, envelope)
             .map_err(|failure| match failure {
                 positron_kernel::BootstrapKeyFailure::Authentication => {
                     BootstrapFailure::new(BootstrapFailureCode::KeyEnvelopeMismatch)
                 },
                 failure => key_failure(failure),
             })?;
-        let ledger = ActiveSegmentLedger::open_with_retention_time(
-            authority,
-            retention_time,
-            catalog,
-            scope,
-            protection,
-        )
+        let ledger = if rotation_pending {
+            ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+                authority,
+                retention_time,
+                catalog,
+                scope,
+                protection,
+            )
+        } else {
+            ActiveSegmentLedger::open_with_retention_time(
+                authority,
+                retention_time,
+                catalog,
+                scope,
+                protection,
+            )
+        }
         .map_err(|failure| ledger_open_failure(failure.code()))?;
         drop(ledger);
     }
@@ -186,6 +210,7 @@ pub(super) fn outcome(
     bootstrap_storage: positron_kernel::InstanceBootstrapStorage,
     record: &BootstrapRecord,
     key: BootstrapKeyCustody,
+    key_cache_lease: positron_kernel::key_provider::KeyCacheLease,
     identity: Identity,
     audit: Vec<GovernanceAuditEntry>,
     authority: StorageKernelResourceAuthority,
@@ -197,6 +222,18 @@ pub(super) fn outcome(
     registered_tenants: Vec<TenantId>,
     max_registered_tenants: u16,
 ) -> Result<InitializedInstance, BootstrapFailure> {
+    let key = super::super::local_rotation::reopen_active_route(
+        &authority,
+        &bootstrap_storage,
+        record.instance,
+        key,
+    )
+    .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyEnvelopeMismatch))?;
+    let key_session = positron_kernel::RootRewrapSession::admit(&authority).map_err(key_failure)?;
+    let key = key_session
+        .lease_system(key, record.instance, key_cache_lease)
+        .map_err(key_failure)?;
+    drop(key_session);
     let logs_shard = VirtualShardId::new(1)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
     let admission_group_planner =

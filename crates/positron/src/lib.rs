@@ -24,6 +24,7 @@ mod config_cli;
 mod control_socket;
 mod doctor_cli;
 mod keys;
+mod local_key_cli;
 mod maintenance_cli;
 mod policy;
 mod recovery_cli;
@@ -68,6 +69,10 @@ pub fn run_native(
     let mut arguments = arguments.into_iter().peekable();
     if arguments.peek().is_some_and(|argument| argument == "keys") {
         arguments.next();
+        if arguments.peek().is_some_and(|argument| argument == "local") {
+            arguments.next();
+            return local_key_cli::run(arguments);
+        }
         return recovery_cli::run(arguments);
     }
     if arguments.peek().is_some_and(|argument| argument == "key") {

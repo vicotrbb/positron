@@ -32,10 +32,20 @@ impl Drop for Fixture {
 }
 
 fn request(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> TestResult<String> {
+    request_with_method("POST", port, path, headers, body)
+}
+
+fn request_with_method(
+    method: &str,
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> TestResult<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut head = format!(
-        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n",
         body.len()
     );
     for (name, value) in headers {
@@ -45,10 +55,13 @@ fn request(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Test
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     let mut response = String::new();
-    match stream.read_to_string(&mut response) {
+    match stream.take(65_537).read_to_string(&mut response) {
         Ok(_) => {},
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {},
         Err(error) => return Err(error.into()),
+    }
+    if response.len() > 65_536 {
+        return Err("binary HTTP response exceeded diagnostic bound".into());
     }
     Ok(response)
 }
@@ -300,16 +313,17 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         let diagnostic = if response.starts_with("HTTP/1.1 200 ") {
             String::new()
         } else {
-            request(
+            request_with_method(
+                "GET",
                 operations,
-                "/status",
+                "/metrics",
                 &[("Authorization", admin.as_str())],
                 b"",
             )?
         };
         assert!(
             response.starts_with("HTTP/1.1 200 "),
-            "workload response: {response}; public status: {diagnostic}"
+            "workload batch {batch_index} response: {response}; public resource metrics: {diagnostic}"
         );
     }
     let elapsed = started.elapsed();

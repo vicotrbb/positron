@@ -813,7 +813,7 @@ fn summary_maintenance_rejects_a_lower_catalog_generation_and_retries_current_st
         &current_authority,
         &current_catalog,
         scope,
-        current_key.clone(),
+        SegmentProtectionKey::from_owned(Box::new([0xc4; 32])),
     )?;
     let store = TraceStore::new();
     current_ledger.seal()?;

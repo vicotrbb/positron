@@ -31,7 +31,7 @@ impl StorageKernelResourceAuthority {
             catalog_writer_held: AtomicBool::new(false),
             active_segment_scopes: Mutex::new(active_segment_scopes),
             snapshot_protection: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            snapshot_barrier: RwLock::new(()),
+            snapshot_barrier: Arc::new(RwLock::new(())),
         }
     }
 
@@ -136,10 +136,20 @@ impl StorageKernelResourceAuthority {
 
     pub(crate) fn snapshot_protection(
         &self,
-    ) -> Arc<Mutex<std::collections::BTreeMap<[u8; 16], usize>>> {
+    ) -> Arc<
+        Mutex<
+            std::collections::BTreeMap<
+                crate::active_segment_ledger::snapshot_protection::SnapshotProtectionBinding,
+                usize,
+            >,
+        >,
+    > {
         Arc::clone(&self.snapshot_protection)
     }
 
+    pub(crate) fn shared_snapshot_barrier(&self) -> Arc<RwLock<()>> {
+        Arc::clone(&self.snapshot_barrier)
+    }
     pub(crate) fn snapshot_barrier(&self) -> &RwLock<()> {
         &self.snapshot_barrier
     }

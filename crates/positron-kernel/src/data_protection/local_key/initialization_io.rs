@@ -79,10 +79,22 @@ pub(super) fn with_initialization_fault<T>(
     fault: InitializationFault,
     operation: impl FnOnce() -> T,
 ) -> T {
+    with_initialization_fault_after(fault, 0, operation)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn with_initialization_fault_after<T>(
+    fault: InitializationFault,
+    preceding_matches: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
     INITIALIZATION_FAULT.with(|injected| {
         let previous = injected.replace(Some(fault));
+        let previous_matches =
+            INITIALIZATION_FAULT_MATCHES.with(|count| count.replace(preceding_matches));
         let result = operation();
         injected.set(previous);
+        INITIALIZATION_FAULT_MATCHES.with(|count| count.set(previous_matches));
         result
     })
 }
@@ -90,6 +102,7 @@ pub(super) fn with_initialization_fault<T>(
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static INITIALIZATION_FAULT: std::cell::Cell<Option<InitializationFault>> = const { std::cell::Cell::new(None) };
+    static INITIALIZATION_FAULT_MATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -99,6 +112,17 @@ fn take_matching_fault(
     INITIALIZATION_FAULT.with(|injected| {
         let fault = injected.get();
         if fault.is_some_and(matches) {
+            if INITIALIZATION_FAULT_MATCHES.with(|count| {
+                let remaining = count.get();
+                if remaining == 0 {
+                    false
+                } else {
+                    count.set(remaining - 1);
+                    true
+                }
+            }) {
+                return None;
+            }
             injected.take()
         } else {
             None

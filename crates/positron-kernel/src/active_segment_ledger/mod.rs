@@ -5,6 +5,9 @@ pub use abandonment::{SegmentAbandonmentPlan, integrity_abandonment_findings};
 mod append;
 mod capacity;
 mod compaction;
+mod envelope_migration;
+mod envelope_overlay;
+mod epoch_retirement;
 mod fault;
 mod format;
 #[cfg(fuzzing)]
@@ -16,6 +19,7 @@ mod publication;
 mod reader;
 mod receipt;
 mod reconstruction;
+pub use epoch_retirement::{KeyEpochRetirementGuard, TenantEpochRetirementGuard};
 mod recovery;
 mod retention;
 mod retention_frontier;
@@ -32,7 +36,7 @@ mod snapshot_lease_record;
 mod snapshot_lease_recovery;
 mod snapshot_lease_replace;
 mod snapshot_lease_usage;
-mod snapshot_protection;
+pub(crate) mod snapshot_protection;
 mod state;
 mod storage;
 #[cfg(feature = "test-support")]
@@ -291,7 +295,7 @@ pub struct ActiveSegmentLedger<'kernel, 'catalog> {
     scope: SegmentScope,
     storage: LedgerStorage,
     protection: SegmentProtectionKey,
-    key: ObjectDataKey,
+    key: Option<ObjectDataKey>,
     state: Mutex<LedgerState<'kernel>>,
     lease_attempts: Arc<Mutex<snapshot_lease_attempt::LeaseAttemptRegistry>>,
 }
@@ -549,6 +553,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             &protection,
             catalog.instance(),
             recovery::RecoveryMode::Repair,
+            &snapshot,
         )?;
         let blocks = reconstruction.blocks;
         let retained_bytes = reconstruction.retained_bytes;
@@ -596,12 +601,28 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
         let (key, current, publish_scope) = if preserve_active {
             if let Some((active, key)) = recovered_active {
-                (key, active, false)
+                (
+                    if purpose == LedgerOpenPurpose::Query {
+                        None
+                    } else {
+                        Some(key)
+                    },
+                    active,
+                    false,
+                )
+            } else if purpose == LedgerOpenPurpose::Query {
+                // Observation of a fully sealed scope does not publish an
+                // active segment or acquire a write key.
+                let observed = match metadata.last().copied() {
+                    Some(metadata) => metadata,
+                    None => fresh_metadata(scope, frontier)?,
+                };
+                (None, observed, false)
             } else {
                 let successor = fresh_metadata(scope, frontier)?;
                 let key = storage.create_active(successor, &protection, catalog.instance())?;
                 metadata.push(successor);
-                (key, successor, true)
+                (Some(key), successor, true)
             }
         } else {
             let successor = fresh_metadata(scope, frontier)?;
@@ -618,7 +639,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
                 });
             }
             metadata.push(successor);
-            (key, successor, true)
+            (Some(key), successor, true)
         };
         if publish_scope {
             publish_segments(catalog, &snapshot, &storage, scope, &metadata)
@@ -906,6 +927,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         let protection = SnapshotProtection::with_barrier(
             self.authority.snapshot_protection(),
             barrier,
+            &catalog,
             blocks.iter().map(CommittedBlock::segment_id),
         )?;
         Ok(LedgerSnapshot {
@@ -922,6 +944,9 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
 
     /// Seals the current active segment without copying or re-encoding its bytes.
     pub fn seal(self) -> Result<SealedSegment, LedgerFailure> {
+        if self.key.is_none() {
+            return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
+        }
         let state = self
             .state
             .lock()

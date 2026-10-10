@@ -1,7 +1,7 @@
 //! Monotonic, governor-accounted KEK leases. No provider call on a child-key path.
 use super::*;
 use crate::data_protection::SecretKeyBytes;
-use crate::{ResourceDimension, ResourceReservation};
+use crate::{ResourceDimension, ResourceReservation, TransferredResourceReservation};
 use std::time::{Duration, Instant};
 mod memory;
 mod object;
@@ -46,6 +46,19 @@ pub struct KeyCacheHealth {
     pub storage_unhealthy: bool,
 }
 
+enum ProviderHandle<'a, P> {
+    Borrowed(&'a P),
+    Owned(P),
+}
+impl<P> ProviderHandle<'_, P> {
+    fn get(&self) -> &P {
+        match self {
+            Self::Borrowed(provider) => provider,
+            Self::Owned(provider) => provider,
+        }
+    }
+}
+
 struct Entry {
     context: EnvelopeContext,
     envelope_digest: [u8; 32],
@@ -57,7 +70,7 @@ struct Entry {
 /// keys remain resident. The clock must be the runtime's monotonic process clock.
 /// Clock injection allows the same public outcomes to be tested without sleeps.
 pub struct KeyProviderCache<'a, P, C = fn() -> Instant> {
-    session: KeyProviderSession<'a, P>,
+    provider: ProviderHandle<'a, P>,
     lease: KeyCacheLease,
     entries: Vec<Entry>,
     capacity: usize,
@@ -68,7 +81,7 @@ pub struct KeyProviderCache<'a, P, C = fn() -> Instant> {
     live_verified: bool,
     zero_system_verified: bool,
     // Last field releases accounted memory only after resident keys are dropped.
-    _reservation: ResourceReservation<'a>,
+    _reservation: TransferredResourceReservation,
 }
 impl<'a, P: KeyProvider> KeyProviderCache<'a, P> {
     pub fn new(
@@ -78,6 +91,34 @@ impl<'a, P: KeyProvider> KeyProviderCache<'a, P> {
         reservation: ResourceReservation<'a>,
     ) -> Result<Self, KeyProviderFailure> {
         Self::with_clock(provider, lease, capacity, reservation, Instant::now)
+    }
+}
+impl<P: KeyProvider + 'static> KeyProviderCache<'static, P> {
+    /// Retains the provider and the existing governor grant without borrowing
+    /// the runtime that owns this cache.
+    pub fn from_owned(
+        provider: P,
+        lease: KeyCacheLease,
+        capacity: usize,
+        reservation: ResourceReservation<'_>,
+    ) -> Result<Self, KeyProviderFailure> {
+        Self::from_owned_with_clock(provider, lease, capacity, reservation, Instant::now)
+    }
+    /// Uses the owning runtime's monotonic process clock for the same lease authority.
+    pub fn from_owned_with_clock(
+        provider: P,
+        lease: KeyCacheLease,
+        capacity: usize,
+        reservation: ResourceReservation<'_>,
+        clock: fn() -> Instant,
+    ) -> Result<Self, KeyProviderFailure> {
+        Self::construct(
+            ProviderHandle::Owned(provider),
+            lease,
+            capacity,
+            reservation,
+            clock,
+        )
     }
 }
 impl<'a, P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'a, P, C> {
@@ -99,6 +140,24 @@ impl<'a, P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'a, P, C> {
         reservation: ResourceReservation<'a>,
         clock: C,
     ) -> Result<Self, KeyProviderFailure> {
+        Self::construct(
+            ProviderHandle::Borrowed(provider),
+            lease,
+            capacity,
+            reservation,
+            clock,
+        )
+    }
+    pub(in crate::data_protection) fn lease(&self) -> KeyCacheLease {
+        self.lease
+    }
+    fn construct(
+        provider: ProviderHandle<'a, P>,
+        lease: KeyCacheLease,
+        capacity: usize,
+        reservation: ResourceReservation<'_>,
+        clock: C,
+    ) -> Result<Self, KeyProviderFailure> {
         let required = Self::required_memory_bytes(capacity)?;
         if !reservation.is_active()
             || reservation.granted().get(ResourceDimension::MemoryBytes) < required
@@ -115,7 +174,7 @@ impl<'a, P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'a, P, C> {
         }
         let last_now = clock();
         Ok(Self {
-            session: KeyProviderSession::new(provider),
+            provider,
             lease,
             entries,
             capacity,
@@ -129,7 +188,7 @@ impl<'a, P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'a, P, C> {
                 system_ready: false,
                 storage_unhealthy: false,
             },
-            _reservation: reservation,
+            _reservation: reservation.transfer(),
         })
     }
     fn expire(&mut self) -> Instant {
@@ -163,7 +222,9 @@ impl<'a, P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'a, P, C> {
         context: EnvelopeContext,
     ) -> Result<(), KeyProviderFailure> {
         self.ensure_healthy()?;
-        let result = self.session.verify_live(context).await;
+        let result = KeyProviderSession::new(self.provider.get())
+            .verify_live(context)
+            .await;
         self.record(&result);
         if result.is_ok() {
             self.live_verified = true;
@@ -192,7 +253,9 @@ impl<'a, P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'a, P, C> {
         if !self.live_verified {
             self.verify_live(context).await?;
         }
-        let result = self.session.unwrap(envelope, context).await;
+        let result = KeyProviderSession::new(self.provider.get())
+            .unwrap(envelope, context)
+            .await;
         self.record(&result);
         let key = result?;
         // A zero lease permits the live verification but retains no plaintext.
@@ -280,6 +343,35 @@ impl<'a, P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'a, P, C> {
             Err(KeyProviderFailure::ContextMismatch | KeyProviderFailure::WrongKey)
         ) {
             self.record(result);
+        }
+    }
+}
+
+impl KeyProviderCache<'static, LocalKeyProvider> {
+    pub(in crate::data_protection) fn local_provider(&self) -> &LocalKeyProvider {
+        self.provider.get()
+    }
+    /// Native local operations perform no asynchronous I/O. Polling once keeps
+    /// the shared verified session and lease path authoritative; a deferred
+    /// response is an explicit availability failure.
+    pub(in crate::data_protection) fn local_system_key(
+        &mut self,
+        envelope: &KeyEnvelope,
+        context: EnvelopeContext,
+    ) -> Result<SecretKeyBytes, KeyProviderFailure> {
+        let future = async {
+            if self.lease.0.is_zero() {
+                self.live_key(envelope, context).await?.temporary_key()
+            } else {
+                self.load(envelope, context).await?;
+                self.key(context)
+            }
+        };
+        let mut future = std::pin::pin!(future);
+        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::future::Future::poll(future.as_mut(), &mut task) {
+            std::task::Poll::Ready(outcome) => outcome,
+            std::task::Poll::Pending => Err(KeyProviderFailure::Unavailable),
         }
     }
 }

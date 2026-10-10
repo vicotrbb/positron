@@ -223,6 +223,7 @@ impl Error for BootstrapFailure {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BootstrapPaths {
+    pub(in crate::instance_bootstrap) key_cache_lease: positron_kernel::key_provider::KeyCacheLease,
     pub(in crate::instance_bootstrap) storage: InstanceBootstrapStorage,
     #[cfg(test)]
     data: std::path::PathBuf,
@@ -237,6 +238,7 @@ impl BootstrapPaths {
         qualification: MountQualification,
     ) -> Result<Self, BootstrapFailure> {
         Ok(Self {
+            key_cache_lease: positron_kernel::key_provider::KeyCacheLease::default(),
             storage: InstanceBootstrapStorage::new(data, secrets, qualification)
                 .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::InvalidRoots))?,
             #[cfg(test)]
@@ -244,6 +246,16 @@ impl BootstrapPaths {
             #[cfg(test)]
             secrets: secrets.to_owned(),
         })
+    }
+
+    /// Uses the checked product lease policy for startup and restore.
+    #[must_use]
+    pub fn with_key_cache_lease(
+        mut self,
+        lease: positron_kernel::key_provider::KeyCacheLease,
+    ) -> Self {
+        self.key_cache_lease = lease;
+        self
     }
 
     /// Binds bootstrap custody to the exact effective local-key reference.
@@ -382,6 +394,15 @@ impl std::fmt::Debug for InitializedInstance {
 }
 
 impl InitializedInstance {
+    /// Current readiness and degradation from the owning KEK lease authority.
+    pub fn data_protection_health(
+        &self,
+    ) -> Result<positron_kernel::key_provider::KeyCacheHealth, BootstrapFailure> {
+        self.key
+            .provider_health()
+            .map_err(super::super::operation::support::key_failure)
+    }
+
     pub(in crate::instance_bootstrap) fn record_catalog_generation(&self, generation: u64) {
         self.catalog_generation
             .store(generation, std::sync::atomic::Ordering::Release);

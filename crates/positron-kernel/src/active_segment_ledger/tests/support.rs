@@ -70,6 +70,10 @@ impl Drop for TemporaryRoot {
     }
 }
 
+const LEDGER_TENANT_CAPACITY: ResourceAmounts = ResourceAmounts::new([
+    32_000_000, 32, 32, 5_000_000, 2_048, 32, 32, 32, 32, 32, 2_000_000,
+]);
+
 pub(super) fn establish_authority(
     volume: OwnedPrimaryDataVolume,
 ) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
@@ -82,6 +86,27 @@ pub(super) fn establish_authority(
 pub(super) fn establish_authority_with_retention_capacity(
     volume: OwnedPrimaryDataVolume,
     retention: ResourceAmounts,
+) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
+    let tenant_capacity = LEDGER_TENANT_CAPACITY;
+    establish_authority_with_tenant_capacity(volume, retention, tenant_capacity)
+}
+
+/// The existing full integrity claim is a 70 MB tenant operation; ordinary
+/// ledger fixtures deliberately admit only 32 MB. Keep their limits intact.
+pub(super) fn establish_integrity_authority(
+    volume: OwnedPrimaryDataVolume,
+) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
+    let claim = crate::integrity_scrub_resource_claim();
+    let large = ResourceAmounts::new([
+        90_000_000, 4, 4, 90_000_000, 70_000, 4, 4, 4, 4, 16, 40_000_000,
+    ]);
+    establish_authority_with_tenant_capacity(volume, large, LEDGER_TENANT_CAPACITY.maximum(claim))
+}
+
+fn establish_authority_with_tenant_capacity(
+    volume: OwnedPrimaryDataVolume,
+    retention: ResourceAmounts,
+    tenant_capacity: ResourceAmounts,
 ) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
     let cardinality = InventoryCardinalityLimits::new(1, 16)?;
     let large = ResourceAmounts::new([
@@ -97,9 +122,6 @@ pub(super) fn establish_authority_with_retention_capacity(
         add(add(add(durability, large)?, large)?, retention_pool)?,
         uniform(12),
     )?;
-    let tenant_capacity = ResourceAmounts::new([
-        32_000_000, 32, 32, 5_000_000, 2_048, 32, 32, 32, 32, 32, 2_000_000,
-    ]);
     let governed = add(recovery_capacity, tenant_capacity)?;
     let raw = add(governed, cardinality.governor_bootstrap_overhead(1)?)?;
     let observed = ObservedResourceEnvironment::for_test(
@@ -180,4 +202,16 @@ fn add(left: ResourceAmounts, right: ResourceAmounts) -> Result<ResourceAmounts,
         value(ResourceDimension::FileDescriptors)?,
         value(ResourceDimension::DiskHeadroomBytes)?,
     ]))
+}
+
+pub(super) fn predecessor_protection() -> crate::SegmentProtectionKey {
+    crate::SegmentProtectionKey::from_owned(Box::new([0xe4; 32]))
+}
+pub(super) fn successor_protection()
+-> Result<crate::SegmentProtectionKey, Box<dyn std::error::Error>> {
+    Ok(crate::SegmentProtectionKey::from_owned_with_route(
+        Box::new([0xe6; 32]),
+        [0xe7; 16],
+        2,
+    )?)
 }

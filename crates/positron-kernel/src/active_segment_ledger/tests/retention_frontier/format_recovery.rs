@@ -489,7 +489,7 @@ fn write_authenticated_segment_fixture(
     let header = decode_header(&original_segment)?;
     let object = object_context(scope, segment)?;
     let old_key = DataProtection::unwrap_segment_key_with_route(
-        &wrapping.key,
+        &*wrapping.key_for_route(wrapping.route)?,
         header.wrapped_key,
         instance.to_bytes(),
         object,
@@ -507,7 +507,7 @@ fn write_authenticated_segment_fixture(
     )?;
     let key = DataProtection::random_key(object)?;
     let wrapped = DataProtection::wrap_segment_key_with_route(
-        &wrapping.key,
+        &*wrapping.key_for_route(wrapping.route)?,
         &key,
         instance.to_bytes(),
         header.route,

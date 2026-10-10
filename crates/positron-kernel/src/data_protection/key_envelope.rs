@@ -243,12 +243,12 @@ const fn default_segment_route() -> SegmentEnvelopeRoute {
 }
 
 pub(super) fn encode_varint_field(field: u8, value: u64, destination: &mut Vec<u8>) {
-    destination.push(field << 3);
+    encode_varint(u64::from(field) << 3, destination);
     encode_varint(value, destination);
 }
 
 pub(super) fn encode_bytes_field(field: u8, bytes: &[u8], destination: &mut Vec<u8>) {
-    destination.push((field << 3) | 2);
+    encode_varint((u64::from(field) << 3) | 2, destination);
     encode_varint(bytes.len() as u64, destination);
     destination.extend_from_slice(bytes);
 }

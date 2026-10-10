@@ -61,7 +61,7 @@ impl<P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'_, P, C> {
         self.record_integrity(&result);
         result
     }
-    async fn live_key(
+    pub(super) async fn live_key(
         &mut self,
         envelope: &KeyEnvelope,
         context: EnvelopeContext,
@@ -74,8 +74,7 @@ impl<P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'_, P, C> {
         if !self.live_verified {
             self.verify_live(context).await?;
         }
-        let result = self
-            .session
+        let result = KeyProviderSession::new(self.provider.get())
             .unwrap(envelope, context)
             .await
             .and_then(LockedKek::new);

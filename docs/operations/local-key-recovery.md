@@ -68,13 +68,21 @@ positron keys recovery import --data-dir /srv/positron/data --secrets-dir /srv/p
 
 Import authenticates the signed bundle, original bootstrap, current Catalog,
 Instance Integrity Key and Governance Audit chain before preparing restoration.
-It publishes the recovered original root through the existing exclusive staging,
+It publishes the recovered root at its authenticated epoch through the existing exclusive staging,
 file synchronization, no-replace publication and directory synchronization path,
 then reopens the original instance. Wrong recipients, wrong trust, corruption,
 or missing input do not initialize or replace custody. A complete authenticated
 staging file can resume after a synchronization failure; incomplete or
 conflicting staging remains rejected. Recovering the root alone does not
 replace the instance data or implement backup restore.
+
+Version 1 restores `local-root-key.v1`. Version 2 restores that file for epoch 1
+or `local-root-key.epoch-N.v1` for successor epoch N. A retained original root
+is authenticated against the immutable bootstrap anchor before successor import;
+import preserves it until local-key retirement completes. An existing successor
+target, corrupt or foreign original custody, or a symbolic link is refused before
+Catalog restoration preparation. Complete authenticated raw staging can resume;
+partial raw staging remains refused on retry and is not repaired automatically.
 
 # Persistent format
 
@@ -88,19 +96,61 @@ ordered fields are:
 
 | Field | Value |
 | --- | --- |
-| 1 | Payload version 1 |
+| 1 | Payload version 1, or version 2 with a stable system KEK recovery envelope |
 | 2 | Instance identifier (16 bytes) |
 | 3 | Local Root KEK identifier (16 bytes) |
 | 4 | Root creation time in Unix seconds |
 | 5 | Root fingerprint (32 bytes) |
 | 6 | Local Root KEK (32 bytes, encrypted container only) |
 | 7 | Local-file provider identifier 1 |
-| 8 | Local Root KEK epoch 1 |
+| 8 | Immutable Local Root KEK epoch; version 1 requires 1 |
 | 9 | Purpose `local-root-recovery` |
 | 10 | Bundle creation time in Unix seconds |
 | 11 | Instance Integrity Key public key (32 bytes) |
 | 12 | Integrity-key fingerprint (32 bytes) |
 | 13 | Repeated canonical sorted native recipients, or single `scrypt` marker |
+| 14 | Version 2 only: original bootstrap root identifier (16 bytes) |
+| 15 | Version 2 only: original bootstrap root fingerprint (32 bytes) |
+| 16 | Version 2 only: original bootstrap root creation time |
+| 17 | Version 2 only: canonical local-provider Key Envelope for the stable system KEK (at most 1024 bytes) |
+
+Version 1 remains readable and its canonical encoding is unchanged. Version 2
+preserves the original system hierarchy when the active local root changes.
+Its system envelope binds the instance, original bootstrap root identity,
+current root identity and immutable root epoch, fixed format and root-wrapping
+purpose. The root identifier and fingerprint in this payload are independently
+pinned by the supplied Recovery Identity; the Instance Integrity signature
+also authenticates the original identity and system envelope. Import checks the
+complete instance before publishing a recovery route or local root. It refuses
+an existing root before writing either. The original initialized bootstrap
+remains immutable.
+
+The early bootstrap recovery route is ciphertext in
+`.positron-system-key-envelopes.v1` in the data root, separate from plaintext
+root custody. Its canonical big-endian layout is eight-byte `POSSEK01`,
+16-byte Instance ID, the original bootstrap root identity (16-byte identifier,
+32-byte fingerprint, eight-byte creation time), and a two-byte envelope count.
+Each entry has that same 56-byte identity layout for its wrapping root,
+eight-byte immutable root epoch, four-byte ciphertext length, and opaque
+serialized canonical Key Envelope containing an AES-256-KWP Wrapped Key Payload.
+The existing provider codec and context verifier own this payload. The stable
+system child retains epoch 1; a successor root URI version pins both its key
+fingerprint and assigned root epoch. The original epoch-1 URI encoding remains
+compatible. There are one to sixteen entries, ordered by
+strictly increasing nonzero epoch, in at most 16384 bytes. The active root must
+match exactly one route; malformed, duplicate, unavailable or wrong-context
+routes fail closed. The original identity is subsequently checked against the
+authenticated initialized bootstrap. This object supplies recovery bytes;
+Catalog state remains the lifecycle authority.
+
+Import publishes this route through an exclusive owner-only no-follow staging
+file, verifies its complete bytes, synchronizes the file, publishes without
+replacing an existing final route, and synchronizes the data directory before
+publishing root custody. Interrupted uncommitted staging is retryable with the
+same authenticated bytes and without replacement entropy. A differing final
+route is refused unless it already contains the exact authenticated successor
+route and immutable instance anchor. In that case import preserves all existing
+route bytes and confirms directory durability before publishing successor custody.
 
 Readers reject unknown versions, noncanonical encodings, duplicate or reordered
 fields, trailing data, wrong provider, epoch, purpose, identity or fingerprints,

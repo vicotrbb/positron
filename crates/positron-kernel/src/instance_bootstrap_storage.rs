@@ -13,6 +13,8 @@ use crate::{
 };
 
 mod io;
+mod root_retirement;
+mod system_envelope;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +30,8 @@ pub enum BootstrapArtifact {
     InitializedStaging,
     Initialized,
     Claim,
+    SystemKeyEnvelope,
+    SystemKeyEnvelopeStaging,
 }
 
 impl BootstrapArtifact {
@@ -38,6 +42,8 @@ impl BootstrapArtifact {
             Self::InitializedStaging => ".positron-bootstrap.initialized.new",
             Self::Initialized => ".positron-bootstrap.initialized",
             Self::Claim => "bootstrap-claim.v1",
+            Self::SystemKeyEnvelope => ".positron-system-key-envelopes.v1",
+            Self::SystemKeyEnvelopeStaging => ".positron-system-key-envelopes.v1.new",
         }
     }
 
@@ -47,7 +53,9 @@ impl BootstrapArtifact {
             Self::Pending
             | Self::PendingReplacement
             | Self::InitializedStaging
-            | Self::Initialized => BootstrapRoot::Data,
+            | Self::Initialized
+            | Self::SystemKeyEnvelope
+            | Self::SystemKeyEnvelopeStaging => BootstrapRoot::Data,
         }
     }
 }
@@ -71,6 +79,10 @@ pub enum BootstrapEntry {
     Diagnostics,
     LocalKey,
     LocalKeyStaging,
+    LocalKeyEpoch,
+    LocalKeyEpochStaging,
+    SystemKeyEnvelope,
+    SystemKeyEnvelopeStaging,
     Claim,
 }
 
@@ -259,16 +271,112 @@ pub struct BootstrapArtifactAccess {
 }
 
 impl BootstrapArtifactAccess {
+    pub(crate) fn prepare_successor_key(
+        &self,
+        epoch: u64,
+    ) -> Result<BootstrapKeyCustody, BootstrapKeyFailure> {
+        BootstrapKeyCustody::initialize_epoch_in(&self.secrets, epoch)
+    }
+    pub(crate) fn open_successor_key(
+        &self,
+        epoch: u64,
+    ) -> Result<BootstrapKeyCustody, BootstrapKeyFailure> {
+        BootstrapKeyCustody::open_epoch_in(&self.secrets, epoch)
+    }
+
+    pub(crate) fn require_recovery_target_absent(
+        &self,
+        key: &BootstrapKeyCustody,
+    ) -> Result<(), BootstrapKeyFailure> {
+        let epoch = key.active_root_epoch()?;
+        let name = if epoch == 1 {
+            "local-root-key.v1".to_owned()
+        } else {
+            format!("local-root-key.epoch-{epoch}.v1")
+        };
+        match unix_fs::statat(&self.secrets, &name, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => {},
+            _ => return Err(BootstrapKeyFailure::Custody),
+        }
+        let existing_route = if self
+            .exists(BootstrapArtifact::SystemKeyEnvelope)
+            .map_err(|_| BootstrapKeyFailure::Custody)?
+        {
+            let bytes = self.read_system_key_envelope()?;
+            key.verify_recovery_envelope(&bytes)?;
+            Some(bytes)
+        } else {
+            None
+        };
+        if epoch > 1 {
+            match unix_fs::statat(
+                &self.secrets,
+                "local-root-key.v1",
+                AtFlags::SYMLINK_NOFOLLOW,
+            ) {
+                Ok(_) => {
+                    let original = BootstrapKeyCustody::open_in(&self.secrets)?;
+                    if original.identity() != key.bootstrap_identity() {
+                        return Err(BootstrapKeyFailure::Authentication);
+                    }
+                    let original = match existing_route.as_ref() {
+                        Some(bytes) => original.open_root_envelope(bytes)?,
+                        None => original,
+                    };
+                    key.verify_recovered_system_matches(&original)?;
+                },
+                Err(rustix::io::Errno::NOENT) => {},
+                Err(_) => return Err(BootstrapKeyFailure::Custody),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn publish_recovered_key(
         &self,
         key: &BootstrapKeyCustody,
     ) -> Result<(), BootstrapKeyFailure> {
+        self.require_recovery_target_absent(key)?;
+        if let Some(envelope) = key.root_recovery_envelope()? {
+            if self
+                .exists(BootstrapArtifact::SystemKeyEnvelope)
+                .map_err(|_| BootstrapKeyFailure::Custody)?
+            {
+                let existing = self.read_system_key_envelope()?;
+                key.verify_recovery_envelope(&existing)?;
+                self.publish_recovered_system_envelope(&existing)?;
+            } else {
+                self.publish_recovered_system_envelope(&envelope)?;
+            }
+        }
         key.publish_recovered_in(&self.secrets)
     }
 
     /// Opens the local bootstrap key relative to the held secrets root.
     pub fn open_key(&self) -> Result<BootstrapKeyCustody, BootstrapKeyFailure> {
-        BootstrapKeyCustody::open_in(&self.secrets)
+        let main_exists = match unix_fs::statat(
+            &self.secrets,
+            "local-root-key.v1",
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
+            Ok(_) => true,
+            Err(rustix::io::Errno::NOENT) => false,
+            Err(_) => return Err(BootstrapKeyFailure::Custody),
+        };
+        let artifact = BootstrapArtifact::SystemKeyEnvelope;
+        if self
+            .exists(artifact)
+            .map_err(|_| BootstrapKeyFailure::Custody)?
+        {
+            let envelope = self.read_system_key_envelope()?;
+            if main_exists {
+                BootstrapKeyCustody::open_in(&self.secrets)?.open_root_envelope(&envelope)
+            } else {
+                BootstrapKeyCustody::open_successor_candidate(&self.secrets, &envelope)
+            }
+        } else {
+            BootstrapKeyCustody::open_in(&self.secrets)
+        }
     }
 
     /// Initializes the local bootstrap key relative to the held secrets root.
@@ -318,10 +426,15 @@ impl BootstrapArtifactAccess {
         let metadata = file
             .metadata()
             .map_err(|_| BootstrapStorageFailure::Unavailable)?;
+        let maximum = if artifact == BootstrapArtifact::SystemKeyEnvelope {
+            16_384
+        } else {
+            MAX_ARTIFACT_BYTES
+        };
         if !metadata.file_type().is_file()
             || metadata.nlink() != 1
             || metadata.len() == 0
-            || metadata.len() > MAX_ARTIFACT_BYTES
+            || metadata.len() > maximum
         {
             return Err(BootstrapStorageFailure::UnsafeOrCorrupt);
         }

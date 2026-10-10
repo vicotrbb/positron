@@ -130,6 +130,7 @@ impl InitializedInstance {
         }
         // Ordinary work is closed and fully reconciled before the final
         // protected durability transaction. Its marker is Drain completion.
+        self.key.close_for_shutdown().map_err(|_| unavailable())?;
         self.begin_shutdown()?;
         match catalog
             .commit_interruptibly(basis.identity(), proposal, None, cancelled)

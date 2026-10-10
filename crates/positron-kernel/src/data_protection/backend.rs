@@ -129,6 +129,10 @@ pub(super) trait CryptoBackend {
 
     fn sha256(&self, bytes: &[u8]) -> Result<[u8; 32], CryptoBackendFailure>;
 
+    fn begin_sha256(&self) -> Result<Sha256Digest, CryptoBackendFailure> {
+        Err(CryptoBackendFailure::HashFailed)
+    }
+
     fn fill_random(&self, destination: &mut [u8]) -> Result<(), CryptoBackendFailure>;
 
     fn hmac_sha256(
@@ -174,7 +178,21 @@ pub(super) trait CryptoBackend {
 
 pub(super) struct RustCryptoBackend;
 
+/// Fixed-size backend state; the pinned sha2 context zeroizes on drop.
+pub(crate) struct Sha256Digest(Sha256);
+impl Sha256Digest {
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+    pub(crate) fn finalize(self) -> [u8; 32] {
+        self.0.finalize().into()
+    }
+}
+
 impl CryptoBackend for RustCryptoBackend {
+    fn begin_sha256(&self) -> Result<Sha256Digest, CryptoBackendFailure> {
+        Ok(Sha256Digest(Sha256::new()))
+    }
     fn seal_aes_256_gcm(
         &self,
         key: &SecretKeyBytes,

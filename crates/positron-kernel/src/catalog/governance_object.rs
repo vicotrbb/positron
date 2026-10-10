@@ -799,6 +799,7 @@ impl CatalogSnapshot {
 }
 
 mod codec;
+mod tenant_envelope;
 
 use codec::{corrupt, encode_credentials, is_governance, lifecycle_code};
 

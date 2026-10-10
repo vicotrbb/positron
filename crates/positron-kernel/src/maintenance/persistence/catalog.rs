@@ -174,8 +174,26 @@ pub(super) fn persist_task_state_inner(
     execution: Option<&MaintenanceExecution<'_>>,
     audit: Option<AuditIntent>,
 ) -> Result<(), MaintenanceFailure> {
-    let record = encode_record(task)?;
     let snapshot = catalog.pin().map_err(map_catalog_failure)?;
+    persist_task_state_from_snapshot(
+        catalog,
+        task,
+        removed,
+        execution.map(MaintenanceExecution::reservation),
+        audit,
+        &snapshot,
+    )
+}
+
+pub(super) fn persist_task_state_from_snapshot(
+    catalog: &Catalog<'_>,
+    task: &TaskState,
+    removed: Option<MaintenanceTaskId>,
+    reservation: Option<&MaintenanceReservation<'_>>,
+    audit: Option<AuditIntent>,
+    snapshot: &crate::CatalogSnapshot,
+) -> Result<(), MaintenanceFailure> {
+    let record = encode_record(task)?;
     let mut objects = Vec::new();
     objects
         .try_reserve_exact(snapshot.object_count())
@@ -213,10 +231,13 @@ pub(super) fn persist_task_state_inner(
         .ok_or(MaintenanceFailure::CatalogUnavailable)?;
     let proposal =
         CatalogProposal::new(transaction, epoch, objects).map_err(map_catalog_failure)?;
-    match execution {
-        Some(execution) => {
-            catalog.commit_admitted_maintenance_task_state(snapshot.identity(), proposal, execution)
-        },
+    match reservation {
+        Some(reservation) => catalog.commit_admitted_maintenance_reservation(
+            snapshot.identity(),
+            proposal,
+            reservation,
+            audit,
+        ),
         None => catalog.commit(snapshot.identity(), proposal, audit),
     }
     .map_err(map_catalog_failure)?;

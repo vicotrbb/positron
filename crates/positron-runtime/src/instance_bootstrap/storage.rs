@@ -85,7 +85,9 @@ pub(super) fn classify_with(
     if has_initialized && has_pending {
         return Ok(BootstrapState::Inconsistent);
     }
-    if has_initialized && has_key {
+    let has_successor_route = layout.contains(BootstrapEntry::LocalKeyEpoch)
+        && layout.contains(BootstrapEntry::SystemKeyEnvelope);
+    if has_initialized && (has_key || has_successor_route) {
         let required_storage =
             layout.contains(BootstrapEntry::Catalog) && layout.contains(BootstrapEntry::Segments);
         return Ok(
@@ -165,7 +167,7 @@ fn authenticated_record(
     let Ok(record) = BootstrapRecord::decode(&plaintext) else {
         return false;
     };
-    record.instance == instance && record.key == key.identity()
+    record.instance == instance && record.key == key.bootstrap_identity()
 }
 
 pub(super) fn write_new(
@@ -179,6 +181,9 @@ pub(super) fn write_new(
         BootstrapArtifact::Claim => BootstrapFileEvent::WriteClaim,
         BootstrapArtifact::InitializedStaging => BootstrapFileEvent::WriteInitialized,
         BootstrapArtifact::Initialized => BootstrapFileEvent::SynchronizeDirectory,
+        BootstrapArtifact::SystemKeyEnvelope | BootstrapArtifact::SystemKeyEnvelopeStaging => {
+            return Err(BootstrapFailure::new(BootstrapFailureCode::CorruptState));
+        },
     })?;
     access.write_new(artifact, bytes).map_err(storage_failure)
 }

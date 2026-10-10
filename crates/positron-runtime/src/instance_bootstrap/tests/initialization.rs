@@ -1445,3 +1445,313 @@ fn durable_tree(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>, std::io::Erro
     visit(root, root, &mut observed)?;
     Ok(observed)
 }
+
+#[test]
+fn initialized_handoff_owns_live_system_provider_leases_after_restart() -> Result<(), Box<dyn Error>>
+{
+    for lease in [
+        positron_kernel::key_provider::KeyCacheLease::default(),
+        positron_kernel::key_provider::KeyCacheLease::new(std::time::Duration::ZERO)?,
+    ] {
+        let roots = Roots::new()?;
+        let paths = roots
+            .paths()
+            .map_err(|code| format!("paths: {code:?}"))?
+            .with_key_cache_lease(lease);
+        let initialized =
+            InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let identity = initialized.instance_id();
+        let integrity = initialized.integrity_key_fingerprint();
+        let health = initialized.data_protection_health()?;
+        assert!(health.system_ready);
+        assert!(!health.provider_degraded);
+        assert!(!health.storage_unhealthy);
+        drop(initialized);
+        let reopened = InstanceBootstrap::reopen(&paths)?;
+        assert_eq!(reopened.instance_id(), identity);
+        assert_eq!(reopened.integrity_key_fingerprint(), integrity);
+        assert!(reopened.data_protection_health()?.system_ready);
+    }
+    Ok(())
+}
+
+#[test]
+fn local_root_rotation_preparation_is_catalog_owned_idempotent_and_resumable()
+-> Result<(), Box<dyn Error>> {
+    let roots = Roots::new()?;
+    let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+    let initialized = InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    let identity = initialized.instance_id();
+    let integrity = initialized.integrity_key_fingerprint();
+    let before = initialized.catalog_generation();
+    let status = initialized.begin_local_key_rotation()?;
+    assert_eq!(status.active_epoch(), 1);
+    assert_eq!(status.successor_epoch(), Some(2));
+    assert_eq!(status.phase(), crate::LocalKeyRotationPhase::Prepared);
+    assert!(initialized.catalog_generation() > before);
+    assert_eq!(initialized.begin_local_key_rotation()?, status);
+    assert_eq!(initialized.local_key_rotation_status()?, status);
+    assert!(initialized.data_protection_health()?.system_ready);
+    drop(initialized);
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    assert_eq!(reopened.instance_id(), identity);
+    assert_eq!(reopened.integrity_key_fingerprint(), integrity);
+    assert_eq!(reopened.local_key_rotation_status()?, status);
+    assert_eq!(reopened.begin_local_key_rotation()?, status);
+    Ok(())
+}
+
+#[test]
+fn local_root_rotation_preparation_resumes_after_publication_failure() -> Result<(), Box<dyn Error>>
+{
+    for fault in [
+        CatalogPublicationFault::SynchronizeCommit,
+        CatalogPublicationFault::SynchronizeGenerationDirectory,
+    ] {
+        let roots = Roots::new()?;
+        let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+        let initialized =
+            InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let identity = initialized.instance_id();
+        let integrity = initialized.integrity_key_fingerprint();
+        let rejected = with_catalog_publication_fault_after(fault, 0, || {
+            initialized.begin_local_key_rotation()
+        });
+        assert_eq!(rejected, Err(crate::LocalKeyRotationFailure::Storage));
+        assert!(initialized.data_protection_health()?.system_ready);
+        drop(initialized);
+        let reopened = InstanceBootstrap::reopen(&paths)?;
+        assert_eq!(reopened.instance_id(), identity);
+        assert_eq!(reopened.integrity_key_fingerprint(), integrity);
+        let before_retry = reopened.local_key_rotation_status()?;
+        assert_eq!(before_retry.active_epoch(), 1);
+        assert_eq!(
+            before_retry.successor_epoch(),
+            match fault {
+                CatalogPublicationFault::SynchronizeCommit => None,
+                CatalogPublicationFault::SynchronizeGenerationDirectory => Some(2),
+                _ => return Err("unexpected publication fixture".into()),
+            }
+        );
+        let prepared = reopened.begin_local_key_rotation()?;
+        assert_eq!(prepared.active_epoch(), 1);
+        assert_eq!(prepared.successor_epoch(), Some(2));
+        assert!(reopened.data_protection_health()?.system_ready);
+    }
+    Ok(())
+}
+
+#[test]
+fn local_root_cutover_changes_live_recovery_identity_and_resumes_after_restart()
+-> Result<(), Box<dyn Error>> {
+    let roots = Roots::new()?;
+    let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+    let initialized = InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    let instance = initialized.instance_id();
+    let integrity = initialized.integrity_key_fingerprint();
+    let original = initialized.recovery_identity()?.root();
+    initialized.begin_local_key_rotation()?;
+    let active = initialized.activate_local_key_rotation()?;
+    assert_eq!(active.active_epoch(), 2);
+    assert_eq!(active.predecessor_epoch(), Some(1));
+    let successor = initialized.recovery_identity()?.root();
+    assert_ne!(successor, original);
+    assert!(initialized.data_protection_health()?.system_ready);
+    assert_eq!(
+        initialized.backup_key_recovery_readiness()?,
+        crate::RecoveryReadiness::IndependentRecoveryRequired
+    );
+    assert_eq!(initialized.activate_local_key_rotation()?, active);
+    drop(initialized);
+    fs::remove_file(roots.secrets.join("local-root-key.v1"))?;
+    let bridge_path = roots.data.join(".positron-system-key-envelopes.v1");
+    let bridge = fs::read(&bridge_path)?;
+    let mut substituted = bridge.clone();
+    substituted[8] ^= 1;
+    fs::write(&bridge_path, &substituted)?;
+    assert_eq!(
+        InstanceBootstrap::classify(&paths)?,
+        BootstrapState::Inconsistent
+    );
+    assert!(InstanceBootstrap::reopen(&paths).is_err());
+    assert_eq!(fs::read(&bridge_path)?, substituted);
+    fs::write(&bridge_path, &bridge)?;
+    let successor_path = roots.secrets.join("local-root-key.epoch-2.v1");
+    let successor_bytes = fs::read(&successor_path)?;
+    fs::remove_file(&successor_path)?;
+    assert_eq!(
+        InstanceBootstrap::classify(&paths)?,
+        BootstrapState::Inconsistent
+    );
+    assert!(InstanceBootstrap::reopen(&paths).is_err());
+    fs::write(&successor_path, &successor_bytes)?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&successor_path, fs::Permissions::from_mode(0o600))?;
+    assert_eq!(
+        InstanceBootstrap::classify(&paths)?,
+        BootstrapState::Initialized
+    );
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    assert_eq!(reopened.instance_id(), instance);
+    assert_eq!(reopened.integrity_key_fingerprint(), integrity);
+    assert_eq!(reopened.recovery_identity()?.root(), successor);
+    assert_eq!(reopened.local_key_rotation_status()?, active);
+    assert!(reopened.data_protection_health()?.system_ready);
+    Ok(())
+}
+
+#[test]
+fn local_root_cutover_reconciles_published_epoch_after_directory_sync_failure()
+-> Result<(), Box<dyn Error>> {
+    for fault in [
+        CatalogPublicationFault::SynchronizeCommit,
+        CatalogPublicationFault::SynchronizeGenerationDirectory,
+    ] {
+        let roots = Roots::new()?;
+        let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+        let initialized =
+            InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+        let original = initialized.recovery_identity()?.root();
+        initialized.begin_local_key_rotation()?;
+        let attempt = with_catalog_publication_fault_after(fault, 0, || {
+            initialized.activate_local_key_rotation()
+        });
+        match fault {
+            CatalogPublicationFault::SynchronizeCommit => {
+                assert_eq!(attempt, Err(crate::LocalKeyRotationFailure::Storage));
+                assert_eq!(initialized.recovery_identity()?.root(), original);
+                assert_eq!(initialized.local_key_rotation_status()?.active_epoch(), 1);
+            },
+            CatalogPublicationFault::SynchronizeGenerationDirectory => {
+                assert_eq!(attempt?.active_epoch(), 2);
+                assert_ne!(initialized.recovery_identity()?.root(), original);
+            },
+            _ => return Err("unexpected publication fixture".into()),
+        }
+        let active = initialized.activate_local_key_rotation()?;
+        assert_eq!(active.active_epoch(), 2);
+        let successor = initialized.recovery_identity()?.root();
+        assert_ne!(successor, original);
+        drop(initialized);
+        let reopened = InstanceBootstrap::reopen(&paths)?;
+        assert_eq!(reopened.recovery_identity()?.root(), successor);
+        assert_eq!(reopened.local_key_rotation_status()?, active);
+    }
+    Ok(())
+}
+
+#[test]
+fn failed_cutover_durability_confirmation_cannot_keep_old_provider_for_new_writes()
+-> Result<(), Box<dyn Error>> {
+    let roots = Roots::new()?;
+    let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+    let initialized = InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    let original = initialized.recovery_identity()?.root();
+    initialized.begin_local_key_rotation()?;
+    let failure = with_catalog_publication_fault_sequence_after(
+        &[
+            (CatalogPublicationFault::SynchronizeGenerationDirectory, 0),
+            (CatalogPublicationFault::SynchronizeGenerationDirectory, 0),
+        ],
+        || initialized.activate_local_key_rotation(),
+    );
+    assert_eq!(failure, Err(crate::LocalKeyRotationFailure::Storage));
+    assert_eq!(initialized.local_key_rotation_status()?.active_epoch(), 2);
+    let successor = initialized.recovery_identity()?.root();
+    assert_ne!(successor, original);
+    assert!(initialized.data_protection_health()?.system_ready);
+    let export = roots.parent.join("successor-recovery");
+    fs::create_dir(&export)?;
+    set_owner_only(&export)?;
+    let bundle = fs::canonicalize(export)?.join("successor.age");
+    let recipient = age::x25519::Identity::generate();
+    let recipients =
+        positron_kernel::RecoveryRecipients::parse(&[recipient.to_public().to_string()])?;
+    initialized.create_recovery_bundle(&bundle, &recipients)?;
+    let verified = initialized.verify_recovery_bundle(
+        &bundle,
+        positron_kernel::RecoveryUnlock::Identity(&recipient),
+    )?;
+    assert_eq!(verified.identity().root(), successor);
+    assert_eq!(initialized.activate_local_key_rotation()?.active_epoch(), 2);
+    drop(initialized);
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    assert_eq!(reopened.recovery_identity()?.root(), successor);
+    assert_eq!(reopened.local_key_rotation_status()?.active_epoch(), 2);
+    Ok(())
+}
+
+#[test]
+fn unreadable_cutover_confirmation_fences_custody_until_authenticated_resume()
+-> Result<(), Box<dyn Error>> {
+    let roots = Roots::new()?;
+    let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+    let initialized = InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    initialized.begin_local_key_rotation()?;
+    let failure = with_catalog_publication_fault_sequence_after(
+        &[
+            (CatalogPublicationFault::SynchronizeGenerationDirectory, 0),
+            (CatalogPublicationFault::ReadGenerationDirectory, 0),
+        ],
+        || initialized.activate_local_key_rotation(),
+    );
+    assert_eq!(failure, Err(crate::LocalKeyRotationFailure::Storage));
+    assert!(!initialized.data_protection_health()?.system_ready);
+    let bundle = roots.parent.join("fenced.age");
+    let recipient = age::x25519::Identity::generate();
+    let recipients =
+        positron_kernel::RecoveryRecipients::parse(&[recipient.to_public().to_string()])?;
+    assert!(
+        initialized
+            .create_recovery_bundle(&bundle, &recipients)
+            .is_err()
+    );
+    assert!(!bundle.exists());
+    assert_eq!(initialized.activate_local_key_rotation()?.active_epoch(), 2);
+    assert!(initialized.data_protection_health()?.system_ready);
+    drop(initialized);
+    assert_eq!(
+        InstanceBootstrap::reopen(&paths)?
+            .local_key_rotation_status()?
+            .active_epoch(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn unreadable_prepublication_confirmation_resumes_prepared_custody() -> Result<(), Box<dyn Error>> {
+    let roots = Roots::new()?;
+    let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+    let initialized = InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    initialized.begin_local_key_rotation()?;
+    let failure = with_catalog_publication_fault_sequence_after(
+        &[
+            (CatalogPublicationFault::SynchronizeCommit, 0),
+            (CatalogPublicationFault::ReadGenerationDirectory, 0),
+        ],
+        || initialized.activate_local_key_rotation(),
+    );
+    assert_eq!(failure, Err(crate::LocalKeyRotationFailure::Storage));
+    assert!(!initialized.data_protection_health()?.system_ready);
+    let bundle = roots.parent.join("fenced.age");
+    let recipient = age::x25519::Identity::generate();
+    let recipients =
+        positron_kernel::RecoveryRecipients::parse(&[recipient.to_public().to_string()])?;
+    assert!(
+        initialized
+            .create_recovery_bundle(&bundle, &recipients)
+            .is_err()
+    );
+    assert!(!bundle.exists());
+    assert_eq!(initialized.activate_local_key_rotation()?.active_epoch(), 2);
+    assert!(initialized.data_protection_health()?.system_ready);
+    drop(initialized);
+    assert_eq!(
+        InstanceBootstrap::reopen(&paths)?
+            .local_key_rotation_status()?
+            .active_epoch(),
+        2
+    );
+    Ok(())
+}

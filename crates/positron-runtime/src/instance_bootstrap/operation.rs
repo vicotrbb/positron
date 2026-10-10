@@ -93,7 +93,7 @@ fn resume(
     } else {
         decode_record(&key, BootstrapObjectPurpose::Pending, &pending_bytes)?
     };
-    require_key_identity(&record, key.identity())?;
+    require_key_identity(&record, key.bootstrap_identity())?;
     let authority = resources::establish(volume, record.tenant, max_registered_tenants)?;
     let catalog = Catalog::open(
         &authority,
@@ -238,6 +238,7 @@ fn resume(
         paths.storage.clone(),
         &record,
         key,
+        paths.key_cache_lease,
         identity,
         audit_records,
         authority,
@@ -257,6 +258,7 @@ pub(super) fn reopen(
 ) -> Result<InitializedInstance, BootstrapFailure> {
     reopen_with_access(
         paths.storage.clone(),
+        paths.key_cache_lease,
         max_registered_tenants,
         acquire(paths)?,
         false,
@@ -271,11 +273,18 @@ pub(super) fn reopen_read_only(
         .storage
         .acquire_read_only()
         .map_err(super::storage::storage_failure)?;
-    reopen_with_access(paths.storage.clone(), max_registered_tenants, access, true)
+    reopen_with_access(
+        paths.storage.clone(),
+        paths.key_cache_lease,
+        max_registered_tenants,
+        access,
+        true,
+    )
 }
 
 fn reopen_with_access(
     bootstrap_storage: positron_kernel::InstanceBootstrapStorage,
+    key_cache_lease: positron_kernel::key_provider::KeyCacheLease,
     max_registered_tenants: u16,
     (volume, access): (OwnedPrimaryDataVolume, BootstrapArtifactAccess),
     read_only: bool,
@@ -286,7 +295,7 @@ fn reopen_with_access(
     let key = access.open_key().map_err(key_failure)?;
     let encoded = storage::read(&access, BootstrapArtifact::Initialized)?;
     let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)?;
-    require_key_identity(&record, key.identity())?;
+    require_key_identity(&record, key.bootstrap_identity())?;
     let authority = resources::establish(volume, record.tenant, max_registered_tenants)?;
     let (current, audit_records) = if read_only {
         let view = Catalog::read_current_view(
@@ -335,6 +344,7 @@ fn reopen_with_access(
         bootstrap_storage,
         &record,
         key,
+        key_cache_lease,
         identity,
         audit_records,
         authority,
@@ -368,7 +378,7 @@ pub(super) fn inspect_offline_support_bundle(
         storage::read(&access, BootstrapArtifact::Initialized).map_err(|_| Unavailable)?;
     let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)
         .map_err(|_| Unavailable)?;
-    require_key_identity(&record, key.identity()).map_err(|_| Unavailable)?;
+    require_key_identity(&record, key.bootstrap_identity()).map_err(|_| Unavailable)?;
     let authority = resources::establish_system_diagnostics(volume, max_registered_tenants)
         .map_err(|_| Unavailable)?;
     let inspection = Catalog::reserve_offline_integrity_inspection(&authority, claim)

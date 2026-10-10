@@ -141,8 +141,15 @@ pub struct StorageKernelResourceAuthority {
     inner: GovernorInner,
     catalog_writer_held: AtomicBool,
     active_segment_scopes: Mutex<Box<ActiveSegmentScopes>>,
-    snapshot_protection: Arc<Mutex<std::collections::BTreeMap<[u8; 16], usize>>>,
-    snapshot_barrier: RwLock<()>,
+    snapshot_protection: Arc<
+        Mutex<
+            std::collections::BTreeMap<
+                crate::active_segment_ledger::snapshot_protection::SnapshotProtectionBinding,
+                usize,
+            >,
+        >,
+    >,
+    snapshot_barrier: Arc<RwLock<()>>,
 }
 
 /// A capacity-admitted tenant that cannot receive work until its durable

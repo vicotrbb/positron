@@ -27,6 +27,7 @@ use super::{
 };
 
 mod append;
+mod envelope_migration;
 pub(in crate::active_segment_ledger) use append::NextFrontier;
 mod catalog;
 #[cfg(test)]
@@ -110,7 +111,7 @@ impl LedgerStorage {
         let object = object_context(metadata.scope, metadata.id)?;
         let key = DataProtection::random_key(object).map_err(map_frame_failure)?;
         let wrapped = DataProtection::wrap_segment_key_with_route(
-            &protection.key,
+            &*protection.key_for_route(protection.route)?,
             &key,
             instance.to_bytes(),
             protection.route,
@@ -187,7 +188,7 @@ impl LedgerStorage {
         protection: &SegmentProtectionKey,
         instance: InstanceId,
     ) -> Result<(ObjectDataKey, RecoveryState), LedgerFailure> {
-        self.recover_segment_with_mode(metadata, protection, instance, RecoveryMode::Repair)
+        self.recover_segment_with_mode(metadata, protection, instance, RecoveryMode::Repair, None)
     }
 
     pub(super) fn recover_segment_with_mode(
@@ -196,6 +197,7 @@ impl LedgerStorage {
         protection: &SegmentProtectionKey,
         instance: InstanceId,
         mode: RecoveryMode,
+        basis: Option<&crate::CatalogSnapshot>,
     ) -> Result<(ObjectDataKey, RecoveryState), LedgerFailure> {
         let catalog_active = metadata.state == SegmentState::Active;
         if catalog_active && matches!(mode, RecoveryMode::Repair) {
@@ -245,18 +247,10 @@ impl LedgerStorage {
         let bytes = file.read(&mut header).map_err(map_io_error)?;
         header.truncate(bytes);
         let decoded = decode_header(&header)?;
-        if decoded.route != protection.route {
-            return Err(LedgerFailure::new(LedgerFailureCode::AuthenticationFailed));
-        }
         let object = object_context(metadata.scope, metadata.id)?;
-        let key = DataProtection::unwrap_segment_key_with_route(
-            &protection.key,
-            decoded.wrapped_key,
-            instance.to_bytes(),
-            object,
-            decoded.route,
-        )
-        .map_err(map_frame_failure)?;
+        let key = super::envelope_overlay::open_key(
+            basis, metadata, instance, protection, &decoded, &header,
+        )?;
         let metadata_context = object
             .frame(SegmentFramePurpose::SegmentMetadata, FrameSequence::new(0))
             .map_err(map_frame_failure)?;
@@ -387,12 +381,13 @@ impl LedgerStorage {
         metadata: SegmentMetadata,
         protection: &SegmentProtectionKey,
         instance: InstanceId,
+        basis: Option<&crate::CatalogSnapshot>,
     ) -> Result<Option<(usize, usize)>, LedgerFailure> {
         if metadata.state != SegmentState::Sealed {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
         Ok(self
-            .verification_source_bound(metadata, protection, instance)?
+            .verification_source_bound(metadata, protection, instance, basis)?
             .filter(|(_, blocks)| *blocks != 0))
     }
 
@@ -403,6 +398,7 @@ impl LedgerStorage {
         metadata: SegmentMetadata,
         protection: &SegmentProtectionKey,
         instance: InstanceId,
+        basis: Option<&crate::CatalogSnapshot>,
     ) -> Result<Option<(usize, usize)>, LedgerFailure> {
         let directory = match metadata.state {
             SegmentState::Active if entry_exists(&self.active, &segment_name(metadata.id))? => {
@@ -433,18 +429,10 @@ impl LedgerStorage {
         let header_bytes = file.read(&mut header).map_err(map_io_error)?;
         header.truncate(header_bytes);
         let decoded = decode_header(&header)?;
-        if decoded.route != protection.route {
-            return Err(LedgerFailure::new(LedgerFailureCode::AuthenticationFailed));
-        }
         let object = object_context(metadata.scope, metadata.id)?;
-        let key = DataProtection::unwrap_segment_key_with_route(
-            &protection.key,
-            decoded.wrapped_key,
-            instance.to_bytes(),
-            object,
-            decoded.route,
-        )
-        .map_err(map_frame_failure)?;
+        let key = super::envelope_overlay::open_key(
+            basis, metadata, instance, protection, &decoded, &header,
+        )?;
         let context = object
             .frame(SegmentFramePurpose::SegmentMetadata, FrameSequence::new(0))
             .map_err(map_frame_failure)?;

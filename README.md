@@ -7,6 +7,10 @@ binding vocabulary in [CONTEXT.md](CONTEXT.md), the accepted product decisions
 in [docs/adr](docs/adr), and the application shape in
 [docs/application-design.md](docs/application-design.md).
 
+Owner operations for [local-key epoch rotation](docs/operations/local-key-rotation.md)
+and independently stored [Recovery Bundles](docs/operations/local-key-recovery.md)
+use the existing key custody and authenticated Catalog lifecycle.
+
 ## Develop
 
 Use the pinned Rust toolchain from `rust-toolchain.toml`.

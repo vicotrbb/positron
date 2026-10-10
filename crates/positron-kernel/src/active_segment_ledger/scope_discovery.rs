@@ -4,10 +4,54 @@ use sha2::{Digest, Sha256};
 
 use crate::catalog::CatalogSnapshot;
 
-use super::format::decode_metadata;
+use super::format::{SegmentState, decode_metadata};
 use super::{LedgerFailure, LedgerFailureCode, SegmentScope};
 
 impl CatalogSnapshot {
+    /// Reports the existing authenticated active publication for one scope.
+    pub fn has_active_ledger_scope(&self, scope: SegmentScope) -> Result<bool, LedgerFailure> {
+        let mut found = false;
+        for plaintext in self.plaintext_objects() {
+            let Some(metadata) = decode_metadata(plaintext)? else {
+                continue;
+            };
+            if metadata.scope == scope && metadata.state == SegmentState::Active {
+                if found {
+                    return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+                }
+                found = true;
+            }
+        }
+        Ok(found)
+    }
+    /// Selects one authenticated active scope without allocating a scope inventory.
+    pub fn next_active_ledger_scope(
+        &self,
+        tenant: TenantId,
+    ) -> Result<Option<SegmentScope>, LedgerFailure> {
+        let mut selected = None;
+        let mut matching = 0_usize;
+        for plaintext in self.plaintext_objects() {
+            let Some(metadata) = decode_metadata(plaintext)? else {
+                continue;
+            };
+            if metadata.scope.tenant_id() != tenant || metadata.state != SegmentState::Active {
+                continue;
+            }
+            if selected.is_none_or(|scope| metadata.scope < scope) {
+                selected = Some(metadata.scope);
+                matching = 1;
+            } else if selected == Some(metadata.scope) {
+                matching = matching
+                    .checked_add(1)
+                    .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::LimitExceeded))?;
+            }
+        }
+        if matching > 1 {
+            return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+        }
+        Ok(selected)
+    }
     /// Returns the bounded canonical ledger scopes reachable from this immutable generation.
     pub fn reachable_ledger_scopes(
         &self,

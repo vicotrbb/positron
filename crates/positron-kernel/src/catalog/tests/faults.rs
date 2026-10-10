@@ -95,6 +95,61 @@ fn secret() -> CatalogSecret {
 }
 
 #[test]
+fn current_publication_confirmation_refuses_a_successor_after_transaction_capture()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = TemporaryRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
+    let authority = establish_catalog_authority(volume)?;
+    let catalog = Catalog::open(&authority, InstanceId::new(id(1))?, secret())?;
+    let original = catalog.pin()?;
+    let first = catalog.commit(
+        original.identity(),
+        CatalogProposal::new(
+            TransactionId::new(id(2))?,
+            FormatEpoch::new(1)?,
+            vec![CatalogObject::new(b"first-current-publication".to_vec())?],
+        )?,
+        None,
+    )?;
+    let result = super::super::storage::fault::with_catalog_fault_hook_after(
+        CatalogFileEvent::BeforeCurrentPublicationConfirmation,
+        0,
+        |catalog| {
+            let basis = catalog.pin().expect("authenticated concurrent basis");
+            catalog
+                .commit(
+                    basis.identity(),
+                    CatalogProposal::new(
+                        TransactionId::new(id(3)).expect("fixture transaction"),
+                        FormatEpoch::new(1).expect("fixture format"),
+                        vec![
+                            CatalogObject::new(b"actual-successor-publication".to_vec())
+                                .expect("fixture successor object"),
+                        ],
+                    )
+                    .expect("fixture proposal"),
+                    None,
+                )
+                .expect("actual successor commits between capture and confirmation");
+        },
+        || catalog.confirm_current_publication(),
+    );
+    assert_eq!(
+        result
+            .expect_err("historical durability cannot acknowledge current successor")
+            .code(),
+        CatalogFailureCode::ConcurrentWriter
+    );
+    let successor = catalog.pin()?;
+    assert_ne!(successor.identity(), first.identity());
+    assert_eq!(
+        catalog.confirm_current_publication()?.identity(),
+        successor.identity()
+    );
+    Ok(())
+}
+
+#[test]
 fn catalog_open_is_refused_while_a_same_authority_repair_claim_is_held_then_recovers()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = TemporaryRoot::new()?;

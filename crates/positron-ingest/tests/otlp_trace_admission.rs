@@ -15,7 +15,7 @@ use positron_ingest::{
     TraceLimitViolation, TraceReceiveFailure, otlp_traces_timestamp_presence_json,
     reserve_trace_receiver_transport,
 };
-use positron_kernel::{MountQualification, ResourceDimension};
+use positron_kernel::{MountQualification, ResourceDimension, WorkClass};
 use positron_runtime::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
 use prost::Message;
 
@@ -288,12 +288,23 @@ fn non_ingest_authority_is_rejected_before_trace_reservation() -> Result<(), Box
         CompatibilityHints::none(),
     )?;
     let governor = instance.resource_governor();
+    let baseline = governor.inspect()?;
+    // The native System KEK cache retains its security grant; no trace grant exists.
+    assert_eq!(baseline.outstanding_reservations(), 1);
+    assert_eq!(baseline.outstanding_for(WorkClass::SecurityLifecycle), 1);
+    assert_eq!(baseline.outstanding_for(WorkClass::Ingest), 0);
     assert_eq!(
         AuthenticatedOtlpTracesRequest::otlp_grpc_protobuf(query_context, governor, Vec::new())
             .err(),
         Some(TraceReceiveFailure::AuthenticationRejected),
     );
-    assert_eq!(governor.inspect()?.outstanding_reservations(), 0);
+    let rejected = governor.inspect()?;
+    assert_eq!(rejected.outstanding_reservations(), 1);
+    assert_eq!(rejected.outstanding_for(WorkClass::SecurityLifecycle), 1);
+    assert_eq!(rejected.outstanding_for(WorkClass::Ingest), 0);
+    for dimension in ResourceDimension::ALL {
+        assert_eq!(rejected.usage(dimension), baseline.usage(dimension));
+    }
     Ok(())
 }
 

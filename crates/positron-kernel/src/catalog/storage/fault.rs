@@ -43,6 +43,8 @@ pub(crate) enum CatalogFileEvent {
     SynchronizeRewrapDirectory,
     #[cfg(any(test, fuzzing, feature = "test-support"))]
     BeforeLeaseMarkerBasis,
+    #[cfg(any(test, fuzzing, feature = "test-support"))]
+    BeforeCurrentPublicationConfirmation,
 }
 
 pub(super) fn injected_partial_write_length(
@@ -198,6 +200,20 @@ pub(crate) fn before_lease_marker_basis(
     }
 }
 
+#[cfg(any(test, fuzzing, feature = "test-support"))]
+pub(crate) fn before_current_publication_confirmation(
+    catalog: &crate::catalog::Catalog<'_>,
+) -> Result<(), CatalogFailure> {
+    if should_inject(
+        CatalogFileEvent::BeforeCurrentPublicationConfirmation,
+        Some(catalog),
+    ) {
+        Err(CatalogFailure::new(CatalogFailureCode::StorageUnavailable))
+    } else {
+        Ok(())
+    }
+}
+
 /// Narrow catalog-publication fault controls for cross-crate integration tests.
 ///
 /// This is available only through the non-default `test-support` feature and
@@ -206,6 +222,7 @@ pub(crate) fn before_lease_marker_basis(
 #[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogPublicationFault {
+    RenameMarker,
     ReclaimAudit,
     SynchronizeReclaimedAuditDirectory,
     SynchronizeCommit,
@@ -217,6 +234,7 @@ pub enum CatalogPublicationFault {
 impl CatalogPublicationFault {
     const fn storage_event(self) -> CatalogFileEvent {
         match self {
+            Self::RenameMarker => CatalogFileEvent::RenameMarker,
             Self::ReclaimAudit => CatalogFileEvent::ReclaimAudit,
             Self::SynchronizeReclaimedAuditDirectory => {
                 CatalogFileEvent::SynchronizeReclaimedAuditDirectory

@@ -40,6 +40,7 @@ impl CommittedLedgerReader<'_, '_, '_> {
             &self.protection,
             self.catalog.instance(),
             super::recovery::RecoveryMode::Observe,
+            &catalog,
         )?;
         let states = metadata
             .into_iter()

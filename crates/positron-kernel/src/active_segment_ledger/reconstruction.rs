@@ -25,6 +25,7 @@ pub(super) fn reconstruct(
     protection: &SegmentProtectionKey,
     instance: InstanceId,
     mode: RecoveryMode,
+    basis: &crate::CatalogSnapshot,
 ) -> Result<Reconstruction, LedgerFailure> {
     let mut segments = metadata.iter().copied().peekable();
     let mut holes = quarantined_holes.iter().copied().peekable();
@@ -52,8 +53,13 @@ pub(super) fn reconstruct(
                 if marker.state != SegmentState::Sealed {
                     return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
                 }
-                let (_, recovered) =
-                    storage.recover_segment_with_mode(marker, protection, instance, mode)?;
+                let (_, recovered) = storage.recover_segment_with_mode(
+                    marker,
+                    protection,
+                    instance,
+                    mode,
+                    Some(basis),
+                )?;
                 if recovered.frontier != base || !recovered.blocks.is_empty() {
                     return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
                 }
@@ -83,8 +89,13 @@ pub(super) fn reconstruct(
         let mut advancing_sealed = None;
         let mut active = None;
         while let Some(segment) = segments.next_if(|candidate| candidate.base_position == base) {
-            let (key, recovered) =
-                storage.recover_segment_with_mode(segment, protection, instance, mode)?;
+            let (key, recovered) = storage.recover_segment_with_mode(
+                segment,
+                protection,
+                instance,
+                mode,
+                Some(basis),
+            )?;
             if segment.state == SegmentState::Active {
                 active = Some((segment, key, recovered));
             } else if recovered.frontier == base {

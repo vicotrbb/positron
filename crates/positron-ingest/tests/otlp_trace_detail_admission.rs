@@ -12,7 +12,7 @@ use positron_ingest::{
     TraceReceiveFailure,
 };
 use positron_kernel::{
-    MountQualification, ResourceAmounts, ResourceDimension, WorkClaim, WorkKind,
+    MountQualification, ResourceAmounts, ResourceDimension, WorkClaim, WorkClass, WorkKind,
 };
 use positron_runtime::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
 use prost::Message;
@@ -196,6 +196,10 @@ fn transient_detail_strings_are_reserved_while_materializing() -> Result<(), Box
         CompatibilityHints::none(),
     )?;
     let governor = instance.resource_governor();
+    let baseline = governor.inspect()?;
+    assert_eq!(baseline.outstanding_total(), 1);
+    assert_eq!(baseline.outstanding_for(WorkClass::SecurityLifecycle), 1);
+    assert_eq!(baseline.outstanding_for(WorkClass::Ingest), 0);
     let request = request_with_event_name_length(800);
     let tenant = context
         .tenant_attribution()
@@ -233,9 +237,18 @@ fn transient_detail_strings_are_reserved_while_materializing() -> Result<(), Box
         matches!(failure, TraceReceiveFailure::CapacityUnavailable),
         "transient source/destination detail peak must fail as capacity unavailable: {failure:?}"
     );
-    assert_eq!(governor.inspect()?.outstanding_total(), 1);
+    let blocked = governor.inspect()?;
+    assert_eq!(blocked.outstanding_total(), 2);
+    assert_eq!(blocked.outstanding_for(WorkClass::SecurityLifecycle), 2);
+    assert_eq!(blocked.outstanding_for(WorkClass::Ingest), 0);
     drop(blocker);
-    assert!(governor.inspect()?.complete());
+    let released = governor.inspect()?;
+    assert_eq!(released.outstanding_total(), 1);
+    assert_eq!(released.outstanding_for(WorkClass::SecurityLifecycle), 1);
+    assert_eq!(released.outstanding_for(WorkClass::Ingest), 0);
+    for dimension in ResourceDimension::ALL {
+        assert_eq!(released.usage(dimension), baseline.usage(dimension));
+    }
     Ok(())
 }
 

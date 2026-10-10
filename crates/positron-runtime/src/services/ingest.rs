@@ -95,6 +95,7 @@ fn ingest_native_batch_inner(
     identity
         .validate_ingest_context(context)
         .map_err(|_| ServiceFailure::Unauthorized)?;
+    refuse_pending_tenant_rotation(instance, &identity, tenant)?;
     let mut outcomes = Vec::new();
     outcomes
         .try_reserve_exact(groups.len())
@@ -196,6 +197,7 @@ fn ingest_native_trace_batch_inner(
     identity
         .validate_ingest_context(context)
         .map_err(|_| ServiceFailure::Unauthorized)?;
+    refuse_pending_tenant_rotation(instance, &identity, tenant)?;
     let mut outcomes = Vec::new();
     outcomes
         .try_reserve_exact(groups.len())
@@ -312,4 +314,25 @@ fn ingest_group(
     };
     LogIngest::new(&instance._authority, &ledger, policy, tenant, shard, schema)
         .accept(group.into_batch(), identity)
+}
+
+fn refuse_pending_tenant_rotation(
+    instance: &crate::InitializedInstance,
+    identity: &positron_governance::Identity,
+    tenant: positron_domain::identity::TenantId,
+) -> Result<(), ServiceFailure> {
+    let _session = positron_kernel::RootRewrapSession::admit(&instance._authority)
+        .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+    let envelope = identity
+        .tenant_key_envelope(tenant)
+        .map_err(|_| ServiceFailure::Unauthorized)?;
+    if instance
+        .key
+        .pending_tenant_key_epoch(instance.instance, tenant, envelope)
+        .map_err(|_| ServiceFailure::KeyEnvelopeMismatch)?
+        .is_some()
+    {
+        return Err(ServiceFailure::KeyRotationInProgress);
+    }
+    Ok(())
 }

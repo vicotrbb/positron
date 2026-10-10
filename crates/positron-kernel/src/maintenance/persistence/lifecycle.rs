@@ -481,7 +481,9 @@ impl MaintenanceCoordinator {
             .ok_or(MaintenanceFailure::UnknownTask)?;
         if !matches!(
             task.task.class,
-            MaintenanceTaskClass::GovernanceAuditCheckpoint | MaintenanceTaskClass::IntegrityScrub
+            MaintenanceTaskClass::GovernanceAuditCheckpoint
+                | MaintenanceTaskClass::IntegrityScrub
+                | MaintenanceTaskClass::EnvelopeVerification
         ) || task.phase != MaintenanceTaskPhase::Running
             || task.active_dispatch != Some(dispatch)
         {

@@ -22,6 +22,7 @@ use super::{
 };
 
 mod abandonment;
+mod epoch_migration;
 mod oracle;
 mod persisted_corruption;
 
@@ -54,6 +55,10 @@ impl Drop for FuzzRoot {
 
 pub(super) fn fuzz_active_segment_stateful(data: &[u8]) {
     if data.len() > 128 {
+        return;
+    }
+    if let Some(commands) = data.strip_prefix(&[0xfe]) {
+        epoch_migration::exercise(commands).expect("bounded successive envelope oracle");
         return;
     }
     let Some(root) = FuzzRoot::new() else {

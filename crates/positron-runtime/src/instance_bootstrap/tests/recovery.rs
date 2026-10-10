@@ -394,3 +394,66 @@ fn corrupt_existing_root_import_preserves_catalog_and_destination()
     }
     Ok(())
 }
+
+#[test]
+fn root_cutover_requires_independent_successor_bundle_verification_before_readiness()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let roots = Roots::new()?;
+    let export = roots.parent().join("root-recovery");
+    std::fs::create_dir(&export)?;
+    std::fs::set_permissions(&export, std::fs::Permissions::from_mode(0o700))?;
+    let export = std::fs::canonicalize(export)?;
+    let old_bundle = export.join("predecessor.age");
+    let new_bundle = export.join("successor.age");
+    let paths = roots.paths();
+    let instance = InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    let identity = age::x25519::Identity::generate();
+    let recipients = RecoveryRecipients::parse(&[identity.to_public().to_string()])?;
+    instance.create_recovery_bundle(&old_bundle, &recipients)?;
+    instance.verify_recovery_bundle(&old_bundle, RecoveryUnlock::Identity(&identity))?;
+    assert_eq!(
+        instance.backup_key_recovery_readiness()?,
+        RecoveryReadiness::Verified
+    );
+    instance.begin_local_key_rotation()?;
+    instance.activate_local_key_rotation()?;
+    let successor = instance.recovery_identity()?.root();
+    assert_eq!(
+        instance.backup_key_recovery_readiness()?,
+        RecoveryReadiness::IndependentRecoveryRequired
+    );
+    assert!(
+        instance
+            .verify_recovery_bundle(&old_bundle, RecoveryUnlock::Identity(&identity))
+            .is_err()
+    );
+    assert!(old_bundle.exists());
+    instance.create_recovery_bundle(&new_bundle, &recipients)?;
+    assert_eq!(
+        instance.backup_key_recovery_readiness()?,
+        RecoveryReadiness::IndependentRecoveryRequired
+    );
+    let verified =
+        instance.verify_recovery_bundle(&new_bundle, RecoveryUnlock::Identity(&identity))?;
+    assert_eq!(verified.identity().root(), successor);
+    assert_eq!(
+        instance.backup_key_recovery_readiness()?,
+        RecoveryReadiness::Verified
+    );
+    assert!(old_bundle.exists());
+    drop(instance);
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    assert_eq!(
+        reopened.backup_key_recovery_readiness()?,
+        RecoveryReadiness::Verified
+    );
+    reopened.retire_recovery_predecessor()?;
+    assert!(!old_bundle.exists());
+    assert!(new_bundle.exists());
+    assert_eq!(
+        reopened.backup_key_recovery_readiness()?,
+        RecoveryReadiness::Verified
+    );
+    Ok(())
+}

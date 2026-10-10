@@ -108,6 +108,37 @@ pub(super) fn scan(
 }
 
 fn recognized_entry(root: BootstrapRoot, name: &[u8]) -> Option<BootstrapEntry> {
+    if root == BootstrapRoot::Secrets
+        && let Some(suffix) = name.strip_prefix(b"local-root-key.epoch-")
+    {
+        let (digits, staging) = if let Some(digits) = suffix.strip_suffix(b".v1.new") {
+            (digits, true)
+        } else if let Some(digits) = suffix.strip_suffix(b".v1") {
+            (digits, false)
+        } else {
+            return None;
+        };
+        if digits.is_empty() || digits.len() > 20 || digits.first() == Some(&b'0') {
+            return None;
+        }
+        let mut epoch = 0_u64;
+        for digit in digits {
+            if !digit.is_ascii_digit() {
+                return None;
+            }
+            epoch = epoch
+                .checked_mul(10)?
+                .checked_add(u64::from(*digit - b'0'))?;
+        }
+        if epoch < 2 {
+            return None;
+        }
+        return Some(if staging {
+            BootstrapEntry::LocalKeyEpochStaging
+        } else {
+            BootstrapEntry::LocalKeyEpoch
+        });
+    }
     match (root, name) {
         (BootstrapRoot::Data, b".positron-volume.lock") => Some(BootstrapEntry::VolumeLock),
         (BootstrapRoot::Data, b".positron-bootstrap.pending") => Some(BootstrapEntry::Pending),
@@ -119,6 +150,12 @@ fn recognized_entry(root: BootstrapRoot, name: &[u8]) -> Option<BootstrapEntry> 
         },
         (BootstrapRoot::Data, b".positron-bootstrap.initialized") => {
             Some(BootstrapEntry::Initialized)
+        },
+        (BootstrapRoot::Data, b".positron-system-key-envelopes.v1.new") => {
+            Some(BootstrapEntry::SystemKeyEnvelopeStaging)
+        },
+        (BootstrapRoot::Data, b".positron-system-key-envelopes.v1") => {
+            Some(BootstrapEntry::SystemKeyEnvelope)
         },
         (BootstrapRoot::Data, b"catalog") => Some(BootstrapEntry::Catalog),
         (BootstrapRoot::Data, b"segments") => Some(BootstrapEntry::Segments),

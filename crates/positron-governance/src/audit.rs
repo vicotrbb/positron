@@ -2,6 +2,10 @@ mod recovery;
 pub use recovery::{RecoveryBundleAction, RecoveryBundleAuditEntry, recovery_bundle_audit_intent};
 mod codec;
 mod rotation;
+mod tenant_rotation;
+pub use tenant_rotation::{
+    TenantKeyRotationAuditEntry, TenantKeyRotationStage, tenant_key_rotation_audit_intent,
+};
 mod schema_checkpoint;
 
 use std::fmt::{Display, Formatter};
@@ -26,7 +30,9 @@ use crate::{
     ResourceGeneration,
 };
 
-pub use rotation::{CatalogRootRotationAuditEntry, CatalogRootRotationStage};
+pub use rotation::{
+    CatalogRootRotationAuditEntry, CatalogRootRotationStage, catalog_root_rotation_audit_intent,
+};
 
 const MAGIC_V1: [u8; 8] = *b"POSAUD01";
 const MAGIC_V2: [u8; 8] = *b"POSAUD02";
@@ -132,6 +138,7 @@ pub enum GovernanceAuditEntry {
     RecoveryBundle(RecoveryBundleAuditEntry),
     Initialization(InitializationAuditEntry),
     CatalogRootRotation(CatalogRootRotationAuditEntry),
+    TenantKeyRotation(TenantKeyRotationAuditEntry),
     IngestPolicyActivation(IngestPolicyActivationAuditEntry),
     TenantQuotaUpdate(TenantQuotaUpdateAuditEntry),
     TenantDisplayNameUpdate(TenantDisplayNameUpdateAuditEntry),
@@ -2164,6 +2171,7 @@ impl GovernanceAuditEntry {
             Self::RecoveryBundle(entry) => entry.position(),
             Self::Initialization(entry) => entry.position(),
             Self::CatalogRootRotation(entry) => entry.position(),
+            Self::TenantKeyRotation(entry) => entry.position(),
             Self::IngestPolicyActivation(entry) => entry.position,
             Self::TenantQuotaUpdate(entry) => entry.position,
             Self::TenantDisplayNameUpdate(entry) => entry.position,
@@ -2195,6 +2203,7 @@ impl GovernanceAuditEntry {
         match self {
             Self::Initialization(entry) => entry.tenant_id(),
             Self::CatalogRootRotation(_) => None,
+            Self::TenantKeyRotation(entry) => Some(entry.tenant()),
             Self::IngestPolicyActivation(entry) => Some(entry.tenant),
             Self::TenantQuotaUpdate(entry) => Some(entry.tenant),
             Self::TenantDisplayNameUpdate(entry) => Some(entry.tenant),
@@ -2224,6 +2233,7 @@ impl GovernanceAuditEntry {
             Self::RecoveryBundle(entry) => entry.operation().action(),
             Self::Initialization(entry) => entry.action(),
             Self::CatalogRootRotation(entry) => entry.action(),
+            Self::TenantKeyRotation(entry) => entry.action(),
             Self::IngestPolicyActivation(_) => "ingest-policy.activate",
             Self::TenantQuotaUpdate(_) => "tenant-quota.update",
             Self::TenantDisplayNameUpdate(_) => "tenant.display-name.update",
@@ -2269,6 +2279,7 @@ impl GovernanceAuditEntry {
             },
             Self::Initialization(entry) => entry.outcome(),
             Self::CatalogRootRotation(entry) => entry.outcome(),
+            Self::TenantKeyRotation(entry) => entry.outcome(),
             Self::IngestPolicyActivation(_) => "succeeded",
             Self::TenantQuotaUpdate(_) => "succeeded",
             Self::TenantDisplayNameUpdate(_) => "succeeded",
@@ -2308,6 +2319,7 @@ impl GovernanceAuditEntry {
         match self {
             Self::Initialization(entry) => Some(entry),
             Self::CatalogRootRotation(_)
+            | Self::TenantKeyRotation(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantQuotaUpdate(_)
             | Self::TenantDisplayNameUpdate(_)
@@ -2333,9 +2345,17 @@ impl GovernanceAuditEntry {
     }
 
     #[must_use]
+    pub const fn as_tenant_key_rotation(&self) -> Option<&TenantKeyRotationAuditEntry> {
+        match self {
+            Self::TenantKeyRotation(entry) => Some(entry),
+            _ => None,
+        }
+    }
+    #[must_use]
     pub const fn as_catalog_root_rotation(&self) -> Option<&CatalogRootRotationAuditEntry> {
         match self {
             Self::CatalogRootRotation(entry) => Some(entry),
+            Self::TenantKeyRotation(_) => None,
             Self::Initialization(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantQuotaUpdate(_)
@@ -2367,6 +2387,7 @@ impl GovernanceAuditEntry {
             Self::SchemaCheckpoint(entry) => Some(entry),
             Self::Initialization(_)
             | Self::CatalogRootRotation(_)
+            | Self::TenantKeyRotation(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantQuotaUpdate(_)
             | Self::TenantDisplayNameUpdate(_)
@@ -2396,6 +2417,7 @@ impl GovernanceAuditEntry {
             Self::ApiKeyLifecycle(entry) => Some(entry),
             Self::Initialization(_)
             | Self::CatalogRootRotation(_)
+            | Self::TenantKeyRotation(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantQuotaUpdate(_)
             | Self::TenantDisplayNameUpdate(_)
@@ -2425,6 +2447,7 @@ impl GovernanceAuditEntry {
             Self::ListenerTransport(entry) => Some(entry),
             Self::Initialization(_)
             | Self::CatalogRootRotation(_)
+            | Self::TenantKeyRotation(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantQuotaUpdate(_)
             | Self::TenantDisplayNameUpdate(_)
@@ -2454,6 +2477,7 @@ impl GovernanceAuditEntry {
             Self::TenantLifecycle(entry) => Some(entry),
             Self::Initialization(_)
             | Self::CatalogRootRotation(_)
+            | Self::TenantKeyRotation(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantQuotaUpdate(_)
             | Self::TenantDisplayNameUpdate(_)
@@ -2483,6 +2507,7 @@ impl GovernanceAuditEntry {
             Self::TenantQuotaUpdate(entry) => Some(entry),
             Self::Initialization(_)
             | Self::CatalogRootRotation(_)
+            | Self::TenantKeyRotation(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantDisplayNameUpdate(_)
             | Self::SchemaCheckpoint(_)
@@ -2514,6 +2539,7 @@ impl GovernanceAuditEntry {
             Self::TenantDisplayNameUpdate(entry) => Some(entry),
             Self::Initialization(_)
             | Self::CatalogRootRotation(_)
+            | Self::TenantKeyRotation(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantQuotaUpdate(_)
             | Self::SchemaCheckpoint(_)
@@ -2543,6 +2569,7 @@ impl GovernanceAuditEntry {
             Self::TenantRetentionUpdate(entry) => Some(entry),
             Self::Initialization(_)
             | Self::CatalogRootRotation(_)
+            | Self::TenantKeyRotation(_)
             | Self::IngestPolicyActivation(_)
             | Self::TenantQuotaUpdate(_)
             | Self::TenantDisplayNameUpdate(_)

@@ -127,24 +127,26 @@ pub use active_segment_ledger::{
     IntegrityFailureCode, IntegrityFinding, IntegrityQuarantineFinding, IntegrityScrubBudget,
     IntegrityScrubContinuation, IntegrityVerificationMode, IntegrityVerificationOutcome,
     IntegrityVerificationReport, IntegrityVerificationRequest, IntegrityVerificationScope,
-    LedgerCompletionState, LedgerFailure, LedgerFailureCode, LedgerSnapshot,
-    MAX_SNAPSHOT_LEASE_TTL_SECONDS, OnlineQuarantinePublication, PreparedCompactionTask,
-    PreparedStoreBlock, RetentionBucket, RetentionEvaluation, RetentionImpactPreview,
-    RetentionImpactTimeRange, RetentionReclamation, RetentionReclamationEstimate, SealedSegment,
-    SegmentAbandonmentPlan, SegmentId, SegmentProtectionKey, SegmentScope, SnapshotLeaseAttempt,
-    SnapshotLeaseGrant, SnapshotLeaseId, SnapshotLeaseReplacement, SnapshotLeaseUsage,
-    StoreBlockIdentity, StoreBlockPreparation, integrity_abandonment_findings,
-    integrity_quarantine_findings,
+    KeyEpochRetirementGuard, LedgerCompletionState, LedgerFailure, LedgerFailureCode,
+    LedgerSnapshot, MAX_SNAPSHOT_LEASE_TTL_SECONDS, OnlineQuarantinePublication,
+    PreparedCompactionTask, PreparedStoreBlock, RetentionBucket, RetentionEvaluation,
+    RetentionImpactPreview, RetentionImpactTimeRange, RetentionReclamation,
+    RetentionReclamationEstimate, SealedSegment, SegmentAbandonmentPlan, SegmentId,
+    SegmentProtectionKey, SegmentScope, SnapshotLeaseAttempt, SnapshotLeaseGrant, SnapshotLeaseId,
+    SnapshotLeaseReplacement, SnapshotLeaseUsage, StoreBlockIdentity, StoreBlockPreparation,
+    TenantEpochRetirementGuard, integrity_abandonment_findings, integrity_quarantine_findings,
 };
 
 pub use catalog::integrity_scrub_resource_claim;
+#[cfg(feature = "test-support")]
+pub use data_protection::RootCustodyPublicationFault;
 pub use data_protection::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose, ControlTokenAuthentication, ControlTokenFailure, ControlTokenProtector,
     ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
     QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure, RecoveryIdentity,
     RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession,
-    RecoveryUnlock,
+    RecoveryUnlock, RootPredecessorEnvelope, RootRewrapSession, VerifiedRootActivation,
 };
 pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{
@@ -163,13 +165,14 @@ pub use lifecycle_clock::{
     LifecycleClockSource, RetentionCutoffProvenance, SystemLifecycleClockSource,
 };
 pub use maintenance::{
-    CompactionBinding, GovernanceAuditCheckpointBinding, IntegrityScrubSourceBinding,
+    CompactionBinding, EnvelopeVerificationCheckpoint, EnvelopeVerificationProgress,
+    EnvelopeVerificationPublication, GovernanceAuditCheckpointBinding, IntegrityScrubSourceBinding,
     MAX_LOWER_CLASS_QUEUE_DELAY_SECONDS, MaintenanceCheckpoint, MaintenanceCoordinator,
     MaintenanceExecution, MaintenanceFailure, MaintenanceObjectId, MaintenancePreconditions,
     MaintenancePriority, MaintenanceReservation, MaintenanceReservationAuthority, MaintenanceScope,
     MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase,
     MaintenanceTaskRecord, MaintenanceTaskStatus, MaintenanceTerminalFailure, MaintenanceTrigger,
-    NO_DURABLE_PROGRESS_SLO_SECONDS,
+    NO_DURABLE_PROGRESS_SLO_SECONDS, RootRetirementReferenceGuard,
 };
 #[cfg(feature = "test-support")]
 pub use retention_time::ManualRetentionTime;

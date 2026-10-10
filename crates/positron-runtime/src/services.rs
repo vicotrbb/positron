@@ -20,6 +20,7 @@ mod ingest;
 mod maintenance;
 mod maintenance_api;
 mod maintenance_control;
+mod maintenance_envelope_verification;
 mod maintenance_inspection;
 mod maintenance_status;
 mod maintenance_verification;
@@ -34,6 +35,7 @@ pub(crate) mod tenant_aliases;
 pub(crate) mod tenant_lifecycle;
 pub(crate) mod tenant_quotas;
 pub(crate) mod tenant_retention;
+mod tenant_rotation;
 pub(crate) mod tenant_service;
 
 pub(super) fn tenant_segment_key(
@@ -44,15 +46,18 @@ pub(super) fn tenant_segment_key(
     let envelope = identity
         .tenant_key_envelope(scope.tenant_id())
         .map_err(|_| ServiceFailure::KeyUnavailable)?;
-    instance
-        .key
-        .segment_key_from_tenant_envelope(instance.instance, scope, envelope)
-        .map_err(|failure| match failure {
-            positron_kernel::BootstrapKeyFailure::Authentication => {
-                ServiceFailure::KeyEnvelopeMismatch
-            },
-            _ => ServiceFailure::KeyUnavailable,
-        })
+    positron_kernel::RootRewrapSession::derive_tenant_segment_key(
+        &instance._authority,
+        &instance.key,
+        instance.instance,
+        scope,
+        envelope,
+    )
+    .map_err(|failure| match failure {
+        positron_kernel::BootstrapKeyFailure::Authentication => ServiceFailure::KeyEnvelopeMismatch,
+        positron_kernel::BootstrapKeyFailure::LimitExceeded => ServiceFailure::CapacityUnavailable,
+        _ => ServiceFailure::KeyUnavailable,
+    })
 }
 
 pub(super) fn context_tenant(
@@ -94,6 +99,7 @@ pub(crate) const fn maintenance_failure_category(failure: ServiceFailure) -> Opt
         ServiceFailure::InvalidRequest => Some("invalid_request"),
         ServiceFailure::InvalidRequestWithLimit(_) => Some("invalid_request_with_limit"),
         ServiceFailure::KeyUnavailable => Some("key_unavailable"),
+        ServiceFailure::KeyRotationInProgress => Some("key_rotation_in_progress"),
         ServiceFailure::CatalogBusy => Some("catalog_busy"),
         ServiceFailure::CatalogUnavailable => Some("catalog_unavailable"),
         ServiceFailure::LedgerUnavailable => Some("ledger_unavailable"),

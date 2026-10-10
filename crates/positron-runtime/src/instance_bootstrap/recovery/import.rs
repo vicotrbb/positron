@@ -19,9 +19,6 @@ impl crate::instance_bootstrap::InstanceBootstrap {
         if layout.unknown_or_unsafe() {
             return Err(RecoveryFailure::Storage);
         }
-        if layout.contains(positron_kernel::BootstrapEntry::LocalKey) {
-            return Err(RecoveryFailure::AlreadyExists);
-        }
         let authority = crate::instance_bootstrap::resources::establish_system_diagnostics(
             volume,
             crate::instance_bootstrap::DEFAULT_MAX_REGISTERED_TENANTS,
@@ -46,7 +43,7 @@ impl crate::instance_bootstrap::InstanceBootstrap {
             .map_err(|_| RecoveryFailure::Authentication)?;
             crate::instance_bootstrap::operation::support::require_key_identity(
                 &record,
-                pin.root(),
+                custody.bootstrap_identity(),
             )
             .map_err(|_| RecoveryFailure::Authentication)?;
             if record.instance != pin.instance()
@@ -85,6 +82,13 @@ impl crate::instance_bootstrap::InstanceBootstrap {
                     .map_err(|_| RecoveryFailure::Authentication)?,
             )
             .map_err(|_| RecoveryFailure::Storage)?;
+            super::super::local_rotation::validate_recovery_route(
+                &authority,
+                &catalog,
+                custody,
+                record.instance,
+            )
+            .map_err(|_| RecoveryFailure::Authentication)?;
             let time = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| RecoveryFailure::Storage)?

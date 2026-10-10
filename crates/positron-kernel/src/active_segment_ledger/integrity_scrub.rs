@@ -427,6 +427,7 @@ fn verify_integrity_against_snapshot(
             super::super::SnapshotProtection::for_segments(
                 authority.snapshot_protection(),
                 authority.snapshot_barrier(),
+                basis,
                 targets.iter().map(|candidate| candidate.id),
             )
             .map_err(map_ledger_failure)?,
@@ -490,7 +491,12 @@ fn verify_integrity_against_snapshot(
                 continuation: continuation_for(source_identity, last_segment),
             }));
         }
-        let physical = match storage.verification_source_bound(*candidate, protection, instance) {
+        let physical = match storage.verification_source_bound(
+            *candidate,
+            protection,
+            instance,
+            Some(basis),
+        ) {
             Ok(Some((bytes, _))) => u64::try_from(bytes)
                 .map_err(|_| IntegrityFailure(IntegrityFailureCode::StorageUnavailable))?,
             Ok(None) => 0,
@@ -621,6 +627,7 @@ fn verify_integrity_against_snapshot(
             protection,
             instance,
             RecoveryMode::Observe,
+            Some(basis),
         ) {
             Ok((_key, _recovered)) => {
                 examined_segments = examined_segments.saturating_add(1);

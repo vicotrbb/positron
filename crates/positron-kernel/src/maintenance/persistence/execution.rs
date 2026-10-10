@@ -161,7 +161,9 @@ impl MaintenanceExecution<'_> {
     ) -> Result<(), MaintenanceFailure> {
         if matches!(
             self.task.class,
-            MaintenanceTaskClass::Compaction | MaintenanceTaskClass::CatalogReclamation
+            MaintenanceTaskClass::Compaction
+                | MaintenanceTaskClass::CatalogReclamation
+                | MaintenanceTaskClass::EnvelopeVerification
         ) {
             return Err(MaintenanceFailure::InvalidTransition);
         }
@@ -180,7 +182,9 @@ impl MaintenanceExecution<'_> {
     ) -> Result<(), MaintenanceFailure> {
         if matches!(
             self.task.class,
-            MaintenanceTaskClass::Compaction | MaintenanceTaskClass::CatalogReclamation
+            MaintenanceTaskClass::Compaction
+                | MaintenanceTaskClass::CatalogReclamation
+                | MaintenanceTaskClass::EnvelopeVerification
         ) {
             return Err(MaintenanceFailure::InvalidTransition);
         }
@@ -195,6 +199,9 @@ impl MaintenanceExecution<'_> {
         catalog: &Catalog<'_>,
         succeeded: bool,
     ) -> Result<(), MaintenanceFailure> {
+        if self.task.class == MaintenanceTaskClass::EnvelopeVerification {
+            return Err(MaintenanceFailure::InvalidTransition);
+        }
         if matches!(
             self.task.class,
             MaintenanceTaskClass::Compaction
@@ -316,7 +323,9 @@ impl MaintenanceExecution<'_> {
     ) -> Result<(), MaintenanceFailure> {
         if !matches!(
             self.task.class,
-            MaintenanceTaskClass::GovernanceAuditCheckpoint | MaintenanceTaskClass::IntegrityScrub
+            MaintenanceTaskClass::GovernanceAuditCheckpoint
+                | MaintenanceTaskClass::IntegrityScrub
+                | MaintenanceTaskClass::EnvelopeVerification
         ) {
             return Err(MaintenanceFailure::InvalidInput);
         }

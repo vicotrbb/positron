@@ -23,6 +23,13 @@ fn mode(unlock: &RecoveryUnlock<'_>) -> RecoveryProtection {
     }
 }
 impl InitializedInstance {
+    pub(super) fn recovery_predecessor_is_absent(
+        &self,
+        snapshot: &positron_kernel::CatalogSnapshot,
+    ) -> Result<bool, RecoveryFailure> {
+        Ok(VerifiedBundle::find(snapshot)?
+            .is_some_and(|bundle| bundle.predecessor.is_none() && !bundle.retiring))
+    }
     fn recovery_catalog(&self) -> Result<Catalog<'_>, RecoveryFailure> {
         let secret = self
             .key
@@ -46,7 +53,13 @@ impl InitializedInstance {
         if integrity.fingerprint() != self.integrity_key_fingerprint {
             return Err(RecoveryFailure::Authentication);
         }
-        RecoveryIdentity::new(self.instance, self.key.identity(), integrity)
+        RecoveryIdentity::new(
+            self.instance,
+            self.key
+                .active_root_identity()
+                .map_err(|_| RecoveryFailure::Authentication)?,
+            integrity,
+        )
     }
     pub fn create_recovery_bundle(
         &self,
@@ -112,7 +125,9 @@ impl InitializedInstance {
             .map_err(|_| RecoveryFailure::Authentication)?;
         let pin = RecoveryIdentity::new(
             self.instance,
-            self.key.identity(),
+            self.key
+                .active_root_identity()
+                .map_err(|_| RecoveryFailure::Authentication)?,
             BootstrapIntegrityIdentity::from_pinned(
                 governance.integrity_public_key(),
                 self.integrity_key_fingerprint,
@@ -291,7 +306,20 @@ impl InitializedInstance {
         let Ok(custody) = access.open_key() else {
             return Ok(RecoveryReadiness::IndependentRecoveryRequired);
         };
-        if custody.identity() != self.key.identity() {
+        let Ok(custody) = super::local_rotation::reopen_active_route(
+            &self._authority,
+            &self.bootstrap_storage,
+            self.instance,
+            custody,
+        ) else {
+            return Ok(RecoveryReadiness::IndependentRecoveryRequired);
+        };
+        if custody.identity()
+            != self
+                .key
+                .active_root_identity()
+                .map_err(|_| RecoveryFailure::Authentication)?
+        {
             return Ok(RecoveryReadiness::IndependentRecoveryRequired);
         }
         let catalog = self.recovery_catalog()?;
@@ -300,7 +328,11 @@ impl InitializedInstance {
             return Ok(RecoveryReadiness::IndependentRecoveryRequired);
         };
         if verified.pin.instance() != self.instance
-            || verified.pin.root() != self.key.identity()
+            || verified.pin.root()
+                != self
+                    .key
+                    .active_root_identity()
+                    .map_err(|_| RecoveryFailure::Authentication)?
             || verified.pin.integrity().fingerprint() != self.integrity_key_fingerprint
         {
             return Ok(RecoveryReadiness::IndependentRecoveryRequired);

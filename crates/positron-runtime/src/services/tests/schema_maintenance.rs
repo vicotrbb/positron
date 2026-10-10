@@ -43,7 +43,7 @@ pub(crate) type InitializedCredentials = (Arc<crate::InitializedInstance>, Strin
 
 static LIVE_NATIVE_MAINTENANCE_TEST: Mutex<()> = Mutex::new(());
 
-fn live_native_maintenance_test_guard() -> MutexGuard<'static, ()> {
+pub(crate) fn live_native_maintenance_test_guard() -> MutexGuard<'static, ()> {
     match LIVE_NATIVE_MAINTENANCE_TEST.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -183,6 +183,9 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
+    pub(crate) fn control_socket_path(&self) -> PathBuf {
+        self.root.join("control.sock")
+    }
     pub(crate) fn new() -> Result<Self, Box<dyn Error>> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -202,6 +205,17 @@ impl Fixture {
 
     pub(crate) fn sealed_segments_directory(&self) -> PathBuf {
         self.root.join("data/segments/sealed")
+    }
+
+    pub(crate) fn recovery_export_directory(&self) -> Result<PathBuf, Box<dyn Error>> {
+        let export = self.root.join("recovery");
+        fs::create_dir(&export)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&export, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(fs::canonicalize(export)?)
     }
 
     pub(crate) fn paths(&self) -> Result<BootstrapPaths, Box<dyn Error>> {
