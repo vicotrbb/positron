@@ -8,6 +8,11 @@ impl GovernanceAuditEntry {
         transaction_id: [u8; 16],
         intent: &[u8],
     ) -> Result<Self, IdentityFailure> {
+        if intent.starts_with(b"POSRECA1") {
+            return Ok(Self::RecoveryBundle(RecoveryBundleAuditEntry::decode(
+                position, intent,
+            )?));
+        }
         if let Some(payload) = intent.strip_prefix(b"POSABL01") {
             let (length, payload) = payload.split_at_checked(2).ok_or(IdentityFailure)?;
             let length = usize::from(u16::from_be_bytes(

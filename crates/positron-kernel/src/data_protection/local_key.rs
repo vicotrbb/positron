@@ -8,6 +8,11 @@ mod bootstrap;
 mod codec;
 mod initialization_io;
 mod persistence;
+mod recovery;
+pub use recovery::{
+    RecoveryFailure, RecoveryIdentity, RecoveryMetadata, RecoveryPassphrase, RecoveryProtection,
+    RecoveryRecipients, RecoverySession, RecoveryUnlock,
+};
 mod runtime_bootstrap;
 mod security_directory;
 
@@ -155,3 +160,6 @@ impl std::fmt::Debug for VerifiedLocalKey {
             .finish()
     }
 }
+
+#[cfg(fuzzing)]
+pub use recovery::fuzz_recovery_bundle_payload;

@@ -1,7 +1,9 @@
+mod recovery;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_kw::{KeyInit as KeyWrapInit, KwpAes256};
 use hmac::{Hmac, Mac};
+pub(super) use recovery::{RecoveryCryptoPurpose, RecoveryDecryption, RecoveryEncryption};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -71,9 +73,44 @@ pub(super) enum CryptoBackendFailure {
     WrapFailed,
     UnwrapFailed,
     SignatureFailed,
+    RecoveryLimitExceeded,
 }
 
 pub(super) trait CryptoBackend {
+    fn sign_recovery(
+        &self,
+        purpose: RecoveryCryptoPurpose,
+        seed: &[u8; 32],
+        payload: &[u8],
+    ) -> Result<[u8; 64], CryptoBackendFailure> {
+        recovery::sign(purpose, seed, payload)
+    }
+    fn verify_recovery(
+        &self,
+        purpose: RecoveryCryptoPurpose,
+        public_key: [u8; 32],
+        payload: &[u8],
+        signature: &[u8],
+    ) -> Result<(), CryptoBackendFailure> {
+        recovery::verify(purpose, public_key, payload, signature)
+    }
+    fn seal_recovery(
+        &self,
+        purpose: RecoveryCryptoPurpose,
+        protection: RecoveryEncryption<'_>,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CryptoBackendFailure> {
+        recovery::seal(purpose, protection, plaintext)
+    }
+    fn open_recovery(
+        &self,
+        purpose: RecoveryCryptoPurpose,
+        unlock: RecoveryDecryption<'_>,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoBackendFailure> {
+        recovery::open(purpose, unlock, ciphertext)
+    }
+
     fn seal_aes_256_gcm(
         &self,
         key: &SecretKeyBytes,

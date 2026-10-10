@@ -1,6 +1,8 @@
 mod codec;
 mod operation;
+mod recovery;
 mod resources;
+pub use recovery::RecoveryReadiness;
 mod storage;
 #[cfg(any(test, fuzzing, feature = "test-support"))]
 mod test_support;
@@ -148,3 +150,6 @@ impl InstanceBootstrap {
         operation::claim(paths)
     }
 }
+
+#[cfg(fuzzing)]
+pub(crate) use recovery::fuzz_recovery_catalog_state;

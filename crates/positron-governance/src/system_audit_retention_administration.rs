@@ -396,7 +396,8 @@ fn receipt_for_pruned_entry(
     transaction: TransactionId,
 ) -> Result<Option<MigratedReceipt>, SystemAuditRetentionAdministrationFailure> {
     let (object, kind, key) = match entry {
-        GovernanceAuditEntry::Initialization(_)
+        GovernanceAuditEntry::RecoveryBundle(_)
+        | GovernanceAuditEntry::Initialization(_)
         | GovernanceAuditEntry::CatalogRootRotation(_)
         | GovernanceAuditEntry::SchemaCheckpoint(_)
         | GovernanceAuditEntry::DurableOperation(_)

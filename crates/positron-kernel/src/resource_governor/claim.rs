@@ -142,6 +142,19 @@ impl WorkClaim {
             && self.operation.is_none()
     }
 
+    pub(crate) fn system_security(amounts: ResourceAmounts) -> Result<Self, GovernorFailure> {
+        if amounts.is_empty() {
+            return Err(GovernorFailure::InvalidConfiguration);
+        }
+        Ok(Self {
+            tenant: None,
+            principal: None,
+            kind: WorkKind::SecurityLifecycle,
+            amounts,
+            operation: None,
+        })
+    }
+
     /// Creates one post-authentication tenant operation attributed to its
     /// credential Principal. The Governor retains this identity in its fixed
     /// grant ledger so one Principal cannot consume unbounded concurrent work.

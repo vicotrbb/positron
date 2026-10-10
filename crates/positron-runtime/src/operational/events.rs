@@ -63,6 +63,8 @@ impl OperationalReloadRejection {
 /// Closed process diagnostics shared by serving and terminal reporting.
 #[derive(Clone, Copy, Debug)]
 pub enum OperationalDiagnostic {
+    LocalKeyCustodyWarning,
+    IndependentKeyRecoveryRequired,
     InvalidCommandLine,
     ConfigurationRejected,
     StartupFailed,
@@ -88,6 +90,8 @@ pub enum OperationalDiagnostic {
 impl OperationalDiagnostic {
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::LocalKeyCustodyWarning => "local_key_custody_warning",
+            Self::IndependentKeyRecoveryRequired => "independent_key_recovery_required",
             Self::InvalidCommandLine => "invalid_command_line",
             Self::ConfigurationRejected => "configuration_rejected",
             Self::StartupFailed => "startup_failed",
@@ -174,7 +178,11 @@ impl OperationalEvent {
     }
     pub(crate) const fn severity(self) -> &'static str {
         match self {
-            Self::Diagnostic(OperationalDiagnostic::TransportSecurityWarning(_)) => "warn",
+            Self::Diagnostic(
+                OperationalDiagnostic::TransportSecurityWarning(_)
+                | OperationalDiagnostic::LocalKeyCustodyWarning
+                | OperationalDiagnostic::IndependentKeyRecoveryRequired,
+            ) => "warn",
             Self::ProcessFenced | Self::Diagnostic(_) => "error",
             Self::RequestCompleted {
                 outcome: RequestOutcome::Unavailable,
@@ -205,6 +213,12 @@ impl OperationalEvent {
         }
         if let Self::Diagnostic(diagnostic) = self {
             match diagnostic {
+                OperationalDiagnostic::LocalKeyCustodyWarning => {
+                    value["warning"] = "Filesystem key custody does not protect against theft of both the key and encrypted data; use an external key provider when available.".into();
+                },
+                OperationalDiagnostic::IndependentKeyRecoveryRequired => {
+                    value["warning"] = "Create and verify a Recovery Bundle stored separately from both data and secrets before relying on backups.".into();
+                },
                 OperationalDiagnostic::ConfigurationReloadRejected(category) => {
                     value["category"] = category.label().into();
                 },

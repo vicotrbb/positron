@@ -104,7 +104,7 @@ impl Display for BootstrapKeyFailure {
 impl Error for BootstrapKeyFailure {}
 
 pub struct BootstrapKeyCustody {
-    key: VerifiedLocalKey,
+    pub(super) key: VerifiedLocalKey,
 }
 
 /// An opaque, instance-bound capability for authenticated crash-record frames.

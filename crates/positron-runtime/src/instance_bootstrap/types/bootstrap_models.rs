@@ -332,6 +332,7 @@ impl InitializationPlan {
 }
 
 pub struct InitializedInstance {
+    pub(in crate::instance_bootstrap) bootstrap_storage: InstanceBootstrapStorage,
     pub(crate) key: BootstrapKeyCustody,
     // Fixture-only inspection data; product authorization always reads the
     // current durable identity through `durable_identity`.

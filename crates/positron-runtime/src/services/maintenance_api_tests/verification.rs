@@ -1,5 +1,130 @@
 use super::*;
 
+fn with_live_catalog<T>(
+    services: &ServiceHandle,
+    operation: impl FnOnce(&positron_kernel::Catalog<'_>) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let _catalog_operation = services.catalog_operation()?;
+    let catalog = open_catalog(&services.instance)?;
+    operation(&catalog)
+}
+
+#[test]
+fn maintenance_cursor_reports_current_total_after_a_task_is_appended()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    for value in 1_u8..=33 {
+        initialized
+            .maintenance_coordinator()
+            .submit_at(
+                MaintenanceTask::new(
+                    MaintenanceTaskId::new([value; 16])
+                        .map_err(|failure| format!("seeded identity: {failure:?}"))?,
+                    MaintenanceTaskClass::SchemaStatistics,
+                ),
+                u64::from(value),
+            )
+            .map_err(|failure| format!("seeded task: {failure:?}"))?;
+    }
+    let first = services
+        .maintenance_status(&administrator, br"{}")
+        .map_err(|failure| format!("first page: {failure:?}"))?;
+    assert_eq!(first.total, 33);
+    assert_eq!(first.returned, 32);
+    let cursor = first.next_cursor.ok_or("first page cursor")?;
+    initialized
+        .maintenance_coordinator()
+        .submit_at(
+            MaintenanceTask::new(
+                MaintenanceTaskId::new([0xfe; 16])
+                    .map_err(|failure| format!("appended identity: {failure:?}"))?,
+                MaintenanceTaskClass::SchemaStatistics,
+            ),
+            34,
+        )
+        .map_err(|failure| format!("appended task: {failure:?}"))?;
+    let next = services
+        .maintenance_status(
+            &administrator,
+            &serde_json::to_vec(&MaintenanceStatusRequest::page_after(cursor.clone(), 32))?,
+        )
+        .map_err(|failure| format!("next page: {failure:?}"))?;
+    assert_eq!(
+        next.total, 34,
+        "a continuation observes the current registry rather than a pinned total"
+    );
+    assert_eq!(next.returned, 2);
+    assert_eq!(next.next_cursor, None);
+    assert_eq!(
+        next.tasks
+            .iter()
+            .map(|task| task.identity.as_str())
+            .collect::<Vec<_>>(),
+        vec![super::hex([33; 16]), super::hex([0xfe; 16])]
+    );
+    assert!(next.tasks.iter().all(|task| task.identity > cursor));
+    assert!(
+        first
+            .tasks
+            .iter()
+            .chain(&next.tasks)
+            .map(|task| &task.identity)
+            .collect::<BTreeSet<_>>()
+            .len()
+            == 34
+    );
+    assert!(
+        next.encode().is_ok(),
+        "the changed total retains the bounded canonical envelope"
+    );
+    Ok(())
+}
+
+#[test]
+fn live_quarantine_fixture_reads_resume_after_catalog_ownership_is_released()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _, _) = fixture.initialized_with_admin()?;
+    let services = Arc::new(ServiceHandle::new(initialized)?);
+    let owner = services.catalog_operation()?;
+    let catalog = open_catalog(&services.instance)?;
+    let expected = catalog.pin()?.number();
+    let barrier = Arc::new(Barrier::new(2));
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let contender = Arc::clone(&services);
+    let started = Arc::clone(&barrier);
+    let reader = std::thread::spawn(move || {
+        started.wait();
+        let result = with_live_catalog(&contender, |catalog| Ok(catalog.pin()?.number()))
+            .map_err(|failure| format!("{failure:?}"));
+        sender
+            .send(result)
+            .map_err(|_| "Catalog reader result receiver closed")
+    });
+    barrier.wait();
+    let premature = receiver.recv_timeout(Duration::from_millis(100));
+    drop((catalog, owner));
+    let result = match &premature {
+        Ok(result) => result.clone(),
+        Err(_) => receiver.recv_timeout(Duration::from_secs(1))?,
+    };
+    reader
+        .join()
+        .map_err(|_| "Catalog fixture reader thread panicked")??;
+    assert!(
+        premature.is_err(),
+        "a live Catalog fixture read waits for the existing owner: {premature:?}"
+    );
+    assert_eq!(
+        result,
+        Ok(expected),
+        "the actual Catalog snapshot is readable after ownership release"
+    );
+    Ok(())
+}
+
 #[test]
 fn authenticated_online_verification_uses_one_pinned_scope_and_rejects_a_stale_resume()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -816,9 +941,12 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
         loopback(0),
         loopback(0),
     )?);
+    // This foreground CAS scenario keeps unrelated maintenance idle through
+    // the existing fixture while all native listeners and process roles run.
+    let foreground_tasks = super::live_key_fencing::ForegroundTasks(&host);
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly),
-        HostInputs::new(&host, &host),
+        HostInputs::new(&host, &foreground_tasks),
     )?;
     let services = process.services().ok_or("serving services")?;
     let initialized = Arc::clone(&services.instance);
@@ -832,22 +960,23 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
-    let catalog = open_catalog(&initialized)?;
-    let scope = catalog
-        .pin()?
-        .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
-        .into_iter()
-        .next()
-        .ok_or("log scope")?;
-    ActiveSegmentLedger::open_for_maintenance_with_retention_time(
-        &initialized._authority,
-        &initialized.retention_time,
-        &catalog,
-        scope,
-        initialized.tenant_segment_key_for_test(scope)?,
-    )?
-    .seal()?;
-    drop(catalog);
+    let scope = with_live_catalog(&services, |catalog| {
+        let scope = catalog
+            .pin()?
+            .reachable_ledger_scopes(initialized.default_tenant_id(), SignalKind::Logs)?
+            .into_iter()
+            .next()
+            .ok_or("log scope")?;
+        ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+            &initialized._authority,
+            &initialized.retention_time,
+            catalog,
+            scope,
+            initialized.tenant_segment_key_for_test(scope)?,
+        )?
+        .seal()?;
+        Ok(scope)
+    })?;
     let damaged_segment = fs::read_dir(&sealed_directory)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -855,42 +984,27 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
         .ok_or("newly sealed block-bearing segment")?;
     let damaged_bytes = b"online verification corruption";
     fs::write(&damaged_segment, damaged_bytes)?;
-    let mut report = None;
-    let mut stale_bases = Vec::new();
-    for _ in 0..4 {
-        let expected_generation = open_catalog(&initialized)?.pin()?.number();
-        let candidate = services
-            .verify_online_integrity(
-                &administrator,
-                &OnlineVerificationRequest::new(
-                    initialized.default_tenant_id().to_canonical_text(),
-                    "logs".to_owned(),
-                    scope.shard_id().value(),
-                    Some(expected_generation),
-                    None,
-                )
-                .encode()?,
+    let expected_generation = with_live_catalog(&services, |catalog| Ok(catalog.pin()?.number()))?;
+    let report = services
+        .verify_online_integrity(
+            &administrator,
+            &OnlineVerificationRequest::new(
+                initialized.default_tenant_id().to_canonical_text(),
+                "logs".to_owned(),
+                scope.shard_id().value(),
+                Some(expected_generation),
+                None,
             )
-            .map_err(|failure| {
-                format!(
-                    "online quarantine failed at Catalog basis {expected_generation}: {failure:?}"
-                )
-            })?;
-        if candidate.outcome != "stale" {
-            report = Some((candidate, expected_generation));
-            break;
-        }
-        stale_bases.push((expected_generation, candidate.catalog_generation));
-    }
-    let report = report.ok_or_else(|| {
-        format!("online quarantine did not acquire a stable G0 basis: {stale_bases:?}")
-    })?;
+            .encode()?,
+        )
+        .map_err(|failure| {
+            format!("online quarantine at exact Catalog basis {expected_generation}: {failure:?}")
+        })?;
 
     assert_eq!(
-        report.0.catalog_generation, report.1,
+        report.catalog_generation, expected_generation,
         "the quarantine report names the immutable Catalog generation scanned before publication"
     );
-    let report = report.0;
     assert_eq!(report.outcome, "quarantined");
     assert!(!report.verification_complete);
     assert!(!report.findings.is_empty());
@@ -900,24 +1014,25 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
         crate::health::ProcessPhase::Serving
     );
     assert!(process.health().integrity_degraded());
-    let catalog = open_catalog(&initialized)?;
-    assert!(
-        !positron_kernel::integrity_quarantine_findings(&catalog.pin()?)?.is_empty(),
-        "the authorized online result is a durable Catalog quarantine finding"
-    );
-    let audits = catalog
-        .governance_audit_records()?
-        .into_iter()
-        .map(|record| GovernanceAuditEntry::decode(&record))
-        .collect::<Result<Vec<_>, _>>()?;
-    let quarantine_audit = audits
-        .iter()
-        .find_map(GovernanceAuditEntry::as_integrity_quarantine)
-        .ok_or("trusted quarantine audit")?;
-    assert_eq!(quarantine_audit.tenant(), initialized.default_tenant_id());
-    assert_eq!(quarantine_audit.signal(), SignalKind::Logs);
-    assert_eq!(quarantine_audit.shard(), scope.shard_id().value());
-    drop(catalog);
+    with_live_catalog(&services, |catalog| {
+        assert!(
+            !positron_kernel::integrity_quarantine_findings(&catalog.pin()?)?.is_empty(),
+            "the authorized online result is a durable Catalog quarantine finding"
+        );
+        let audits = catalog
+            .governance_audit_records()?
+            .into_iter()
+            .map(|record| GovernanceAuditEntry::decode(&record))
+            .collect::<Result<Vec<_>, _>>()?;
+        let quarantine_audit = audits
+            .iter()
+            .find_map(GovernanceAuditEntry::as_integrity_quarantine)
+            .ok_or("trusted quarantine audit")?;
+        assert_eq!(quarantine_audit.tenant(), initialized.default_tenant_id());
+        assert_eq!(quarantine_audit.signal(), SignalKind::Logs);
+        assert_eq!(quarantine_audit.shard(), scope.shard_id().value());
+        Ok(())
+    })?;
     for value in 1_u8..=33 {
         initialized
             .maintenance_coordinator()
@@ -951,9 +1066,22 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
             ),
             None => expected_findings = Some(status.integrity_findings.clone()),
         }
-        total.get_or_insert(status.total);
-        assert_eq!(total, Some(status.total));
+        if let Some(previous_total) = total {
+            assert!(
+                status.total >= previous_total,
+                "each page reports the current append-only task registry"
+            );
+        }
+        total = Some(status.total);
+        let mut previous_identity = request.cursor().map(str::to_owned);
         for task in &status.tasks {
+            if let Some(previous) = &previous_identity {
+                assert!(
+                    task.identity > *previous,
+                    "task identities advance strictly beyond the cursor"
+                );
+            }
+            previous_identity = Some(task.identity.clone());
             assert!(
                 identities.insert(task.identity.clone()),
                 "a status cursor must not repeat task identities"
@@ -962,12 +1090,39 @@ fn authenticated_online_verification_quarantines_local_damage_without_rewriting_
         let Some(cursor) = status.next_cursor else {
             break;
         };
+        assert_eq!(
+            Some(&cursor),
+            previous_identity.as_ref(),
+            "continuation names the last returned identity"
+        );
+        if request.cursor().is_none() {
+            initialized
+                .maintenance_coordinator()
+                .submit_at(
+                    MaintenanceTask::new(
+                        MaintenanceTaskId::new([0xfe; 16])
+                            .map_err(|failure| format!("appended task identity: {failure:?}"))?,
+                        MaintenanceTaskClass::SchemaStatistics,
+                    ),
+                    34,
+                )
+                .map_err(|failure| format!("appended task: {failure:?}"))?;
+        }
         request = MaintenanceStatusRequest::page_after(cursor, MAX_STATUS_PAGE_TASKS as u32);
     }
-    assert_eq!(
-        identities.len(),
-        usize::try_from(total.ok_or("status total")?)?,
-        "all tasks remain reachable while every page carries findings"
+    for value in 1_u8..=33 {
+        assert!(
+            identities.contains(&super::hex([value; 16])),
+            "every fixed seeded task remains reachable across live pages"
+        );
+    }
+    assert!(
+        identities.contains(&super::hex([0xfe; 16])),
+        "a task appended ahead of the cursor remains reachable"
+    );
+    assert!(
+        identities.len() <= usize::try_from(total.ok_or("status total")?)?,
+        "returned identities are a subset of the current registry"
     );
     assert_eq!(
         expected_findings.as_ref(),

@@ -253,3 +253,17 @@ destination; process inputs cover the registered operational worker's lifecycle:
 cargo +nightly fuzz run configuration_document -- -runs=1000
 cargo +nightly fuzz run process_inputs -- -runs=1000
 ```
+
+Recovery Bundle signed Protobuf and native age header boundaries:
+
+```console
+cargo +nightly fuzz run recovery_bundle_payload --sanitizer address -- -runs=1000 -max_total_time=30 -max_len=4096 -print_final_stats=1
+```
+
+The bounded program explores arbitrary signed-envelope bytes, canonical payload
+mutations, authenticated mutations signed by a public fixture key, and native
+age header parsing. It also checks raw and mutated Catalog recovery-state
+references, pinned identity decoding and canonical re-encoding. Root fixture material stays in zeroizing in-memory custody;
+no plaintext fixture key is written by this harness. The public recovery tests
+exercise encrypted age containers, owner-only files, wrong keys/context,
+corruption, actual scrypt limits, independent verification and publication faults.

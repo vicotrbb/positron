@@ -107,7 +107,10 @@ fn resource_sizing(max_registered_tenants: u16) -> Result<ResourceSizing, Bootst
         baseline_slack: large,
     })?;
     let per_tenant_ordinary_capacity = ResourceAmounts::new(DEFAULT_TENANT_QUOTA);
-    let ordinary_capacity = multiply(per_tenant_ordinary_capacity, max_registered_tenants)?;
+    let ordinary_capacity = add(
+        multiply(per_tenant_ordinary_capacity, max_registered_tenants)?,
+        ResourceAmounts::new([300_000_000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+    )?;
     let governed = add(recovery_capacity, ordinary_capacity)?;
     let raw = add(
         governed,
@@ -134,7 +137,23 @@ fn ordinary_pool_policy() -> Result<OrdinaryPoolPolicy, positron_kernel::Governo
     let lane = |weight: u64| {
         ResourceAmounts::new(DEFAULT_TENANT_QUOTA.map(|capacity| capacity / 32 * weight))
     };
-    OrdinaryPoolPolicy::new(lane(8), lane(6), lane(4), lane(2))
+    OrdinaryPoolPolicy::new(
+        add_security_scrypt_headroom(lane(8)),
+        lane(6),
+        lane(4),
+        lane(2),
+    )
+}
+
+fn add_security_scrypt_headroom(amounts: ResourceAmounts) -> ResourceAmounts {
+    ResourceAmounts::new(ResourceDimension::ALL.map(|dimension| {
+        amounts.get(dimension)
+            + if dimension == ResourceDimension::MemoryBytes {
+                300_000_000
+            } else {
+                0
+            }
+    }))
 }
 
 fn resource_configuration(

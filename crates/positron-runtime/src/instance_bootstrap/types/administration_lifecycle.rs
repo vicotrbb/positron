@@ -115,7 +115,9 @@ impl InitializedInstance {
         .map_err(map_durable_operation_failure)
     }
 
-    fn operation_time_seconds(&self) -> Result<u64, BootstrapFailure> {
+    pub(in crate::instance_bootstrap) fn operation_time_seconds(
+        &self,
+    ) -> Result<u64, BootstrapFailure> {
         let scope =
             positron_kernel::SegmentScope::new(self.tenant, SignalKind::Logs, self.logs_shard);
         self.retention_time

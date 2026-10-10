@@ -1693,6 +1693,7 @@ version = "0.0.0"
 dependencies = [
  "aes-gcm",
  "aes-kw",
+ "age",
  "getrandom 0.4.3",
  "hmac 0.13.0",
  "positron-darwin-acl",
@@ -1733,6 +1734,7 @@ dependencies = [
 name = "positron-runtime"
 version = "0.0.0"
 dependencies = [
+ "age",
  "async-trait",
  "bytes",
  "flate2",
