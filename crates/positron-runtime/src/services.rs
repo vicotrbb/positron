@@ -179,6 +179,29 @@ impl std::fmt::Debug for ServiceHandle {
 }
 
 impl ServiceHandle {
+    fn record_query_budget(&self, dimension: Option<positron_query::QueryBudgetDimension>) {
+        if let Some(dimension) = dimension
+            && let Ok(owner) = self.integrity_health.lock()
+            && let Some(health) = owner.as_ref()
+        {
+            health
+                .operational_telemetry()
+                .record_query_budget(dimension);
+        }
+    }
+    fn record_ingest(
+        &self,
+        signal: positron_domain::routing::SignalKind,
+        outcome: &IngestRequestOutcome,
+    ) {
+        if let Ok(owner) = self.integrity_health.lock()
+            && let Some(health) = owner.as_ref()
+        {
+            health
+                .operational_telemetry()
+                .record_ingest(signal, outcome);
+        }
+    }
     #[cfg(test)]
     pub(crate) fn wake_maintenance_worker(&self) -> Result<bool, ServiceFailure> {
         maintenance::wake_runtime_maintenance(self, None)
@@ -785,8 +808,30 @@ impl ServiceHandle {
         source: &str,
         budget: QueryBudget,
     ) -> Result<Vec<String>, ServiceFailure> {
-        self.require_data_or_mutation_admission()?;
-        query::query_log_bodies(self, bearer, self.instance.logs_shard, source, budget)
+        let started = std::time::Instant::now();
+        let result = self.require_data_or_mutation_admission().and_then(|()| {
+            query::query_log_bodies(self, bearer, self.instance.logs_shard, source, budget)
+        });
+        if let Ok(owner) = self.integrity_health.lock()
+            && let Some(health) = owner.as_ref()
+        {
+            let status = match &result {
+                Ok(_) => 200,
+                Err(ServiceFailure::Unauthorized) => 401,
+                Err(ServiceFailure::CapacityUnavailable) => 429,
+                Err(
+                    ServiceFailure::InvalidRequest
+                    | ServiceFailure::InvalidRequestWithLimit(_)
+                    | ServiceFailure::RequestTooLarge,
+                ) => 400,
+                Err(_) => 503,
+            };
+            health.operational_telemetry().record_query(
+                crate::operational::RequestOutcome::from_status(status),
+                started.elapsed(),
+            );
+        }
+        result
     }
 
     #[cfg(test)]

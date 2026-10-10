@@ -1105,9 +1105,9 @@ fn listener_roles(listeners: &[Box<dyn BoundListener>]) -> u8 {
 }
 
 fn split_listener_tasks(tasks: RunningTasks) -> (RunningTasks, RunningTasks) {
-    tasks
-        .into_iter()
-        .partition(|(role, _)| *role != TaskRole::Maintenance)
+    tasks.into_iter().partition(|(role, _)| {
+        !matches!(role, TaskRole::Maintenance | TaskRole::OperationalTelemetry)
+    })
 }
 
 fn close_listeners(listeners: &mut [Box<dyn BoundListener>]) -> Result<(), ()> {
@@ -1244,21 +1244,6 @@ enum DrainFailureSite {
     JoinWithin,
 }
 
-impl DrainFailureSite {
-    const fn token(self) -> &'static str {
-        match self {
-            Self::PollJoin => "poll_join",
-            Self::JoinWithin => "join_within",
-        }
-    }
-}
-
-struct DrainTaskFailureDiagnostic {
-    site: DrainFailureSite,
-    role: TaskRole,
-    failure: TaskFailure,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DrainDiagnosticDelivery {
     Delivered,
@@ -1283,16 +1268,22 @@ fn preserve_crash_record_diagnostic(
 }
 
 fn report_crash_record_persistence_failure() -> CrashRecordDiagnosticDelivery {
-    let mut stderr = std::io::stderr().lock();
-    report_crash_record_persistence_failure_to(&mut stderr)
+    match crate::write_operational_diagnostic(
+        crate::OperationalDiagnostic::RuntimeCrashRecordUnavailable,
+    ) {
+        Ok(()) => CrashRecordDiagnosticDelivery::Delivered,
+        Err(_) => CrashRecordDiagnosticDelivery::Unavailable,
+    }
 }
 
+#[cfg(test)]
 fn report_crash_record_persistence_failure_to(
     sink: &mut impl std::io::Write,
 ) -> CrashRecordDiagnosticDelivery {
-    match writeln!(
+    match crate::render_operational_diagnostic(
         sink,
-        "positron: unable to persist sanitized runtime crash record"
+        false,
+        crate::OperationalDiagnostic::RuntimeCrashRecordUnavailable,
     ) {
         Ok(()) => CrashRecordDiagnosticDelivery::Delivered,
         Err(_) => CrashRecordDiagnosticDelivery::Unavailable,
@@ -1312,22 +1303,11 @@ fn preserve_drain_task_failure(
     }
 }
 
-impl std::fmt::Display for DrainTaskFailureDiagnostic {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "positron: runtime drain task failure site={} role={} category={}",
-            self.site.token(),
-            drain_task_role_token(self.role),
-            drain_task_failure_token(self.failure),
-        )
-    }
-}
-
-const fn drain_task_role_token(role: TaskRole) -> &'static str {
+pub(crate) const fn drain_task_role_token(role: TaskRole) -> &'static str {
     match role {
         TaskRole::Control => "control",
         TaskRole::Operations => "operations",
+        TaskRole::OperationalTelemetry => "operational_telemetry",
         TaskRole::Maintenance => "maintenance",
         TaskRole::Api => "api",
         TaskRole::OtlpGrpc => "otlp_grpc",
@@ -1336,7 +1316,7 @@ const fn drain_task_role_token(role: TaskRole) -> &'static str {
     }
 }
 
-const fn drain_task_failure_token(failure: TaskFailure) -> &'static str {
+pub(crate) const fn drain_task_failure_token(failure: TaskFailure) -> &'static str {
     match failure {
         TaskFailure::RegistrationUnavailable => "registration_unavailable",
         TaskFailure::SpawnUnavailable => "spawn_unavailable",
@@ -1351,24 +1331,31 @@ fn report_drain_task_failure(
     role: TaskRole,
     failure: TaskFailure,
 ) -> DrainDiagnosticDelivery {
-    let mut stderr = std::io::stderr().lock();
-    report_drain_task_failure_to(&mut stderr, site, role, failure)
+    match crate::write_operational_diagnostic(crate::OperationalDiagnostic::DrainTaskFailure {
+        joining: matches!(site, DrainFailureSite::JoinWithin),
+        role,
+        failure,
+    }) {
+        Ok(()) => DrainDiagnosticDelivery::Delivered,
+        Err(_) => DrainDiagnosticDelivery::Unavailable,
+    }
 }
 
+#[cfg(test)]
 fn report_drain_task_failure_to(
     sink: &mut impl std::io::Write,
     site: DrainFailureSite,
     role: TaskRole,
     failure: TaskFailure,
 ) -> DrainDiagnosticDelivery {
-    match writeln!(
+    match crate::render_operational_diagnostic(
         sink,
-        "{}",
-        DrainTaskFailureDiagnostic {
-            site,
+        false,
+        crate::OperationalDiagnostic::DrainTaskFailure {
+            joining: matches!(site, DrainFailureSite::JoinWithin),
             role,
             failure,
-        }
+        },
     ) {
         Ok(()) => DrainDiagnosticDelivery::Delivered,
         Err(_) => DrainDiagnosticDelivery::Unavailable,
@@ -1379,7 +1366,7 @@ fn report_drain_task_failure_to(
 mod drain_failure_diagnostic_tests {
     use super::{
         CrashRecordDiagnosticDelivery, DrainDiagnosticDelivery, DrainFailureSite,
-        DrainTaskFailureDiagnostic, preserve_crash_record_diagnostic, preserve_drain_task_failure,
+        preserve_crash_record_diagnostic, preserve_drain_task_failure,
         report_crash_record_persistence_failure_to, report_drain_task_failure_to,
     };
     use crate::{TaskFailure, TaskRole};
@@ -1389,6 +1376,7 @@ mod drain_failure_diagnostic_tests {
         let roles = [
             (TaskRole::Control, "control"),
             (TaskRole::Operations, "operations"),
+            (TaskRole::OperationalTelemetry, "operational_telemetry"),
             (TaskRole::Maintenance, "maintenance"),
             (TaskRole::Api, "api"),
             (TaskRole::OtlpGrpc, "otlp_grpc"),
@@ -1413,17 +1401,17 @@ mod drain_failure_diagnostic_tests {
         for (site, site_token) in sites {
             for (role, role_token) in roles {
                 for (failure, failure_token) in failures {
+                    let mut output = Vec::new();
                     assert_eq!(
-                        DrainTaskFailureDiagnostic {
-                            site,
-                            role,
-                            failure,
-                        }
-                        .to_string(),
-                        format!(
-                            "positron: runtime drain task failure site={site_token} role={role_token} category={failure_token}"
-                        )
+                        report_drain_task_failure_to(&mut output, site, role, failure),
+                        DrainDiagnosticDelivery::Delivered
                     );
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&output).expect("closed JSON diagnostic");
+                    assert_eq!(value["event"], "runtime_drain_task_failure");
+                    assert_eq!(value["site"], site_token);
+                    assert_eq!(value["role"], role_token);
+                    assert_eq!(value["category"], failure_token);
                 }
             }
         }

@@ -237,3 +237,19 @@ file-operation fault seam. It publishes one bounded governance-sensitive
 proposal at every object, audit, commit, marker, rename, and directory-sync
 boundary, then reopens storage and asserts complete predecessor-or-successor
 catalog and audit visibility.
+
+Operational telemetry drives arbitrary bounded status/listener sequences through
+closed request classification, the 32-record ring and pending queue, overflow
+reporting, JSON rendering, and finite counter families:
+
+```console
+cargo +nightly fuzz run operational_state -- -runs=1000
+```
+
+The configuration decoder also covers the explicit bounded numeric external OTLP
+destination; process inputs cover the registered operational worker's lifecycle:
+
+```console
+cargo +nightly fuzz run configuration_document -- -runs=1000
+cargo +nightly fuzz run process_inputs -- -runs=1000
+```

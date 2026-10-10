@@ -11,8 +11,9 @@ use positron_config::{ConfigurationInputs, NetworkListenerRole, NetworkTransport
 use positron_kernel::MountQualification;
 use positron_runtime::{
     ApplicationRuntime, BootstrapPaths, ExitOutcome, HostInputs, InitializationMode,
-    NativeBindings, NativeHost, PublicPlaintextApiStartupIntent, RecoveryAttempt,
-    RecoveryAttemptHost, RecoveryDecision, ServeConfiguration, ShutdownTrigger,
+    NativeBindings, NativeHost, OperationalDiagnostic, OperationalReloadRejection,
+    PublicPlaintextApiStartupIntent, RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision,
+    ServeConfiguration, ShutdownTrigger,
 };
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -125,8 +126,8 @@ pub fn run_native(
         Ok(outcome) => {
             if let ExitOutcome::InternalCleanupFailure(failure) = outcome {
                 for role in failure.failed_roles() {
-                    match report_runtime_diagnostic(std::format_args!(
-                        "positron: runtime cleanup failed role={role:?}"
+                    match report_runtime_diagnostic(OperationalDiagnostic::RuntimeCleanupFailure(
+                        role,
                     )) {
                         RuntimeDiagnosticDelivery::Delivered
                         | RuntimeDiagnosticDelivery::Unavailable => {},
@@ -136,7 +137,9 @@ pub fn run_native(
             exit_code(outcome)
         },
         Err(failure) => {
-            eprintln!("positron: {}", failure.message());
+            match report_runtime_diagnostic(failure.diagnostic()) {
+                RuntimeDiagnosticDelivery::Delivered | RuntimeDiagnosticDelivery::Unavailable => {},
+            }
             ExitCode::from(failure.code())
         },
     }
@@ -156,7 +159,9 @@ fn run(
     .map_err(|_| LaunchFailure::Configuration)?;
     let effective = resolve(inputs).map_err(|_| LaunchFailure::Configuration)?;
     for warning in effective.security_warnings() {
-        eprintln!("positron: warning: {}", warning.message());
+        match report_runtime_diagnostic(OperationalDiagnostic::TransportSecurityWarning(warning)) {
+            RuntimeDiagnosticDelivery::Delivered | RuntimeDiagnosticDelivery::Unavailable => {},
+        }
     }
     let paths = BootstrapPaths::with_local_key(
         Path::new(effective.data_directory()),
@@ -340,9 +345,9 @@ fn wait_for_shutdown(
                         Ok(candidate) => {
                             let outcome = process.reload_configuration(candidate);
                             if let Some(category) = reload_rejection_category(&outcome) {
-                                let delivery = report_runtime_diagnostic(std::format_args!(
-                                    "positron: configuration reload rejected category={category}"
-                                ));
+                                let delivery = report_runtime_diagnostic(
+                                    OperationalDiagnostic::ConfigurationReloadRejected(category),
+                                );
                                 match delivery {
                                     RuntimeDiagnosticDelivery::Delivered
                                     | RuntimeDiagnosticDelivery::Unavailable => {},
@@ -351,17 +356,19 @@ fn wait_for_shutdown(
                         },
                         Err(()) => {
                             if process.record_invalid_configuration_reload().is_err() {
-                                let delivery = report_runtime_diagnostic(std::format_args!(
-                                    "positron: configuration reload audit unavailable"
-                                ));
+                                let delivery = report_runtime_diagnostic(
+                                    OperationalDiagnostic::ConfigurationReloadAuditUnavailable,
+                                );
                                 match delivery {
                                     RuntimeDiagnosticDelivery::Delivered
                                     | RuntimeDiagnosticDelivery::Unavailable => {},
                                 }
                             }
-                            let delivery = report_runtime_diagnostic(std::format_args!(
-                                "positron: configuration reload rejected category=source_rejected"
-                            ));
+                            let delivery = report_runtime_diagnostic(
+                                OperationalDiagnostic::ConfigurationReloadRejected(
+                                    OperationalReloadRejection::SourceRejected,
+                                ),
+                            );
                             match delivery {
                                 RuntimeDiagnosticDelivery::Delivered
                                 | RuntimeDiagnosticDelivery::Unavailable => {},
@@ -446,9 +453,7 @@ fn capture_runtime_failure(
         .persist_crash_record(phase, finding_code, "runtime")
         .is_err()
     {
-        return report_runtime_diagnostic(std::format_args!(
-            "positron: unable to persist sanitized runtime crash record"
-        ));
+        return report_runtime_diagnostic(OperationalDiagnostic::RuntimeCrashRecordUnavailable);
     }
     RuntimeDiagnosticDelivery::Delivered
 }
@@ -462,9 +467,7 @@ fn capture_draining_runtime_failure(
         .persist_crash_record(phase, finding_code, "runtime")
         .is_err()
     {
-        return report_runtime_diagnostic(std::format_args!(
-            "positron: unable to persist sanitized runtime crash record"
-        ));
+        return report_runtime_diagnostic(OperationalDiagnostic::RuntimeCrashRecordUnavailable);
     }
     RuntimeDiagnosticDelivery::Delivered
 }
@@ -484,16 +487,19 @@ fn preserve_runtime_outcome(
     }
 }
 
-fn report_runtime_diagnostic(message: std::fmt::Arguments<'_>) -> RuntimeDiagnosticDelivery {
-    let mut stderr = std::io::stderr().lock();
-    report_runtime_diagnostic_to(&mut stderr, message)
+fn report_runtime_diagnostic(diagnostic: OperationalDiagnostic) -> RuntimeDiagnosticDelivery {
+    match positron_runtime::write_operational_diagnostic(diagnostic) {
+        Ok(()) => RuntimeDiagnosticDelivery::Delivered,
+        Err(_) => RuntimeDiagnosticDelivery::Unavailable,
+    }
 }
 
+#[cfg(test)]
 fn report_runtime_diagnostic_to(
     sink: &mut impl std::io::Write,
-    message: std::fmt::Arguments<'_>,
+    diagnostic: OperationalDiagnostic,
 ) -> RuntimeDiagnosticDelivery {
-    match writeln!(sink, "{message}") {
+    match positron_runtime::render_operational_diagnostic(sink, false, diagnostic) {
         Ok(()) => RuntimeDiagnosticDelivery::Delivered,
         Err(_) => RuntimeDiagnosticDelivery::Unavailable,
     }
@@ -504,7 +510,7 @@ fn reload_rejection_category(
         positron_runtime::ConfigurationReloadOutcome,
         positron_runtime::ConfigurationRuntimeFailure,
     >,
-) -> Option<&'static str> {
+) -> Option<OperationalReloadRejection> {
     use positron_runtime::{ConfigurationReloadOutcome, ConfigurationRuntimeFailure};
 
     match outcome {
@@ -515,12 +521,20 @@ fn reload_rejection_category(
         ) => None,
         Ok(ConfigurationReloadOutcome::RejectedImmutable { .. })
         | Err(ConfigurationRuntimeFailure::ImmutableConfiguration) => {
-            Some("immutable_configuration")
+            Some(OperationalReloadRejection::ImmutableConfiguration)
         },
-        Ok(ConfigurationReloadOutcome::RequiresDrain { .. }) => Some("requires_drain"),
-        Err(ConfigurationRuntimeFailure::Unavailable) => Some("runtime_unavailable"),
-        Err(ConfigurationRuntimeFailure::PublicationUnavailable) => Some("publication_unavailable"),
-        Err(ConfigurationRuntimeFailure::ListenerUnavailable) => Some("listener_unavailable"),
+        Ok(ConfigurationReloadOutcome::RequiresDrain { .. }) => {
+            Some(OperationalReloadRejection::RequiresDrain)
+        },
+        Err(ConfigurationRuntimeFailure::Unavailable) => {
+            Some(OperationalReloadRejection::RuntimeUnavailable)
+        },
+        Err(ConfigurationRuntimeFailure::PublicationUnavailable) => {
+            Some(OperationalReloadRejection::PublicationUnavailable)
+        },
+        Err(ConfigurationRuntimeFailure::ListenerUnavailable) => {
+            Some(OperationalReloadRejection::ListenerUnavailable)
+        },
     }
 }
 
@@ -588,6 +602,16 @@ impl LaunchFailure {
         }
     }
 
+    const fn diagnostic(self) -> OperationalDiagnostic {
+        match self {
+            Self::Usage => OperationalDiagnostic::InvalidCommandLine,
+            Self::Configuration => OperationalDiagnostic::ConfigurationRejected,
+            Self::Startup(_) => OperationalDiagnostic::StartupFailed,
+            Self::Signal => OperationalDiagnostic::SignalHandlingUnavailable,
+        }
+    }
+
+    #[cfg(test)]
     const fn message(self) -> &'static str {
         match self {
             Self::Usage => "invalid command line",
@@ -619,8 +643,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        ExitOutcome, LaunchFailure, NativeRecovery, RecoveryAttemptHost, RecoveryDecision,
-        ReloadInputs, RuntimeDiagnosticDelivery, ShutdownTrigger, exit_code,
+        ExitOutcome, LaunchFailure, NativeRecovery, OperationalDiagnostic, RecoveryAttemptHost,
+        RecoveryDecision, ReloadInputs, RuntimeDiagnosticDelivery, ShutdownTrigger, exit_code,
         pending_termination_trigger, preserve_runtime_outcome, reload_rejection_category,
         report_runtime_diagnostic_to, wait_for_shutdown,
     };
@@ -718,7 +742,10 @@ mod tests {
                 "immutable_configuration",
             ),
         ] {
-            assert_eq!(reload_rejection_category(&outcome), Some(expected));
+            assert_eq!(
+                reload_rejection_category(&outcome).map(|category| category.label()),
+                Some(expected)
+            );
         }
     }
 
@@ -736,19 +763,19 @@ mod tests {
             }
         }
 
-        let message = "positron: unable to persist sanitized runtime crash record";
+        let diagnostic = OperationalDiagnostic::RuntimeCrashRecordUnavailable;
         let mut rendered = Vec::new();
         assert_eq!(
-            report_runtime_diagnostic_to(&mut rendered, format_args!("{message}")),
+            report_runtime_diagnostic_to(&mut rendered, diagnostic),
             RuntimeDiagnosticDelivery::Delivered
         );
         assert_eq!(
             String::from_utf8(rendered).expect("UTF-8 diagnostic"),
-            format!("{message}\n")
+            "{\"component\":\"runtime\",\"event\":\"runtime_crash_record_unavailable\",\"severity\":\"error\"}\n"
         );
 
         let mut sink = ClosedDiagnosticSink;
-        let delivery = report_runtime_diagnostic_to(&mut sink, format_args!("{message}"));
+        let delivery = report_runtime_diagnostic_to(&mut sink, diagnostic);
         assert_eq!(delivery, RuntimeDiagnosticDelivery::Unavailable);
         assert_eq!(
             preserve_runtime_outcome(delivery, ExitOutcome::Forced),

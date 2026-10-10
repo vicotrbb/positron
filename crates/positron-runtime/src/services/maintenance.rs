@@ -22,43 +22,7 @@ use positron_signals::{
 
 use super::{ServiceFailure, classify_catalog_failure_code, maintenance_failure_category};
 
-#[derive(Clone, Copy)]
-enum MaintenanceWorkerOperation {
-    StartDispatch,
-    CompleteInFlight,
-    IntegrityDiscovery,
-    RetentionDiscovery,
-}
-
-#[derive(Clone, Copy)]
-enum IntegrityScrubFailureStage {
-    PreVerification,
-    VerificationFailure,
-    IncompleteInvalid,
-    VerificationOutcomeFenced,
-}
-
-impl IntegrityScrubFailureStage {
-    const fn token(self) -> &'static str {
-        match self {
-            Self::PreVerification => "pre_verification",
-            Self::VerificationFailure => "verification_failure",
-            Self::IncompleteInvalid => "incomplete_invalid",
-            Self::VerificationOutcomeFenced => "verification_outcome_fenced",
-        }
-    }
-}
-
-impl MaintenanceWorkerOperation {
-    const fn token(self) -> &'static str {
-        match self {
-            Self::StartDispatch => "start_dispatch",
-            Self::CompleteInFlight => "complete_in_flight",
-            Self::IntegrityDiscovery => "integrity_discovery",
-            Self::RetentionDiscovery => "retention_discovery",
-        }
-    }
-}
+use crate::{IntegrityScrubFailureStage, MaintenanceWorkerOperation, OperationalDiagnostic};
 
 #[derive(Clone, Copy)]
 struct MaintenanceWorkerFailureContext {
@@ -99,35 +63,20 @@ impl MaintenanceWorkerFailureContext {
     }
 
     fn report(self, failure: ServiceFailure) -> ServiceFailure {
-        let mut stderr = std::io::stderr().lock();
-        preserve_primary_failure(self.report_to(&mut stderr, failure), failure)
-    }
-
-    fn report_to(
-        self,
-        sink: &mut impl std::io::Write,
-        failure: ServiceFailure,
-    ) -> DiagnosticDelivery {
-        let Some(category) = maintenance_failure_category(failure) else {
-            return DiagnosticDelivery::Delivered;
+        if maintenance_failure_category(failure).is_none() {
+            return failure;
+        }
+        let diagnostic = OperationalDiagnostic::MaintenanceOperationFailure {
+            operation: self.operation,
+            task: self.task_class,
+            stage: None,
+            failure,
         };
-        let write = match self.task_class {
-            Some(task_class) => writeln!(
-                sink,
-                "positron: maintenance worker failure operation={} task={} category={category}",
-                self.operation.token(),
-                maintenance_task_class_token(task_class),
-            ),
-            None => writeln!(
-                sink,
-                "positron: maintenance worker failure operation={} category={category}",
-                self.operation.token(),
-            ),
-        };
-        match write {
+        let delivery = match crate::write_operational_diagnostic(diagnostic) {
             Ok(()) => DiagnosticDelivery::Delivered,
             Err(_) => DiagnosticDelivery::Unavailable,
-        }
+        };
+        preserve_primary_failure(delivery, failure)
     }
 }
 
@@ -135,29 +84,20 @@ fn report_integrity_scrub_failure_stage(
     stage: IntegrityScrubFailureStage,
     failure: ServiceFailure,
 ) -> ServiceFailure {
-    let mut stderr = std::io::stderr().lock();
-    preserve_primary_failure(
-        report_integrity_scrub_failure_stage_to(&mut stderr, stage, failure),
+    if maintenance_failure_category(failure).is_none() {
+        return failure;
+    }
+    let diagnostic = OperationalDiagnostic::MaintenanceOperationFailure {
+        operation: MaintenanceWorkerOperation::CompleteInFlight,
+        task: Some(MaintenanceTaskClass::IntegrityScrub),
+        stage: Some(stage),
         failure,
-    )
-}
-
-fn report_integrity_scrub_failure_stage_to(
-    sink: &mut impl std::io::Write,
-    stage: IntegrityScrubFailureStage,
-    failure: ServiceFailure,
-) -> DiagnosticDelivery {
-    let Some(category) = maintenance_failure_category(failure) else {
-        return DiagnosticDelivery::Delivered;
     };
-    match writeln!(
-        sink,
-        "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub stage={} category={category}",
-        stage.token(),
-    ) {
+    let delivery = match crate::write_operational_diagnostic(diagnostic) {
         Ok(()) => DiagnosticDelivery::Delivered,
         Err(_) => DiagnosticDelivery::Unavailable,
-    }
+    };
+    preserve_primary_failure(delivery, failure)
 }
 
 #[derive(Clone)]
@@ -405,33 +345,6 @@ fn installed_task_class(execution: &InstalledMaintenanceExecution<'_>) -> Mainte
         | InstalledMaintenanceExecution::IntegrityScrub { execution, .. } => {
             execution.task().class()
         },
-    }
-}
-
-const fn maintenance_task_class_token(task_class: MaintenanceTaskClass) -> &'static str {
-    match task_class {
-        MaintenanceTaskClass::ActiveSegmentRoll => "active_segment_roll",
-        MaintenanceTaskClass::Compaction => "compaction",
-        MaintenanceTaskClass::SnapshotLeaseExpiry => "snapshot_lease_expiry",
-        MaintenanceTaskClass::RetentionPublication => "retention_publication",
-        MaintenanceTaskClass::RetentionReclamation => "retention_reclamation",
-        MaintenanceTaskClass::CatalogReclamation => "catalog_reclamation",
-        MaintenanceTaskClass::OrphanReclamation => "orphan_reclamation",
-        MaintenanceTaskClass::IntegrityScrub => "integrity_scrub",
-        MaintenanceTaskClass::QuarantineFollowUp => "quarantine_follow_up",
-        MaintenanceTaskClass::SchemaStatistics => "schema_statistics",
-        MaintenanceTaskClass::SchemaPromotion => "schema_promotion",
-        MaintenanceTaskClass::SchemaDemotion => "schema_demotion",
-        MaintenanceTaskClass::GovernanceAuditCheckpoint => "governance_audit_checkpoint",
-        MaintenanceTaskClass::KeyRewrap => "key_rewrap",
-        MaintenanceTaskClass::EnvelopeVerification => "envelope_verification",
-        MaintenanceTaskClass::Migration => "migration",
-        MaintenanceTaskClass::RepositoryVerification => "repository_verification",
-        MaintenanceTaskClass::RepositoryCleanup => "repository_cleanup",
-        MaintenanceTaskClass::BackupSnapshot => "backup_snapshot",
-        MaintenanceTaskClass::DurableExport => "durable_export",
-        MaintenanceTaskClass::CompletedOperationExpiry => "completed_operation_expiry",
-        MaintenanceTaskClass::TenantPurge => "tenant_purge",
     }
 }
 
@@ -1525,12 +1438,22 @@ mod diagnostic_tests {
             "diagnostic child exited with {:?}",
             output.status.code()
         );
+        let records = String::from_utf8(output.stderr)?
+            .lines()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(records.len(), 2);
+        for record in &records {
+            assert_eq!(record["event"], "maintenance_worker_failure");
+            assert_eq!(record["component"], "runtime");
+            assert_eq!(record["severity"], "error");
+            assert_eq!(record["operation"], "complete_in_flight");
+            assert_eq!(record["task"], "integrity_scrub");
+            assert_eq!(record["category"], "corrupt_state");
+        }
         assert_eq!(
-            String::from_utf8(output.stderr)?,
-            concat!(
-                "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub category=corrupt_state\n",
-                "positron: maintenance worker failure operation=complete_in_flight task=integrity_scrub stage=verification_outcome_fenced category=corrupt_state\n",
-            )
+            records.get(1).ok_or("stage record")?["stage"],
+            "verification_outcome_fenced"
         );
         Ok(())
     }

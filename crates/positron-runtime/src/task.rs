@@ -14,6 +14,8 @@ mod tests;
 pub enum TaskRole {
     Control,
     Operations,
+    /// Process-owned bounded structured logging and optional external trace export.
+    OperationalTelemetry,
     /// Internal Storage Kernel maintenance work; it owns no listener.
     Maintenance,
     Api,

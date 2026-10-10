@@ -57,6 +57,7 @@ fn admitted_http_trace_request_keeps_captured_policy_after_successor_activation(
             receive_traces(
                 &mut server,
                 RequestHead {
+                    openmetrics: false,
                     method: "POST".to_owned(),
                     path: "/v1/traces".to_owned(),
                     content_length: body.len(),
@@ -185,6 +186,7 @@ fn authenticated_http_trace_marker_survives_ack_and_runtime_reopen() -> Result<(
     let response = receive_traces(
         &mut server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/traces".to_owned(),
             content_length: body.len(),
@@ -236,6 +238,7 @@ fn authenticated_http_trace_marker_survives_ack_and_runtime_reopen() -> Result<(
     let expensive_response = receive_traces(
         &mut expensive_server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/traces".to_owned(),
             content_length: expensive_body.len(),

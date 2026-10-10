@@ -198,6 +198,7 @@ impl HttpHarness {
         let result = receive_traces(
             &mut server,
             RequestHead {
+                openmetrics: false,
                 method: "POST".to_owned(),
                 path: "/v1/traces".to_owned(),
                 content_length: declared_length.unwrap_or(body.len()),

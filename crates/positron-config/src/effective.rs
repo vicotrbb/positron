@@ -298,6 +298,7 @@ impl PublicPlaintextApiConfiguration {
 pub struct EffectiveConfiguration {
     pub(crate) schema_version: u16,
     pub(crate) log_level: LogLevel,
+    pub(crate) trace_otlp_grpc_address: Option<SocketAddr>,
     pub(crate) shutdown_grace_seconds: u16,
     pub(crate) max_registered_tenants: u16,
     pub(crate) control_path: String,
@@ -360,10 +361,16 @@ pub struct EffectiveConfiguration {
     pub(crate) secrets_directory: String,
     pub(crate) local_key_file: ProtectedFileReference,
     pub(crate) export_destinations: Vec<ExportDestinationDefinition>,
-    pub(crate) sources: [SettingSource; 100],
+    pub(crate) sources: [SettingSource; 101],
 }
 
 impl EffectiveConfiguration {
+    /// The explicit external numeric OTLP gRPC destination; no implicit exporter.
+    #[must_use]
+    pub const fn operational_trace_address(&self) -> Option<SocketAddr> {
+        self.trace_otlp_grpc_address
+    }
+
     #[must_use]
     pub const fn schema_version(&self) -> u16 {
         self.schema_version
@@ -823,6 +830,12 @@ impl EffectiveConfiguration {
         rendered.push_str(&self.schema_version.to_string());
         rendered.push_str("\n\n[diagnostics]\nlog_level = ");
         rendered.push_str(&super::render_toml_basic_string(self.log_level.as_str()));
+        rendered.push_str("\ntrace_otlp_grpc_address = ");
+        rendered.push_str(&super::render_toml_basic_string(
+            &self
+                .trace_otlp_grpc_address
+                .map_or_else(|| "disabled".to_owned(), |address| address.to_string()),
+        ));
         rendered.push_str("\n\n[runtime]\nshutdown_grace_seconds = ");
         rendered.push_str(&self.shutdown_grace_seconds.to_string());
         rendered.push_str("\nmax_registered_tenants = ");
@@ -1027,6 +1040,9 @@ impl EffectiveConfiguration {
             }
             match setting {
                 Setting::DiagnosticsLogLevel => active.log_level = candidate.log_level,
+                Setting::DiagnosticsTraceOtlpGrpcAddress => {
+                    active.trace_otlp_grpc_address = candidate.trace_otlp_grpc_address
+                },
                 Setting::SchemaVersion
                 | Setting::RuntimeShutdownGraceSeconds
                 | Setting::RuntimeMaxRegisteredTenants
@@ -1135,6 +1151,9 @@ impl EffectiveConfiguration {
         match setting {
             Setting::SchemaVersion => self.schema_version != other.schema_version,
             Setting::DiagnosticsLogLevel => self.log_level != other.log_level,
+            Setting::DiagnosticsTraceOtlpGrpcAddress => {
+                self.trace_otlp_grpc_address != other.trace_otlp_grpc_address
+            },
             Setting::RuntimeShutdownGraceSeconds => {
                 self.shutdown_grace_seconds != other.shutdown_grace_seconds
             },
@@ -1508,6 +1527,9 @@ impl EffectiveConfiguration {
         match setting {
             Setting::SchemaVersion => self.schema_version.to_string(),
             Setting::DiagnosticsLogLevel => self.log_level.as_str().to_owned(),
+            Setting::DiagnosticsTraceOtlpGrpcAddress => self
+                .trace_otlp_grpc_address
+                .map_or_else(|| "disabled".to_owned(), |address| address.to_string()),
             Setting::RuntimeShutdownGraceSeconds => self.shutdown_grace_seconds.to_string(),
             Setting::RuntimeMaxRegisteredTenants => self.max_registered_tenants.to_string(),
             Setting::ListenerControlPath => self.control_path.clone(),
@@ -1859,6 +1881,9 @@ impl EffectiveConfiguration {
         match setting {
             Setting::SchemaVersion => self.schema_version.to_string(),
             Setting::DiagnosticsLogLevel => self.log_level.as_str().to_owned(),
+            Setting::DiagnosticsTraceOtlpGrpcAddress => self
+                .trace_otlp_grpc_address
+                .map_or_else(|| "disabled".to_owned(), |address| address.to_string()),
             Setting::RuntimeShutdownGraceSeconds => self.shutdown_grace_seconds.to_string(),
             Setting::RuntimeMaxRegisteredTenants => self.max_registered_tenants.to_string(),
             Setting::ListenerControlPath => self.control_path.clone(),

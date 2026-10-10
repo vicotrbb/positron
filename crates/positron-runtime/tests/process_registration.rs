@@ -35,13 +35,20 @@ fn data_task_registration_failure_preserves_recovery_staging_and_cleans_up()
         [
             TaskEvent::Registered(TaskRole::Control),
             TaskEvent::Registered(TaskRole::Operations),
+            TaskEvent::Registered(TaskRole::OperationalTelemetry),
             TaskEvent::Spawned(TaskRole::Control),
             TaskEvent::Spawned(TaskRole::Operations),
+            TaskEvent::Spawned(TaskRole::OperationalTelemetry),
             TaskEvent::Registered(TaskRole::Api),
+            TaskEvent::Aborted(
+                TaskRole::OperationalTelemetry,
+                ProcessPhase::Recovering,
+                true
+            ),
             TaskEvent::Aborted(TaskRole::Operations, ProcessPhase::Recovering, true),
             TaskEvent::Aborted(TaskRole::Control, ProcessPhase::Recovering, true),
         ],
-        "only recovery-safe tasks start before a data registration failure, and both roll back"
+        "only recovery-safe tasks start before a data registration failure, and all three roll back"
     );
     Ok(())
 }

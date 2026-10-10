@@ -442,7 +442,14 @@ fn complete_candidate(factory: &dyn ListenerFactory) -> Result<(), ExitOutcome> 
 type RegisteredTasks = Vec<(TaskRole, Box<dyn RegisteredTask>)>;
 
 fn register_control_tasks(registrar: &dyn TaskRegistrar) -> Result<RegisteredTasks, ExitOutcome> {
-    register_tasks(registrar, &[TaskRole::Control, TaskRole::Operations])
+    register_tasks(
+        registrar,
+        &[
+            TaskRole::Control,
+            TaskRole::Operations,
+            TaskRole::OperationalTelemetry,
+        ],
+    )
 }
 
 fn register_data_tasks(registrar: &dyn TaskRegistrar) -> Result<RegisteredTasks, ExitOutcome> {
@@ -594,9 +601,12 @@ fn restricted_fenced_process(
             ListenerRole::Control | ListenerRole::Operations
         )
     });
-    let approved_tasks = tasks
-        .iter()
-        .all(|(role, _)| matches!(role, TaskRole::Control | TaskRole::Operations));
+    let approved_tasks = tasks.iter().all(|(role, _)| {
+        matches!(
+            role,
+            TaskRole::Control | TaskRole::Operations | TaskRole::OperationalTelemetry
+        )
+    });
     if !approved_listeners || !approved_tasks {
         let mut listeners = listeners;
         let mut tasks = tasks;

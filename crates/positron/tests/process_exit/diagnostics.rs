@@ -360,3 +360,58 @@ fn volume_bytes(
     walk(root, root, &mut output)?;
     Ok(output)
 }
+
+#[cfg(unix)]
+#[test]
+fn detached_serve_startup_failures_and_transport_warnings_are_closed_json()
+-> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args([
+            "serve",
+            "--set",
+            "diagnostics.log_level=startup-secret-canary",
+        ])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let failure: serde_json::Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(failure["event"], "configuration_rejected");
+    assert_eq!(failure["severity"], "error");
+    assert_eq!(failure["component"], "runtime");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("startup-secret-canary"));
+    let root = std::env::temp_dir().join(format!(
+        "positron-startup-json-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    fs::create_dir_all(&root)?;
+    let configuration = root.join("positron.toml");
+    fs::write(
+        &configuration,
+        format!(
+            "schema_version=1\n[listener]\napi_bind_address=\"0.0.0.0:0\"\napi_transport=\"plaintext\"\n[storage]\ndata_directory=\"{}\"\nsecrets_directory=\"{}\"\n",
+            root.join("data").display(),
+            root.join("secrets").display()
+        ),
+    )?;
+    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["serve", "--config"])
+        .arg(&configuration)
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let records = String::from_utf8(output.stderr)?
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records.first().ok_or("warning")?["event"],
+        "transport_security_warning"
+    );
+    assert_eq!(records.first().ok_or("warning")?["severity"], "warn");
+    assert_eq!(
+        records.get(1).ok_or("failure")?["event"],
+        "configuration_rejected"
+    );
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

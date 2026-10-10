@@ -94,5 +94,8 @@ name = "otlp_logs_http"
 path = "tests/otlp_logs_http/tests/mod.rs"
 
 
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["pipe"] }
+
 [lints]
 workspace = true

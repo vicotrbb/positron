@@ -282,6 +282,7 @@ const fn task_bit(role: TaskRole) -> u8 {
     1 << match role {
         TaskRole::Control => 0,
         TaskRole::Operations => 1,
+        TaskRole::OperationalTelemetry => 7,
         TaskRole::Maintenance => 2,
         TaskRole::Api => 3,
         TaskRole::OtlpGrpc => 4,

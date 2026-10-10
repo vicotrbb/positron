@@ -234,7 +234,7 @@ fn second_signal_cleanup_overflow_is_bounded_and_deterministic()
     else {
         panic!("cleanup overflow must remain typed");
     };
-    assert_eq!(cleanup.task_failures(), 7);
+    assert_eq!(cleanup.task_failures(), 8);
     assert_eq!(cleanup.listener_failures(), 1);
     assert!(cleanup.overflowed());
     assert_eq!(
@@ -313,6 +313,7 @@ fn deadline_aborts_every_task_and_never_reports_graceful_completion()
             TaskEvent::Aborted(TaskRole::OtlpHttp, ProcessPhase::Stopping, true),
             TaskEvent::Aborted(TaskRole::OtlpGrpc, ProcessPhase::Stopping, true),
             TaskEvent::Aborted(TaskRole::Api, ProcessPhase::Stopping, true),
+            TaskEvent::Aborted(TaskRole::OperationalTelemetry, ProcessPhase::Stopping, true),
             TaskEvent::Aborted(TaskRole::Operations, ProcessPhase::Stopping, true),
             TaskEvent::Aborted(TaskRole::Control, ProcessPhase::Stopping, true),
         ]
@@ -431,7 +432,11 @@ fn ambiguous_bootstrap_fences_without_exposing_a_data_endpoint()
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        [TaskRole::Control, TaskRole::Operations]
+        [
+            TaskRole::Control,
+            TaskRole::Operations,
+            TaskRole::OperationalTelemetry
+        ]
     );
     assert!(roots.acquire_volume_again().is_err());
     assert_eq!(
@@ -530,10 +535,11 @@ fn first_signal_closes_admission_joins_registered_tasks_and_releases_ownership_l
     assert_eq!(health.readiness(), Readiness::NotReady);
     assert!(roots.acquire_volume_again().is_ok());
     let events = tasks.events.borrow();
-    assert_eq!(events.len(), 21);
+    assert_eq!(events.len(), 24);
     let expected = [
         TaskRole::Control,
         TaskRole::Operations,
+        TaskRole::OperationalTelemetry,
         TaskRole::Api,
         TaskRole::OtlpGrpc,
         TaskRole::OtlpHttp,
@@ -541,14 +547,16 @@ fn first_signal_closes_admission_joins_registered_tasks_and_releases_ownership_l
         TaskRole::Maintenance,
     ];
     assert_eq!(
-        &events[..4],
+        &events[..6],
         [
             TaskEvent::Registered(TaskRole::Control),
             TaskEvent::Registered(TaskRole::Operations),
+            TaskEvent::Registered(TaskRole::OperationalTelemetry),
             TaskEvent::Spawned(TaskRole::Control),
             TaskEvent::Spawned(TaskRole::Operations),
+            TaskEvent::Spawned(TaskRole::OperationalTelemetry),
         ],
-        "only recovery-safe Control and Operations tasks may start before data-plane registration"
+        "only recovery-safe Control, Operations, and OperationalTelemetry tasks may start before data-plane registration"
     );
     assert_eq!(
         events

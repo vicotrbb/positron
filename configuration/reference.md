@@ -106,6 +106,7 @@ Precedence: compiled defaults, TOML file, non-secret POSITRON__ overrides, then 
 | `storage.secrets_directory` | string | `/var/lib/positron-secrets` | absolute path; at most 256 bytes | public | compiled default, configuration file | immutable after initialization |
 | `security.local_key_file` | string | `<redacted protected-file reference>` | protected absolute path under `storage.secrets_directory`, named `local-root-key.v1`; at most 256 bytes | secret-bearing (redacted) | compiled default, protected configuration-file reference | immutable after initialization |
 | `export.destination` | array of tables | disabled | at most 8 named destinations; each has a lowercase `name` of at most 63 bytes, a nonzero 16-byte lowercase hexadecimal `identity`, and one to 8 unique canonical `allowed_tenants` | public | compiled default, configuration file | immutable after initialization |
+| `diagnostics.trace_otlp_grpc_address` | string | `disabled` | disabled or explicit external numeric OTLP gRPC address; at most 64 bytes | public | compiled default, configuration file | restart-required |
 
 ## Durable export destinations
 

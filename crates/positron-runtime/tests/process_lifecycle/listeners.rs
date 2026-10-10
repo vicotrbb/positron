@@ -32,7 +32,11 @@ fn listener_bind_failure_is_typed_and_releases_the_volume_claim()
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        [TaskRole::Control, TaskRole::Operations]
+        [
+            TaskRole::Control,
+            TaskRole::Operations,
+            TaskRole::OperationalTelemetry
+        ]
     );
     Ok(())
 }

@@ -38,6 +38,8 @@ mod h2_protection;
 mod http2_api;
 #[path = "native_transport/maintenance_routes.rs"]
 mod maintenance_routes;
+#[path = "native_transport/operational.rs"]
+mod operational;
 #[path = "native_transport/policy_routes.rs"]
 mod policy_routes;
 #[path = "native_transport/proxy_trust.rs"]

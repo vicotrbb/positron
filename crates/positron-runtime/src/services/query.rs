@@ -206,7 +206,10 @@ pub(super) fn query_log_bodies(
     };
     let query = service
         .plan_pipeline(context, source, budget)
-        .map_err(|failure| map_query_failure(&failure))?;
+        .map_err(|failure| {
+            services.record_query_budget(failure.limiting_budget());
+            map_query_failure(&failure)
+        })?;
     let _drain = instance
         .enter_query_execution_for(tenant, query.cancellation())
         .map_err(|_| ServiceFailure::Unauthorized)?;
@@ -221,10 +224,20 @@ pub(super) fn query_log_bodies(
             service.execute_with_schema(query, catalog)
         })
         .map_err(schema_bootstrap::classify_replay_failure)?
-        .map_err(|failure| map_query_failure(&failure))?;
+        .map_err(|failure| {
+            services.record_query_budget(failure.limiting_budget());
+            map_query_failure(&failure)
+        })?;
     // QueryService publishes the source lease and its expiry task atomically
     // before yielding this stream. Wake only after that durable transition so
     // the registered worker cannot consume a pre-publication signal.
     services.notify_maintenance_worker();
-    collect_query_bodies(events)
+    collect_query_bodies(events.inspect(|event| {
+        if let positron_query::QueryEvent::Terminal(positron_query::QueryTerminal::Incomplete(
+            incomplete,
+        )) = event
+        {
+            services.record_query_budget(incomplete.stats().limiting_budget());
+        }
+    }))
 }

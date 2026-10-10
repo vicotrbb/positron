@@ -59,6 +59,7 @@ fn live_http_trace_export_accepts_protobuf_and_persists_before_response()
     let response = receive_traces(
         &mut server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/traces".to_owned(),
             content_length: body.len(),
@@ -462,6 +463,7 @@ fn receive_http_with_declared_length(
     let response = receive_traces(
         &mut server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/traces".to_owned(),
             content_length: declared_length.unwrap_or(body.len()),
@@ -495,6 +497,7 @@ pub(super) fn receive_http_with_tenant(
     let response = receive_traces(
         &mut server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/traces".to_owned(),
             content_length: declared_length.unwrap_or(body.len()),

@@ -5,6 +5,7 @@ schema_version = 1
 
 [diagnostics]
 log_level = "info"
+trace_otlp_grpc_address = "disabled"
 
 [listener]
 control_path = "/var/run/positron/control.sock"

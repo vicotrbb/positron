@@ -110,6 +110,8 @@ pub enum ValueDomain {
     LoopbackSocketAddress(usize),
     /// A socket address whose transport policy decides whether public binding is safe.
     SocketAddress(usize),
+    /// Disabled or an explicit numeric external OTLP gRPC address.
+    OptionalSocketAddress(usize),
     /// An absolute normalized path with a byte ceiling.
     AbsolutePath(usize),
     /// A secret-bearing absolute normalized path with a byte ceiling.
@@ -315,6 +317,7 @@ pub enum Setting {
     StorageSecretsDirectory,
     SecurityLocalKeyFile,
     ExportDestinations,
+    DiagnosticsTraceOtlpGrpcAddress,
 }
 
 impl Setting {
