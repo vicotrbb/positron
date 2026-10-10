@@ -22,6 +22,9 @@ pub(crate) mod key_provider;
 mod local_key;
 mod service;
 
+#[cfg(test)]
+mod recovery_tests;
+
 #[cfg(any(test, fuzzing))]
 mod fuzzing;
 
@@ -55,7 +58,8 @@ use key_envelope::{
 pub(crate) use local_key::CrashRecordProtector;
 pub use local_key::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
-    BootstrapObjectPurpose,
+    BootstrapObjectPurpose, RecoveryFailure, RecoveryIdentity, RecoveryMetadata,
+    RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession, RecoveryUnlock,
 };
 pub(crate) use service::DataProtection;
 
@@ -93,3 +97,6 @@ pub use local_key::fuzz_local_root_key_file;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(fuzzing)]
+pub use local_key::fuzz_recovery_bundle_payload;

@@ -376,3 +376,10 @@ path = "fuzz_targets/doctor_status.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "recovery_bundle_payload"
+path = "fuzz_targets/recovery_bundle_payload.rs"
+test = false
+doc = false
+bench = false

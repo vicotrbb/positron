@@ -235,6 +235,7 @@ fn resume(
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
     drop(catalog);
     outcome(
+        paths.storage.clone(),
         &record,
         key,
         identity,
@@ -254,7 +255,12 @@ pub(super) fn reopen(
     paths: &BootstrapPaths,
     max_registered_tenants: u16,
 ) -> Result<InitializedInstance, BootstrapFailure> {
-    reopen_with_access(max_registered_tenants, acquire(paths)?, false)
+    reopen_with_access(
+        paths.storage.clone(),
+        max_registered_tenants,
+        acquire(paths)?,
+        false,
+    )
 }
 
 pub(super) fn reopen_read_only(
@@ -265,10 +271,11 @@ pub(super) fn reopen_read_only(
         .storage
         .acquire_read_only()
         .map_err(super::storage::storage_failure)?;
-    reopen_with_access(max_registered_tenants, access, true)
+    reopen_with_access(paths.storage.clone(), max_registered_tenants, access, true)
 }
 
 fn reopen_with_access(
+    bootstrap_storage: positron_kernel::InstanceBootstrapStorage,
     max_registered_tenants: u16,
     (volume, access): (OwnedPrimaryDataVolume, BootstrapArtifactAccess),
     read_only: bool,
@@ -325,6 +332,7 @@ fn reopen_with_access(
     let maintenance = MaintenanceCoordinator::restore_from_snapshot(&current)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
     outcome(
+        bootstrap_storage,
         &record,
         key,
         identity,

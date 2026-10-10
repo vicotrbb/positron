@@ -142,7 +142,9 @@ pub use data_protection::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose, ControlTokenAuthentication, ControlTokenFailure, ControlTokenProtector,
     ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
-    QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest,
+    QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure, RecoveryIdentity,
+    RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession,
+    RecoveryUnlock,
 };
 pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{
@@ -2414,3 +2416,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(fuzzing)]
+pub use data_protection::fuzz_recovery_bundle_payload;

@@ -1103,6 +1103,19 @@ impl ProcessState {
         self.health.clone()
     }
 
+    pub(crate) fn record_local_key_custody_warnings(&self, recovery_required: bool) {
+        self.health
+            .record_operational_event(OperationalEvent::Diagnostic(
+                crate::OperationalDiagnostic::LocalKeyCustodyWarning,
+            ));
+        if recovery_required {
+            self.health
+                .record_operational_event(OperationalEvent::Diagnostic(
+                    crate::OperationalDiagnostic::IndependentKeyRecoveryRequired,
+                ));
+        }
+    }
+
     pub(crate) fn record_resource_observation_deferred(&self) {
         self.health
             .record_operational_event(OperationalEvent::ResourceObservationDeferred);

@@ -8,6 +8,11 @@ use crate::data_protection::local_key::persistence::open_existing_local_key_in;
 use crate::data_protection::local_key::security_directory::FreshInitializationRootProof;
 
 impl BootstrapKeyCustody {
+    pub(crate) fn publish_recovered_in(&self, directory: &File) -> Result<(), BootstrapKeyFailure> {
+        super::super::bootstrap::publish_recovered_local_key(directory, &self.key)
+            .map_err(map_local)
+    }
+
     pub(crate) fn initialize_in(directory: &File) -> Result<Self, BootstrapKeyFailure> {
         let proof =
             FreshInitializationRootProof::from_open_directory(directory).map_err(map_local)?;

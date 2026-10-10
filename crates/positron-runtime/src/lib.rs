@@ -40,7 +40,7 @@ pub use instance_bootstrap::{
     BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
     BootstrapPaths, BootstrapState, DoctorRuntimeFacts, GracefulShutdownRecord, InitializationPlan,
     InitializedInstance, InstanceBootstrap, OfflineSupportBundleFailure,
-    OfflineSupportBundleInspection, TenantRetentionImpactPreview,
+    OfflineSupportBundleInspection, RecoveryReadiness, TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
     OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityAggregateOutcome,
@@ -118,4 +118,10 @@ pub fn fuzz_tail_state_machine(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_operational_state(data: &[u8]) {
     operational::fuzz_state(data);
+}
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_recovery_catalog_state(data: &[u8]) {
+    instance_bootstrap::fuzz_recovery_catalog_state(data);
 }

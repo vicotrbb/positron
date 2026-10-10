@@ -26,6 +26,7 @@ mod doctor_cli;
 mod keys;
 mod maintenance_cli;
 mod policy;
+mod recovery_cli;
 mod support_bundle;
 mod tenant_alias_cli;
 mod tenant_lifecycle;
@@ -65,6 +66,10 @@ pub fn run_native(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
     let mut arguments = arguments.into_iter().peekable();
+    if arguments.peek().is_some_and(|argument| argument == "keys") {
+        arguments.next();
+        return recovery_cli::run(arguments);
+    }
     if arguments.peek().is_some_and(|argument| argument == "key") {
         arguments.next();
         return keys::run(arguments);

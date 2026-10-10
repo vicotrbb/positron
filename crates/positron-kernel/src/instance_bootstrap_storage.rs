@@ -226,6 +226,25 @@ impl InstanceBootstrapStorage {
         Ok((volume, BootstrapArtifactAccess { data, secrets }))
     }
 
+    /// Binds a separate Recovery Bundle location outside both protected instance roots.
+    pub fn recovery_bundle_location(
+        &self,
+        path: &Path,
+    ) -> Result<PathBuf, BootstrapStorageFailure> {
+        if path.as_os_str().len() > 4096 {
+            return Err(BootstrapStorageFailure::InvalidRoots);
+        }
+        let _access = self.inspect()?;
+        let parent = canonical_root(path.parent().ok_or(BootstrapStorageFailure::InvalidRoots)?)?;
+        if parent.starts_with(&self.data) || parent.starts_with(&self.secrets) {
+            return Err(BootstrapStorageFailure::InvalidRoots);
+        }
+        Ok(parent.join(
+            path.file_name()
+                .ok_or(BootstrapStorageFailure::InvalidRoots)?,
+        ))
+    }
+
     /// Returns the trusted mount provenance attached to this authority.
     #[must_use]
     pub const fn qualification(&self) -> MountQualification {
@@ -240,6 +259,13 @@ pub struct BootstrapArtifactAccess {
 }
 
 impl BootstrapArtifactAccess {
+    pub(crate) fn publish_recovered_key(
+        &self,
+        key: &BootstrapKeyCustody,
+    ) -> Result<(), BootstrapKeyFailure> {
+        key.publish_recovered_in(&self.secrets)
+    }
+
     /// Opens the local bootstrap key relative to the held secrets root.
     pub fn open_key(&self) -> Result<BootstrapKeyCustody, BootstrapKeyFailure> {
         BootstrapKeyCustody::open_in(&self.secrets)

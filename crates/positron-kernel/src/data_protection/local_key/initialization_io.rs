@@ -7,7 +7,7 @@ use std::time::{SystemTime, SystemTimeError, UNIX_EPOCH};
 use crate::data_protection::{CryptoBackend, CryptoBackendFailure, RustCryptoBackend};
 
 pub(super) fn fill_random(destination: &mut [u8]) -> Result<(), CryptoBackendFailure> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if take_matching_fault(|fault| {
         fault == InitializationFault::Entropy
             || (fault == InitializationFault::RootKeyEntropy && destination.len() == 32)
@@ -20,7 +20,7 @@ pub(super) fn fill_random(destination: &mut [u8]) -> Result<(), CryptoBackendFai
 }
 
 pub(super) fn unix_creation_seconds() -> Result<u64, SystemTimeError> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if take_matching_fault(|fault| fault == InitializationFault::Clock).is_some() {
         return UNIX_EPOCH
             .duration_since(SystemTime::now())
@@ -32,7 +32,7 @@ pub(super) fn unix_creation_seconds() -> Result<u64, SystemTimeError> {
 }
 
 pub(super) fn write_new_key(file: &mut File, payload: &[u8]) -> Result<(), io::Error> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(InitializationFault::PartialWrite(length)) =
         take_matching_fault(|fault| matches!(fault, InitializationFault::PartialWrite(_)))
     {
@@ -46,7 +46,7 @@ pub(super) fn write_new_key(file: &mut File, payload: &[u8]) -> Result<(), io::E
 }
 
 pub(super) fn synchronize_key_file(file: &File) -> Result<(), io::Error> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if take_matching_fault(|fault| fault == InitializationFault::SynchronizeKeyFile).is_some() {
         return Err(io::Error::from(io::ErrorKind::Other));
     }
@@ -54,7 +54,7 @@ pub(super) fn synchronize_key_file(file: &File) -> Result<(), io::Error> {
 }
 
 pub(super) fn synchronize_security_directory(directory: &File) -> Result<(), io::Error> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if take_matching_fault(|fault| fault == InitializationFault::SynchronizeSecurityDirectory)
         .is_some()
     {
@@ -63,7 +63,7 @@ pub(super) fn synchronize_security_directory(directory: &File) -> Result<(), io:
     directory.sync_all()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InitializationFault {
     PartialWrite(usize),
@@ -74,7 +74,7 @@ pub(super) enum InitializationFault {
     Clock,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn with_initialization_fault<T>(
     fault: InitializationFault,
     operation: impl FnOnce() -> T,
@@ -87,12 +87,12 @@ pub(super) fn with_initialization_fault<T>(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static INITIALIZATION_FAULT: std::cell::Cell<Option<InitializationFault>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn take_matching_fault(
     matches: impl FnOnce(InitializationFault) -> bool,
 ) -> Option<InitializationFault> {

@@ -260,3 +260,80 @@ pub(super) fn with_initialization_event_action<T>(
         result
     })
 }
+
+/// Restores authenticated existing key material; it never creates replacement entropy.
+pub(super) fn publish_recovered_local_key(
+    directory: &File,
+    key: &VerifiedLocalKey,
+) -> Result<(), LocalKeyFailure> {
+    let metadata = directory
+        .metadata()
+        .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::UnsafeSecurityDirectory))?;
+    if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o7777 != 0o700 {
+        return Err(LocalKeyFailure::new(
+            LocalKeyFailureCode::UnsafeSecurityDirectory,
+        ));
+    }
+    verify_directory_acl(directory)?;
+    if exists(directory, LOCAL_KEY_FILE_NAME)? {
+        return Err(LocalKeyFailure::new(LocalKeyFailureCode::KeyAlreadyExists));
+    }
+    if exists(directory, LOCAL_KEY_STAGING_FILE_NAME)? {
+        let staged = read_staged_key(directory, metadata.uid())?;
+        if staged.evidence() != key.evidence() {
+            return Err(LocalKeyFailure::new(LocalKeyFailureCode::IdentityMismatch));
+        }
+        let file = unix_fs::openat(
+            directory,
+            LOCAL_KEY_STAGING_FILE_NAME,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::UnsafeKeyFile))?;
+        verify_named_key_file(
+            directory,
+            &file,
+            metadata.uid(),
+            LOCAL_KEY_STAGING_FILE_NAME,
+        )?;
+        verify_file_acl(&file)?;
+        initialization_io::synchronize_key_file(&file)
+            .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::SynchronizeKeyFileFailed))?;
+        return publish_staged_key(directory);
+    }
+    let mut file = unix_fs::openat(
+        directory,
+        LOCAL_KEY_STAGING_FILE_NAME,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map(File::from)
+    .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::CreateKeyFileFailed))?;
+    verify_named_key_file(
+        directory,
+        &file,
+        metadata.uid(),
+        LOCAL_KEY_STAGING_FILE_NAME,
+    )?;
+    verify_file_acl(&file)?;
+    let bytes = key.root_key.0.expose_to_backend();
+    let encoded = encode_file_v1(
+        key.evidence.key_id,
+        key.evidence.creation_time,
+        SecretRootKey::from_owned(Box::new(*bytes)),
+    )?;
+    initialization_io::write_new_key(&mut file, encoded.as_bytes())
+        .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::WriteFailed))?;
+    initialization_io::synchronize_key_file(&file)
+        .map_err(|_| LocalKeyFailure::new(LocalKeyFailureCode::SynchronizeKeyFileFailed))?;
+    verify_named_key_file(
+        directory,
+        &file,
+        metadata.uid(),
+        LOCAL_KEY_STAGING_FILE_NAME,
+    )?;
+    verify_file_acl(&file)?;
+    drop(file);
+    publish_staged_key(directory)
+}

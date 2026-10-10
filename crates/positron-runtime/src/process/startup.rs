@@ -252,6 +252,10 @@ impl ApplicationRuntime {
         if attempt > 0 {
             state.record_dependency_status(None);
         }
+        state.record_local_key_custody_warnings(!matches!(
+            instance.backup_key_recovery_readiness(),
+            Ok(crate::RecoveryReadiness::Verified)
+        ));
         for intent in &plaintext_listener_intents {
             if let Err(failure) = instance.activate_public_plaintext_api_transport(*intent) {
                 return Err(cleanup_startup(

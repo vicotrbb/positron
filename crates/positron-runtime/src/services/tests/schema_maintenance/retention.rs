@@ -166,221 +166,319 @@ fn runtime_worker_terminalizes_a_policy_stale_retention_publication_before_recla
 #[test]
 fn runtime_maintenance_worker_discovers_and_completes_expired_log_and_trace_retention()
 -> Result<(), Box<dyn Error>> {
-    let fixture = Fixture::new()?;
-    let (mut initialized, ingest, _, administrator_secret) = fixture.initialized_with_admin()?;
-    let (retention_time, elapsed) =
-        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
-    Arc::get_mut(&mut initialized)
-        .ok_or("sole initialized instance")?
-        .install_retention_time_for_test(retention_time)?;
-    let tenant = initialized.default_tenant_id();
-    let system = initialized.attribute(
-        PresentedCredential::parse(&administrator_secret)?,
-        RequestedIntent::SystemAdministration,
-        CompatibilityHints::none(),
-    )?;
-    let retention = std::num::NonZeroU64::new(1).ok_or("one second retention")?;
-    let preview = initialized.inspect_tenant_retention_impact(system, tenant, retention)?;
-    initialized.update_tenant_retention(
-        system,
-        tenant,
-        retention,
-        ResourceGeneration::new(1)?,
-        Some(&preview),
-        AdministrativeIdempotencyKey::new([0x83; 16])?,
-    )?;
-    let services = ServiceHandle::new(Arc::clone(&initialized))?;
-    assert_eq!(
-        services
-            .ingest_otlp_logs(&ingest, request("runtime-retention-log").encode_to_vec())?
-            .accepted_records(),
-        1
-    );
-    assert_eq!(
-        services
-            .ingest_otlp_traces(
-                &ingest,
-                ExportTraceServiceRequest {
-                    resource_spans: vec![ResourceSpans {
-                        scope_spans: vec![ScopeSpans {
-                            spans: vec![Span {
-                                trace_id: vec![0x83; 16],
-                                span_id: vec![0x84; 8],
-                                name: "runtime-retention-trace".to_owned(),
-                                start_time_unix_nano: 41,
-                                end_time_unix_nano: 42,
-                                ..Span::default()
+    for initial_seconds in [10_u64, 897_u64] {
+        let current_seconds = initial_seconds
+            .checked_add(2)
+            .ok_or("current retention seconds")?;
+        let fixture = Fixture::new()?;
+        let (mut initialized, ingest, _, administrator_secret) =
+            fixture.initialized_with_admin()?;
+        let (retention_time, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(
+            UnixNanoseconds::new(i64::try_from(
+                initial_seconds
+                    .checked_mul(1_000_000_000)
+                    .ok_or("initial retention nanoseconds")?,
+            )?),
+        );
+        Arc::get_mut(&mut initialized)
+            .ok_or("sole initialized instance")?
+            .install_retention_time_for_test(retention_time)?;
+        let tenant = initialized.default_tenant_id();
+        let system = initialized.attribute(
+            PresentedCredential::parse(&administrator_secret)?,
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )?;
+        let retention = std::num::NonZeroU64::new(1).ok_or("one second retention")?;
+        let preview = initialized.inspect_tenant_retention_impact(system, tenant, retention)?;
+        initialized.update_tenant_retention(
+            system,
+            tenant,
+            retention,
+            ResourceGeneration::new(1)?,
+            Some(&preview),
+            AdministrativeIdempotencyKey::new([0x83; 16])?,
+        )?;
+        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        assert_eq!(
+            services
+                .ingest_otlp_logs(&ingest, request("runtime-retention-log").encode_to_vec())?
+                .accepted_records(),
+            1
+        );
+        assert_eq!(
+            services
+                .ingest_otlp_traces(
+                    &ingest,
+                    ExportTraceServiceRequest {
+                        resource_spans: vec![ResourceSpans {
+                            scope_spans: vec![ScopeSpans {
+                                spans: vec![Span {
+                                    trace_id: vec![0x83; 16],
+                                    span_id: vec![0x84; 8],
+                                    name: "runtime-retention-trace".to_owned(),
+                                    start_time_unix_nano: 41,
+                                    end_time_unix_nano: 42,
+                                    ..Span::default()
+                                }],
+                                ..ScopeSpans::default()
                             }],
-                            ..ScopeSpans::default()
+                            ..ResourceSpans::default()
                         }],
-                        ..ResourceSpans::default()
-                    }],
-                }
-                .encode_to_vec(),
-            )?
-            .accepted_records(),
-        1
-    );
+                    }
+                    .encode_to_vec(),
+                )?
+                .accepted_records(),
+            1
+        );
 
-    let catalog = open_catalog(&initialized)?;
-    let snapshot = catalog.pin()?;
-    let scopes = [SignalKind::Logs, SignalKind::Traces]
-        .into_iter()
-        .map(|signal| snapshot.reachable_ledger_scopes(tenant, signal))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    assert_eq!(
-        scopes.len(),
-        2,
-        "one canonical scope for each stored signal"
-    );
-    drop((snapshot, catalog));
-    for scope in &scopes {
         let catalog = open_catalog(&initialized)?;
-        let identity = positron_governance::Identity::open(&catalog.pin()?)?;
-        let protection = super::super::super::tenant_segment_key(&initialized, &identity, *scope)?;
-        ActiveSegmentLedger::open_with_retention_time(
-            &initialized._authority,
-            &initialized.retention_time,
-            &catalog,
-            *scope,
-            protection,
-        )?
-        .seal()?;
-    }
-    elapsed.advance(2_000_000_000)?;
+        let snapshot = catalog.pin()?;
+        let scopes = [SignalKind::Logs, SignalKind::Traces]
+            .into_iter()
+            .map(|signal| snapshot.reachable_ledger_scopes(tenant, signal))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scopes.len(),
+            2,
+            "one canonical scope for each stored signal"
+        );
+        drop((snapshot, catalog));
+        for scope in &scopes {
+            let catalog = open_catalog(&initialized)?;
+            let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+            let protection =
+                super::super::super::tenant_segment_key(&initialized, &identity, *scope)?;
+            ActiveSegmentLedger::open_with_retention_time(
+                &initialized._authority,
+                &initialized.retention_time,
+                &catalog,
+                *scope,
+                protection,
+            )?
+            .seal()?;
+        }
+        elapsed.advance(2_000_000_000)?;
 
-    assert!(
-        services.wake_maintenance_worker()?,
-        "the sole runtime worker discovers and begins due retention work"
-    );
-    for _ in 0..8 {
-        if !services.wake_maintenance_worker()? {
-            break;
+        assert!(
+            services.wake_maintenance_worker()?,
+            "the sole runtime worker discovers and begins due retention work"
+        );
+        let mut initial_drained_turns = 0_usize;
+        for _ in 0..16 {
+            if !services.wake_maintenance_worker()? {
+                break;
+            }
+            initial_drained_turns += 1;
         }
-    }
-    let scheduled_scrubs = initialized
-        .maintenance_coordinator()
-        .statuses()
-        .map_err(|_| "scheduled integrity scrub statuses")?
-        .into_iter()
-        .filter(|status| {
-            status.task().class() == MaintenanceTaskClass::IntegrityScrub
-                && status.phase() == MaintenanceTaskPhase::Queued
-        })
-        .map(|status| status.task().not_before())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        scheduled_scrubs.len(),
-        scopes.len(),
-        "each retention publication schedules one persisted scrub"
-    );
-    let current_seconds = 12_u64;
-    assert!(
-        scheduled_scrubs
-            .iter()
-            .all(|due| *due > current_seconds && *due < 900),
-        "each initial queued scrub remains in the first lifecycle epoch"
-    );
-    assert!(
-        !services.wake_maintenance_worker()?,
-        "the worker remains idle before every queued scrub's persisted due instant"
-    );
-    let latest_due = *scheduled_scrubs
-        .iter()
-        .max()
-        .ok_or("latest queued jittered integrity scrub")?;
-    elapsed.advance(
-        latest_due
-            .checked_sub(current_seconds)
-            .ok_or("checked latest scrub due delta")?
-            .checked_mul(1_000_000_000)
-            .ok_or("checked latest scrub due nanoseconds")?,
-    )?;
-    let mut drained_turns = 0_usize;
-    for _ in 0..16 {
-        if !services.wake_maintenance_worker()? {
-            break;
-        }
-        drained_turns += 1;
-    }
-    assert!(
-        drained_turns < 16,
-        "the finite maintenance drain reaches an idle state"
-    );
-    let statuses = initialized
-        .maintenance_coordinator()
-        .statuses()
-        .map_err(|_| "completed retention and scrub statuses")?;
-    for scope in &scopes {
-        let maintenance_scope =
-            MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id());
-        for class in [
-            MaintenanceTaskClass::RetentionPublication,
-            MaintenanceTaskClass::RetentionReclamation,
-            MaintenanceTaskClass::IntegrityScrub,
-        ] {
+        assert!(
+            initial_drained_turns < 16,
+            "the finite maintenance drain reaches idle before inspecting descriptor phases"
+        );
+        let scrub_statuses = initialized
+            .maintenance_coordinator()
+            .statuses()
+            .map_err(|_| "persisted integrity scrub statuses")?
+            .into_iter()
+            .filter(|status| status.task().class() == MaintenanceTaskClass::IntegrityScrub)
+            .collect::<Vec<_>>();
+        for scope in &scopes {
+            let maintenance_scope =
+                MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id());
+            let descriptors = scrub_statuses
+                .iter()
+                .filter(|status| status.task().scope() == maintenance_scope)
+                .collect::<Vec<_>>();
             assert!(
-                statuses.iter().any(|status| {
-                    status.task().class() == class
-                        && status.task().scope() == maintenance_scope
-                        && status.phase() == MaintenanceTaskPhase::Succeeded
-                }),
-                "the {class:?} task for each expired scope completes before the worker is idle"
+                !descriptors.is_empty(),
+                "each stored scope has a persisted scrub descriptor"
             );
+            assert!(
+                descriptors
+                    .iter()
+                    .filter(|status| status.phase() == MaintenanceTaskPhase::Queued)
+                    .count()
+                    <= 1,
+                "each scope has at most one pending scrub"
+            );
+            for status in descriptors {
+                let due = status.task().not_before();
+                assert!(
+                    due > 0 && due < 900,
+                    "the first lifecycle epoch persists a bounded nonzero due instant"
+                );
+                if status.phase() == MaintenanceTaskPhase::Failed {
+                    assert!(
+                        due <= current_seconds,
+                        "only an admitted due scrub can be superseded"
+                    );
+                    assert_eq!(
+                        status.terminal_failure(),
+                        Some(positron_kernel::MaintenanceTerminalFailure::StaleGeneration)
+                    );
+                    let catalog = open_catalog(&initialized)?;
+                    let current_source = catalog.pin()?.integrity_scope_source_identity(*scope)?;
+                    assert_ne!(
+                        status
+                            .task()
+                            .source_binding()
+                            .ok_or("bound superseded scrub")?
+                            .to_bytes(),
+                        current_source,
+                        "the superseded descriptor belongs to an obsolete source"
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    status.phase(),
+                    if due > current_seconds {
+                        MaintenanceTaskPhase::Queued
+                    } else {
+                        MaintenanceTaskPhase::Succeeded
+                    },
+                    "idle descriptors reflect whether their persisted due instant has elapsed: now={current_seconds}, due={due}, terminal={:?}",
+                    status.terminal_failure()
+                );
+            }
         }
-    }
-    let catalog = open_catalog(&initialized)?;
-    let idle_generation = catalog.pin()?.number();
-    let idle_task_count = initialized
-        .maintenance_coordinator()
-        .durable_records()
-        .map_err(|_| "durable maintenance records")?
-        .len();
-    drop(catalog);
-    for _ in 0..4 {
         assert!(
             !services.wake_maintenance_worker()?,
-            "a quiescent maintenance worker must not roll an empty active segment"
+            "the worker is idle after every already-due scrub completes"
         );
-    }
-    let catalog = open_catalog(&initialized)?;
-    assert_eq!(
-        catalog.pin()?.number(),
-        idle_generation,
-        "idle discovery does not publish a Catalog generation"
-    );
-    assert_eq!(
-        initialized
+        let latest_queued_due = scrub_statuses
+            .iter()
+            .filter(|status| status.phase() == MaintenanceTaskPhase::Queued)
+            .map(|status| status.task().not_before())
+            .max();
+        if let Some(latest_due) = latest_queued_due {
+            elapsed.advance(
+                latest_due
+                    .checked_sub(current_seconds)
+                    .ok_or("checked latest scrub due delta")?
+                    .checked_mul(1_000_000_000)
+                    .ok_or("checked latest scrub due nanoseconds")?,
+            )?;
+        }
+        let mut drained_turns = 0_usize;
+        for _ in 0..16 {
+            if !services.wake_maintenance_worker()? {
+                break;
+            }
+            drained_turns += 1;
+        }
+        assert!(
+            drained_turns < 16,
+            "the finite maintenance drain reaches an idle state"
+        );
+        let statuses = initialized
+            .maintenance_coordinator()
+            .statuses()
+            .map_err(|_| "completed retention and scrub statuses")?;
+        for scope in &scopes {
+            let maintenance_scope =
+                MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id());
+            let catalog = open_catalog(&initialized)?;
+            let current_source = catalog.pin()?.integrity_scope_source_identity(*scope)?;
+            for status in statuses.iter().filter(|status| {
+                status.task().class() == MaintenanceTaskClass::IntegrityScrub
+                    && status.task().scope() == maintenance_scope
+                    && status.phase() == MaintenanceTaskPhase::Failed
+            }) {
+                assert!(status.task().not_before() <= latest_queued_due.unwrap_or(current_seconds));
+                assert_eq!(
+                    status.terminal_failure(),
+                    Some(positron_kernel::MaintenanceTerminalFailure::StaleGeneration)
+                );
+                assert_ne!(
+                    status
+                        .task()
+                        .source_binding()
+                        .ok_or("bound final superseded scrub")?
+                        .to_bytes(),
+                    current_source,
+                    "no final failure may refer to the current source"
+                );
+            }
+            assert!(
+                statuses.iter().any(|status| status.task().class()
+                    == MaintenanceTaskClass::IntegrityScrub
+                    && status.task().scope() == maintenance_scope
+                    && status.phase() == MaintenanceTaskPhase::Succeeded
+                    && status
+                        .task()
+                        .source_binding()
+                        .is_some_and(|binding| binding.to_bytes() == current_source)),
+                "each current scope has successfully verified integrity after retention"
+            );
+            for class in [
+                MaintenanceTaskClass::RetentionPublication,
+                MaintenanceTaskClass::RetentionReclamation,
+                MaintenanceTaskClass::IntegrityScrub,
+            ] {
+                assert!(
+                    statuses.iter().any(|status| {
+                        status.task().class() == class
+                            && status.task().scope() == maintenance_scope
+                            && status.phase() == MaintenanceTaskPhase::Succeeded
+                    }),
+                    "the {class:?} task for each expired scope completes before the worker is idle"
+                );
+            }
+        }
+        let catalog = open_catalog(&initialized)?;
+        let idle_generation = catalog.pin()?.number();
+        let idle_task_count = initialized
             .maintenance_coordinator()
             .durable_records()
             .map_err(|_| "durable maintenance records")?
-            .len(),
-        idle_task_count,
-        "idle discovery does not create a new durable task"
-    );
-    drop(catalog);
-
-    for scope in scopes {
+            .len();
+        drop(catalog);
+        for _ in 0..4 {
+            assert!(
+                !services.wake_maintenance_worker()?,
+                "a quiescent maintenance worker must not roll an empty active segment"
+            );
+        }
         let catalog = open_catalog(&initialized)?;
-        let identity = positron_governance::Identity::open(&catalog.pin()?)?;
-        let protection = super::super::super::tenant_segment_key(&initialized, &identity, scope)?;
-        let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
-            &initialized._authority,
-            &initialized.retention_time,
-            &catalog,
-            scope,
-            protection,
-        )?;
         assert_eq!(
-            ledger
-                .prepare_retention_publication()
-                .expect_err("the runtime worker has consumed this expired scope")
-                .code(),
-            positron_kernel::LedgerFailureCode::InvalidInput
+            catalog.pin()?.number(),
+            idle_generation,
+            "idle discovery does not publish a Catalog generation"
         );
+        assert_eq!(
+            initialized
+                .maintenance_coordinator()
+                .durable_records()
+                .map_err(|_| "durable maintenance records")?
+                .len(),
+            idle_task_count,
+            "idle discovery does not create a new durable task"
+        );
+        drop(catalog);
+
+        for scope in scopes {
+            let catalog = open_catalog(&initialized)?;
+            let identity = positron_governance::Identity::open(&catalog.pin()?)?;
+            let protection =
+                super::super::super::tenant_segment_key(&initialized, &identity, scope)?;
+            let ledger = ActiveSegmentLedger::open_for_maintenance_with_retention_time(
+                &initialized._authority,
+                &initialized.retention_time,
+                &catalog,
+                scope,
+                protection,
+            )?;
+            assert_eq!(
+                ledger
+                    .prepare_retention_publication()
+                    .expect_err("the runtime worker has consumed this expired scope")
+                    .code(),
+                positron_kernel::LedgerFailureCode::InvalidInput
+            );
+        }
     }
     Ok(())
 }

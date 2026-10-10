@@ -1,3 +1,5 @@
+mod recovery;
+pub use recovery::{RecoveryBundleAction, RecoveryBundleAuditEntry, recovery_bundle_audit_intent};
 mod codec;
 mod rotation;
 mod schema_checkpoint;
@@ -127,6 +129,7 @@ impl InitialAuditMetadata {
 /// Closed Administration-owned meaning for exactly one committed kernel audit position.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GovernanceAuditEntry {
+    RecoveryBundle(RecoveryBundleAuditEntry),
     Initialization(InitializationAuditEntry),
     CatalogRootRotation(CatalogRootRotationAuditEntry),
     IngestPolicyActivation(IngestPolicyActivationAuditEntry),
@@ -2136,6 +2139,15 @@ pub struct InitializationAuditEntry {
 }
 
 impl GovernanceAuditEntry {
+    #[must_use]
+    pub const fn as_recovery_bundle(&self) -> Option<&RecoveryBundleAuditEntry> {
+        if let Self::RecoveryBundle(entry) = self {
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
     /// Decodes every supported committed schema without weakening the closed
     /// failure for unknown or malformed records.
     pub fn decode(record: &GovernanceAuditRecord) -> Result<Self, IdentityFailure> {
@@ -2149,6 +2161,7 @@ impl GovernanceAuditEntry {
     #[must_use]
     pub const fn position(&self) -> u64 {
         match self {
+            Self::RecoveryBundle(entry) => entry.position(),
             Self::Initialization(entry) => entry.position(),
             Self::CatalogRootRotation(entry) => entry.position(),
             Self::IngestPolicyActivation(entry) => entry.position,
@@ -2200,13 +2213,15 @@ impl GovernanceAuditEntry {
             Self::IntegrityQuarantine(entry) => Some(entry.tenant()),
             Self::TlsMaterialReload(_)
             | Self::MaintenanceControl(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
     #[must_use]
     pub fn action(&self) -> &str {
         match self {
+            Self::RecoveryBundle(entry) => entry.operation().action(),
             Self::Initialization(entry) => entry.action(),
             Self::CatalogRootRotation(entry) => entry.action(),
             Self::IngestPolicyActivation(_) => "ingest-policy.activate",
@@ -2245,6 +2260,13 @@ impl GovernanceAuditEntry {
     #[must_use]
     pub fn outcome(&self) -> &str {
         match self {
+            Self::RecoveryBundle(entry) => {
+                if entry.operation() == RecoveryBundleAction::VerificationRejected {
+                    "rejected"
+                } else {
+                    "succeeded"
+                }
+            },
             Self::Initialization(entry) => entry.outcome(),
             Self::CatalogRootRotation(entry) => entry.outcome(),
             Self::IngestPolicyActivation(_) => "succeeded",
@@ -2305,7 +2327,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
@@ -2333,7 +2356,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
@@ -2361,7 +2385,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
@@ -2389,7 +2414,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
@@ -2417,7 +2443,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
@@ -2445,7 +2472,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
@@ -2473,7 +2501,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
@@ -2503,7 +2532,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 
@@ -2531,7 +2561,8 @@ impl GovernanceAuditEntry {
             | Self::MaintenanceControl(_)
             | Self::MaintenanceRun(_)
             | Self::IntegrityQuarantine(_)
-            | Self::MaintenanceWindow(_) => None,
+            | Self::MaintenanceWindow(_)
+            | Self::RecoveryBundle(_) => None,
         }
     }
 

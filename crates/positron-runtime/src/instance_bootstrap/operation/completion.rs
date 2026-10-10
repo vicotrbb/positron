@@ -183,6 +183,7 @@ pub(super) fn ensure_claim(
     reason = "bootstrap handoff transfers each established authority exactly once"
 )]
 pub(super) fn outcome(
+    bootstrap_storage: positron_kernel::InstanceBootstrapStorage,
     record: &BootstrapRecord,
     key: BootstrapKeyCustody,
     identity: Identity,
@@ -203,6 +204,7 @@ pub(super) fn outcome(
     #[cfg(not(any(test, fuzzing)))]
     let _ = (identity, audit);
     Ok(InitializedInstance {
+        bootstrap_storage,
         key,
         #[cfg(any(test, fuzzing))]
         identity,
