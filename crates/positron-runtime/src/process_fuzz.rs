@@ -7,9 +7,10 @@ use std::time::Duration;
 use crate::tail_fuzz_support::{FuzzRoot, describe};
 use crate::*;
 
-const ROLES: [TaskRole; 7] = [
+const ROLES: [TaskRole; 8] = [
     TaskRole::Control,
     TaskRole::Operations,
+    TaskRole::OperationalTelemetry,
     TaskRole::Api,
     TaskRole::OtlpGrpc,
     TaskRole::OtlpHttp,
@@ -27,7 +28,7 @@ fn run_checked(data: &[u8]) -> Result<(), String> {
     let root = FuzzRoot::new()?;
     let selected = data.first().copied().unwrap_or(0);
     let role = ROLES
-        .get(usize::from(selected % 7))
+        .get(usize::from(selected % 8))
         .copied()
         .ok_or("task role")?;
     let failure = Arc::new(AtomicU8::new(0));

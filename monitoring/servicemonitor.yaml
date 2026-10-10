@@ -1,0 +1,28 @@
+# Match your Operations Service labels and named port. Install the referenced
+# CA and API-key Secrets independently; no credential value belongs here.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: positron-operations
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: positron
+      app.kubernetes.io/component: operations
+  endpoints:
+    - port: operations
+      path: /metrics
+      scheme: https
+      interval: 30s
+      scrapeTimeout: 10s
+      authorization:
+        type: Bearer
+        credentials:
+          name: positron-monitoring
+          key: api-key
+      tlsConfig:
+        serverName: positron-operations
+        ca:
+          secret:
+            name: positron-operations-ca
+            key: ca.crt

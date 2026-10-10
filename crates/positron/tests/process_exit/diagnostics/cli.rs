@@ -16,7 +16,10 @@ fn invalid_configuration_has_a_stable_nonzero_exit_without_echoing_input()
 
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr)?;
-    assert_eq!(stderr, "positron: configuration rejected\n");
+    let diagnostic: serde_json::Value = serde_json::from_str(&stderr)?;
+    assert_eq!(diagnostic["event"], "configuration_rejected");
+    assert_eq!(diagnostic["severity"], "error");
+    assert_eq!(diagnostic["component"], "runtime");
     assert!(!stderr.contains(secret_marker));
     Ok(())
 }
@@ -28,10 +31,10 @@ fn unknown_command_has_the_usage_exit() -> Result<(), Box<dyn std::error::Error>
         .output()?;
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8(output.stderr)?,
-        "positron: invalid command line\n"
-    );
+    let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(diagnostic["event"], "invalid_command_line");
+    assert_eq!(diagnostic["severity"], "error");
+    assert_eq!(diagnostic["component"], "runtime");
     Ok(())
 }
 

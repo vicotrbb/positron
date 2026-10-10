@@ -603,11 +603,16 @@ fn drain_diagnostic_reports_closed_late_join_context_to_stderr()
         "late_join",
         "drain_diagnostic_child_reports_late_join_failure",
     )?;
-    assert!(
-        stderr.contains(
-            "positron: runtime drain task failure site=join_within role=control category=join_unavailable"
-        ),
-        "late-join drain failure did not emit its closed diagnostic: {stderr}"
+    let records: Vec<serde_json::Value> = stderr
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        records,
+        vec![serde_json::json!({
+            "event": "runtime_drain_task_failure", "component": "runtime", "severity": "error",
+            "site": "join_within", "role": "control", "category": "join_unavailable"
+        })]
     );
     Ok(())
 }
@@ -619,12 +624,20 @@ fn drain_diagnostic_reports_closed_poll_join_context_to_stderr()
         "poll_join",
         "drain_diagnostic_child_reports_poll_join_failure",
     )?;
-    assert!(
-        stderr.contains(
-            "positron: runtime drain task failure site=poll_join role=control category=join_unavailable"
-        ),
-        "poll-join drain failure did not emit its closed diagnostic: {stderr}"
-    );
+    let records: Vec<serde_json::Value> = stderr
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let expected: Vec<_> = ["poll_join", "join_within"]
+        .into_iter()
+        .map(|site| {
+            serde_json::json!({
+                "event": "runtime_drain_task_failure", "component": "runtime", "severity": "error",
+                "site": site, "role": "control", "category": "join_unavailable"
+            })
+        })
+        .collect();
+    assert_eq!(records, expected);
     Ok(())
 }
 

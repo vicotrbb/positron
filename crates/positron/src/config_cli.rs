@@ -159,6 +159,9 @@ fn domain_description(domain: ValueDomain) -> String {
             format!("loopback_socket_address:max_bytes={maximum}")
         },
         ValueDomain::SocketAddress(maximum) => format!("socket_address:max_bytes={maximum}"),
+        ValueDomain::OptionalSocketAddress(maximum) => {
+            format!("disabled_or_external_otlp_grpc:max_bytes={maximum}")
+        },
         ValueDomain::AbsolutePath(maximum) => format!("absolute_path:max_bytes={maximum}"),
         ValueDomain::ProtectedAbsolutePath(maximum) => {
             format!("protected_absolute_path:max_bytes={maximum}")

@@ -14,6 +14,7 @@ mod instance_bootstrap;
 mod integrity_verification;
 mod listener;
 mod native_host;
+mod operational;
 mod process;
 #[cfg(fuzzing)]
 mod process_fuzz;
@@ -60,6 +61,10 @@ pub use native_host::{
 };
 #[cfg(feature = "test-support")]
 pub use native_host::{fuzz_connection_admission, fuzz_h2_observer};
+pub use operational::{
+    IntegrityScrubFailureStage, MaintenanceWorkerOperation, OperationalDiagnostic,
+    OperationalReloadRejection, render_operational_diagnostic, write_operational_diagnostic,
+};
 pub use process::{
     ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole, CrashInspection,
     DrainingProcess, ExitOutcome, HostInputs, InitializationMode, PublicPlaintextApiStartupIntent,
@@ -107,4 +112,10 @@ pub fn fuzz_process_inputs(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_tail_state_machine(data: &[u8]) {
     tail_fuzz::run(data);
+}
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_operational_state(data: &[u8]) {
+    operational::fuzz_state(data);
 }

@@ -15,6 +15,7 @@ use positron_kernel::TransferredResourceReservation;
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 
 pub(in crate::native_host) struct RequestHead {
+    pub(in crate::native_host) openmetrics: bool,
     pub(in crate::native_host) method: String,
     pub(in crate::native_host) path: String,
     pub(in crate::native_host) content_length: usize,
@@ -55,6 +56,39 @@ impl RequestHead {
     }
 }
 
+fn accepts_openmetrics(value: &str) -> bool {
+    value.split(',').any(|media| {
+        let mut parts = media.split(';').map(str::trim);
+        if !parts
+            .next()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("application/openmetrics-text"))
+        {
+            return false;
+        }
+        let mut quality = None;
+        let mut version = None;
+        for parameter in parts {
+            let Some((key, value)) = parameter.split_once('=') else {
+                return false;
+            };
+            if key.eq_ignore_ascii_case("q") {
+                if quality.is_some() {
+                    return false;
+                }
+                quality = value.parse::<f64>().ok();
+                if !quality.is_some_and(|quality| quality > 0.0 && quality <= 1.0) {
+                    return false;
+                }
+            } else if key.eq_ignore_ascii_case("version")
+                && (version.replace(value).is_some() || value != "1.0.0")
+            {
+                return false;
+            }
+        }
+        true
+    })
+}
+
 pub(in crate::native_host) fn read_head<S: Read>(stream: &mut S) -> Result<RequestHead, Response> {
     let mut bytes = Zeroizing::new(Vec::with_capacity(512));
     let mut byte = [0_u8; 1];
@@ -78,6 +112,7 @@ pub(in crate::native_host) fn read_head<S: Read>(stream: &mut S) -> Result<Reque
     let mut content_length: Option<usize> = None;
     let mut bearer = None;
     let mut authorization_seen = false;
+    let mut openmetrics = false;
     let mut content_type = None;
     let mut content_encoding = None;
     let mut tenant_hint = None;
@@ -97,6 +132,8 @@ pub(in crate::native_host) fn read_head<S: Read>(stream: &mut S) -> Result<Reque
             }
             authorization_seen = true;
             bearer = value.strip_prefix("Bearer ").map(ToOwned::to_owned);
+        } else if name.eq_ignore_ascii_case("accept") {
+            openmetrics |= accepts_openmetrics(value);
         } else if name.eq_ignore_ascii_case("content-type") {
             if content_type.is_some() {
                 return Err(Response::empty(400));
@@ -129,6 +166,7 @@ pub(in crate::native_host) fn read_head<S: Read>(stream: &mut S) -> Result<Reque
         }
     }
     Ok(RequestHead {
+        openmetrics,
         method: method.to_owned(),
         path: path.to_owned(),
         content_length: content_length.unwrap_or(0),
@@ -153,6 +191,7 @@ pub(in crate::native_host) fn head_from_http_parts(
     let mut content_length: Option<usize> = None;
     let mut bearer = None;
     let mut authorization_seen = false;
+    let mut openmetrics = false;
     let mut content_type = None;
     let mut content_encoding = None;
     let mut tenant_hint = None;
@@ -171,6 +210,8 @@ pub(in crate::native_host) fn head_from_http_parts(
             }
             authorization_seen = true;
             bearer = value.strip_prefix("Bearer ").map(ToOwned::to_owned);
+        } else if name == http::header::ACCEPT {
+            openmetrics |= accepts_openmetrics(value);
         } else if name == http::header::CONTENT_TYPE {
             if content_type.is_some() {
                 return Err(Response::empty(400));
@@ -206,6 +247,7 @@ pub(in crate::native_host) fn head_from_http_parts(
         return Err(Response::empty(400));
     }
     Ok(RequestHead {
+        openmetrics,
         method: method.as_str().to_owned(),
         path: path.to_owned(),
         content_length: body_length,
@@ -592,7 +634,6 @@ impl Response {
         self
     }
 
-    #[cfg(test)]
     pub(in crate::native_host) const fn status(&self) -> u16 {
         self.status
     }
@@ -699,6 +740,25 @@ mod tests {
     impl TimeoutStream for MemoryStream {
         fn set_timeouts(&mut self, _timeout: std::time::Duration) -> Result<(), std::io::Error> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn metrics_accept_requires_supported_nonzero_media_type() {
+        for (accept, expected) in [
+            ("application/openmetrics-text; version=1.0.0", true),
+            ("application/openmetrics-text-invalid", false),
+            ("application/openmetrics-text; q=0", false),
+            ("application/openmetrics-text; version=9.0.0", false),
+            ("text/plain, application/openmetrics-text; q=0.8", true),
+        ] {
+            let mut stream = std::io::Cursor::new(
+                format!("GET /metrics HTTP/1.1\r\nAccept: {accept}\r\n\r\n").into_bytes(),
+            );
+            let Ok(head) = super::read_head(&mut stream) else {
+                panic!("bounded head");
+            };
+            assert_eq!(head.openmetrics, expected, "{accept}");
         }
     }
 

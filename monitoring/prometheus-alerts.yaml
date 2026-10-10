@@ -1,0 +1,67 @@
+groups:
+  - name: positron.operational
+    rules:
+      - alert: PositronNotReady
+        expr: positron_process_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Readiness has remained false."
+          runbook: "docs/operations/operational-state.md#health-readiness"
+      - alert: PositronClockUncertain
+        expr: positron_clock_uncertain == 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Destructive lifecycle work is paused for clock uncertainty."
+          runbook: "docs/operations/operational-state.md#clock"
+      - alert: PositronDiskHardPressure
+        expr: positron_disk_pressure{state="hard"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk pressure refuses new disk-growing work."
+          runbook: "docs/operations/operational-state.md#disk-pressure"
+      - alert: PositronQuarantine
+        expr: positron_integrity_quarantine_findings > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Authenticated catalog records quarantined objects."
+          runbook: "docs/operations/operational-state.md#integrity"
+      - alert: PositronMaintenanceStalled
+        expr: positron_maintenance_progress_slo_breaches > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Running maintenance has no durable progress within its SLO."
+          runbook: "docs/operations/operational-state.md#maintenance"
+      - alert: PositronMaintenanceDeadlineUnknown
+        expr: positron_maintenance_progress_slo_unknown > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Maintenance progress deadline cannot be established."
+          runbook: "docs/operations/operational-state.md#maintenance"
+      - alert: PositronOperationalOutputLost
+        expr: increase(positron_operational_events_dropped_total[5m]) + increase(positron_operational_log_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The bounded operational queue or log sink lost output."
+          runbook: "docs/operations/operational-state.md#operational-output"
+      - alert: PositronTraceExportFailed
+        expr: increase(positron_operational_trace_failures_total[5m]) + increase(positron_operational_trace_refused_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Explicit external trace export failed or was refused."
+          runbook: "docs/operations/operational-state.md#trace-export"

@@ -37,6 +37,18 @@ pub(super) fn ingest_native_batch(
     context: AuthorizedContext,
     batch: NativeLogBatch<'_>,
 ) -> Result<IngestRequestOutcome, ServiceFailure> {
+    let result = ingest_native_batch_inner(services, context, batch);
+    if let Ok(outcome) = &result {
+        services.record_ingest(SignalKind::Logs, outcome);
+    }
+    result
+}
+
+fn ingest_native_batch_inner(
+    services: &ServiceHandle,
+    context: AuthorizedContext,
+    batch: NativeLogBatch<'_>,
+) -> Result<IngestRequestOutcome, ServiceFailure> {
     services.revalidate_ingest_context(context)?;
     let instance = &services.instance;
     let tenant = super::context_tenant(context)?;
@@ -126,6 +138,18 @@ pub(super) fn ingest_authenticated_traces<'authority>(
 }
 
 fn ingest_native_trace_batch(
+    services: &ServiceHandle,
+    context: AuthorizedContext,
+    batch: NativeSpanBatch<'_>,
+) -> Result<IngestRequestOutcome, ServiceFailure> {
+    let result = ingest_native_trace_batch_inner(services, context, batch);
+    if let Ok(outcome) = &result {
+        services.record_ingest(SignalKind::Traces, outcome);
+    }
+    result
+}
+
+fn ingest_native_trace_batch_inner(
     services: &ServiceHandle,
     context: AuthorizedContext,
     batch: NativeSpanBatch<'_>,

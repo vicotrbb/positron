@@ -276,7 +276,10 @@ impl crate::TaskRegistrar for PendingTasks {
     ) -> Result<Box<dyn crate::RegisteredTask>, crate::TaskFailure> {
         if Some(role) == self.role {
             Ok(Box::new(PendingRegistration(self.released.clone())))
-        } else if matches!(role, TaskRole::Control | TaskRole::Operations) {
+        } else if matches!(
+            role,
+            TaskRole::Control | TaskRole::Operations | TaskRole::OperationalTelemetry
+        ) {
             Ok(Box::new(InspectionRegistration(
                 self.ordinary.register(role)?,
             )))

@@ -72,6 +72,7 @@ fn receive_log_request(
     let response = receive(
         &mut server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/logs".to_owned(),
             content_length: body.len(),
@@ -102,6 +103,7 @@ fn receive_trace_request(
     let response = receive_traces(
         &mut server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/traces".to_owned(),
             content_length: body.len(),

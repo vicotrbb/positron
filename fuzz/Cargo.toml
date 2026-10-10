@@ -348,3 +348,10 @@ bench = false
 
 [workspace]
 members = ["."]
+
+[[bin]]
+name = "operational_state"
+path = "fuzz_targets/operational_state.rs"
+test = false
+doc = false
+bench = false

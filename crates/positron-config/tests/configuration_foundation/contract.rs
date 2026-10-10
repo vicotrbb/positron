@@ -135,6 +135,10 @@ fn generated_schema_covers_every_canonical_setting_with_its_declared_constraints
                     Some("tls-or-explicit-plaintext-opt-out-off-loopback")
                 );
             },
+            ValueDomain::OptionalSocketAddress(maximum) => {
+                assert_eq!(property.get("maxLength").and_then(serde_json::Value::as_u64), Some(maximum as u64));
+                assert_eq!(property.get("x-positron-address-scope").and_then(serde_json::Value::as_str), Some("disabled-or-external-numeric-otlp-grpc"));
+            },
             ValueDomain::AbsolutePath(maximum) | ValueDomain::ProtectedAbsolutePath(maximum) => {
                 assert_eq!(
                     property
@@ -603,7 +607,7 @@ fn exposes_the_complete_canonical_setting_contract_and_compiled_defaults()
     assert_eq!(
         effective.redacted_reference(),
         "schema_version = 1\n\n\
-         [diagnostics]\nlog_level = \"info\"\n\n\
+         [diagnostics]\nlog_level = \"info\"\ntrace_otlp_grpc_address = \"disabled\"\n\n\
          [runtime]\nshutdown_grace_seconds = 30\nmax_registered_tenants = 2\n\n\
          [listener]\ncontrol_path = \"/var/run/positron/control.sock\"\n\
          operations_bind_address = \"127.0.0.1:13133\"\n\

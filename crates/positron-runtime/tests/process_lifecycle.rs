@@ -10,6 +10,51 @@ use positron_runtime::{
 };
 
 #[test]
+fn operational_worker_is_registered_before_spawn_and_retained_for_fenced_inspection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("operational-worker")?;
+    let listeners = ObservingListeners::default();
+    let tasks = ObservingTasks::default();
+    let mut process = ApplicationRuntime::start(
+        ServeConfiguration::new(
+            roots.bootstrap_paths()?,
+            InitializationMode::InitializeIfEmpty,
+        ),
+        HostInputs::new(&listeners, &tasks),
+    )?;
+    {
+        let events = tasks.events.borrow();
+        let registered = events
+            .iter()
+            .position(|event| *event == TaskEvent::Registered(TaskRole::OperationalTelemetry))
+            .ok_or("worker registration")?;
+        let spawned = events
+            .iter()
+            .position(|event| *event == TaskEvent::Spawned(TaskRole::OperationalTelemetry))
+            .ok_or("worker spawn")?;
+        assert!(registered < spawned);
+    }
+    process
+        .services()
+        .ok_or("serving services")?
+        .request_integrity_fence();
+    assert!(process.apply_pending_integrity_fence());
+    assert!(!tasks.events.borrow().iter().any(|event| matches!(
+        event,
+        TaskEvent::Aborted(TaskRole::OperationalTelemetry, _, _)
+    )));
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        positron_runtime::ExitOutcome::Graceful
+    );
+    assert!(tasks.events.borrow().iter().any(|event| matches!(
+        event,
+        TaskEvent::Joined(TaskRole::OperationalTelemetry, _, _)
+    )));
+    Ok(())
+}
+
+#[test]
 fn partial_task_spawn_failure_aborts_started_tasks_and_releases_ownership()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("spawn-fault")?;
@@ -43,6 +88,11 @@ fn partial_task_spawn_failure_aborts_started_tasks_and_releases_ownership()
             .cloned()
             .collect::<Vec<_>>(),
         [
+            TaskEvent::Aborted(
+                TaskRole::OperationalTelemetry,
+                ProcessPhase::Recovering,
+                true
+            ),
             TaskEvent::Aborted(TaskRole::Operations, ProcessPhase::Recovering, true),
             TaskEvent::Aborted(TaskRole::Control, ProcessPhase::Recovering, true),
         ]
@@ -94,6 +144,11 @@ fn partial_spawn_with_failed_rollback_reports_internal_cleanup_failure()
             .cloned()
             .collect::<Vec<_>>(),
         [
+            TaskEvent::Aborted(
+                TaskRole::OperationalTelemetry,
+                ProcessPhase::Recovering,
+                true
+            ),
             TaskEvent::Aborted(TaskRole::Operations, ProcessPhase::Recovering, true),
             TaskEvent::Aborted(TaskRole::Control, ProcessPhase::Recovering, true),
             TaskEvent::Aborted(TaskRole::Operations, ProcessPhase::Recovering, true),
@@ -107,6 +162,7 @@ fn assert_recovery_tasks_start_before_data_registration(tasks: &ObservingTasks) 
     let expected = [
         TaskRole::Control,
         TaskRole::Operations,
+        TaskRole::OperationalTelemetry,
         TaskRole::Api,
         TaskRole::OtlpGrpc,
         TaskRole::OtlpHttp,
@@ -114,14 +170,16 @@ fn assert_recovery_tasks_start_before_data_registration(tasks: &ObservingTasks) 
         TaskRole::Maintenance,
     ];
     assert_eq!(
-        &events[..4],
+        &events[..6],
         [
             TaskEvent::Registered(TaskRole::Control),
             TaskEvent::Registered(TaskRole::Operations),
+            TaskEvent::Registered(TaskRole::OperationalTelemetry),
             TaskEvent::Spawned(TaskRole::Control),
             TaskEvent::Spawned(TaskRole::Operations),
+            TaskEvent::Spawned(TaskRole::OperationalTelemetry),
         ],
-        "only recovery-safe Control and Operations tasks may start before data-plane task registration"
+        "only recovery-safe Control, Operations, and OperationalTelemetry tasks may start before data-plane task registration"
     );
     assert_eq!(
         events
@@ -141,7 +199,12 @@ fn assert_recovery_tasks_start_before_data_registration(tasks: &ObservingTasks) 
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        [TaskRole::Control, TaskRole::Operations, TaskRole::Api]
+        [
+            TaskRole::Control,
+            TaskRole::Operations,
+            TaskRole::OperationalTelemetry,
+            TaskRole::Api
+        ]
     );
 }
 

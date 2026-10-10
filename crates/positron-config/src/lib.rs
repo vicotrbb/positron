@@ -185,7 +185,7 @@ pub fn setting_for_path(path: &str) -> Option<Setting> {
 
 /// Returns the complete canonical contract in deterministic declaration order.
 #[must_use]
-pub const fn setting_definitions() -> [SettingDefinition; 100] {
+pub const fn setting_definitions() -> [SettingDefinition; 101] {
     contract::SETTING_DEFINITIONS
 }
 
@@ -196,6 +196,7 @@ use source::{apply_command_line, apply_environment, apply_toml};
 struct Candidate {
     schema_version: u16,
     log_level: LogLevel,
+    trace_otlp_grpc_address: Option<SocketAddr>,
     shutdown_grace_seconds: u16,
     max_registered_tenants: u16,
     control_path: String,
@@ -258,7 +259,7 @@ struct Candidate {
     secrets_directory: String,
     local_key_file: ProtectedFileReference,
     export_destinations: Vec<ExportDestinationDefinition>,
-    sources: [SettingSource; 100],
+    sources: [SettingSource; 101],
 }
 
 impl Candidate {
@@ -293,6 +294,7 @@ impl Candidate {
         Ok(Self {
             schema_version: parse_schema_version(schema_version)?,
             log_level: LogLevel::parse(log_level)?,
+            trace_otlp_grpc_address: None,
             shutdown_grace_seconds: parse_shutdown_grace_seconds(shutdown)?,
             max_registered_tenants: parse_max_registered_tenants(max_registered_tenants)?,
             control_path: checked_path(control, Setting::ListenerControlPath)?,
@@ -511,7 +513,7 @@ impl Candidate {
                 Setting::SecurityLocalKeyFile,
             )?,
             export_destinations: Vec::new(),
-            sources: [SettingSource::CompiledDefault; 100],
+            sources: [SettingSource::CompiledDefault; 101],
         })
     }
 
@@ -535,6 +537,9 @@ impl Candidate {
                 self.schema_version = parse_schema_version(value)?;
             },
             Setting::DiagnosticsLogLevel => self.log_level = LogLevel::parse(value)?,
+            Setting::DiagnosticsTraceOtlpGrpcAddress => {
+                self.trace_otlp_grpc_address = parse_trace_address(value)?
+            },
             Setting::RuntimeShutdownGraceSeconds => {
                 self.shutdown_grace_seconds = parse_shutdown_grace_seconds(value)?;
             },
@@ -963,6 +968,24 @@ impl Candidate {
     }
 
     fn validate(self) -> Result<EffectiveConfiguration, ConfigurationFailure> {
+        if let Some(destination) = self.trace_otlp_grpc_address {
+            // Reject self-export; unrelated numeric collectors may share the OTLP port.
+            if [
+                self.operations_bind_address,
+                self.api_bind_address,
+                self.otlp_grpc_bind_address,
+                self.otlp_http_bind_address,
+                self.loki_push_bind_address,
+            ]
+            .iter()
+            .any(|listener| operational_trace_conflicts(destination, *listener))
+            {
+                return Err(ConfigurationFailure::new(
+                    ConfigurationFailureCode::UnsafeCombination,
+                    FailureSource::DiagnosticsTraceOtlpGrpcAddress,
+                ));
+            }
+        }
         if self.data_directory == self.secrets_directory {
             return Err(ConfigurationFailure::new(
                 ConfigurationFailureCode::UnsafeCombination,
@@ -1032,6 +1055,7 @@ impl Candidate {
         Ok(EffectiveConfiguration {
             schema_version: self.schema_version,
             log_level: self.log_level,
+            trace_otlp_grpc_address: self.trace_otlp_grpc_address,
             shutdown_grace_seconds: self.shutdown_grace_seconds,
             max_registered_tenants: self.max_registered_tenants,
             control_path: self.control_path,
@@ -1637,6 +1661,7 @@ const fn failure_source(setting: Setting) -> FailureSource {
     match setting {
         Setting::SchemaVersion => FailureSource::SchemaVersion,
         Setting::DiagnosticsLogLevel => FailureSource::DiagnosticsLogLevel,
+        Setting::DiagnosticsTraceOtlpGrpcAddress => FailureSource::DiagnosticsTraceOtlpGrpcAddress,
         Setting::RuntimeShutdownGraceSeconds => FailureSource::RuntimeShutdownGraceSeconds,
         Setting::RuntimeMaxRegisteredTenants => FailureSource::RuntimeMaxRegisteredTenants,
         Setting::ListenerControlPath => FailureSource::ListenerControlPath,
@@ -1858,4 +1883,46 @@ const fn failure_source(setting: Setting) -> FailureSource {
         Setting::SecurityLocalKeyFile => FailureSource::SecurityLocalKeyFile,
         Setting::ExportDestinations => FailureSource::ExportDestinations,
     }
+}
+
+fn parse_trace_address(value: &str) -> Result<Option<SocketAddr>, ConfigurationFailure> {
+    if value == "disabled" {
+        return Ok(None);
+    }
+    let failure =
+        || ConfigurationFailure::unsupported_value(FailureSource::DiagnosticsTraceOtlpGrpcAddress);
+    if value.len() > 64 {
+        return Err(failure());
+    }
+    let address: SocketAddr = value.parse().map_err(|_| failure())?;
+    let ip = match address.ip() {
+        std::net::IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map_or(address.ip(), std::net::IpAddr::V4),
+        ip => ip,
+    };
+    if address.port() == 0 || ip.is_unspecified() || ip.is_multicast() {
+        return Err(failure());
+    }
+    Ok(Some(address))
+}
+
+/// Rejects exact and loopback-alias self destinations. A wildcard listener with
+/// the same port is conservatively ambiguous without local-interface identity.
+#[must_use]
+pub fn operational_trace_conflicts(destination: SocketAddr, listener: SocketAddr) -> bool {
+    fn normalized(ip: std::net::IpAddr) -> std::net::IpAddr {
+        match ip {
+            std::net::IpAddr::V6(ip) => ip
+                .to_ipv4_mapped()
+                .map_or(std::net::IpAddr::V6(ip), std::net::IpAddr::V4),
+            ip => ip,
+        }
+    }
+    let destination_ip = normalized(destination.ip());
+    let listener_ip = normalized(listener.ip());
+    destination.port() == listener.port()
+        && (listener_ip.is_unspecified()
+            || destination_ip == listener_ip
+            || (destination_ip.is_loopback() && listener_ip.is_loopback()))
 }

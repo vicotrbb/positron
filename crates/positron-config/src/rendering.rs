@@ -142,6 +142,9 @@ fn render_schema_value(definition: SettingDefinition) -> String {
         ValueDomain::LoopbackSocketAddress(maximum) => format!(
             "{{\"type\": \"string\", \"maxLength\": {maximum}, \"x-positron-address-scope\": \"loopback-only\"}}"
         ),
+        ValueDomain::OptionalSocketAddress(maximum) => format!(
+            "{{\"type\": \"string\", \"maxLength\": {maximum}, \"x-positron-address-scope\": \"disabled-or-external-numeric-otlp-grpc\"}}"
+        ),
         ValueDomain::SocketAddress(maximum) => format!(
             "{{\"type\": \"string\", \"maxLength\": {maximum}, \"x-positron-address-scope\": \"tls-or-explicit-plaintext-opt-out-off-loopback\"}}"
         ),
@@ -388,6 +391,7 @@ fn reference_domain(definition: SettingDefinition) -> String {
             ValueDomain::UnsignedIntegerRange(minimum, maximum) => format!("`{minimum}..={maximum}`"),
             ValueDomain::LoopbackSocketAddress(maximum) => format!("loopback socket address; at most {maximum} bytes"),
             ValueDomain::SocketAddress(maximum) => format!("socket address; at most {maximum} bytes"),
+            ValueDomain::OptionalSocketAddress(maximum) => format!("disabled or explicit external numeric OTLP gRPC address; at most {maximum} bytes"),
             ValueDomain::AbsolutePath(maximum) => format!("absolute path; at most {maximum} bytes"),
             ValueDomain::ProtectedAbsolutePath(maximum) => format!("protected absolute path; at most {maximum} bytes"),
             ValueDomain::ExportDestinations(maximum, name, tenants) => format!("at most {maximum} named destinations; each has a lowercase `name` of at most {name} bytes, a nonzero 16-byte lowercase hexadecimal `identity`, and one to {tenants} unique canonical `allowed_tenants`"),

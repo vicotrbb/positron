@@ -213,6 +213,7 @@ impl CompletionState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailureSource {
+    DiagnosticsTraceOtlpGrpcAddress,
     ConfigurationDocument,
     EnvironmentOverride,
     CommandLineOverride,
@@ -322,6 +323,7 @@ impl FailureSource {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::DiagnosticsTraceOtlpGrpcAddress => "diagnostics.trace_otlp_grpc_address",
             Self::ConfigurationDocument => "configuration_document",
             Self::EnvironmentOverride => "environment_override",
             Self::CommandLineOverride => "command_line_override",

@@ -131,6 +131,33 @@ pub(super) fn route<S: Read + Write>(
     role: ListenerRole,
     peer: std::net::SocketAddr,
     trusted_proxy: Option<TrustedProxy>,
+    head: RequestHead,
+    health: &HealthState,
+    dependencies: super::RouteDependencies<'_>,
+) -> Result<Response, Response> {
+    let started = std::time::Instant::now();
+    let result = route_inner(
+        stream,
+        role,
+        peer,
+        trusted_proxy,
+        head,
+        health,
+        dependencies,
+    );
+    let status = match &result {
+        Ok(response) | Err(response) => response.status(),
+    };
+    // Scrapes, health probes and the Control surface never feed operational traces.
+    health.record_request(role, status, started.elapsed());
+    result
+}
+
+fn route_inner<S: Read + Write>(
+    stream: &mut S,
+    role: ListenerRole,
+    peer: std::net::SocketAddr,
+    trusted_proxy: Option<TrustedProxy>,
     mut head: RequestHead,
     health: &HealthState,
     dependencies: super::RouteDependencies<'_>,
@@ -578,18 +605,43 @@ pub(super) fn route<S: Read + Write>(
             "ready",
             &health.security_warnings(),
         )),
-        (ListenerRole::Operations, "GET", "/status") => {
+        (ListenerRole::Operations, "GET", "/status" | "/metrics") => {
             let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
                 Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
             })?);
-            let status = health
-                .authorized_configuration_status(&bearer)
+            let status =
+                if head.path == "/metrics" && health.phase() == crate::ProcessPhase::Fenced {
+                    health
+                        .authorized_fenced_doctor_status(&bearer)
+                        .map(|_| None)
+                } else {
+                    health.authorized_configuration_status(&bearer).map(Some)
+                }
                 .map_err(|failure| match failure {
                     crate::health::ConfigurationStatusFailure::AuthenticationRejected => {
                         Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
                     },
                     crate::health::ConfigurationStatusFailure::Unavailable => Response::empty(503),
                 })?;
+            if head.path == "/metrics" {
+                let mut body =
+                    crate::operational::metrics(health, status.as_ref(), head.openmetrics);
+                if head.openmetrics {
+                    body.push_str("# EOF\n");
+                }
+                return Ok(Response {
+                    status: 200,
+                    content_type: if head.openmetrics {
+                        "application/openmetrics-text; version=1.0.0; charset=utf-8"
+                    } else {
+                        "text/plain; version=0.0.4; charset=utf-8"
+                    },
+                    body: body.into_bytes(),
+                    retry_after_seconds: None,
+                    diagnostics_reservation: None,
+                });
+            }
+            let status = status.ok_or_else(|| Response::empty(503))?;
             status.configuration.as_ref().map_or_else(
                 || Ok(Response::empty(503)),
                 |configuration| {
@@ -631,7 +683,11 @@ pub(super) fn route<S: Read + Write>(
             let services = services.ok_or_else(|| Response::empty(503))?;
             super::super::otlp_http::receive_from(stream, head, peer, trusted_proxy, services)
         },
-        (ListenerRole::Operations, _, "/health/live" | "/health/ready" | "/status")
+        (
+            ListenerRole::Operations,
+            _,
+            "/health/live" | "/health/ready" | "/status" | "/metrics",
+        )
         | (ListenerRole::OtlpHttp, _, "/v1/logs" | "/v1/traces") => Ok(Response::empty(405)),
         (ListenerRole::Api, _, path) if api_path_is_known(path) => Ok(Response::empty(405)),
         (ListenerRole::LokiPush, _, "/loki/api/v1/push" | "/otlp/v1/logs") => {
@@ -693,6 +749,7 @@ mod tests {
             request_barrier.wait();
             let mut stream = Cursor::new(Vec::new());
             let head = RequestHead {
+                openmetrics: false,
                 method: "GET".to_owned(),
                 path: "/status".to_owned(),
                 content_length: 0,
@@ -796,6 +853,74 @@ mod tests {
         assert!(!body.contains(&administrator));
         assert_eq!(source_listing(&data, &secrets)?, before);
 
+        assert_eq!(
+            request_for_role(
+                &state.health(),
+                ListenerRole::Api,
+                "GET",
+                "/canary-tenant-body",
+                Some(administrator.clone())
+            )
+            .status(),
+            404
+        );
+
+        let metrics = request_for_role(
+            &state.health(),
+            ListenerRole::Operations,
+            "GET",
+            "/metrics",
+            Some(administrator.clone()),
+        );
+        assert_eq!(metrics.status(), 200);
+        let metrics_body = std::str::from_utf8(metrics.body())?;
+        assert!(metrics_body.contains("positron_process_ready 1\n"));
+        assert!(metrics_body.contains("positron_resource_usage{dimension=\"queue_slots\"} 0\n"));
+        assert!(metrics_body.contains("positron_integrity_quarantine_findings 0\n"));
+        assert!(metrics_body.contains(
+            "positron_requests_total{listener=\"api\",outcome=\"request_rejected\"} 1\n"
+        ));
+        assert!(!metrics_body.contains("canary-tenant-body"));
+        assert!(metrics_body.contains("positron_maintenance_tasks{phase=\"running\"} 0\n"));
+        assert!(!metrics_body.contains(&administrator));
+        assert!(!metrics_body.contains(&data.display().to_string()));
+        let mut raw = Cursor::new(format!("GET /metrics HTTP/1.1\r\nAuthorization: Bearer {administrator}\r\nAccept: application/openmetrics-text; version=1.0.0\r\n\r\n").into_bytes());
+        let head = super::super::io::read_head(&mut raw).map_err(|_| "valid scrape request")?;
+        let openmetrics = route(
+            &mut raw,
+            ListenerRole::Operations,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
+            None,
+            head,
+            &state.health(),
+            super::super::RouteDependencies::new(None, None),
+        )
+        .map_err(|_| "scrape failed")?;
+        assert_eq!(
+            openmetrics.content_type,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8"
+        );
+        assert!(openmetrics.body().ends_with(b"# EOF\n"));
+        assert!(
+            std::str::from_utf8(openmetrics.body())?.contains("# TYPE positron_requests counter\n")
+        );
+        assert!(
+            !std::str::from_utf8(openmetrics.body())?
+                .contains("# TYPE positron_requests_total counter\n")
+        );
+        assert_eq!(
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/metrics",
+                None
+            )
+            .status(),
+            401
+        );
+        assert_eq!(source_listing(&data, &secrets)?, before);
+
         drop(services);
         fs::remove_dir_all(root)?;
         Ok(())
@@ -892,6 +1017,7 @@ mod tests {
             SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
             None,
             RequestHead {
+                openmetrics: false,
                 method: "POST".to_owned(),
                 path: "/control/support-bundle".to_owned(),
                 content_length: body_length,
@@ -940,6 +1066,7 @@ mod tests {
             SocketAddr::from((Ipv4Addr::LOCALHOST, 1)),
             None,
             RequestHead {
+                openmetrics: false,
                 method: method.to_owned(),
                 path: path.to_owned(),
                 content_length: 0,

@@ -345,13 +345,31 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
     );
     let stderr = rejected_child.stderr.take().ok_or("child stderr")?;
     let mut stderr = BufReader::new(stderr);
-    let mut observed = String::new();
-    stderr.read_line(&mut observed)?;
-    stderr.read_line(&mut observed)?;
-    assert_eq!(
-        observed,
-        "positron: warning: operations transport is plaintext\npositron: configuration reload rejected category=source_rejected\n"
-    );
+    let mut records = Vec::new();
+    for _ in 0..32 {
+        let mut line = String::new();
+        assert!(stderr.read_line(&mut line)? > 0);
+        let record: serde_json::Value = serde_json::from_str(&line)?;
+        assert_eq!(record["component"], "runtime");
+        let rejected = record["event"] == "configuration_reload_rejected";
+        records.push(record);
+        if rejected {
+            break;
+        }
+    }
+    let warnings: Vec<_> = records
+        .iter()
+        .filter(|record| record["event"] == "transport_security_warning")
+        .collect();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["warning"], "operations transport is plaintext");
+    let rejected: Vec<_> = records
+        .iter()
+        .filter(|record| record["event"] == "configuration_reload_rejected")
+        .collect();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["category"], "source_rejected");
+    assert_eq!(rejected[0]["severity"], "error");
     assert!(rejected_child.try_wait()?.is_none());
     if let Err(error) = wait_for_ready(operations_port) {
         let status = configuration_status(operations_port, &authorization)
@@ -648,33 +666,6 @@ fn configuration_restore_probe_never_sends_a_third_reload_for_unresolved_pending
     assert_eq!(signals, 2);
     assert!(error.to_string().contains("original bounded reload probe"));
     Ok(())
-}
-
-#[cfg(unix)]
-#[test]
-fn reconciliation_stderr_accepts_only_the_bounded_retry_variants() {
-    let baseline = "positron: warning: operations transport is plaintext\npositron: configuration reload rejected category=source_rejected\n";
-    let publication_before_source = "positron: warning: operations transport is plaintext\npositron: configuration reload rejected category=publication_unavailable\npositron: configuration reload rejected category=source_rejected\n";
-    let duplicate_publication = "positron: warning: operations transport is plaintext\npositron: configuration reload rejected category=publication_unavailable\npositron: configuration reload rejected category=publication_unavailable\npositron: configuration reload rejected category=source_rejected\n";
-
-    assert!(reconciliation_stderr_is_exact(false, baseline));
-    assert!(!reconciliation_stderr_is_exact(
-        false,
-        publication_before_source
-    ));
-    assert!(reconciliation_stderr_is_exact(true, baseline));
-    assert!(reconciliation_stderr_is_exact(
-        true,
-        publication_before_source
-    ));
-    assert!(!reconciliation_stderr_is_exact(true, duplicate_publication));
-}
-
-#[cfg(unix)]
-fn reconciliation_stderr_is_exact(retried: bool, stderr: &str) -> bool {
-    let baseline = "positron: warning: operations transport is plaintext\npositron: configuration reload rejected category=source_rejected\n";
-    let publication_before_source = "positron: warning: operations transport is plaintext\npositron: configuration reload rejected category=publication_unavailable\npositron: configuration reload rejected category=source_rejected\n";
-    stderr == baseline || (retried && stderr == publication_before_source)
 }
 
 #[cfg(unix)]

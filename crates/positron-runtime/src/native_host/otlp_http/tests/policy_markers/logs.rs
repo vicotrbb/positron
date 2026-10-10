@@ -56,6 +56,7 @@ fn admitted_http_log_request_keeps_captured_policy_after_successor_activation()
             receive(
                 &mut server,
                 RequestHead {
+                    openmetrics: false,
                     method: "POST".to_owned(),
                     path: "/v1/logs".to_owned(),
                     content_length: body.len(),
@@ -178,6 +179,7 @@ fn authenticated_http_log_marker_survives_ack_and_runtime_reopen() -> Result<(),
     let response = receive(
         &mut server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/logs".to_owned(),
             content_length: body.len(),
@@ -295,6 +297,7 @@ fn authenticated_http_log_attribute_marker_reports_insufficient_governor_headroo
     let response = receive(
         &mut server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/logs".to_owned(),
             content_length: body.len(),
@@ -363,6 +366,7 @@ fn authenticated_http_log_attribute_marker_reports_insufficient_governor_headroo
     let expensive_response = receive(
         &mut expensive_server,
         RequestHead {
+            openmetrics: false,
             method: "POST".to_owned(),
             path: "/v1/logs".to_owned(),
             content_length: expensive_body.len(),

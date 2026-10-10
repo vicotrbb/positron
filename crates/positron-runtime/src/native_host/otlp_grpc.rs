@@ -587,45 +587,62 @@ impl LogsService for OtlpLogsGrpc {
         &self,
         mut request: Request<ExportLogsServiceRequest>,
     ) -> Result<Response<ExportLogsServiceResponse>, Status> {
-        if self
-            .health
-            .as_ref()
-            .is_some_and(|health| !health.admits_data_or_mutation())
-        {
-            return Err(Status::unavailable(
-                "OTLP Logs ingest is temporarily unavailable",
-            ));
+        let started = std::time::Instant::now();
+        let result = async {
+            if self
+                .health
+                .as_ref()
+                .is_some_and(|health| !health.admits_data_or_mutation())
+            {
+                return Err(Status::unavailable(
+                    "OTLP Logs ingest is temporarily unavailable",
+                ));
+            }
+            let context = request
+                .extensions()
+                .get::<AuthorizedContext>()
+                .copied()
+                .ok_or_else(authentication_rejected)?;
+            let admission = request
+                .extensions_mut()
+                .remove::<crate::services::ReceiverAdmissionLease>()
+                .ok_or_else(|| Status::internal("OTLP Logs admission context was unavailable"))?;
+            let reservation = admission.take().map_err(service_status)?;
+            if request.get_ref().resource_logs.iter().all(|resource| {
+                resource
+                    .scope_logs
+                    .iter()
+                    .all(|scope| scope.log_records.is_empty())
+            }) {
+                drop(reservation);
+                return render(IngestRequestOutcome::new(Vec::new()));
+            }
+            let outcome = self
+                .blocking
+                .ingest(
+                    self.services.clone(),
+                    context,
+                    request.into_inner(),
+                    reservation,
+                )
+                .await
+                .map_err(service_status)?;
+            render(outcome)
         }
-        let context = request
-            .extensions()
-            .get::<AuthorizedContext>()
-            .copied()
-            .ok_or_else(authentication_rejected)?;
-        let admission = request
-            .extensions_mut()
-            .remove::<crate::services::ReceiverAdmissionLease>()
-            .ok_or_else(|| Status::internal("OTLP Logs admission context was unavailable"))?;
-        let reservation = admission.take().map_err(service_status)?;
-        if request.get_ref().resource_logs.iter().all(|resource| {
-            resource
-                .scope_logs
-                .iter()
-                .all(|scope| scope.log_records.is_empty())
-        }) {
-            drop(reservation);
-            return render(IngestRequestOutcome::new(Vec::new()));
+        .await;
+        if let Some(health) = &self.health {
+            let status = match &result {
+                Ok(_) => 200,
+                Err(failure) => match failure.code() {
+                    tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => 401,
+                    tonic::Code::ResourceExhausted => 429,
+                    tonic::Code::InvalidArgument => 400,
+                    _ => 503,
+                },
+            };
+            health.record_request(crate::ListenerRole::OtlpGrpc, status, started.elapsed());
         }
-        let outcome = self
-            .blocking
-            .ingest(
-                self.services.clone(),
-                context,
-                request.into_inner(),
-                reservation,
-            )
-            .await
-            .map_err(service_status)?;
-        render(outcome)
+        result
     }
 }
 
@@ -635,51 +652,70 @@ impl TraceService for OtlpTracesGrpc {
         &self,
         mut request: Request<ExportTraceServiceRequest>,
     ) -> Result<Response<ExportTraceServiceResponse>, Status> {
-        if self
-            .health
-            .as_ref()
-            .is_some_and(|health| !health.admits_data_or_mutation())
-        {
-            return Err(Status::unavailable(
-                "OTLP Traces ingest is temporarily unavailable",
-            ));
+        let started = std::time::Instant::now();
+        let result = async {
+            if self
+                .health
+                .as_ref()
+                .is_some_and(|health| !health.admits_data_or_mutation())
+            {
+                return Err(Status::unavailable(
+                    "OTLP Traces ingest is temporarily unavailable",
+                ));
+            }
+            let context = request
+                .extensions()
+                .get::<AuthorizedContext>()
+                .copied()
+                .ok_or_else(trace_authentication_rejected)?;
+            let admission = request
+                .extensions_mut()
+                .remove::<crate::services::ReceiverAdmissionLease>()
+                .ok_or_else(|| Status::internal("OTLP Traces admission context was unavailable"))?;
+            let evidence = request
+                .extensions()
+                .get::<OtlpGrpcTransportEvidence>()
+                .cloned()
+                .ok_or_else(|| {
+                    Status::internal("OTLP Traces transport evidence was unavailable")
+                })?;
+            let reservation = admission.take().map_err(trace_service_status)?;
+            if request.get_ref().resource_spans.iter().all(|resource| {
+                resource
+                    .scope_spans
+                    .iter()
+                    .all(|scope| scope.spans.is_empty())
+            }) {
+                drop(reservation);
+                return trace_render(IngestRequestOutcome::new(Vec::new()));
+            }
+            let outcome = self
+                .blocking
+                .ingest_traces(
+                    self.services.clone(),
+                    context,
+                    request.into_inner(),
+                    evidence,
+                    reservation,
+                )
+                .await
+                .map_err(trace_service_status)?;
+            trace_render(outcome)
         }
-        let context = request
-            .extensions()
-            .get::<AuthorizedContext>()
-            .copied()
-            .ok_or_else(trace_authentication_rejected)?;
-        let admission = request
-            .extensions_mut()
-            .remove::<crate::services::ReceiverAdmissionLease>()
-            .ok_or_else(|| Status::internal("OTLP Traces admission context was unavailable"))?;
-        let evidence = request
-            .extensions()
-            .get::<OtlpGrpcTransportEvidence>()
-            .cloned()
-            .ok_or_else(|| Status::internal("OTLP Traces transport evidence was unavailable"))?;
-        let reservation = admission.take().map_err(trace_service_status)?;
-        if request.get_ref().resource_spans.iter().all(|resource| {
-            resource
-                .scope_spans
-                .iter()
-                .all(|scope| scope.spans.is_empty())
-        }) {
-            drop(reservation);
-            return trace_render(IngestRequestOutcome::new(Vec::new()));
+        .await;
+        if let Some(health) = &self.health {
+            let status = match &result {
+                Ok(_) => 200,
+                Err(failure) => match failure.code() {
+                    tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => 401,
+                    tonic::Code::ResourceExhausted => 429,
+                    tonic::Code::InvalidArgument => 400,
+                    _ => 503,
+                },
+            };
+            health.record_request(crate::ListenerRole::OtlpGrpc, status, started.elapsed());
         }
-        let outcome = self
-            .blocking
-            .ingest_traces(
-                self.services.clone(),
-                context,
-                request.into_inner(),
-                evidence,
-                reservation,
-            )
-            .await
-            .map_err(trace_service_status)?;
-        trace_render(outcome)
+        result
     }
 }
 

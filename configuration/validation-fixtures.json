@@ -3,7 +3,7 @@
   "generated_from": "crates/positron-config/src/contract.rs",
   "maximum_document_bytes": 16384,
   "cases": [
-    {"id": "minimal-valid-document", "class": "positive", "toml": "schema_version = 1\n", "expected": "accepted"},
+    {"id": "disabled-operational-export", "class": "positive", "toml": "schema_version = 1\n[diagnostics]\ntrace_otlp_grpc_address = \"disabled\"\n", "expected": "accepted"},
     {"id": "registered-tenant-capacity-above-default", "class": "boundary", "toml": "schema_version = 1\n[runtime]\nmax_registered_tenants = 3\n", "expected": "accepted"},
     {"id": "unknown-setting", "class": "negative", "toml": "schema_version = 1\nunknown_setting = true\n", "expected": "unknown_setting"},
     {"id": "oversized-document", "class": "adversarial", "recipe": {"repeat": "#", "bytes": 16385}, "expected": "resource_limit"}

@@ -7,6 +7,8 @@ use positron_kernel::{
     MaintenanceTaskPhase, MaintenanceTerminalFailure, ResourceDimension, WorkClass,
 };
 
+use crate::operational::OperationalEvent;
+
 use crate::{
     BootstrapPaths, ConfigurationObservation, ConfigurationRuntimeFailure, DoctorRuntimeFacts,
     InitializedInstance, InstanceBootstrap, ListenerRole, RuntimeConfiguration,
@@ -112,6 +114,7 @@ pub enum OperationalLogFailure {
 /// Resource Governor for authenticated Operations inspection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MaintenanceHealth {
+    pub(crate) by_class: [[u32; 6]; 22],
     queued: u32,
     running: u32,
     deferred: u32,
@@ -253,6 +256,7 @@ impl MaintenanceHealth {
 }
 
 pub(crate) struct OperationsStatus {
+    pub(crate) resources: positron_kernel::ResourceSnapshot,
     pub(crate) configuration: Option<ConfigurationObservation>,
     pub(crate) maintenance: MaintenanceHealth,
     pub(crate) doctor: DoctorRuntimeFacts,
@@ -305,7 +309,7 @@ pub struct HealthState {
     inspection_authority: Arc<OnceLock<Weak<InitializedInstance>>>,
     fenced_inspection: Arc<OnceLock<FencedInspection>>,
     catalog_operation: Arc<OnceLock<Weak<Mutex<()>>>>,
-    operational_events: Arc<Mutex<Vec<&'static str>>>,
+    operational_events: Arc<crate::operational::OperationalTelemetry>,
 }
 
 impl std::fmt::Debug for HealthState {
@@ -325,27 +329,94 @@ impl HealthState {
     /// Returns the bounded, allowlisted operational event snapshot owned by
     /// the process lifecycle. Event values are closed vocabulary only.
     pub fn operational_log_snapshot(&self) -> Result<String, OperationalLogFailure> {
-        let events = self
-            .operational_events
-            .lock()
-            .map_err(|_| OperationalLogFailure::Unavailable)?;
+        let events = self.operational_events.snapshot()?;
         let mut rendered = format!(
             "inspection_owner=process_lifecycle\nrecord_count={}\n",
             events.len()
         );
         for (index, event) in events.iter().enumerate() {
-            rendered.push_str(&format!("record_{index}_event={event}\n"));
+            rendered.push_str(&format!("record_{index}_event={}\n", event.name()));
         }
         Ok(rendered)
     }
 
-    fn record_operational_event(&self, event: &'static str) {
-        if let Ok(mut events) = self.operational_events.lock() {
-            if events.len() == 32 {
-                events.remove(0);
-            }
-            events.push(event);
+    /// Structured JSON records from the same bounded, closed event ring.
+    pub fn operational_logs_json(&self) -> Result<String, OperationalLogFailure> {
+        serde_json::to_string(
+            &self
+                .operational_events
+                .snapshot()?
+                .iter()
+                .map(|event| event.json())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| OperationalLogFailure::Unavailable)
+    }
+
+    fn record_operational_event(&self, event: OperationalEvent) {
+        self.operational_events.record(event);
+    }
+    pub(crate) fn operational_telemetry(&self) -> &crate::operational::OperationalTelemetry {
+        &self.operational_events
+    }
+    pub(crate) fn record_request(
+        &self,
+        role: ListenerRole,
+        status: u16,
+        elapsed: std::time::Duration,
+    ) {
+        self.operational_events
+            .record_request(role, status, elapsed);
+    }
+    pub(crate) fn operational_log_level(&self) -> Result<positron_config::LogLevel, ()> {
+        self.configuration
+            .get()
+            .map_or(Ok(positron_config::LogLevel::Info), |configuration| {
+                configuration
+                    .observed()
+                    .map(|observation| observation.effective().log_level())
+                    .map_err(|_| ())
+            })
+    }
+    pub(crate) fn trace_export_context(
+        &self,
+    ) -> Result<
+        Option<(
+            std::net::SocketAddr,
+            positron_kernel::TransferredResourceReservation,
+        )>,
+        (),
+    > {
+        if self.phase() != ProcessPhase::Serving {
+            return Ok(None);
         }
+        let configuration = self
+            .configuration
+            .get()
+            .ok_or(())?
+            .observed()
+            .map_err(|_| ())?;
+        let Some(destination) = configuration.effective().operational_trace_address() else {
+            return Ok(None);
+        };
+        let authority = self
+            .inspection_authority
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(())?;
+        // One capped 4 KiB message, bounded HTTP/2 windows and headers, and a
+        // conservative 1 MiB complete client/runtime memory peak. CPU denotes
+        // one admitted worker, not a count of instructions or elapsed nanos.
+        let claim = positron_kernel::WorkClaim::system_diagnostics(
+            positron_kernel::ResourceAmounts::new([1_048_576, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0]),
+        )
+        .map_err(|_| ())?;
+        let reservation = authority
+            .resource_governor()
+            .reserve(claim)
+            .map_err(|_| ())?
+            .transfer();
+        Ok(Some((destination, reservation)))
     }
 
     /// Runs one bounded diagnostic collection against the current serving
@@ -459,7 +530,7 @@ impl HealthState {
     pub(crate) fn fence(&self) {
         self.phase
             .store(ProcessPhase::Fenced as u8, Ordering::Release);
-        self.record_operational_event("process_fenced");
+        self.record_operational_event(OperationalEvent::ProcessFenced);
     }
 
     /// Records a bounded one-way request. The `RunningProcess` remains the
@@ -722,6 +793,7 @@ impl HealthState {
             .statuses_with_progress_slo(now, clock_uncertain)
             .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
         let mut maintenance = MaintenanceHealth {
+            by_class: [[0; 6]; 22],
             queued: 0,
             running: 0,
             deferred: 0,
@@ -751,6 +823,26 @@ impl HealthState {
             failed_unclassified: 0,
         };
         for status in statuses {
+            let class = crate::operational::MAINTENANCE_CLASSES
+                .iter()
+                .position(|(class, _)| *class == status.task().class())
+                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+            let phase = match status.phase() {
+                MaintenanceTaskPhase::Queued => 0,
+                MaintenanceTaskPhase::Running => 1,
+                MaintenanceTaskPhase::Deferred => 2,
+                MaintenanceTaskPhase::Cancelled => 3,
+                MaintenanceTaskPhase::Succeeded => 4,
+                MaintenanceTaskPhase::Failed => 5,
+            };
+            let count = maintenance
+                .by_class
+                .get_mut(class)
+                .and_then(|counts| counts.get_mut(phase))
+                .ok_or(ConfigurationStatusFailure::Unavailable)?;
+            *count = count
+                .checked_add(1)
+                .ok_or(ConfigurationStatusFailure::Unavailable)?;
             match status.phase() {
                 MaintenanceTaskPhase::Queued => {
                     maintenance.queued = maintenance
@@ -885,6 +977,7 @@ impl HealthState {
         maintenance.recovery_reserve_memory_bytes =
             resources.recovery_reserve_capacity(ResourceDimension::MemoryBytes);
         Ok(OperationsStatus {
+            resources,
             configuration: self
                 .configuration_status()
                 .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
@@ -966,7 +1059,7 @@ impl ProcessState {
                 inspection_authority: Arc::new(OnceLock::new()),
                 fenced_inspection: Arc::new(OnceLock::new()),
                 catalog_operation: Arc::new(OnceLock::new()),
-                operational_events: Arc::new(Mutex::new(Vec::new())),
+                operational_events: Arc::new(crate::operational::OperationalTelemetry::default()),
             },
         }
     }
@@ -977,7 +1070,7 @@ impl ProcessState {
 
     pub(crate) fn record_resource_observation_deferred(&self) {
         self.health
-            .record_operational_event("resource_observation_deferred");
+            .record_operational_event(OperationalEvent::ResourceObservationDeferred);
     }
 
     pub(crate) fn record_dependency_status(&self, failure: Option<crate::BootstrapFailureCode>) {
@@ -990,19 +1083,19 @@ impl ProcessState {
         }
         self.health.record_operational_event(match failure {
             Some(crate::BootstrapFailureCode::StorageUnavailable) => {
-                "dependency_storage_unavailable"
+                OperationalEvent::DependencyStorageUnavailable
             },
             Some(crate::BootstrapFailureCode::KeyCustodyUnavailable) => {
-                "dependency_key_unavailable"
+                OperationalEvent::DependencyKeyUnavailable
             },
             Some(crate::BootstrapFailureCode::ResourceUnavailable) => {
-                "dependency_resources_unavailable"
+                OperationalEvent::DependencyResourcesUnavailable
             },
             Some(crate::BootstrapFailureCode::CatalogUnavailable) => {
-                "dependency_catalog_unavailable"
+                OperationalEvent::DependencyCatalogUnavailable
             },
-            Some(_) => "dependency_recovery_unavailable",
-            None => "dependency_restored",
+            Some(_) => OperationalEvent::DependencyRecoveryUnavailable,
+            None => OperationalEvent::DependencyRestored,
         });
     }
 
@@ -1016,13 +1109,13 @@ impl ProcessState {
     pub(crate) fn transition(&self, phase: ProcessPhase) {
         self.health.phase.store(phase as u8, Ordering::Release);
         self.health.record_operational_event(match phase {
-            ProcessPhase::Starting => "process_starting",
-            ProcessPhase::Recovering => "process_recovering",
-            ProcessPhase::Serving => "process_serving",
-            ProcessPhase::Draining => "process_draining",
-            ProcessPhase::Fenced => "process_fenced",
-            ProcessPhase::Stopping => "process_stopping",
-            ProcessPhase::Stopped => "process_stopped",
+            ProcessPhase::Starting => OperationalEvent::ProcessStarting,
+            ProcessPhase::Recovering => OperationalEvent::ProcessRecovering,
+            ProcessPhase::Serving => OperationalEvent::ProcessServing,
+            ProcessPhase::Draining => OperationalEvent::ProcessDraining,
+            ProcessPhase::Fenced => OperationalEvent::ProcessFenced,
+            ProcessPhase::Stopping => OperationalEvent::ProcessStopping,
+            ProcessPhase::Stopped => OperationalEvent::ProcessStopped,
         });
     }
 
@@ -1161,6 +1254,15 @@ mod tests {
         assert!(snapshot.contains("record_0_event=process_recovering"));
         assert!(snapshot.contains("record_31_event=process_serving"));
         assert!(!snapshot.contains("record_32_event="));
+        let json = state
+            .health()
+            .operational_logs_json()
+            .expect("structured logs");
+        let records: serde_json::Value = serde_json::from_str(&json).expect("JSON log records");
+        assert_eq!(records.as_array().expect("records").len(), 32);
+        assert_eq!(records[31]["event"], "process_serving");
+        assert_eq!(records[31]["component"], "runtime");
+        assert_eq!(records[31]["severity"], "info");
     }
 
     #[test]

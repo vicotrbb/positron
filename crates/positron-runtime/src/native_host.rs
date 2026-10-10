@@ -27,6 +27,9 @@ use crate::{
     TaskFailure, TaskJoinOutcome, TaskRegistrar, TaskRole, ValidatedListenerSet,
 };
 
+pub(crate) mod operational_worker;
+use operational_worker::run as operational_worker;
+
 mod api_http;
 mod connection_admission;
 #[cfg(unix)]
@@ -1208,7 +1211,7 @@ impl ListenerGenerationFactory for NativeHost {
             // as at startup. They must not retain mutable instance authority
             // when a committed generation is subsequently fenced.
             let role_services = match role {
-                TaskRole::Control | TaskRole::Operations => None,
+                TaskRole::Control | TaskRole::Operations | TaskRole::OperationalTelemetry => None,
                 _ => services.clone(),
             };
             match task.spawn(cancellation.clone(), health.clone(), role_services) {
@@ -1299,6 +1302,21 @@ impl RegisteredTask for NativeRegisteredTask {
         health: HealthState,
         services: Option<ServiceHandle>,
     ) -> Result<Box<dyn RunningTask>, TaskFailure> {
+        if self.role == TaskRole::OperationalTelemetry {
+            let force = TaskCancellation::new();
+            let worker_force = force.clone();
+            let admissions = Arc::clone(&self.admissions);
+            let handle = std::thread::Builder::new()
+                .name("positron-operational-telemetry".to_owned())
+                .spawn(move || operational_worker(cancellation, worker_force, health, admissions))
+                .map_err(|_| TaskFailure::SpawnUnavailable)?;
+            return Ok(Box::new(NativeRunningTask {
+                force,
+                maintenance_wake: None,
+                shutdown_cancellation: None,
+                handle: Some(handle),
+            }));
+        }
         if self.role == TaskRole::Maintenance {
             let services = services.ok_or(TaskFailure::SpawnUnavailable)?;
             let wake_services = services.clone();
@@ -1368,20 +1386,29 @@ enum MaintenanceDiagnosticDelivery {
 }
 
 fn report_maintenance_failure(failure: crate::ServiceFailure) -> MaintenanceDiagnosticDelivery {
-    let mut stderr = std::io::stderr().lock();
-    report_maintenance_failure_to(&mut stderr, failure)
+    if crate::services::maintenance_failure_category(failure).is_none() {
+        return MaintenanceDiagnosticDelivery::Delivered;
+    }
+    match crate::write_operational_diagnostic(
+        crate::OperationalDiagnostic::MaintenanceWorkerFailure(failure),
+    ) {
+        Ok(()) => MaintenanceDiagnosticDelivery::Delivered,
+        Err(_) => MaintenanceDiagnosticDelivery::Unavailable,
+    }
 }
 
+#[cfg(test)]
 fn report_maintenance_failure_to(
     sink: &mut impl std::io::Write,
     failure: crate::ServiceFailure,
 ) -> MaintenanceDiagnosticDelivery {
-    let Some(category) = crate::services::maintenance_failure_category(failure) else {
+    let Some(_category) = crate::services::maintenance_failure_category(failure) else {
         return MaintenanceDiagnosticDelivery::Delivered;
     };
-    match writeln!(
+    match crate::render_operational_diagnostic(
         sink,
-        "positron: maintenance worker failure category={category}"
+        false,
+        crate::OperationalDiagnostic::MaintenanceWorkerFailure(failure),
     ) {
         Ok(()) => MaintenanceDiagnosticDelivery::Delivered,
         Err(_) => MaintenanceDiagnosticDelivery::Unavailable,
@@ -1434,7 +1461,9 @@ const fn listener_role(role: TaskRole) -> Result<ListenerRole, TaskFailure> {
     match role {
         TaskRole::Control => Ok(ListenerRole::Control),
         TaskRole::Operations => Ok(ListenerRole::Operations),
-        TaskRole::Maintenance => Err(TaskFailure::SpawnUnavailable),
+        TaskRole::Maintenance | TaskRole::OperationalTelemetry => {
+            Err(TaskFailure::SpawnUnavailable)
+        },
         TaskRole::Api => Ok(ListenerRole::Api),
         TaskRole::OtlpGrpc => Ok(ListenerRole::OtlpGrpc),
         TaskRole::OtlpHttp => Ok(ListenerRole::OtlpHttp),
@@ -1735,7 +1764,25 @@ mod listener_generation_tests {
             endpoint_address(&replacement_endpoints, ListenerRole::Operations)?,
             "a changed endpoint must bind a fresh descriptor rather than clone the old socket"
         );
+        let retired = endpoint_address(&old_endpoints, ListenerRole::Operations)?;
+        let staged = endpoint_address(&replacement_endpoints, ListenerRole::Operations)?;
+        assert!(!super::operational_worker::destination_allowed(
+            &host.admissions,
+            retired
+        )?);
+        assert!(!super::operational_worker::destination_allowed(
+            &host.admissions,
+            staged
+        )?);
         active.drain()?;
+        assert!(super::operational_worker::destination_allowed(
+            &host.admissions,
+            retired
+        )?);
+        assert!(!super::operational_worker::destination_allowed(
+            &host.admissions,
+            staged
+        )?);
         replacement.drain()?;
         Ok(())
     }
@@ -2438,7 +2485,8 @@ mod tests {
         );
         let stderr = String::from_utf8(output.stderr)?;
         assert!(
-            stderr.contains("positron: maintenance worker failure category=corrupt_state"),
+            stderr.contains("\"event\":\"maintenance_worker_failure\"")
+                && stderr.contains("\"category\":\"corrupt_state\""),
             "maintenance failure did not emit its closed category: {stderr}"
         );
         Ok(())
