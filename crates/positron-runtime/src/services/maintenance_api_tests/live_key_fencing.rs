@@ -8,7 +8,7 @@ fn online_key_mismatch_immediately_closes_data_admission() -> Result<(), Box<dyn
     let fixture = Fixture::new()?;
     let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
     drop(initialized);
-    let (host, mut process) = serving_process(&fixture, "online")?;
+    let (host, mut process) = serving_process(&fixture, "online", false)?;
     let services = process.services().ok_or("services")?;
     let scope = log_scope(&services)?;
     assert_eq!(process.health().readiness(), crate::Readiness::Ready);
@@ -63,7 +63,7 @@ fn native_background_key_mismatch_retains_operator_cause() -> Result<(), Box<dyn
     let fixture = Fixture::new()?;
     let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
     drop(initialized);
-    let (host, mut process) = serving_process(&fixture, "background")?;
+    let (host, mut process) = serving_process(&fixture, "background", true)?;
     let services = process.services().ok_or("services")?;
     let scope = log_scope(&services)?;
     {
@@ -128,6 +128,7 @@ fn log_scope(services: &ServiceHandle) -> Result<SegmentScope, Box<dyn std::erro
 fn serving_process(
     fixture: &Fixture,
     label: &str,
+    background_maintenance: bool,
 ) -> Result<(NativeHost, crate::RunningProcess), Box<dyn std::error::Error>> {
     let control = std::env::temp_dir().join(format!(
         "positron83-live-{}-{}.sock",
@@ -138,9 +139,18 @@ fn serving_process(
     let host = NativeHost::new(NativeBindings::new(
         control, loopback, loopback, loopback, loopback, loopback,
     )?);
+    // Foreground verification owns the mismatch detection in the first test.
+    // Keep independent maintenance idle there so its admission reservations
+    // cannot prevent that inspection. The background test runs native workers.
+    let foreground_tasks = ForegroundTasks(&host);
+    let tasks: &dyn crate::TaskRegistrar = if background_maintenance {
+        &host
+    } else {
+        &foreground_tasks
+    };
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly),
-        HostInputs::new(&host, &host),
+        HostInputs::new(&host, tasks),
     )?;
     Ok((host, process))
 }
@@ -199,4 +209,44 @@ fn assert_data_closed(process: &crate::RunningProcess) -> Result<(), Box<dyn std
         "pending unsafe-key fence must refuse data admission: {response}"
     );
     Ok(())
+}
+
+struct ForegroundTasks<'host>(&'host NativeHost);
+
+impl crate::TaskRegistrar for ForegroundTasks<'_> {
+    fn register(
+        &self,
+        role: crate::TaskRole,
+    ) -> Result<Box<dyn crate::RegisteredTask>, crate::TaskFailure> {
+        if role == crate::TaskRole::Maintenance {
+            Ok(Box::new(IdleMaintenance))
+        } else {
+            self.0.register(role)
+        }
+    }
+}
+
+struct IdleMaintenance;
+
+impl crate::RegisteredTask for IdleMaintenance {
+    fn spawn(
+        self: Box<Self>,
+        _: crate::TaskCancellation,
+        _: crate::HealthState,
+        _: Option<ServiceHandle>,
+    ) -> Result<Box<dyn crate::RunningTask>, crate::TaskFailure> {
+        Ok(self)
+    }
+}
+
+impl crate::RunningTask for IdleMaintenance {
+    fn poll_join(&mut self) -> Result<Option<crate::TaskJoinOutcome>, crate::TaskFailure> {
+        Ok(None)
+    }
+    fn join_within(&mut self, _: Duration) -> Result<crate::TaskJoinOutcome, crate::TaskFailure> {
+        Ok(crate::TaskJoinOutcome::Joined)
+    }
+    fn abort(&mut self) -> Result<(), crate::TaskFailure> {
+        Ok(())
+    }
 }
