@@ -651,6 +651,13 @@ impl MaintenanceCoordinator {
     /// so it is returned to its queued checkpoint before any handler resumes.
     pub fn restore_from_catalog(catalog: &Catalog<'_>) -> Result<Self, MaintenanceFailure> {
         let snapshot = catalog.pin().map_err(map_catalog_failure)?;
+        Self::restore_from_snapshot(&snapshot)
+    }
+
+    /// Reconstructs bounded coordinator facts from an immutable Catalog view.
+    pub fn restore_from_snapshot(
+        snapshot: &crate::CatalogSnapshot,
+    ) -> Result<Self, MaintenanceFailure> {
         let mut identities = BTreeSet::new();
         let mut records = Vec::new();
         let mut window = None;
@@ -703,7 +710,7 @@ impl MaintenanceCoordinator {
                 BTreeSet::new(),
                 |mut verified, (publication, reclamation)| {
                     if crate::active_segment_ledger::reclamation_eligibility_is_durably_established(
-                        &snapshot,
+                        snapshot,
                         &publication.task,
                         &reclamation.task,
                         publication.checkpoint.as_ref(),

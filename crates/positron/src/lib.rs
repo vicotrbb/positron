@@ -48,6 +48,13 @@ pub fn fuzz_offline_integrity_continuation_hex(bytes: &[u8]) {
     verify_cli::fuzz_offline_continuation_hex(value);
 }
 
+/// Fuzzes bounded, closed-allowlist online Doctor rendering without transport.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_doctor_status(bytes: &[u8]) -> Option<String> {
+    doctor_cli::fuzz_status(bytes)
+}
+
 const EXIT_OK: u8 = 0;
 const EXIT_CONFIGURATION: u8 = 2;
 const EXIT_STARTUP: u8 = 3;

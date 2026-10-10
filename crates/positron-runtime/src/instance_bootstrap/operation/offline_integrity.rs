@@ -25,12 +25,15 @@ pub(in super::super) fn verify(
         ActiveSegmentLedger, IntegrityScrubBudget, IntegrityVerificationRequest, TransactionId,
     };
 
-    let (volume, access) = paths.storage.acquire().map_err(|failure| match failure {
-        positron_kernel::BootstrapStorageFailure::OwnershipLocked => {
-            crate::OfflineIntegrityFailure::OwnershipLocked
-        },
-        _ => crate::OfflineIntegrityFailure::BootstrapUnavailable,
-    })?;
+    let (volume, access) = paths
+        .storage
+        .acquire_read_only()
+        .map_err(|failure| match failure {
+            positron_kernel::BootstrapStorageFailure::OwnershipLocked => {
+                crate::OfflineIntegrityFailure::OwnershipLocked
+            },
+            _ => crate::OfflineIntegrityFailure::BootstrapUnavailable,
+        })?;
     let state = storage::classify_with(&access)
         .map_err(|_| crate::OfflineIntegrityFailure::BootstrapUnavailable)?;
     if state != BootstrapState::Initialized {

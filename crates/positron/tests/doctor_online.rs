@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const STATUS_BODY: &str = "{\"phase\":\"serving\",\"integrity_degraded\":false,\"effective_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"desired_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drift_disposition\":\"none\",\"pending_restart\":false,\"doctor\":{\"key_custody\":\"verified\",\"catalog_bootstrap\":\"verified\",\"catalog_generation\":1,\"backup_repository\":\"configured\",\"durable_operations\":0,\"active_durable_operations\":0,\"snapshot_leases\":0,\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true,\"otlp_grpc\":true,\"otlp_http\":true,\"loki_push\":true},\"required_families\":{\"catalog_integrity\":{\"disposition\":\"observed\",\"audit_chain\":\"verified\",\"frontier\":1,\"manifest_objects\":7,\"quarantine_findings\":0,\"scrub\":\"observed\"},\"resource_governor\":{\"disposition\":\"observed\",\"queues\":\"observed\",\"fairness\":\"within_bound\",\"recovery_reserve\":\"configured\"},\"listener_security\":{\"disposition\":\"observed\",\"profiles\":\"active\",\"certificates\":\"loaded\",\"proxy_trust\":\"not_configured\",\"drain\":\"accepting\"},\"backup_verification\":{\"disposition\":\"observed\",\"manifest_verification\":\"verified\",\"purge_compatibility\":\"compatible\"},\"health_state\":{\"disposition\":\"observed\",\"derivation\":\"serving_ready_live\"},\"configuration\":{\"disposition\":\"observed\",\"contract\":\"valid\",\"effective_sources\":\"redacted\",\"key_custody\":\"verified\"}}},\"maintenance\":{\"queued\":0,\"outstanding_reservations\":0,\"clock_uncertain\":false,\"running_no_durable_progress_slo_breaches\":0,\"running_no_durable_progress_slo_unknown\":0,\"checkpointed_tasks\":0,\"paused_tasks\":0,\"conflicted_tasks\":0}}";
+const STATUS_BODY: &str = "{\"phase\":\"serving\",\"integrity_degraded\":false,\"effective_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"desired_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"drift_disposition\":\"none\",\"pending_restart\":false,\"doctor\":{\"key_custody\":\"verified\",\"catalog_bootstrap\":\"verified\",\"catalog_generation\":1,\"backup_repository\":\"configured\",\"durable_operations\":0,\"active_durable_operations\":0,\"snapshot_leases\":0,\"listener_topology\":{\"control\":true,\"operations\":true,\"api\":true,\"otlp_grpc\":true,\"otlp_http\":true,\"loki_push\":true},\"required_families\":{\"storage\":{\"disposition\":\"observed\",\"ownership\":\"held\",\"capabilities\":\"not_probed_read_only\",\"usable_disk_bytes\":100000000,\"disk_pressure\":\"healthy\"},\"catalog_integrity\":{\"disposition\":\"observed\",\"audit_chain\":\"verified\",\"frontier\":1,\"manifest_objects\":7,\"quarantine_findings\":0,\"scrub\":\"observed\"},\"resource_governor\":{\"disposition\":\"observed\",\"queues\":\"observed\",\"fairness\":\"within_bound\",\"recovery_reserve\":\"configured\"},\"listener_security\":{\"disposition\":\"observed\",\"profiles\":\"active\",\"certificates\":\"loaded\",\"proxy_trust\":\"not_configured\",\"drain\":\"accepting\"},\"backup_verification\":{\"disposition\":\"observed\",\"manifest_verification\":\"verified\",\"purge_compatibility\":\"compatible\"},\"health_state\":{\"disposition\":\"observed\",\"derivation\":\"serving_ready_live\"},\"configuration\":{\"disposition\":\"observed\",\"contract\":\"valid\",\"effective_sources\":\"redacted\",\"key_custody\":\"verified\"}}},\"maintenance\":{\"queued\":0,\"outstanding_reservations\":0,\"clock_uncertain\":false,\"running_no_durable_progress_slo_breaches\":0,\"running_no_durable_progress_slo_unknown\":0,\"checkpointed_tasks\":0,\"paused_tasks\":0,\"conflicted_tasks\":0}}";
 const LISTENER_WAIT: Duration = Duration::from_secs(10);
 const CHILD_WAIT: Duration = Duration::from_secs(9);
 const REQUEST_BOUND: Duration = Duration::from_secs(6);
@@ -114,13 +114,21 @@ fn spawn_status_listener(
     listener: TcpListener,
     done: Arc<AtomicBool>,
 ) -> JoinHandle<io::Result<()>> {
+    spawn_status_body(listener, done, STATUS_BODY.to_owned())
+}
+
+fn spawn_status_body(
+    listener: TcpListener,
+    done: Arc<AtomicBool>,
+    body: String,
+) -> JoinHandle<io::Result<()>> {
     thread::spawn(move || {
         let mut stream = accept_direct_request(&listener, &done, "status listener")?;
         read_request(&mut stream)?;
         stream.write_all(
             format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{STATUS_BODY}",
-                STATUS_BODY.len()
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             )
             .as_bytes(),
         )
@@ -347,4 +355,120 @@ fn terminate_child(child: &mut std::process::Child) -> io::Result<()> {
             Ok(())
         },
     }
+}
+
+#[test]
+fn online_doctor_excludes_unknown_secret_canaries_from_declared_fields()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CANARY: &str = "secretcanary87NeverExportThis";
+    for (field, original) in [
+        ("phase", "serving"),
+        (
+            "effective_digest",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        ("key_custody", "verified"),
+        ("backup_repository", "configured"),
+    ] {
+        let done = Arc::new(AtomicBool::new(false));
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?;
+        let body = STATUS_BODY.replace(
+            &format!("\"{field}\":\"{original}\""),
+            &format!("\"{field}\":\"{CANARY}\""),
+        );
+        let server = spawn_status_body(listener, Arc::clone(&done), body);
+        let result = online_doctor(endpoint, None);
+        done.store(true, Ordering::Release);
+        join_listener(server, "canary status listener")?;
+        let output = result?;
+        let stdout = String::from_utf8(output.stdout)?;
+        assert!(
+            !stdout.contains(CANARY),
+            "prohibited field {field} escaped: {stdout}"
+        );
+        assert_eq!(output.status.code(), Some(3));
+        assert!(stdout.contains("DOCTOR_ONLINE_INSPECTION_UNAVAILABLE"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn online_control_doctor_bounds_the_whole_response_when_a_peer_trickles_bytes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    let path = temporary_path("trickle.sock");
+    let listener = UnixListener::bind(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    let done = Arc::new(AtomicBool::new(false));
+    let server_done = Arc::clone(&done);
+    let server = thread::spawn(move || -> io::Result<Instant> {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+        let mut request = [0_u8; 4096];
+        assert!(stream.read(&mut request)? > 0);
+        let accepted = Instant::now();
+        while accepted.elapsed() < STALL_DURATION && !server_done.load(Ordering::Acquire) {
+            if stream.write_all(b"x").is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        Ok(accepted)
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["doctor", "--online", "--credential-stdin", "--control-path"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().ok_or("doctor stdin")?;
+    input.write_all(b"system-administrator\n")?;
+    drop(input);
+    let status = wait_for_child(&mut child);
+    let finished = Instant::now();
+    done.store(true, Ordering::Release);
+    let accepted = join_listener(server, "trickling control listener")?;
+    let status = status?;
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .ok_or("doctor stdout")?
+        .read_to_string(&mut stdout)?;
+    std::fs::remove_file(path)?;
+    assert_eq!(status.code(), Some(3));
+    assert!(stdout.contains("DOCTOR_ONLINE_INSPECTION_UNAVAILABLE"));
+    assert!(
+        finished.duration_since(accepted) < REQUEST_BOUND,
+        "control response exceeded the five-second whole-request deadline"
+    );
+    Ok(())
+}
+
+#[test]
+fn online_doctor_excludes_unknown_family_values_and_does_not_claim_complete_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let done = Arc::new(AtomicBool::new(false));
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = listener.local_addr()?;
+    let body = STATUS_BODY.replace(
+        "\"audit_chain\":\"verified\"",
+        "\"audit_chain\":\"secretcanaryFamily87\"",
+    );
+    let server = spawn_status_body(listener, Arc::clone(&done), body);
+    let result = online_doctor(endpoint, None);
+    done.store(true, Ordering::Release);
+    join_listener(server, "family status listener")?;
+    let output = result?;
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        !stdout.contains("secretcanaryFamily87"),
+        "unknown family value escaped: {stdout}"
+    );
+    assert_eq!(output.status.code(), Some(3));
+    assert!(stdout.contains("catalog_audit_chain=missing"));
+    assert!(stdout.contains("required_diagnostic_families_complete=false"));
+    Ok(())
 }

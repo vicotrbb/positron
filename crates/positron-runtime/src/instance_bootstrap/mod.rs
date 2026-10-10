@@ -58,6 +58,13 @@ impl InstanceBootstrap {
         operation::reopen(paths, max_registered_tenants)
     }
 
+    pub(crate) fn reopen_read_only(
+        paths: &BootstrapPaths,
+        max_registered_tenants: u16,
+    ) -> Result<InitializedInstance, BootstrapFailure> {
+        operation::reopen_read_only(paths, max_registered_tenants)
+    }
+
     pub(crate) fn verify_offline_integrity(
         paths: &BootstrapPaths,
         max_registered_tenants: u16,

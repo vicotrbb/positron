@@ -9,15 +9,15 @@ pub(super) fn execute_offline(
         environment,
         options.overrides.clone(),
     )
-    .map_err(|_| DoctorFailure::Arguments)?;
-    let effective = resolve(inputs).map_err(|_| DoctorFailure::Arguments)?;
+    .map_err(|_| DoctorFailure::ConfigurationInvalid)?;
+    let effective = resolve(inputs).map_err(|_| DoctorFailure::ConfigurationInvalid)?;
     let paths = BootstrapPaths::with_local_key(
         Path::new(effective.data_directory()),
         Path::new(effective.secrets_directory()),
         effective.local_key_file().as_path(),
         MountQualification::LocalHost,
     )
-    .map_err(|_| DoctorFailure::Arguments)?;
+    .map_err(|_| DoctorFailure::ConfigurationInvalid)?;
     match verify_offline_integrity(&paths, effective.max_registered_tenants()) {
         Ok(report) => {
             let verified = report.is_verified();
@@ -100,6 +100,7 @@ pub(super) fn offline_success_report(
     );
     report.push_str(&effective.redacted_effective());
     report.push_str("\nconfiguration_effective_redacted_end=true\nsafe_command=none\n");
+    report.push_str("storage_ownership=exclusive\nstorage_capabilities=not_probed_read_only\n");
     report.push_str(&format!(
         "finding_code=DOCTOR_STORAGE_CAPACITY_OBSERVED\nseverity=info\nevidence_scope=primary_data_volume\nusable_disk_bytes={}\ndisk_pressure={pressure}\nsafe_command=none\n",
         facts.usable_disk_bytes(),

@@ -702,7 +702,7 @@ impl PrimaryDataVolume {
         root: &Path,
         qualification: MountQualification,
     ) -> Result<OwnedPrimaryDataVolume, VolumeFailure> {
-        Self::acquire_with_identity(root, qualification, None)
+        Self::acquire_with_identity(root, qualification, None, false)
     }
 
     pub(crate) fn acquire_bound(
@@ -710,13 +710,24 @@ impl PrimaryDataVolume {
         qualification: MountQualification,
         expected: VolumeRootIdentity,
     ) -> Result<OwnedPrimaryDataVolume, VolumeFailure> {
-        Self::acquire_with_identity(root, qualification, Some(expected))
+        Self::acquire_with_identity(root, qualification, Some(expected), false)
+    }
+
+    /// Locks existing storage for inspection without creating artifacts or
+    /// running the mutating startup capability probe.
+    pub(crate) fn acquire_bound_read_only(
+        root: &Path,
+        qualification: MountQualification,
+        expected: VolumeRootIdentity,
+    ) -> Result<OwnedPrimaryDataVolume, VolumeFailure> {
+        Self::acquire_with_identity(root, qualification, Some(expected), true)
     }
 
     fn acquire_with_identity(
         root: &Path,
         qualification: MountQualification,
         expected: Option<VolumeRootIdentity>,
+        read_only: bool,
     ) -> Result<OwnedPrimaryDataVolume, VolumeFailure> {
         if qualification == MountQualification::UnverifiedExternalOrPvc {
             return Err(VolumeFailure::from_io(
@@ -801,7 +812,20 @@ impl PrimaryDataVolume {
             ));
         }
         reject_existing_probe_residue(&root_file)?;
-        let ownership_lock = open_ownership_artifact(&root_file)?;
+        let ownership_lock = if read_only {
+            unix_fs::openat(
+                &root_file,
+                ".positron-volume.lock",
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+                Mode::empty(),
+            )
+            .map(File::from)
+            .map_err(|source| {
+                VolumeFailure::from_io(VolumeOperation::OpenOwnershipLock, io::Error::from(source))
+            })?
+        } else {
+            open_ownership_artifact(&root_file)?
+        };
         verify_ownership_artifact(&root_file, &ownership_lock, handle_identity)?;
         try_lock_ownership(&ownership_lock).map_err(|source| {
             VolumeFailure::from_io(VolumeOperation::AcquireOwnershipLock, source)
@@ -811,7 +835,9 @@ impl PrimaryDataVolume {
             VolumeOperation::OpenOwnershipLock,
         )?;
         verify_ownership_artifact(&root_file, &ownership_lock, handle_identity)?;
-        run_capability_probe(&root_file)?;
+        if !read_only {
+            run_capability_probe(&root_file)?;
+        }
         verify_ownership_artifact(&root_file, &ownership_lock, handle_identity)?;
         let final_metadata = fs::symlink_metadata(root).map_err(|source| {
             let mut failure = VolumeFailure::from_io(VolumeOperation::VerifyRootIdentity, source);

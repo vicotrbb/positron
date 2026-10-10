@@ -254,7 +254,25 @@ pub(super) fn reopen(
     paths: &BootstrapPaths,
     max_registered_tenants: u16,
 ) -> Result<InitializedInstance, BootstrapFailure> {
-    let (volume, access) = acquire(paths)?;
+    reopen_with_access(max_registered_tenants, acquire(paths)?, false)
+}
+
+pub(super) fn reopen_read_only(
+    paths: &BootstrapPaths,
+    max_registered_tenants: u16,
+) -> Result<InitializedInstance, BootstrapFailure> {
+    let access = paths
+        .storage
+        .acquire_read_only()
+        .map_err(super::storage::storage_failure)?;
+    reopen_with_access(max_registered_tenants, access, true)
+}
+
+fn reopen_with_access(
+    max_registered_tenants: u16,
+    (volume, access): (OwnedPrimaryDataVolume, BootstrapArtifactAccess),
+    read_only: bool,
+) -> Result<InitializedInstance, BootstrapFailure> {
     if storage::classify_with(&access)? != BootstrapState::Initialized {
         return Err(inconsistent());
     }
@@ -263,18 +281,39 @@ pub(super) fn reopen(
     let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)?;
     require_key_identity(&record, key.identity())?;
     let authority = resources::establish(volume, record.tenant, max_registered_tenants)?;
-    let catalog = Catalog::open(
-        &authority,
-        record.instance,
-        key.catalog_secret(record.instance).map_err(key_failure)?,
-    )
-    .map_err(catalog_failure)?;
+    let (current, audit_records) = if read_only {
+        let view = Catalog::read_current_view(
+            &authority,
+            record.instance,
+            key.catalog_secret(record.instance).map_err(key_failure)?,
+        )
+        .map_err(catalog_failure)?;
+        let audit_records = view
+            .governance_audit_records()
+            .iter()
+            .map(|record| {
+                positron_governance::GovernanceAuditEntry::decode(record)
+                    .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        (view.snapshot().clone(), audit_records)
+    } else {
+        let catalog = Catalog::open(
+            &authority,
+            record.instance,
+            key.catalog_secret(record.instance).map_err(key_failure)?,
+        )
+        .map_err(catalog_failure)?;
+        (
+            catalog.pin().map_err(catalog_failure)?,
+            governance_audit_records(&catalog)?,
+        )
+    };
     let retention_time = RetentionTimeAuthority::establish()
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))?;
-    if catalog.pin().map_err(catalog_failure)?.number() == 0 {
+    if current.number() == 0 {
         return Err(BootstrapFailure::new(BootstrapFailureCode::CorruptState));
     }
-    let current = catalog.pin().map_err(catalog_failure)?;
     apply_catalog_quota(&authority, &current)?;
     let registered_tenants = TenantAdministration::registered_tenant_ids(&current)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
@@ -283,10 +322,8 @@ pub(super) fn reopen(
     let claim_available = storage::exists(&access, BootstrapArtifact::Claim)?;
     let identity = Identity::open(&current)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
-    let audit_records = governance_audit_records(&catalog)?;
-    let maintenance = MaintenanceCoordinator::restore_from_catalog(&catalog)
+    let maintenance = MaintenanceCoordinator::restore_from_snapshot(&current)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
-    drop(catalog);
     outcome(
         &record,
         key,

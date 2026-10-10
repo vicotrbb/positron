@@ -280,6 +280,9 @@ fn corrupted_startup_frontier_rederives_the_fence_after_restart()
         [ListenerRole::Control, ListenerRole::Operations]
     );
 
+    let data_modified_before_doctor = std::fs::metadata(&roots.data)?.modified()?;
+    let secrets_root = roots.data.parent().ok_or("fixture parent")?.join("secrets");
+    let secrets_modified_before_doctor = std::fs::metadata(&secrets_root)?.modified()?;
     let response = control_response(&control, Some(&administrator), "/control/fenced/inspection")?;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     let (_, body) = response
@@ -304,6 +307,17 @@ fn corrupted_startup_frontier_rederives_the_fence_after_restart()
         true
     );
     assert_eq!(inspection["doctor"]["listener_topology"]["api"], false);
+    assert_eq!(
+        data_modified_before_doctor,
+        std::fs::metadata(&roots.data)?.modified()?,
+        "fenced Doctor must not create and remove capability probe artifacts"
+    );
+    assert_eq!(
+        secrets_modified_before_doctor,
+        std::fs::metadata(&secrets_root)?.modified()?
+    );
+    assert_eq!(std::fs::read(&active)?, damaged_bytes);
+
     let response = control_response(&control, None, "/control/fenced/inspection")?;
     assert!(response.starts_with("HTTP/1.1 401"));
     let response = control_response(

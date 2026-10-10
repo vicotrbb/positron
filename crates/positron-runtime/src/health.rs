@@ -456,7 +456,7 @@ impl HealthState {
         let credential = PresentedCredential::parse(bearer)
             .map_err(|_| ServingDiagnosticsFailure::AuthenticationRejected)?;
         let actor = authority
-            .attribute(
+            .attribute_read_only(
                 credential,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
@@ -490,7 +490,7 @@ impl HealthState {
             let credential = PresentedCredential::parse(bearer)
                 .map_err(|_| FencedDiagnosticsFailure::AuthenticationRejected)?;
             let actor = authority
-                .attribute(
+                .attribute_read_only(
                     credential,
                     RequestedIntent::SystemAdministration,
                     CompatibilityHints::none(),
@@ -502,7 +502,7 @@ impl HealthState {
             return collect(&authority, actor, facts)
                 .map_err(|_| FencedDiagnosticsFailure::Unavailable);
         }
-        let authority = InstanceBootstrap::reopen_with_max_registered_tenants(
+        let authority = InstanceBootstrap::reopen_read_only(
             &inspection.paths,
             inspection.max_registered_tenants,
         )
@@ -510,7 +510,7 @@ impl HealthState {
         let credential = PresentedCredential::parse(bearer)
             .map_err(|_| FencedDiagnosticsFailure::AuthenticationRejected)?;
         let actor = authority
-            .attribute(
+            .attribute_read_only(
                 credential,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
@@ -676,7 +676,7 @@ impl HealthState {
     pub(crate) fn authorize_configuration_status(&self, bearer: &str) -> Result<(), ()> {
         if let Some(authority) = self.inspection_authority.get().and_then(Weak::upgrade) {
             return authority
-                .attribute(
+                .attribute_read_only(
                     PresentedCredential::parse(bearer).map_err(|_| ())?,
                     RequestedIntent::SystemAdministration,
                     CompatibilityHints::none(),
@@ -712,10 +712,9 @@ impl HealthState {
         bearer: &str,
     ) -> Result<(), ()> {
         let authority =
-            InstanceBootstrap::reopen_with_max_registered_tenants(paths, max_registered_tenants)
-                .map_err(|_| ())?;
+            InstanceBootstrap::reopen_read_only(paths, max_registered_tenants).map_err(|_| ())?;
         authority
-            .attribute(
+            .attribute_read_only(
                 PresentedCredential::parse(bearer).map_err(|_| ())?,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
@@ -766,7 +765,7 @@ impl HealthState {
             .and_then(Weak::upgrade)
             .ok_or(ConfigurationStatusFailure::Unavailable)?;
         let actor = authority
-            .attribute(
+            .attribute_read_only(
                 PresentedCredential::parse(bearer)
                     .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?,
                 RequestedIntent::SystemAdministration,
@@ -776,18 +775,12 @@ impl HealthState {
         let doctor = authority
             .doctor_runtime_facts(actor)
             .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
-        let clock_uncertain =
-            authority.retention_time.status().state() == LifecycleClockState::ClockUncertain;
-        let now = if clock_uncertain {
-            None
-        } else {
-            Some(
-                authority
-                    .retention_time
-                    .governance_now_seconds()
-                    .map_err(|_| ConfigurationStatusFailure::Unavailable)?,
-            )
+        let now = match authority.retention_time.inspect_governance_now_seconds() {
+            Ok(now) => Some(now),
+            Err(positron_kernel::LifecycleClockFailure::ClockUncertain) => None,
+            Err(_) => return Err(ConfigurationStatusFailure::Unavailable),
         };
+        let clock_uncertain = now.is_none();
         let statuses = authority
             .maintenance_coordinator()
             .statuses_with_progress_slo(now, clock_uncertain)

@@ -355,3 +355,10 @@ path = "fuzz_targets/operational_state.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "doctor_status"
+path = "fuzz_targets/doctor_status.rs"
+test = false
+doc = false
+bench = false

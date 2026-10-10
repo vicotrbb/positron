@@ -806,6 +806,55 @@ impl RetentionTimeAuthority {
         self.lease_time(scope)
     }
 
+    /// Samples the trusted clock for diagnostics without reconciling or
+    /// publishing any Lifecycle Clock state. Uncertain observations fail closed.
+    pub fn inspect_security_time_seconds(&self) -> Result<u64, LifecycleClockFailure> {
+        self.inspect_clock_seconds().map(|(_, security)| security)
+    }
+
+    /// Reads process-monotonic lifecycle time without advancing its anchor.
+    pub fn inspect_governance_now_seconds(&self) -> Result<u64, LifecycleClockFailure> {
+        self.inspect_clock_seconds().map(|(lifecycle, _)| lifecycle)
+    }
+
+    fn inspect_clock_seconds(&self) -> Result<(u64, u64), LifecycleClockFailure> {
+        let _acceptance = self
+            .acceptance
+            .lock()
+            .map_err(|_| LifecycleClockFailure::Unavailable)?;
+        let safety = *self
+            .safety
+            .lock()
+            .map_err(|_| LifecycleClockFailure::Unavailable)?;
+        if safety.state != LifecycleClockState::Certain {
+            return Err(LifecycleClockFailure::ClockUncertain);
+        }
+        let expected = advance_global(safety, self.elapsed.nanoseconds()?)?;
+        let instant = if let Some(source) = &self.source {
+            let wall = source.read()?;
+            let adjusted = wall
+                .value()
+                .checked_add(safety.wall_clock_correction_nanoseconds)
+                .ok_or(LifecycleClockFailure::OutOfRange)?;
+            if adjusted.abs_diff(expected.value())
+                > self.policy.maximum_reconciliation_offset_nanoseconds
+            {
+                return Err(LifecycleClockFailure::ClockUncertain);
+            }
+            wall
+        } else {
+            expected
+        };
+        let seconds = |instant: UnixNanoseconds| {
+            instant
+                .value()
+                .checked_div(1_000_000_000)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(LifecycleClockFailure::OutOfRange)
+        };
+        Ok((seconds(expected)?, seconds(instant)?))
+    }
+
     /// Returns process-monotonic trusted time when a retention preview has no
     /// tenant scopes from which to recover a durable lifecycle frontier.
     pub fn governance_now_seconds(&self) -> Result<u64, LifecycleClockFailure> {
@@ -1216,6 +1265,62 @@ mod clock_safety_tests {
                 .map(|instant| *instant)
                 .map_err(|_| LifecycleClockFailure::Unavailable)
         }
+    }
+
+    #[test]
+    fn diagnostic_clock_reads_preserve_runtime_state_and_fail_closed_on_discontinuity() {
+        let wall = Arc::new(Mutex::new(UnixNanoseconds::new(2_000_000_000)));
+        let (clock, elapsed) = RetentionTimeAuthority::establish_with_source_and_manual_elapsed(
+            MutableWallClock(Arc::clone(&wall)),
+            LifecycleClockPolicy::new(100).expect("policy"),
+        )
+        .expect("clock");
+        let before = clock.status();
+        elapsed.advance(1_000_000_000).expect("elapsed");
+        *wall.lock().expect("wall") = UnixNanoseconds::new(3_000_000_000);
+        assert_eq!(clock.inspect_governance_now_seconds(), Ok(3));
+        assert_eq!(clock.inspect_security_time_seconds(), Ok(3));
+        assert_eq!(
+            clock.status(),
+            before,
+            "inspection must not advance the anchor or sample state"
+        );
+        *wall.lock().expect("wall") = UnixNanoseconds::new(1_000_000_000);
+        assert_eq!(
+            clock.inspect_governance_now_seconds(),
+            Err(LifecycleClockFailure::ClockUncertain)
+        );
+        assert_eq!(
+            clock.inspect_security_time_seconds(),
+            Err(LifecycleClockFailure::ClockUncertain)
+        );
+        assert_eq!(
+            clock.status(),
+            before,
+            "a diagnostic observation must not fence or reconcile the clock"
+        );
+        clock
+            .governance_now_seconds()
+            .expect("ordinary governance observes the discontinuity");
+        let uncertain = clock.status();
+        assert_eq!(uncertain.state(), LifecycleClockState::ClockUncertain);
+        assert_eq!(
+            clock.inspect_security_time_seconds(),
+            Err(LifecycleClockFailure::ClockUncertain)
+        );
+        assert_eq!(clock.status(), uncertain);
+    }
+
+    #[test]
+    fn diagnostic_manual_clock_read_does_not_advance_the_persisted_anchor() {
+        let (clock, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(
+            UnixNanoseconds::new(2_000_000_000),
+        );
+        let before = clock.status();
+        elapsed.advance(1_000_000_000).expect("elapsed");
+        assert_eq!(clock.inspect_governance_now_seconds(), Ok(3));
+        assert_eq!(clock.inspect_security_time_seconds(), Ok(3));
+        assert_eq!(clock.status(), before);
     }
 
     #[test]

@@ -198,6 +198,34 @@ impl InstanceBootstrapStorage {
         Ok((volume, BootstrapArtifactAccess { data, secrets }))
     }
 
+    /// Acquires existing ownership for read-only offline inspection. Missing
+    /// ownership artifacts are rejected rather than initialized.
+    pub fn acquire_read_only(
+        &self,
+    ) -> Result<(OwnedPrimaryDataVolume, BootstrapArtifactAccess), BootstrapStorageFailure> {
+        let expected = crate::VolumeRootIdentity {
+            device: self.data_identity.device,
+            inode: self.data_identity.inode,
+        };
+        let volume =
+            PrimaryDataVolume::acquire_bound_read_only(&self.data, self.qualification, expected)
+                .map_err(|failure| match failure.operation() {
+                    VolumeOperation::AcquireOwnershipLock => {
+                        BootstrapStorageFailure::OwnershipLocked
+                    },
+                    VolumeOperation::VerifyRootIdentity => {
+                        BootstrapStorageFailure::BoundIdentityMismatch
+                    },
+                    _ => BootstrapStorageFailure::Unavailable,
+                })?;
+        let data = volume
+            ._root
+            .try_clone()
+            .map_err(|_| BootstrapStorageFailure::Unavailable)?;
+        let secrets = open_verified_root(&self.secrets, self.secrets_identity)?;
+        Ok((volume, BootstrapArtifactAccess { data, secrets }))
+    }
+
     /// Returns the trusted mount provenance attached to this authority.
     #[must_use]
     pub const fn qualification(&self) -> MountQualification {

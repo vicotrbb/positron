@@ -138,6 +138,23 @@ impl InitializedInstance {
             })
     }
 
+    /// Authenticates a diagnostic read without reconciling runtime clock state.
+    pub(crate) fn attribute_read_only(
+        &self,
+        credential: positron_governance::PresentedCredential,
+        intent: positron_governance::RequestedIntent,
+        hints: positron_governance::CompatibilityHints,
+    ) -> Result<positron_governance::AuthorizedContext, positron_governance::AttributionFailure>
+    {
+        self.durable_identity()
+            .map_err(|_| positron_governance::AttributionFailure)?
+            .attribute_with_expiry_time(&self.key, credential, intent, hints, || {
+                self.retention_time
+                    .inspect_security_time_seconds()
+                    .map_err(|_| positron_governance::AttributionFailure)
+            })
+    }
+
     /// Records the active explicit plaintext listener transport selection through
     /// the Catalog's single joint governance-audit publication path.
     pub(crate) fn activate_public_plaintext_api_transport(
