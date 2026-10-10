@@ -27,6 +27,8 @@ use support::*;
 mod bundles;
 #[path = "diagnostics/cli.rs"]
 mod cli;
+#[path = "diagnostics/doctor.rs"]
+mod doctor;
 #[path = "diagnostics/live_control.rs"]
 mod live_control;
 #[path = "diagnostics/offline.rs"]

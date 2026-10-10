@@ -314,6 +314,7 @@ pub(in crate::native_host) fn configuration_status_response(
     maintenance: MaintenanceHealth,
     doctor: DoctorRuntimeFacts,
     bound_listener_roles: u8,
+    resources: positron_kernel::ResourceSnapshot,
 ) -> Response {
     let required_families = required_families_json(
         phase,
@@ -322,6 +323,7 @@ pub(in crate::native_host) fn configuration_status_response(
         maintenance,
         doctor,
         bound_listener_roles,
+        resources,
     );
     Response::json(
         200,
@@ -434,6 +436,7 @@ fn required_families_json(
     maintenance: MaintenanceHealth,
     doctor: DoctorRuntimeFacts,
     bound_listener_roles: u8,
+    resources: positron_kernel::ResourceSnapshot,
 ) -> String {
     use positron_config::NetworkListenerRole;
 
@@ -444,6 +447,12 @@ fn required_families_json(
         (ListenerRole::OtlpHttp, NetworkListenerRole::OtlpHttp),
         (ListenerRole::LokiPush, NetworkListenerRole::LokiPush),
     ];
+    let disk_pressure = match resources.disk_pressure() {
+        positron_kernel::DiskPressureState::Healthy => "healthy",
+        positron_kernel::DiskPressureState::SoftPressure => "soft",
+        positron_kernel::DiskPressureState::HardPressure => "hard",
+    };
+    let usable_disk_bytes = resources.usable_disk_bytes();
     let effective = status.effective();
     let all_network_bound = network_roles
         .iter()
@@ -501,7 +510,7 @@ fn required_families_json(
         "unavailable"
     };
     format!(
-        "{{\"catalog_integrity\":{{\"disposition\":\"observed\",\"audit_chain\":\"verified\",\"frontier\":{},\"manifest_objects\":{},\"reachable_ledger_scopes\":{},\"quarantine_findings\":{},\"scrub\":\"observed\",\"scrub_tasks\":{},\"scrub_checkpoints\":{}}},\"resource_governor\":{{\"disposition\":\"observed\",\"queues\":\"observed\",\"fairness\":\"{fairness}\",\"recovery_reserve\":\"configured\",\"recovery_reserve_memory_bytes\":{}}},\"listener_security\":{{\"disposition\":\"observed\",\"profiles\":\"{listener_profiles}\",\"certificates\":\"{listener_certificates}\",\"proxy_trust\":\"{proxy_trust}\",\"drain\":\"{drain}\"}},\"backup_verification\":{{\"disposition\":\"not_shipped\",\"manifest_verification\":\"not_shipped\",\"purge_compatibility\":\"not_shipped\"}},\"health_state\":{{\"disposition\":\"observed\",\"derivation\":\"{health_derivation}\"}},\"configuration\":{{\"disposition\":\"observed\",\"contract\":\"valid\",\"effective_sources\":\"{configuration_sources}\",\"key_custody\":\"{}\"}}}}",
+        "{{\"storage\":{{\"disposition\":\"observed\",\"ownership\":\"held\",\"capabilities\":\"not_probed_read_only\",\"usable_disk_bytes\":{usable_disk_bytes},\"disk_pressure\":\"{disk_pressure}\"}},\"catalog_integrity\":{{\"disposition\":\"observed\",\"audit_chain\":\"verified\",\"frontier\":{},\"manifest_objects\":{},\"reachable_ledger_scopes\":{},\"quarantine_findings\":{},\"scrub\":\"observed\",\"scrub_tasks\":{},\"scrub_checkpoints\":{}}},\"resource_governor\":{{\"disposition\":\"observed\",\"queues\":\"observed\",\"fairness\":\"{fairness}\",\"recovery_reserve\":\"configured\",\"recovery_reserve_memory_bytes\":{}}},\"listener_security\":{{\"disposition\":\"observed\",\"profiles\":\"{listener_profiles}\",\"certificates\":\"{listener_certificates}\",\"proxy_trust\":\"{proxy_trust}\",\"drain\":\"{drain}\"}},\"backup_verification\":{{\"disposition\":\"not_shipped\",\"manifest_verification\":\"not_shipped\",\"purge_compatibility\":\"not_shipped\"}},\"health_state\":{{\"disposition\":\"observed\",\"derivation\":\"{health_derivation}\"}},\"configuration\":{{\"disposition\":\"observed\",\"contract\":\"valid\",\"effective_sources\":\"{configuration_sources}\",\"key_custody\":\"{}\"}}}}",
         doctor.catalog_audit_frontier(),
         doctor.catalog_manifest_objects(),
         doctor.catalog_reachable_ledger_scopes(),

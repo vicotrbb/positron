@@ -108,6 +108,7 @@ impl Options {
 #[derive(Clone, Copy, Debug)]
 pub(super) enum DoctorFailure {
     Arguments,
+    ConfigurationInvalid,
     AuthenticationRejected,
     TrustFileRejected,
     EndpointUnavailable,
@@ -121,7 +122,7 @@ impl std::error::Error for DoctorFailure {}
 impl DoctorFailure {
     pub(super) const fn exit_code(self) -> u8 {
         match self {
-            Self::Arguments => EXIT_USAGE,
+            Self::Arguments | Self::ConfigurationInvalid => EXIT_USAGE,
             Self::AuthenticationRejected | Self::TrustFileRejected | Self::EndpointUnavailable => {
                 EXIT_DIAGNOSTIC_FAILURE
             },
@@ -131,6 +132,9 @@ impl DoctorFailure {
         match self {
             Self::Arguments => {
                 "report_version=1\nmode=unknown\nstatus=invalid_arguments\nfinding_code=DOCTOR_ARGUMENTS_INVALID\nseverity=error\nsafe_command=correct_doctor_arguments\n"
+            },
+            Self::ConfigurationInvalid => {
+                "report_version=1\nmode=offline\nstatus=configuration_invalid\nfinding_code=DOCTOR_CONFIGURATION_INVALID\nseverity=error\nevidence_scope=configuration_contract\nconfiguration_contract=invalid\nremaining_inspection=unknown\nsafe_command=positron config validate\n"
             },
             Self::AuthenticationRejected => {
                 "report_version=1\nmode=online\nstatus=authentication_rejected\nfinding_code=DOCTOR_AUTHENTICATION_REJECTED\nseverity=error\nevidence_scope=none\nsafe_command=use_system_administrator_credential\n"

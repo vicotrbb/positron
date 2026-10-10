@@ -550,7 +550,7 @@ fn route_inner<S: Read + Write>(
             )?;
             policy_activate_response(services, &bearer, &body)
         },
-        (ListenerRole::Control, "GET", "/control/fenced/inspection")
+        (ListenerRole::Control, "GET", "/control/fenced/inspection" | "/control/doctor")
             if health.phase() == ProcessPhase::Fenced =>
         {
             let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
@@ -605,7 +605,8 @@ fn route_inner<S: Read + Write>(
             "ready",
             &health.security_warnings(),
         )),
-        (ListenerRole::Operations, "GET", "/status" | "/metrics") => {
+        (ListenerRole::Operations, "GET", "/status" | "/metrics")
+        | (ListenerRole::Control, "GET", "/control/doctor") => {
             let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
                 Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
             })?);
@@ -652,6 +653,7 @@ fn route_inner<S: Read + Write>(
                         status.maintenance,
                         status.doctor,
                         status.bound_listener_roles,
+                        status.resources,
                     ))
                 },
             )

@@ -142,3 +142,32 @@ admission; failures include bounded connection/send/response refusal. Correct th
 configuration and restart when the destination changes. Do not configure Positron's own
 receiver as the collector, increase retries, or ingest operational spans into its own
 tenant data to conceal failed external export.
+
+## Doctor
+
+Run `positron doctor --online --endpoint ADDRESS --server-name NAME --trust-file FILE --credential-stdin`
+with a system administrator credential on standard input. Close standard input after the credential.
+For an explicitly selected plaintext listener, replace the TLS options with `--allow-plaintext`.
+The client ignores ambient HTTP proxies. An owner may use
+`positron doctor --online --control-path PATH --credential-stdin` instead. The owner-only Control
+Listener serves `/control/doctor` while Serving or Fenced; `/control/fenced/inspection` remains
+available for existing fenced-inspection clients. Neither route changes configuration, maintenance,
+clock state, catalog state, keys, or the process phase.
+
+Stop the server before `positron doctor --offline --config FILE`. Offline Doctor acquires the
+existing exclusive Storage Ownership Lock without creating it or running a capability probe.
+An empty volume or missing lock produces `DOCTOR_BOOTSTRAP_UNAVAILABLE`; a live owner produces
+`DOCTOR_STORAGE_LOCKED`. Doctor never initializes a volume, repairs damage, or truncates a tail.
+The integrity inspection retains the existing bounded pass and continuation contract. A reported
+continuation is a next command for `positron verify --offline`, not an automatic second pass.
+
+Reports use version 1 key/value fields, stable finding codes, severity, evidence scope, and safe
+next commands. Exit 0 confirms the reported inspected scope; exit 2 identifies argument or
+configuration errors; exit 3 identifies a degraded, incomplete, fenced, unavailable, or failed
+inspection. Online network requests have one five-second deadline and an 8 KiB response bound.
+Unknown fields and unsupported values cannot enter a report. Missing required observations remain
+`missing` or `unavailable`, and a declared `observed` family alone cannot establish completeness.
+Storage capability tests require writes, so Doctor reports `not_probed_read_only`. Online headroom,
+pressure, maintenance, and Recovery Reserve facts come from their current runtime owners.
+Offline reports explicitly identify runtime-only families as unavailable. Backup verification and
+purge compatibility remain `not_shipped` until their owning subsystem supplies real observations.

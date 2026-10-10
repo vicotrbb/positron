@@ -19,6 +19,7 @@ use zeroize::Zeroizing;
 mod offline;
 mod online;
 mod options;
+mod report;
 
 use offline::execute_offline;
 use options::{DoctorFailure, Mode, Options};
@@ -60,3 +61,13 @@ fn execute(
 
 #[cfg(test)]
 mod tests;
+
+/// Exercises the bounded untrusted Doctor response boundary without I/O.
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_status(bytes: &[u8]) -> Option<String> {
+    if bytes.len() > 8192 {
+        return None;
+    }
+    let value = serde_json::from_slice(bytes).ok()?;
+    report::render_status(&value).ok().map(|(_, report)| report)
+}

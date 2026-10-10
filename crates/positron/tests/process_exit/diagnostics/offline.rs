@@ -228,3 +228,84 @@ fn offline_doctor_reports_corrupt_bootstrap_as_fenced_without_repairing_it()
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn offline_doctor_does_not_initialize_an_empty_volume_or_create_an_ownership_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!("positron-doctor-empty-{nonce}"));
+    let roots = ChildRoots::new(&root)?;
+    let config = root.join("positron.toml");
+    fs::write(
+        &config,
+        process_configuration(
+            &root,
+            &roots.data,
+            &roots.secrets,
+            [42_001, 42_002, 42_003, 42_004, 42_005],
+        ),
+    )?;
+    let before_data = volume_bytes(&roots.data)?;
+    let before_secrets = volume_bytes(&roots.secrets)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["doctor", "--offline", "--config"])
+        .arg(&config)
+        .output()?;
+    assert_eq!(output.status.code(), Some(3));
+    assert!(String::from_utf8(output.stdout)?.contains("DOCTOR_BOOTSTRAP_UNAVAILABLE"));
+    assert_eq!(
+        before_data,
+        volume_bytes(&roots.data)?,
+        "Doctor must not create a lock or probe artifact"
+    );
+    assert_eq!(before_secrets, volume_bytes(&roots.secrets)?);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn offline_doctor_reports_configuration_failure_without_echoing_rejected_values()
+-> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args([
+            "doctor",
+            "--offline",
+            "--set",
+            "storage.data_directory=secretcanaryConfiguration87",
+        ])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(
+        stdout.contains("finding_code=DOCTOR_CONFIGURATION_INVALID"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("evidence_scope=configuration_contract"));
+    assert!(!stdout.contains("secretcanaryConfiguration87"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn offline_doctor_does_not_recreate_a_missing_ownership_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let (root, roots, config) = initialized_doctor_fixture("missing-lock")?;
+    fs::remove_file(roots.data.join(".positron-volume.lock"))?;
+    let before = volume_bytes(&roots.data)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["doctor", "--offline", "--config"])
+        .arg(&config)
+        .output()?;
+    assert_eq!(output.status.code(), Some(3));
+    assert!(String::from_utf8(output.stdout)?.contains("DOCTOR_BOOTSTRAP_UNAVAILABLE"));
+    assert_eq!(before, volume_bytes(&roots.data)?);
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
