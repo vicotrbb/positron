@@ -175,6 +175,11 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
     assert!(archive.contains("inspection_owner=process_lifecycle"));
     assert!(archive.contains("process_serving"));
     assert!(!archive.contains("availability=not_persisted"));
+    assert!(!archive.contains("operational_log_owner_unavailable"));
+    assert!(archive.contains("positron_operational_snapshot_available 1\n"));
+    assert!(archive.contains("positron_queries_total{outcome=\"success\"} 0\n"));
+    assert!(archive.contains("readiness=ready\n"));
+    assert!(archive.contains("integrity_degraded=false\n"));
     assert!(archive.contains(data.to_string_lossy().as_ref()));
     assert!(!archive.contains(secrets.to_string_lossy().as_ref()));
     assert!(archive.contains("retained_identifier_classes=data_directory"));
@@ -210,6 +215,32 @@ fn fenced_control_bundle_uses_current_administrator_facts_without_retired_runtim
         "the public serving bundle must expose the queued-or-terminal audited maintenance task: {archive}"
     );
     assert!(!archive.contains("status=not_exported_by_current_diagnostics_contract"));
+    let api = process
+        .bound_endpoints()
+        .iter()
+        .find(|endpoint| endpoint.role() == positron_runtime::ListenerRole::Api)
+        .and_then(positron_runtime::BoundEndpoint::socket_address)
+        .ok_or("API endpoint")?;
+    for _ in 0..33 {
+        let mut request = TcpStream::connect(api)?;
+        request.write_all(b"GET /request-path-secret-canary HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+        let mut response = String::new();
+        request.read_to_string(&mut response)?;
+        assert!(response.starts_with("HTTP/1.1 404"));
+    }
+    let (head, ciphertext) = control_bundle(&control, administrator.secret(), &request)?;
+    assert!(head.starts_with(b"HTTP/1.1 200 "));
+    let mut reader = Decryptor::new(Cursor::new(ciphertext))?
+        .decrypt(std::iter::once(&identity as &dyn Identity))?;
+    let mut truncated = Vec::new();
+    reader.read_to_end(&mut truncated)?;
+    super::super::SupportBundle::verify_signed_archive(&truncated, signature_identity)
+        .map_err(|_| "truncated manifest signature")?;
+    let truncated = String::from_utf8_lossy(&truncated);
+    assert!(truncated.contains("operational_log_snapshot_truncated"));
+    assert!(truncated.contains("recent_history_truncated=true"));
+    assert!(!truncated.contains("operational_log_owner_unavailable"));
+    assert!(!truncated.contains("request-path-secret-canary"));
     process
         .services()
         .ok_or("services absent")?

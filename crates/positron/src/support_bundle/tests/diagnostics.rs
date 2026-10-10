@@ -63,7 +63,7 @@ fn captured_backtrace_is_persisted_only_as_a_safe_fingerprint()
         .collect::<String>();
     let record = super::crash_record::SanitizedCrashRecord::new(
         "draining",
-        "joined_task_panic",
+        "joined_task_panicked",
         "serving_loop",
     )
     .map_err(|_| "typed crash record")?
@@ -342,8 +342,8 @@ fn crash_readout_bounds_invalid_directory_entries_and_declares_unknown_omissions
     assert_eq!(
         readout.omissions(),
         [
-            "unknown_crash_record_file",
-            "crash_record_enumeration_limit"
+            "crash_record_enumeration_limit",
+            "unknown_crash_record_file"
         ]
     );
     fs::remove_dir_all(root)?;
@@ -394,6 +394,61 @@ fn controlled_process_restart_preserves_each_crash_record() -> Result<(), Box<dy
     let rendered = readout.render();
     assert!(rendered.contains("runtime_startup_failed"));
     assert!(rendered.contains("catalog_unavailable"));
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
+fn crash_record_bounds_select_canonical_sequence_before_directory_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::env::temp_dir().join(format!(
+        "positron-crash-order-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ));
+    fs::create_dir(&root)?;
+    let store =
+        super::crash_record::CrashRecordStore::under_test_root(&root).map_err(|_| "store")?;
+    for sequence in 0..32 {
+        let finding = if sequence == 0 {
+            "catalog_unavailable"
+        } else {
+            "runtime_poll_panicked"
+        };
+        let record = super::crash_record::SanitizedCrashRecord::new("serving", finding, "runtime")
+            .map_err(|_| "record")?;
+        store.persist(&record).map_err(|_| "persist")?;
+    }
+    let directory = super::crash_record::data_directory(&root).join("diagnostics/crash-records");
+    let mut records = fs::read_dir(&directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    records.sort();
+    let bytes = records
+        .iter()
+        .map(fs::read)
+        .collect::<Result<Vec<_>, _>>()?;
+    for path in &records {
+        fs::remove_file(path)?;
+    }
+    for (path, bytes) in records.iter().zip(&bytes).rev() {
+        fs::write(path, bytes)?;
+    }
+    for (files, bytes) in [(1, 12_288), (32, 300)] {
+        let readout = store
+            .read_recent(
+                std::time::Duration::from_secs(60),
+                files,
+                bytes,
+                SystemTime::now(),
+            )
+            .map_err(|_| "read")?;
+        let rendered = readout.render();
+        assert!(
+            rendered.contains("finding_code=catalog_unavailable\n"),
+            "oldest canonical record must survive the source bound: {rendered}"
+        );
+        assert!(!rendered.contains("runtime_poll_panicked"));
+    }
     fs::remove_dir_all(root)?;
     Ok(())
 }
