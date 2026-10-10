@@ -33,7 +33,7 @@ mod snapshot;
 #[path = "resource_governor/tests/telemetry.rs"]
 mod telemetry_tests;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};

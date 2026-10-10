@@ -350,6 +350,20 @@ bench = false
 members = ["."]
 
 [[bin]]
+name = "key_provider_envelope"
+path = "fuzz_targets/key_provider_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_cache_stateful"
+path = "fuzz_targets/key_cache_stateful.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "operational_state"
 path = "fuzz_targets/operational_state.rs"
 test = false

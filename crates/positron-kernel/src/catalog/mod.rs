@@ -8,6 +8,7 @@ mod fixture;
 mod governance_object;
 mod inspection;
 mod preparation;
+mod provider_integrity;
 mod recovery;
 mod rotation;
 mod storage;
@@ -613,10 +614,10 @@ impl<'authority> Catalog<'authority> {
         )
     }
 
-    /// Reserves both abandonment proposal copies and bounded registry/audit
+    /// Reserves both Catalog proposal copies and bounded registry/audit
     /// overhead before inspecting or copying objects. Publication separately
     /// reserves its protected durability-completion capacity.
-    pub(crate) fn reserve_segment_abandonment(
+    pub(crate) fn reserve_catalog_proposal_copy(
         &self,
         snapshot: &CatalogSnapshot,
     ) -> Result<crate::ResourceReservation<'_>, CatalogFailure> {

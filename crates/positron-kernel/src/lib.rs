@@ -71,6 +71,24 @@ mod active_segment_ledger;
 mod catalog;
 #[allow(dead_code)]
 mod data_protection;
+/// Provider plaintext operations are confined to Data Protection adapters.
+/// ```compile_fail
+/// use positron_kernel::key_provider::{KeyProvider, SecretWrappedKeyPayload};
+/// ```
+pub mod key_provider {
+    pub use crate::data_protection::key_provider::{
+        CacheInvalidation, ConformanceFailure, ConformanceStep, CredentialFileReference,
+        EnvelopeContext, KeyCacheHealth, KeyCacheLease, KeyEnvelope, KeyProviderConformance,
+        KeyProviderFailure, KeyScope, LocalKeyProvider, ProviderConformanceTarget,
+        ProviderCredentialModel, ProviderFailureDisposition, ProviderFamily, ProviderKeyUri,
+        TransitAuthentication, WrappingAlgorithm,
+    };
+    #[cfg(fuzzing)]
+    #[doc(hidden)]
+    pub use crate::data_protection::key_provider::{
+        fuzz_key_cache_stateful, fuzz_key_provider_envelope,
+    };
+}
 mod diagnostics;
 mod export_output;
 mod instance_bootstrap_storage;

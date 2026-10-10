@@ -16,6 +16,14 @@ pub(super) fn establish_catalog_authority_with_repair_memory(
     volume: OwnedPrimaryDataVolume,
     repair_memory_bytes: u64,
 ) -> Result<StorageKernelResourceAuthority, Box<dyn std::error::Error>> {
+    establish_catalog_authority_with_pool_units(volume, repair_memory_bytes, 1)
+}
+
+pub(crate) fn establish_catalog_authority_with_pool_units(
+    volume: OwnedPrimaryDataVolume,
+    repair_memory_bytes: u64,
+    ordinary_unit: u64,
+) -> Result<StorageKernelResourceAuthority, Box<dyn std::error::Error>> {
     let cardinality = InventoryCardinalityLimits::new(1, 16)?;
     let large = ResourceAmounts::new([
         repair_memory_bytes,
@@ -34,7 +42,7 @@ pub(super) fn establish_catalog_authority_with_repair_memory(
     let dual = uniform(2);
     let durability = add(add(large, large)?, large)?;
     let recovery_capacity = add(add(add(durability, large)?, large)?, uniform(6))?;
-    let governed = add(recovery_capacity, uniform(16))?;
+    let governed = add(recovery_capacity, uniform(16 * ordinary_unit))?;
     let raw = add(governed, cardinality.governor_bootstrap_overhead(1)?)?;
     let observed = ObservedResourceEnvironment::for_test(
         &volume,
@@ -55,8 +63,13 @@ pub(super) fn establish_catalog_authority_with_repair_memory(
     )?;
     let tenant = TenantId::from_bytes([0x43; 16])?;
     let policy = GovernorPolicy::new(
-        [TenantQuota::new(tenant, 1, uniform(16))?],
-        OrdinaryPoolPolicy::new(uniform(4), uniform(3), uniform(2), uniform(1))?,
+        [TenantQuota::new(tenant, 1, uniform(16 * ordinary_unit))?],
+        OrdinaryPoolPolicy::new(
+            uniform(4 * ordinary_unit),
+            uniform(3 * ordinary_unit),
+            uniform(2 * ordinary_unit),
+            uniform(ordinary_unit),
+        )?,
     )?;
     let recovery =
         RecoveryPoolCapacities::new(durability, small, dual, small, large, small, small)?;

@@ -18,6 +18,7 @@ mod control_token;
 mod export_manifest_signature;
 mod frame;
 mod key_envelope;
+pub(crate) mod key_provider;
 mod local_key;
 mod service;
 

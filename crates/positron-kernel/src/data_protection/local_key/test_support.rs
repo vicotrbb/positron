@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
-pub(super) struct SecurityRoot {
-    pub(super) path: PathBuf,
+pub(crate) struct SecurityRoot {
+    pub(crate) path: PathBuf,
     _directory: File,
 }
 
 impl SecurityRoot {
-    pub(super) fn create() -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn create() -> Result<Self, Box<dyn std::error::Error>> {
         let path = std::fs::canonicalize(std::env::temp_dir())?.join(format!(
             "positron-local-key-persistence-{}-{}",
             std::process::id(),

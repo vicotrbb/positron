@@ -259,6 +259,25 @@ impl std::fmt::Debug for BootstrapKeyCustody {
 }
 
 impl BootstrapKeyCustody {
+    pub(in crate::data_protection) fn provider_wrap(
+        &self,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, super::super::key_provider::KeyProviderFailure> {
+        use super::super::{CryptoBackend, RustCryptoBackend};
+        RustCryptoBackend
+            .wrap_key_aes_256_kwp(&self.key.root_key.0, payload)
+            .map_err(|_| super::super::key_provider::KeyProviderFailure::ContextMismatch)
+    }
+
+    pub(in crate::data_protection) fn provider_unwrap(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<super::super::SecretPlaintext, super::super::key_provider::KeyProviderFailure> {
+        use super::super::{CryptoBackend, RustCryptoBackend};
+        RustCryptoBackend
+            .unwrap_key_aes_256_kwp(&self.key.root_key.0, ciphertext)
+            .map_err(|_| super::super::key_provider::KeyProviderFailure::ContextMismatch)
+    }
     pub(crate) fn crash_record_protector(
         &self,
         instance: InstanceId,

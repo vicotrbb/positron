@@ -23,7 +23,7 @@ mod persistence_tests;
 #[path = "local_key/tests/runtime_bootstrap.rs"]
 mod runtime_bootstrap_tests;
 #[cfg(test)]
-mod test_support;
+pub(super) mod test_support;
 
 use codec::SecretRootKey;
 
