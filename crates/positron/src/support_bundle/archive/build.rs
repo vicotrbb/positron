@@ -132,14 +132,24 @@ impl SupportBundle {
         identifier_retention: IdentifierRetentionPolicy,
         signer: Option<&positron_kernel::ExportManifestSigner>,
     ) -> Result<Self, ()> {
+        // age 0.11.5 admits at most 16 native X25519 stanzas (99 bytes
+        // each). Its header, bounded GREASE stanza and nonce use at most
+        // 288 additional bytes; each 64 KiB payload chunk adds a 16-byte
+        // authentication tag. Reserve the closed recipient-set maximum so
+        // archive selection stays deterministic despite randomized framing.
+        let archive_limit = if encryption_state == "age_x25519" {
+            let tags = limits.bytes.div_ceil(65_536).max(1) * 16;
+            limits.bytes.checked_sub(288 + 16 * 99 + tags).ok_or(())?
+        } else {
+            limits.bytes
+        };
         let mut selected = Vec::new();
         selected.try_reserve_exact(limits.count).map_err(|_| ())?;
         let mut unknown = 0;
         let mut omissions = Vec::new();
-        // Reserve two metadata members (manifest plus Redaction Report) before
-        // admitting content. This makes the byte bound deterministic rather
-        // than discovering metadata overflow after source selection.
-        let mut projected = FOOTER.saturating_add(BLOCK.saturating_mul(4));
+        // Admit bounded content first, then account for the exact metadata
+        // below. Content is removed in reverse admission order if necessary.
+        let mut projected = FOOTER;
         for member in input {
             let Some(class) = member.class else {
                 unknown += 1;
@@ -153,7 +163,7 @@ impl SupportBundle {
                 continue;
             }
             let next = BLOCK + blocks(member.bytes.len());
-            if projected.saturating_add(next) > limits.bytes {
+            if projected.saturating_add(next) > archive_limit {
                 once(&mut omissions, "archive_byte_limit")?;
                 continue;
             };
@@ -163,68 +173,90 @@ impl SupportBundle {
         if unknown != 0 {
             once(&mut omissions, "unknown_member_class")?;
         }
-        let included_classes = selected
-            .iter()
-            .map(|(class, _)| class.report_name())
-            .collect::<Vec<_>>()
-            .join(",");
-        let report = RedactionReport {
-            unknown,
-            omissions,
-            plaintext_warning,
-        };
-        let redaction = format!(
-            "policy_version={POLICY}\nincluded_classes={included_classes}\nidentifier_pseudonymization={}\nrequested_retained_identifier_classes={}\nretained_identifier_classes={}\nidentifier_retention_outcome={}\nmember_count_limit={}\narchive_byte_limit={}\nelapsed_time_limit_seconds={}\nexcluded_unknown_members={}\nomissions={}\nencryption={encryption_state}\nplaintext_export_warning={}\nsignature={signature_state}\n",
-            identifier_retention
-                .applied_retention()
-                .pseudonymization_value(),
-            identifier_retention.requested().report_value(),
-            identifier_retention.applied_retention().report_value(),
-            identifier_retention.outcome(),
-            limits.count,
-            limits.bytes,
-            limits.elapsed_limit.as_secs(),
-            report.unknown,
-            report.omissions.join(","),
-            plaintext_warning
-        );
-        let mut manifest = format!(
-            "format=positron-support-bundle-tar-v1\nredaction_policy_version={POLICY}\narchive_byte_limit={}\nrequested_retained_identifier_classes={}\nretained_identifier_classes={}\nidentifier_retention_outcome={}\n",
-            limits.bytes,
-            identifier_retention.requested().report_value(),
-            identifier_retention.applied_retention().report_value(),
-            identifier_retention.outcome(),
-        );
-        for (class, bytes) in &selected {
+        let (report, redaction, manifest, signature) = loop {
+            let included_classes = selected
+                .iter()
+                .map(|(class, _)| class.report_name())
+                .collect::<Vec<_>>()
+                .join(",");
+            let omitted_classes = Class::ALL
+                .into_iter()
+                .filter(|class| {
+                    !selected
+                        .iter()
+                        .any(|(included, _)| included.path() == class.path())
+                })
+                .map(Class::report_name)
+                .collect::<Vec<_>>()
+                .join(",");
+            let report = RedactionReport {
+                unknown,
+                omissions,
+                plaintext_warning,
+            };
+            let redaction = format!(
+                "policy_version={POLICY}\nincluded_classes={included_classes}\nomitted_allowlisted_classes={omitted_classes}\nexcluded_classes=tenant_telemetry,query_results,api_key_secrets_and_hashes,tls_private_keys,encryption_key_material,local_root_key_files,recovery_bundles,provider_credentials,authorization_headers,secret_environment_values,kubernetes_secret_values,raw_memory,core_dumps\nidentifier_pseudonymization={}\nrequested_retained_identifier_classes={}\nretained_identifier_classes={}\nidentifier_retention_outcome={}\nmember_count_limit={}\narchive_byte_limit={}\noutput_byte_limit={}\nelapsed_time_limit_seconds={}\ninput_log_window_seconds={}\nsource_file_limit={}\nexcluded_unknown_members={}\nomissions={}\nencryption={encryption_state}\nplaintext_export_warning={}\nsignature={signature_state}\n",
+                identifier_retention
+                    .applied_retention()
+                    .pseudonymization_value(),
+                identifier_retention.requested().report_value(),
+                identifier_retention.applied_retention().report_value(),
+                identifier_retention.outcome(),
+                limits.count,
+                archive_limit,
+                limits.bytes,
+                limits.elapsed_limit.as_secs(),
+                limits.log_window.as_secs(),
+                limits.source_file_limit,
+                report.unknown,
+                report.omissions.join(","),
+                plaintext_warning
+            );
+            let mut manifest = format!(
+                "format=positron-support-bundle-tar-v1\nredaction_policy_version={POLICY}\narchive_byte_limit={}\noutput_byte_limit={}\nrequested_retained_identifier_classes={}\nretained_identifier_classes={}\nidentifier_retention_outcome={}\n",
+                archive_limit,
+                limits.bytes,
+                identifier_retention.requested().report_value(),
+                identifier_retention.applied_retention().report_value(),
+                identifier_retention.outcome(),
+            );
+            for (class, bytes) in &selected {
+                manifest.push_str(&format!(
+                    "member={} bytes={} sha256={}\n",
+                    class.path(),
+                    bytes.len(),
+                    hex(bytes)?
+                ));
+            }
             manifest.push_str(&format!(
-                "member={} bytes={} sha256={}\n",
-                class.path(),
-                bytes.len(),
-                hex(bytes)?
+                "redaction_report_sha256={}\n",
+                hex(redaction.as_bytes())?
             ));
-        }
-        manifest.push_str(&format!(
-            "redaction_report_sha256={}\n",
-            hex(redaction.as_bytes())?
-        ));
-        let signature = signer
-            .map(|signer| {
-                let signature = signer.sign(manifest.as_bytes()).map_err(|_| ())?;
-                Ok(format!(
-                    "integrity_identity={}\nsignature={}\n",
-                    encode_bytes(&signature.integrity_identity().public_key())?,
-                    encode_bytes(&signature.bytes())?
-                ))
-            })
-            .transpose()?;
-        let meta = (BLOCK + blocks(manifest.len())).saturating_add(BLOCK + blocks(redaction.len()));
-        let meta = signature.as_ref().map_or(meta, |signature| {
-            meta.saturating_add(BLOCK + blocks(signature.len()))
-        });
-        if projected.saturating_add(meta) > limits.bytes {
-            return Err(());
-        }
-        let mut archive = BoundedArchive::new(limits.bytes);
+            let signature = signer
+                .map(|signer| {
+                    let signature = signer.sign(manifest.as_bytes()).map_err(|_| ())?;
+                    Ok(format!(
+                        "integrity_identity={}\nsignature={}\n",
+                        encode_bytes(&signature.integrity_identity().public_key())?,
+                        encode_bytes(&signature.bytes())?
+                    ))
+                })
+                .transpose()?;
+            let meta =
+                (BLOCK + blocks(manifest.len())).saturating_add(BLOCK + blocks(redaction.len()));
+            let meta = signature.as_ref().map_or(meta, |signature| {
+                meta.saturating_add(BLOCK + blocks(signature.len()))
+            });
+            if projected.saturating_add(meta) > archive_limit {
+                let (_, bytes) = selected.pop().ok_or(())?;
+                projected = projected.saturating_sub(BLOCK + blocks(bytes.len()));
+                omissions = report.omissions;
+                once(&mut omissions, "archive_byte_limit")?;
+                continue;
+            }
+            break (report, redaction, manifest, signature);
+        };
+        let mut archive = BoundedArchive::new(archive_limit);
         {
             let mut tar = tar::Builder::new(&mut archive);
             append(&mut tar, "manifest.txt", manifest.as_bytes()).map_err(|_| ())?;
@@ -238,7 +270,7 @@ impl SupportBundle {
             tar.finish().map_err(|_| ())?;
         }
         let archive = archive.into_bytes();
-        (archive.len() <= limits.bytes)
+        (archive.len() <= archive_limit)
             .then_some(Self {
                 archive,
                 report,

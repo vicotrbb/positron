@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use super::super::{DEFAULT_ELAPSED_LIMIT, MAX_OUTPUT_LIMIT, TAR_RECORD, crypto};
+use super::super::{
+    DEFAULT_ELAPSED_LIMIT, DEFAULT_LOG_WINDOW, DEFAULT_SOURCE_FILES, MAX_OUTPUT_LIMIT, TAR_RECORD,
+    crypto,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Class {
@@ -20,7 +23,6 @@ pub(crate) enum Class {
     CrashRecords,
 }
 impl Class {
-    #[cfg(test)]
     pub(crate) const ALL: [Self; 14] = [
         Self::EffectiveConfiguration,
         Self::CompatibilityManifest,
@@ -165,6 +167,8 @@ pub(crate) struct BundleLimits {
     pub(crate) count: usize,
     pub(crate) bytes: usize,
     pub(crate) elapsed_limit: Duration,
+    pub(crate) log_window: Duration,
+    pub(crate) source_file_limit: usize,
 }
 
 /// Only native age v1 X25519 recipients are admitted. The bounded typed set
@@ -205,11 +209,22 @@ impl BundleLimits {
                 count,
                 bytes,
                 elapsed_limit: DEFAULT_ELAPSED_LIMIT,
+                log_window: DEFAULT_LOG_WINDOW,
+                source_file_limit: DEFAULT_SOURCE_FILES,
             })
             .ok_or(())
     }
     pub(crate) const fn with_elapsed_limit(mut self, elapsed_limit: Duration) -> Self {
         self.elapsed_limit = elapsed_limit;
+        self
+    }
+    pub(crate) const fn with_source_limits(
+        mut self,
+        log_window: Duration,
+        source_file_limit: usize,
+    ) -> Self {
+        self.log_window = log_window;
+        self.source_file_limit = source_file_limit;
         self
     }
 }

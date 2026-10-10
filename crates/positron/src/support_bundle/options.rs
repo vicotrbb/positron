@@ -117,6 +117,11 @@ impl BundleOptions {
         if elapsed_limit > MAX_ELAPSED_LIMIT || log_window > MAX_LOG_WINDOW {
             return Err(BundleFailure::Arguments);
         }
+        if control_path.is_some()
+            && (log_window != DEFAULT_LOG_WINDOW || source_file_limit != DEFAULT_SOURCE_FILES)
+        {
+            return Err(BundleFailure::Arguments);
+        }
         if (control_path.is_some() || credential_stdin || !offline_key_unavailable)
             && (!credential_stdin || offline_key_unavailable)
             || log_window.is_zero()

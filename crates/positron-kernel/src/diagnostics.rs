@@ -42,15 +42,17 @@ impl CrashRecord {
         finding_code: &'static str,
         component: &'static str,
     ) -> Result<Self, CrashRecordFailure> {
-        (valid(phase) && valid(finding_code) && valid(component))
-            .then_some(Self {
-                phase,
-                finding_code,
-                component,
-                catalog_generation: None,
-                backtrace_identity: "unavailable".to_owned(),
-            })
-            .ok_or(CrashRecordFailure::Invalid)
+        (canonical_crash_value("phase", phase)
+            && canonical_crash_value("finding_code", finding_code)
+            && canonical_crash_value("component", component))
+        .then_some(Self {
+            phase,
+            finding_code,
+            component,
+            catalog_generation: None,
+            backtrace_identity: "unavailable".to_owned(),
+        })
+        .ok_or(CrashRecordFailure::Invalid)
     }
     #[must_use]
     pub fn with_catalog_generation(mut self, generation: u64) -> Self {
@@ -248,16 +250,16 @@ impl CrashRecordStore {
         let mut records = Vec::new();
         let mut omissions = Vec::new();
         let mut total = 0usize;
+        let mut candidates = Vec::new();
         for entry in entries.by_ref().take(MAX_ENUMERATED_ENTRIES) {
             let entry = entry.map_err(|_| CrashRecordFailure::Unavailable)?;
-            if records.len() == maximum_files {
-                omit_once(&mut omissions, "crash_record_file_limit");
-                break;
-            }
             let Ok(name) = entry.file_name().to_str() else {
                 omit_once(&mut omissions, "unknown_crash_record_file");
                 continue;
             };
+            if matches!(name, "." | "..") {
+                continue;
+            }
             let Some(sequence) = record_sequence(name, ".frame") else {
                 if record_sequence(name, ".txt").is_some() {
                     omit_once(&mut omissions, "unauthenticated_legacy_crash_record");
@@ -270,7 +272,30 @@ impl CrashRecordStore {
                 omit_once(&mut omissions, "unknown_crash_record_file");
                 continue;
             }
-            let file = match open_record(&directory, name) {
+            candidates
+                .try_reserve_exact(1)
+                .map_err(|_| CrashRecordFailure::Unavailable)?;
+            candidates.push((sequence, name.to_owned()));
+        }
+        // A partial directory inventory cannot select a deterministic subset.
+        // Declare the bounded omission without opening any of its candidates.
+        if entries
+            .next()
+            .transpose()
+            .map_err(|_| CrashRecordFailure::Unavailable)?
+            .is_some()
+        {
+            omit_once(&mut omissions, "crash_record_enumeration_limit");
+            omissions.sort_unstable();
+            return Ok(CrashReadout { records, omissions });
+        }
+        candidates.sort_unstable_by_key(|(sequence, _)| *sequence);
+        for (sequence, name) in candidates {
+            if records.len() == maximum_files {
+                omit_once(&mut omissions, "crash_record_file_limit");
+                break;
+            }
+            let file = match open_record(&directory, &name) {
                 Ok(file) => file,
                 Err(()) => {
                     omit_once(&mut omissions, "unsafe_crash_record_file");
@@ -322,18 +347,8 @@ impl CrashRecordStore {
             total = next;
             records.push(plaintext.to_vec());
         }
-        // Reading one additional directory entry proves that the bounded
-        // inspection intentionally omitted an unknown number of entries. It
-        // does not validate, stat, or open that entry.
-        if entries
-            .next()
-            .transpose()
-            .map_err(|_| CrashRecordFailure::Unavailable)?
-            .is_some()
-        {
-            omit_once(&mut omissions, "crash_record_enumeration_limit");
-        }
         records.sort();
+        omissions.sort_unstable();
         Ok(CrashReadout { records, omissions })
     }
 }
@@ -449,13 +464,6 @@ impl CrashReadout {
         &self.omissions
     }
 }
-fn valid(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 96
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
 fn valid_rendered(bytes: &[u8]) -> bool {
     let Ok(value) = std::str::from_utf8(bytes) else {
         return false;
@@ -489,7 +497,7 @@ fn canonical_crash_value(key: &str, value: &str) -> bool {
         "build_identity" => safe_value(value),
         "phase" => matches!(
             value,
-            "starting" | "serving" | "draining" | "stopping" | "fenced"
+            "starting" | "recovering" | "serving" | "draining" | "stopping" | "fenced"
         ),
         "component" => matches!(value, "runtime" | "catalog" | "serving_loop"),
         "finding_code" => matches!(
@@ -541,17 +549,29 @@ fn set_owner_only(file: &File) -> Result<(), CrashRecordFailure> {
 
 /// Exercises the bounded, unauthenticated crash-record container boundary.
 /// Authentication and plaintext parsing remain separate: `encrypted_frame_open`
-/// fuzzes PFRM/AEAD decoding, while production reaches `valid_rendered` only
-/// after `CrashRecordProtector::open` authenticates a frame.
+/// fuzzes PFRM/AEAD decoding. The same bounded input also exercises the closed
+/// plaintext allowlist; production reaches it only after frame authentication.
 #[cfg(fuzzing)]
 pub fn fuzz_crash_record_decoder(data: &[u8]) {
     let bounded = &data[..data.len().min(MAX_ENCODED_RECORD_BYTES + 1)];
     let _ = crate::data_protection::crash_record_frame_parts(bounded);
+    let _ = valid_rendered(bounded);
 }
 
 #[cfg(test)]
 mod tests {
     use super::{CrashRecord, valid_rendered};
+
+    #[test]
+    fn crash_record_rejects_identifier_and_secret_canaries_in_vocabulary_fields() {
+        for fields in [
+            ("tenant_secret_canary", "runtime_poll_panicked", "runtime"),
+            ("serving", "credential_secret_canary", "runtime"),
+            ("serving", "runtime_poll_panicked", "provider_secret_canary"),
+        ] {
+            assert!(CrashRecord::new(fields.0, fields.1, fields.2).is_err());
+        }
+    }
 
     #[test]
     fn captured_backtrace_artifact_marks_a_bounded_fingerprint_as_truncated() {

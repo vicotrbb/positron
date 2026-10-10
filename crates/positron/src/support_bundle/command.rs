@@ -102,7 +102,8 @@ fn execute(
     })?;
     let limits = BundleLimits::new(14, options.output_limit)
         .map_err(|_| BundleFailure::Arguments)?
-        .with_elapsed_limit(options.elapsed_limit);
+        .with_elapsed_limit(options.elapsed_limit)
+        .with_source_limits(options.log_window, options.source_file_limit);
     if let Some(control_path) = options.control_path.as_deref() {
         let ciphertext = live_control::request_live_bundle(control_path, &options, started)?;
         output::write_new_owner_only_before_publication(&output_destination, &ciphertext, || {

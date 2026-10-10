@@ -1194,6 +1194,8 @@ fn integrity_scrub_not_before(
         .ok_or(ServiceFailure::Internal)?;
     epoch_start
         .checked_add(u64::from_be_bytes(bytes) % INTEGRITY_SCRUB_JITTER_SECONDS)
+        // Zero is the unscheduled sentinel in the canonical task contract.
+        .map(|not_before| not_before.max(1))
         .ok_or(ServiceFailure::CapacityUnavailable)
 }
 
@@ -1403,6 +1405,43 @@ mod diagnostic_tests {
         ServiceFailure, report_integrity_scrub_failure_stage,
     };
     use positron_kernel::MaintenanceTaskClass;
+
+    #[test]
+    fn zero_jitter_first_epoch_admits_a_valid_scheduled_integrity_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_domain::{
+            identity::TenantId,
+            routing::{SignalKind, VirtualShardId},
+        };
+        use positron_kernel::{
+            InstanceId, MaintenancePreconditions, MaintenanceScope, MaintenanceTask,
+            MaintenanceTaskId, MaintenanceTrigger, SegmentScope,
+        };
+        // This valid identity and scope produce zero jitter in epoch zero.
+        let instance = InstanceId::new(1275_u128.to_be_bytes())?;
+        let scope = SegmentScope::new(
+            TenantId::from_bytes([2; 16])?,
+            SignalKind::Logs,
+            VirtualShardId::new(1)?,
+        );
+        let task = MaintenanceTask::integrity_scrub(
+            MaintenanceTaskId::new([4; 16])
+                .map_err(|failure| format!("task identity: {failure:?}"))?,
+            MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id()),
+            MaintenanceTrigger::Scheduled,
+            MaintenancePreconditions::new(1, 1)
+                .map_err(|failure| format!("preconditions: {failure:?}"))?,
+            [3; 32],
+            super::integrity_scrub_not_before(instance, scope, 0)?,
+        )
+        .map_err(|failure| format!("scheduled descriptor: {failure:?}"))?;
+        assert_eq!(
+            task.not_before(),
+            1,
+            "the zero sentinel cannot enter scheduled work"
+        );
+        Ok(())
+    }
 
     const DIAGNOSTIC_CHILD: &str = "POSITRON_MAINTENANCE_DIAGNOSTIC_CHILD";
 

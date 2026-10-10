@@ -184,6 +184,60 @@ fn archive_bound_omits_later_allowlisted_members_and_declares_truncation() {
 }
 
 #[test]
+fn metadata_overflow_truncates_content_instead_of_rejecting_a_bounded_bundle() {
+    let payload = [b'x'; 8_000];
+    let bundle = SupportBundle::build(
+        [BundleMember::doctor_report(&payload)],
+        BundleLimits::new(1, 10_240).expect("minimum export budget"),
+    )
+    .expect("metadata remains exportable when source content must be omitted");
+    assert_eq!(bundle.included_member_count(), 0);
+    assert!(
+        bundle
+            .redaction_report()
+            .declared_omissions()
+            .contains(&"archive_byte_limit")
+    );
+    assert!(bundle.archive().len() <= 10_240);
+    let report = String::from_utf8_lossy(bundle.archive());
+    assert!(
+        report
+            .lines()
+            .find_map(|line| line.strip_prefix("omitted_allowlisted_classes="))
+            .is_some_and(|classes| classes.split(',').any(|class| class == "doctor"))
+    );
+}
+
+#[test]
+fn metadata_reservation_does_not_omit_a_member_that_fits_the_final_tar() {
+    let bundle = SupportBundle::build(
+        [BundleMember::doctor_report(&[b'x'; 6_000])],
+        BundleLimits::new(1, 10_240).expect("minimum export budget"),
+    )
+    .expect("content and metadata fit one export");
+    assert_eq!(bundle.included_member_count(), 1);
+    assert!(
+        !bundle
+            .redaction_report()
+            .declared_omissions()
+            .contains(&"archive_byte_limit")
+    );
+    assert!(bundle.archive().len() <= 10_240);
+}
+
+#[test]
+fn packaging_identical_allowlisted_inputs_and_bounds_is_deterministic() {
+    let build = || {
+        SupportBundle::build(
+            [BundleMember::doctor_report(&[b'x'; 6_000])],
+            BundleLimits::new(1, 10_240).expect("minimum export budget"),
+        )
+        .expect("bounded truncated archive")
+    };
+    assert_eq!(build().archive(), build().archive());
+}
+
+#[test]
 fn offline_key_unavailability_is_declared_in_the_redaction_report() {
     let bundle = SupportBundle::build_authenticated(
         [BundleMember::doctor_report(b"finding=key_unavailable")],
@@ -214,7 +268,7 @@ fn encrypted_signed_bundle_report_declares_classes_pseudonymization_and_real_exp
     for expected in [
         b"included_classes=doctor,health_state".as_slice(),
         b"identifier_pseudonymization=ephemeral_per_bundle".as_slice(),
-        b"archive_byte_limit=20000".as_slice(),
+        b"output_byte_limit=20000".as_slice(),
         b"elapsed_time_limit_seconds=30".as_slice(),
         b"encryption=age_x25519".as_slice(),
         b"signature=unsigned_key_unavailable_offline".as_slice(),
@@ -289,18 +343,30 @@ fn encrypted_signed_bundle_decrypts_to_a_report_bound_by_its_manifest()
     )?;
     let signer = instance.support_bundle_manifest_signer(actor)?;
     let bundle = SupportBundle::build_authenticated(
-        [BundleMember::doctor_report(b"finding=verified")],
-        BundleLimits::new(1, 12_000).map_err(|_| "limits")?,
+        [BundleMember::doctor_report(&vec![b'x'; 4_000])],
+        BundleLimits::new(1, 10_240).map_err(|_| "limits")?,
         super::super::ManifestAuthentication::Signed(&signer),
     )
     .map_err(|_| "bundle")?;
-    let recipient = age::x25519::Identity::generate();
-    let ciphertext = AgeRecipients::parse([recipient.to_public().to_string()])
-        .map_err(|_| "recipient")?
-        .encrypt(bundle.archive())
-        .map_err(|_| "encrypt")?;
+    let identities: Vec<_> = (0..16).map(|_| age::x25519::Identity::generate()).collect();
+    let recipient = identities.first().ok_or("identity")?;
+    let ciphertext = AgeRecipients::parse(
+        identities
+            .iter()
+            .map(|identity| identity.to_public().to_string()),
+    )
+    .map_err(|_| "recipient")?
+    .encrypt_bounded(bundle.archive(), 10_240)
+    .map_err(|_| "encrypt")?;
+    assert!(ciphertext.len() <= 10_240);
+    assert!(
+        bundle
+            .redaction_report()
+            .declared_omissions()
+            .contains(&"archive_byte_limit")
+    );
     let decryptor = age::Decryptor::new(&ciphertext[..])?;
-    let mut reader = decryptor.decrypt(std::iter::once(&recipient as &dyn age::Identity))?;
+    let mut reader = decryptor.decrypt(std::iter::once(recipient as &dyn age::Identity))?;
     let mut archive = Vec::new();
     reader.read_to_end(&mut archive)?;
     SupportBundle::verify_signed_archive(&archive, signer.identity()).map_err(|_| "binding")?;
@@ -376,8 +442,8 @@ fn authorized_runtime_signer_authenticates_the_final_archive_and_detects_member_
 }
 
 #[test]
-fn signed_archive_cannot_bypass_the_final_archive_bound() -> Result<(), Box<dyn std::error::Error>>
-{
+fn signed_archive_truncates_content_to_preserve_the_final_archive_bound()
+-> Result<(), Box<dyn std::error::Error>> {
     use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
     use positron_kernel::MountQualification;
     use positron_runtime::{BootstrapPaths, InitializationPlan, InstanceBootstrap};
@@ -408,14 +474,22 @@ fn signed_archive_cannot_bypass_the_final_archive_bound() -> Result<(), Box<dyn 
     )?;
     let signer = instance.support_bundle_manifest_signer(actor)?;
     let payload = vec![b'x'; 6_000];
+    let bundle = SupportBundle::build_authenticated(
+        [BundleMember::doctor_report(&payload)],
+        BundleLimits::new(1, 10_240).expect("minimum tar bound"),
+        super::super::ManifestAuthentication::Signed(&signer),
+    )
+    .map_err(|_| "truncated signed bundle")?;
+    assert_eq!(bundle.included_member_count(), 0);
     assert!(
-        SupportBundle::build_authenticated(
-            [BundleMember::doctor_report(&payload)],
-            BundleLimits::new(1, 10_240).expect("minimum tar bound"),
-            super::super::ManifestAuthentication::Signed(&signer),
-        )
-        .is_err()
+        bundle
+            .redaction_report()
+            .declared_omissions()
+            .contains(&"archive_byte_limit")
     );
+    SupportBundle::verify_signed_archive(bundle.archive(), signer.identity())
+        .map_err(|_| "signature")?;
+    assert!(bundle.archive().len() <= 10_240);
     drop(instance);
     fs::remove_dir_all(root)?;
     Ok(())

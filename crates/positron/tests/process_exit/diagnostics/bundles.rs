@@ -101,6 +101,58 @@ fn compiled_support_bundle_enforces_the_bounded_log_window_before_inspection()
 
 #[cfg(unix)]
 #[test]
+fn online_bundle_rejects_source_overrides_before_configuration_or_collection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (root, _roots, config) = initialized_support_bundle_fixture("online-source-bounds")?;
+    let recipient = age::x25519::Identity::generate().to_public().to_string();
+    for (option, value) in [("--log-window-seconds", "1"), ("--max-source-files", "1")] {
+        let result = Command::new(env!("CARGO_BIN_EXE_positron"))
+            .args(["support", "bundle", "create", "--config"])
+            .arg(&config)
+            .args(["--output"])
+            .arg(root.join("missing.age"))
+            .args([
+                "--recipient",
+                recipient.as_str(),
+                "--credential-stdin",
+                "--control-path",
+                "/tmp/missing-positron-control.sock",
+                option,
+                value,
+            ])
+            .output()?;
+        assert_eq!(result.status.code(), Some(2));
+        assert_eq!(
+            String::from_utf8(result.stdout)?,
+            "report_version=1\nstatus=invalid_arguments\nfinding_code=SUPPORT_BUNDLE_ARGUMENTS_INVALID\nseverity=error\n"
+        );
+        assert!(!root.join("missing.age").exists());
+    }
+    let defaults = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["support", "bundle", "create", "--config"])
+        .arg(&config)
+        .args(["--output"])
+        .arg(root.join("missing.age"))
+        .args([
+            "--recipient",
+            recipient.as_str(),
+            "--credential-stdin",
+            "--control-path",
+            "/tmp/missing-positron-control.sock",
+            "--log-window-seconds",
+            "300",
+            "--max-source-files",
+            "32",
+        ])
+        .output()?;
+    assert_eq!(defaults.status.code(), Some(3));
+    assert!(String::from_utf8(defaults.stdout)?.contains("SUPPORT_BUNDLE_AUTHENTICATION_REJECTED"));
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn compiled_support_bundle_reports_an_unavailable_output_directory()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
@@ -625,6 +677,9 @@ fn compiled_support_bundle_declares_collection_bounds_in_every_canonical_output_
         );
         let records = archive_member(&archive, "sanitized-crash-records.txt")?;
         let redaction = archive_member(&archive, "redaction-report.txt")?;
+        assert!(redaction.contains("input_log_window_seconds=60\n"));
+        assert!(redaction.contains("source_file_limit=1\n"));
+        assert!(redaction.contains("excluded_classes=tenant_telemetry,query_results,api_key_secrets_and_hashes,tls_private_keys,encryption_key_material,local_root_key_files,recovery_bundles,provider_credentials,authorization_headers,secret_environment_values,kubernetes_secret_values,raw_memory,core_dumps\n"));
         if mode.requires_credential() {
             assert!(
                 records.contains("record_index=0\n") && !records.contains("record_index=1\n"),

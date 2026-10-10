@@ -340,6 +340,32 @@ impl HealthState {
         Ok(rendered)
     }
 
+    /// Returns recent closed operational records, with an explicit omission
+    /// flag when the monotonic cutoff excludes retained history.
+    pub fn operational_log_snapshot_since(
+        &self,
+        cutoff: std::time::Instant,
+    ) -> Result<(String, bool), OperationalLogFailure> {
+        let (events, omitted, history_truncated) =
+            self.operational_events.snapshot_since(cutoff)?;
+        let mut rendered = format!(
+            "inspection_owner=process_lifecycle\nrecord_count={}\nomitted_outside_window={omitted}\nrecent_history_truncated={history_truncated}\n",
+            events.len()
+        );
+        for (index, event) in events.iter().enumerate() {
+            rendered.push_str(&format!("record_{index}_event={}\n", event.name()));
+        }
+        Ok((rendered, omitted != 0 || history_truncated))
+    }
+
+    /// Bounded counters from the existing operational aggregation owner.
+    #[must_use]
+    pub fn operational_telemetry_snapshot(&self) -> String {
+        let mut rendered = String::new();
+        self.operational_events.metrics(&mut rendered, false);
+        rendered
+    }
+
     /// Structured JSON records from the same bounded, closed event ring.
     pub fn operational_logs_json(&self) -> Result<String, OperationalLogFailure> {
         serde_json::to_string(
@@ -615,6 +641,22 @@ impl HealthState {
     #[must_use]
     pub fn integrity_degraded(&self) -> bool {
         self.integrity_degraded.load(Ordering::Acquire)
+    }
+
+    /// Closed diagnostic status derived from the current Health State.
+    #[must_use]
+    pub fn diagnostic_status(&self) -> &'static str {
+        if self.phase() != ProcessPhase::Serving {
+            "unavailable"
+        } else if self.readiness() == Readiness::NotReady
+            || self.liveness() == Liveness::Dead
+            || self.integrity_degraded()
+            || !self.security_warnings().is_empty()
+        {
+            "degraded"
+        } else {
+            "healthy"
+        }
     }
 
     #[must_use]
@@ -1222,6 +1264,61 @@ mod tests {
     use super::{ProcessPhase, ProcessState, lower_class_queue_delay_breached};
 
     #[test]
+    fn operational_log_snapshot_excludes_records_before_a_monotonic_cutoff() {
+        let state = ProcessState::starting();
+        state.transition(ProcessPhase::Serving);
+        let cutoff = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(1))
+            .expect("test instant");
+        let (recent, omitted) = state
+            .health()
+            .operational_log_snapshot_since(cutoff)
+            .expect("snapshot");
+        assert!(recent.contains("record_count=0\n"));
+        assert!(omitted);
+        assert!(!recent.contains("process_serving"));
+        assert!(
+            state
+                .health()
+                .operational_log_snapshot()
+                .expect("full snapshot")
+                .contains("process_serving")
+        );
+    }
+
+    #[test]
+    fn recent_operational_snapshot_declares_bounded_history_eviction() {
+        let cutoff = std::time::Instant::now();
+        let state = ProcessState::starting();
+        for _ in 0..33 {
+            state.transition(ProcessPhase::Serving);
+        }
+        let (records, omitted) = state
+            .health()
+            .operational_log_snapshot_since(cutoff)
+            .expect("recent snapshot");
+        assert!(records.contains("record_count=32\n"));
+        assert!(records.contains("recent_history_truncated=true\n"));
+        assert!(omitted);
+    }
+
+    #[test]
+    fn diagnostic_health_status_reports_unready_dependencies_and_dead_stopping() {
+        let state = ProcessState::starting();
+        assert_eq!(state.health().diagnostic_status(), "unavailable");
+        state.transition(ProcessPhase::Serving);
+        assert_eq!(state.health().diagnostic_status(), "healthy");
+        state.record_dependency_status(Some(crate::BootstrapFailureCode::ResourceUnavailable));
+        assert_eq!(state.health().readiness(), super::Readiness::NotReady);
+        assert_eq!(state.health().diagnostic_status(), "degraded");
+        state.record_dependency_status(None);
+        state.fail_critical_worker();
+        assert_eq!(state.health().phase(), ProcessPhase::Stopping);
+        assert_eq!(state.health().liveness(), super::Liveness::Dead);
+        assert_eq!(state.health().diagnostic_status(), "unavailable");
+    }
+
+    #[test]
     fn maintenance_integrity_failure_uses_the_canonical_process_phase() {
         let state = ProcessState::starting();
         state.transition(ProcessPhase::Serving);
@@ -1266,6 +1363,7 @@ mod tests {
         assert_eq!(state.health().phase(), ProcessPhase::Serving);
         assert_eq!(state.health().readiness(), super::Readiness::Ready);
         assert!(state.health().integrity_degraded());
+        assert_eq!(state.health().diagnostic_status(), "degraded");
     }
 
     #[test]

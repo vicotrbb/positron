@@ -58,7 +58,7 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                 let signer = instance.support_bundle_manifest_signer(actor).map_err(|_| ())?;
                 let maintenance_inventory = instance.maintenance_bundle_evidence(facts).map_err(|_| ())?;
                 let maintenance = format!("{maintenance}{maintenance_inventory}");
-                let operational_logs = health.operational_log_snapshot().map_err(|_| ())?;
+                let (operational_logs, logs_truncated) = recent_operational_logs(health, started)?;
                 let crash = instance
                     .crash_records()
                     .map_err(|_| ())?
@@ -69,7 +69,7 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                         std::time::SystemTime::now(),
                     )
                     .map_err(|_| ())?;
-                let report = live_doctor_report(&facts);
+                let report = live_doctor_report(&facts, health);
                 let options = BundleOptions {
                     config: PathBuf::new(),
                     output: PathBuf::new(),
@@ -83,13 +83,14 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                     control_path: None,
                     identifier_retention: request.identifier_retention,
                 };
-                let operational = format!(
+                let mut operational = format!(
                     "inspection_mode=online\nprocess_phase=serving\nkey_custody={}\ncatalog_bootstrap={}\ncatalog_generation={}\nbackup_repository={}\n",
                     if facts.key_custody_verified() { "verified" } else { "unavailable" },
                     if facts.catalog_bootstrap_verified() { "verified" } else { "unavailable" },
                     facts.catalog_generation(),
                     facts.backup_repository().label(),
                 );
+                operational.push_str(&health.operational_telemetry_snapshot());
                 let members = live_canonical_members(
                     effective,
                     LiveBundleEvidence {
@@ -97,6 +98,8 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                         operational: &operational,
                         maintenance: &maintenance,
                         operational_logs: &operational_logs,
+                        logs_truncated,
+                        health,
                         crash,
                     },
                     &options,
@@ -139,9 +142,16 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
                         .support_bundle_manifest_signer(actor)
                         .map_err(|_| ())?;
                     let report = fenced_doctor_report(&facts);
-                    let operational_logs = health.operational_log_snapshot().map_err(|_| ())?;
-                    let members =
-                        fenced_canonical_members(&facts, &report, &operational_logs, started)?;
+                    let (operational_logs, logs_truncated) =
+                        recent_operational_logs(health, started)?;
+                    let members = fenced_canonical_members(
+                        &facts,
+                        &report,
+                        &operational_logs,
+                        logs_truncated,
+                        health,
+                        started,
+                    )?;
                     let limits = BundleLimits::new(14, DEFAULT_OUTPUT_LIMIT)
                         .map_err(|_| ())?
                         .with_elapsed_limit(DEFAULT_ELAPSED_LIMIT);
@@ -177,9 +187,15 @@ impl ControlDiagnosticsHandler for LiveSupportBundleCollector {
     }
 }
 
-fn live_doctor_report(facts: &DoctorRuntimeFacts) -> String {
+fn live_doctor_report(facts: &DoctorRuntimeFacts, health: &HealthState) -> String {
     format!(
-        "report_version=1\nmode=online\nstatus=healthy\nfinding_code=DOCTOR_SERVING_OWNER_VERIFIED\nseverity=info\nevidence_scope=authenticated_serving_instance\nprocess_phase=serving\nkey_custody={}\ncatalog_bootstrap={}\ncatalog_generation={}\nbackup_repository={}\nsafe_command=none\n",
+        "report_version=1\nmode=online\nstatus={}\nfinding_code=DOCTOR_SERVING_OWNER_VERIFIED\nseverity={}\nevidence_scope=authenticated_serving_instance\nprocess_phase=serving\nkey_custody={}\ncatalog_bootstrap={}\ncatalog_generation={}\nbackup_repository={}\nsafe_command=none\n",
+        health.diagnostic_status(),
+        if health.diagnostic_status() == "healthy" {
+            "info"
+        } else {
+            "warning"
+        },
         if facts.key_custody_verified() {
             "verified"
         } else {
@@ -217,10 +233,55 @@ fn fenced_doctor_report(facts: &DoctorRuntimeFacts) -> String {
 /// and data listeners. This closed member list records current authenticated
 /// catalog/key facts and typed unavailable runtime families rather than
 /// reusing Serving claims or reconstructing configuration from a stale owner.
+fn recent_operational_logs(health: &HealthState, started: Instant) -> Result<(String, bool), ()> {
+    let cutoff = started.checked_sub(DEFAULT_LOG_WINDOW).ok_or(())?;
+    health
+        .operational_log_snapshot_since(cutoff)
+        .map_err(|_| ())
+}
+
+fn health_evidence(health: &HealthState) -> String {
+    let phase = format!("{:?}", health.phase()).to_ascii_lowercase();
+    let readiness = if health.readiness() == positron_runtime::Readiness::Ready {
+        "ready"
+    } else {
+        "not_ready"
+    };
+    let liveness = if health.liveness() == positron_runtime::Liveness::Live {
+        "live"
+    } else {
+        "dead"
+    };
+    let warnings = health
+        .security_warnings()
+        .into_iter()
+        .map(|warning| warning.label())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "inspection_owner=health_state\nprocess_phase={phase}\nreadiness={readiness}\nliveness={liveness}\nintegrity_degraded={}\nsecurity_warnings={warnings}\nhealth_status={}\n",
+        health.integrity_degraded(),
+        health.diagnostic_status()
+    )
+}
+
+fn operational_log_member(records: &str, truncated: bool) -> BundleMember {
+    if truncated {
+        BundleMember::operational_logs_with_omission(
+            records.as_bytes(),
+            "operational_log_snapshot_truncated",
+        )
+    } else {
+        BundleMember::operational_logs(records.as_bytes())
+    }
+}
+
 fn fenced_canonical_members(
     facts: &DoctorRuntimeFacts,
     doctor: &str,
     operational_logs: &str,
+    logs_truncated: bool,
+    health: &HealthState,
     started: Instant,
 ) -> Result<Vec<BundleMember>, ()> {
     if started.elapsed() > DEFAULT_ELAPSED_LIMIT {
@@ -249,13 +310,11 @@ fn fenced_canonical_members(
         ),
         BundleMember::compatibility_manifest(compatibility.as_bytes()),
         BundleMember::product_identity(product.as_bytes()),
-        BundleMember::health_state(
-            b"inspection_owner=health_state\nprocess_phase=fenced\nreadiness=not_ready\nliveness=live\n",
-        ),
+        BundleMember::health_state(health_evidence(health).as_bytes()),
         BundleMember::operational_telemetry(
-            b"inspection_owner=operational_telemetry_runtime\navailability=unavailable\nreason=retired_after_fence\n",
+            health.operational_telemetry_snapshot().as_bytes(),
         ),
-        BundleMember::operational_logs(operational_logs.as_bytes()),
+        operational_log_member(operational_logs, logs_truncated),
         BundleMember::catalog_summary(
             format!("inspection_owner=authenticated_fenced_catalog\n{current}").as_bytes(),
         ),
@@ -292,6 +351,8 @@ struct LiveBundleEvidence<'a> {
     operational: &'a str,
     maintenance: &'a str,
     operational_logs: &'a str,
+    logs_truncated: bool,
+    health: &'a HealthState,
     crash: positron_kernel::CrashReadout,
 }
 
@@ -313,10 +374,11 @@ fn live_canonical_members(
     for member in &mut members {
         match member.class {
             Some(Class::OperationalLogs) => {
-                member.bytes = evidence.operational_logs.as_bytes().to_vec();
+                *member =
+                    operational_log_member(evidence.operational_logs, evidence.logs_truncated);
             },
             Some(Class::HealthState) => {
-                member.bytes = b"inspection_owner=serving_health_state\nprocess_phase=serving\ninspection_mode=online\n".to_vec();
+                member.bytes = health_evidence(evidence.health).into_bytes();
             },
             Some(Class::CatalogSummary) => {
                 member.bytes = format!(

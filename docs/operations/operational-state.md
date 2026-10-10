@@ -171,3 +171,50 @@ Storage capability tests require writes, so Doctor reports `not_probed_read_only
 pressure, maintenance, and Recovery Reserve facts come from their current runtime owners.
 Offline reports explicitly identify runtime-only families as unavailable. Backup verification and
 purge compatibility remain `not_shipped` until their owning subsystem supplies real observations.
+
+## Support Bundles and Crash Records
+
+Create an encrypted diagnostic export with `positron support bundle create --config FILE
+--output FILE.age --recipient AGE_X25519_RECIPIENT --credential-stdin`. Stop the server
+for offline collection, or add `--control-path PATH` for authenticated online collection.
+The Control collector uses its fixed 1 MiB, 30-second, 300-second recent-record window
+and 32-source-file bounds; offline collection may lower the byte, elapsed-time, window,
+and source-file limits through the corresponding command options. Native age X25519
+recipients are the only accepted encryption recipients. Encrypted archive admission reserves
+the bounded framing for the maximum 16 recipients and payload authentication tags.
+The signed metadata declares both the plaintext archive budget and final output budget;
+source members that exceed the remaining budget produce a declared truncated summary.
+Online source-window or source-file overrides that differ from the fixed Control policy
+are rejected before authentication or collection. Online exports still enforce a smaller
+requested output or client deadline bound.
+
+The closed allowlist excludes telemetry, query output, credentials and hashes, private
+keys, recovery material, secret values, raw memory, and core dumps. Deployment identifiers
+are pseudonymized with one ephemeral per-bundle mapping. An authenticated administrator
+may explicitly request `--retain-identifier data_directory`; the Redaction Report records
+both the requested and applied policy, including unavailable retention after runtime retirement.
+
+The archive manifest binds each included member checksum and the Redaction Report.
+The report lists included and omitted allowlisted classes, prohibited classes, collection
+bounds, omission reasons, encryption, and signature state. If content and metadata exceed
+the archive budget, later admitted members are omitted deterministically and the manifest
+and report are regenerated before signing. Collection never reports omitted content as complete.
+Operational counters come from the existing aggregation owner. Health evidence records
+current readiness, liveness, integrity degradation, and security warnings; a Serving phase
+alone cannot establish healthy status. Recent operational logs apply the declared monotonic
+time window and report both expired records and bounded history eviction.
+
+`--allow-plaintext-bundle` explicitly selects an atomic owner-only plaintext export with
+a persistent security warning in the report. Output cannot replace an existing file or
+enter managed data/secrets directories. `--offline-key-unavailable` permits a stopped,
+exclusively locked instance to export checksum-protected evidence with an explicit unsigned
+reason; it never falls back from rejected authentication or decrypts unavailable crash records.
+
+Crash Records accept only fixed phase, component, and finding vocabulary. They contain
+bounded build/catalog identity and a bounded backtrace fingerprint, never panic payloads
+or backtrace text. The kernel encrypts at most 32 records under existing key custody.
+Unauthenticated, oversized, unknown, unsafe, old, and excess records are excluded with
+declared omissions. Neither collection path repairs storage or changes process state.
+Crash candidates are ordered by canonical record sequence before source-file or byte
+truncation. If the directory inventory itself exceeds its bound, collection emits an
+empty declared summary instead of selecting an unpredictable subset of directory entries.

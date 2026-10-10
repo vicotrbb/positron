@@ -43,7 +43,8 @@ struct Buffer {
     query_budgets: [u64; 8],
     queries: [u64; 5],
     query_duration_micros: u64,
-    records: std::collections::VecDeque<OperationalEvent>,
+    records: std::collections::VecDeque<(std::time::Instant, OperationalEvent)>,
+    last_evicted_record: Option<std::time::Instant>,
     pending: std::collections::VecDeque<OperationalEvent>,
     requests: [[u64; 5]; 4],
     duration_micros: [u64; 4],
@@ -153,14 +154,14 @@ impl OperationalTelemetry {
             return;
         };
         if buffer.records.len() == 32 {
-            buffer.records.pop_front();
+            buffer.last_evicted_record = buffer.records.pop_front().map(|(at, _)| at);
         }
         if buffer.pending.len() == 32 {
             buffer.pending.pop_front();
             self.dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        buffer.records.push_back(event);
+        buffer.records.push_back((std::time::Instant::now(), event));
         buffer.pending.push_back(event);
     }
     pub(crate) fn record_request(
@@ -208,8 +209,26 @@ impl OperationalTelemetry {
     ) -> Result<Vec<OperationalEvent>, crate::health::OperationalLogFailure> {
         self.buffer
             .lock()
-            .map(|buffer| buffer.records.iter().copied().collect())
+            .map(|buffer| buffer.records.iter().map(|(_, event)| *event).collect())
             .map_err(|_| crate::health::OperationalLogFailure::Unavailable)
+    }
+    pub(crate) fn snapshot_since(
+        &self,
+        cutoff: std::time::Instant,
+    ) -> Result<(Vec<OperationalEvent>, usize, bool), crate::health::OperationalLogFailure> {
+        let buffer = self
+            .buffer
+            .lock()
+            .map_err(|_| crate::health::OperationalLogFailure::Unavailable)?;
+        let events: Vec<_> = buffer
+            .records
+            .iter()
+            .filter(|(at, _)| *at >= cutoff)
+            .map(|(_, event)| *event)
+            .collect();
+        let omitted = buffer.records.len().saturating_sub(events.len());
+        let history_truncated = buffer.last_evicted_record.is_some_and(|at| at >= cutoff);
+        Ok((events, omitted, history_truncated))
     }
     pub(crate) fn take_pending(&self) -> Result<Option<OperationalEvent>, crate::TaskFailure> {
         self.buffer
