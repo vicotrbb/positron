@@ -1,4 +1,5 @@
-//! Native Transit v1 wire fields from Vault v2.1.2, commit 76fdd658.
+//! Independently verified native Transit v1 fields: Vault 2.1.2 (76fdd658)
+//! and OpenBao 2.7.1 (a5db72ce). See each target's operations document.
 use super::super::wire::SecretText;
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -85,9 +86,17 @@ struct Health<'a> {
     sealed: bool,
     standby: bool,
 }
-pub(super) fn verify_health(bytes: &[u8]) -> Result<(), KeyProviderFailure> {
+pub(super) fn verify_health(
+    bytes: &[u8],
+    family: ProviderFamily,
+) -> Result<(), KeyProviderFailure> {
     let health: Health<'_> = parse(bytes)?;
-    if health.version.as_str() != "2.1.2" {
+    let expected = match family {
+        ProviderFamily::VaultTransit => "2.1.2",
+        ProviderFamily::OpenBaoTransit => "2.7.1",
+        _ => return Err(KeyProviderFailure::InvalidConfiguration),
+    };
+    if health.version.as_str() != expected {
         return Err(KeyProviderFailure::InvalidConfiguration);
     }
     if !health.initialized || health.sealed || health.standby {
@@ -115,6 +124,7 @@ struct Metadata<'a> {
     min_encryption_version: u32,
     latest_version: u32,
     keys: std::collections::BTreeMap<String, i64>,
+    soft_deleted: Option<bool>,
 }
 pub(super) fn verify_metadata(
     bytes: &[u8],
@@ -122,6 +132,9 @@ pub(super) fn verify_metadata(
     wrapping: bool,
 ) -> Result<(), KeyProviderFailure> {
     let metadata = parse::<MetadataReply<'_>>(bytes)?.data;
+    if identity.family() == ProviderFamily::OpenBaoTransit && metadata.soft_deleted != Some(false) {
+        return Err(KeyProviderFailure::PermissionDenied);
+    }
     let version = identity
         .version()
         .parse::<u32>()

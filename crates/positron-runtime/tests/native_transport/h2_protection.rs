@@ -144,7 +144,7 @@ async fn grpc_idle_connection_after_response_survives_the_header_deadline()
 
     let (response, mut body) = sender.send_request(harness.request()?, false)?;
     body.send_data(Bytes::from(harness.grpc_message("first")), true)?;
-    assert_success(response).await?;
+    assert_success(response, "first export before idle").await?;
     tokio::time::sleep(Duration::from_millis(1_250)).await;
 
     let (response, mut body) = sender.send_request(harness.request()?, false)?;
@@ -152,7 +152,7 @@ async fn grpc_idle_connection_after_response_survives_the_header_deadline()
         Bytes::from(harness.grpc_message("after-header-deadline")),
         true,
     )?;
-    assert_success(response).await?;
+    assert_success(response, "second export after header deadline").await?;
     drop(sender);
     connection.abort();
     let _ = connection.await;
@@ -264,9 +264,10 @@ impl Drop for GrpcHarness {
 
 async fn assert_success(
     response: h2::client::ResponseFuture,
+    phase: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = tokio::time::timeout(Duration::from_secs(2), response).await??;
-    assert_grpc_status(response, "0").await?;
+    assert_grpc_status(response, "0", phase).await?;
     Ok(())
 }
 
@@ -284,7 +285,7 @@ where
         .body(())?;
     let (response, _) = sender.send_request(request, true)?;
     let response = tokio::time::timeout(Duration::from_secs(2), response).await??;
-    assert_grpc_status(response, "16").await?;
+    assert_grpc_status(response, "16", "unauthenticated export").await?;
     drop(sender);
     connection.abort();
     let _ = connection.await;
@@ -306,7 +307,7 @@ async fn fresh_authenticated_export(
         })?;
     body.send_data(Bytes::from(harness.grpc_message("capacity-reused")), true)
         .map_err(|error| std::io::Error::other(format!("fresh gRPC body was reset: {error}")))?;
-    assert_success(response)
+    assert_success(response, "fresh capacity reuse export")
         .await
         .map_err(|error| std::io::Error::other(format!("fresh gRPC export failed: {error}")))?;
     drop(sender);
@@ -318,6 +319,7 @@ async fn fresh_authenticated_export(
 async fn assert_grpc_status(
     response: http::Response<h2::RecvStream>,
     expected: &str,
+    phase: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(response.status(), 200);
     let headers = response.headers().clone();
@@ -331,7 +333,11 @@ async fn assert_grpc_status(
         metadata
             .get("grpc-status")
             .and_then(|value| value.to_str().ok()),
-        Some(expected)
+        Some(expected),
+        "{phase}: public gRPC message {:?}",
+        metadata
+            .get("grpc-message")
+            .and_then(|value| value.to_str().ok())
     );
     Ok(())
 }
