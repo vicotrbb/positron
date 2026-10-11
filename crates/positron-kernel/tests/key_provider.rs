@@ -10,6 +10,28 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn vault_transit_identity_refuses_url_normalization_and_unpinned_mounts() {
+    for locator in [
+        "https://vault.example/v1/transit/keys/../root",
+        "https://vault.example/v1/transit/keys/root%2fother",
+        "https://vault.example/v1/transit/keys/root/extra",
+        "https://vault.example/transit/keys/root",
+        "https://vault.example/v1/../transit/keys/root",
+        "https://vault.example/v1/transit//keys/root",
+    ] {
+        assert!(ProviderKeyUri::new(ProviderFamily::VaultTransit, locator, "1").is_err());
+    }
+    assert!(
+        ProviderKeyUri::new(
+            ProviderFamily::VaultTransit,
+            "https://vault.example/v1/transit/keys/root",
+            "01"
+        )
+        .is_err()
+    );
+}
 struct Root(PathBuf);
 impl Root {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -356,3 +378,6 @@ fn google_native_identity_failure_releases_real_refresh_ownership_before_runtime
 
 #[path = "key_provider/azure.rs"]
 mod azure;
+
+#[path = "key_provider/vault.rs"]
+mod vault;

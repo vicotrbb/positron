@@ -25,6 +25,7 @@ mod local;
 pub(super) mod owner;
 mod payload;
 mod session;
+mod vault;
 pub use cache::{CacheInvalidation, KeyCacheHealth, KeyCacheLease, KeyProviderCache};
 #[cfg(test)]
 pub(in crate::data_protection) use cache::{observe_cache_release, with_cache_lock_failure};
@@ -38,6 +39,7 @@ pub use payload::{
     EnvelopeContext, KeyEnvelope, KeyScope, SecretKek, SecretWrappedKeyPayload, WrappingAlgorithm,
 };
 pub use session::KeyProviderSession;
+pub use vault::VaultTransitKeyProvider;
 
 /// Capabilities verified against the exact pre-provisioned key, never an alias.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,7 +116,8 @@ impl ProviderKeyUri {
             },
             ProviderFamily::AzureKeyVault => azure_key_uri(locator, version, false),
             ProviderFamily::AzureManagedHsm => azure_key_uri(locator, version, true),
-            ProviderFamily::VaultTransit | ProviderFamily::OpenBaoTransit => {
+            ProviderFamily::VaultTransit => vault_key_uri(locator, version),
+            ProviderFamily::OpenBaoTransit => {
                 positive_version
                     && locator.starts_with("https://")
                     && locator
@@ -145,6 +148,37 @@ impl ProviderKeyUri {
     pub fn version(&self) -> &str {
         &self.version
     }
+}
+
+fn vault_key_uri(locator: &str, version: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(locator) else {
+        return false;
+    };
+    let Some(path) = url.path().strip_prefix("/v1/") else {
+        return false;
+    };
+    let Some((mount, name)) = path.rsplit_once("/keys/") else {
+        return false;
+    };
+    let component = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 128
+            && !matches!(part, "." | "..")
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    url.scheme() == "https"
+        && url.as_str() == locator
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && mount.split('/').all(component)
+        && component(name)
+        && !version.starts_with('0')
+        && version.parse::<i32>().is_ok_and(|v| v > 0)
 }
 
 /// Google resource names route requests directly, so reject path normalization.

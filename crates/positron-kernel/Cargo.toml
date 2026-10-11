@@ -92,4 +92,5 @@ path = "tests/key_provider.rs"
 workspace = true
 
 [dev-dependencies]
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["test-util"] }
