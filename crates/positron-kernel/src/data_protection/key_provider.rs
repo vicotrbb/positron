@@ -2,7 +2,9 @@
 
 use std::fmt::{Display, Formatter};
 
+mod aws;
 mod cache;
+pub use aws::AwsKmsKeyProvider;
 mod conformance;
 pub use conformance::{
     ConformanceFailure, ConformanceStep, KeyProviderConformance, ProviderConformanceTarget,
@@ -98,19 +100,7 @@ impl ProviderKeyUri {
         };
         let positive_version = version.parse::<u64>().is_ok_and(|value| value > 0);
         let pinned = match family {
-            ProviderFamily::AwsKms => {
-                version == "immutable"
-                    && locator.starts_with("arn:")
-                    && locator.contains(":kms:")
-                    && locator.rsplit_once(":key/").is_some_and(|(_, key)| {
-                        !key.is_empty()
-                            && !key.contains('/')
-                            && key.bytes().all(|byte| {
-                                byte.is_ascii_hexdigit()
-                                    || matches!(byte, b'-' | b'm' | b'r' | b'k')
-                            })
-                    })
-            },
+            ProviderFamily::AwsKms => version == "immutable" && aws_arn_parts(locator).is_some(),
             ProviderFamily::GoogleCloudKms => {
                 positive_version
                     && locator.starts_with("projects/")
@@ -160,6 +150,91 @@ impl ProviderKeyUri {
     pub fn version(&self) -> &str {
         &self.version
     }
+}
+
+/// Exact immutable AWS key ARN; aliases and partial key IDs cannot route calls.
+fn aws_arn_parts(locator: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = locator.split(':');
+    if parts.next()? != "arn" {
+        return None;
+    }
+    let partition = parts.next()?;
+    if !matches!(
+        partition,
+        "aws"
+            | "aws-cn"
+            | "aws-eusc"
+            | "aws-us-gov"
+            | "aws-iso"
+            | "aws-iso-b"
+            | "aws-iso-e"
+            | "aws-iso-f"
+    ) || parts.next()? != "kms"
+    {
+        return None;
+    }
+    let region = parts.next()?;
+    if region.is_empty()
+        || region.len() > 63
+        || !region
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return None;
+    }
+    // Pinned AWS partition model, without a list of individual regions.
+    let prefix = match partition {
+        "aws" => {
+            let (geography, _) = region.split_once('-')?;
+            if !matches!(
+                geography,
+                "us" | "eu" | "ap" | "sa" | "ca" | "me" | "af" | "il" | "mx"
+            ) {
+                return None;
+            }
+            geography
+        },
+        "aws-cn" => "cn",
+        "aws-eusc" => "eusc-de",
+        "aws-us-gov" => "us-gov",
+        "aws-iso" => "us-iso",
+        "aws-iso-b" => "us-isob",
+        "aws-iso-e" => "eu-isoe",
+        "aws-iso-f" => "us-isof",
+        _ => return None,
+    };
+    let (area, number) = region
+        .strip_prefix(prefix)?
+        .strip_prefix('-')?
+        .rsplit_once('-')?;
+    if area.is_empty()
+        || !area.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        || number.is_empty()
+        || !number.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let account = parts.next()?;
+    if account.len() != 12 || !account.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let key = parts.next()?.strip_prefix("key/")?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let valid = if let Some(id) = key.strip_prefix("mrk-") {
+        id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    } else {
+        key.len() == 36
+            && key.bytes().enumerate().all(|(index, byte)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            })
+    };
+    valid.then_some((partition, region, key))
 }
 
 /// Secret-free classifications. Provider response bodies must never be attached.

@@ -189,6 +189,11 @@ impl KeyEnvelope {
         algorithm: WrappingAlgorithm,
         ciphertext: Vec<u8>,
     ) -> Result<Self, KeyProviderFailure> {
+        if provider.family == ProviderFamily::AwsKms
+            && algorithm != WrappingAlgorithm::AwsKmsSymmetricDefault
+        {
+            return Err(KeyProviderFailure::ContextMismatch);
+        }
         if ciphertext.is_empty()
             || ciphertext.len() > 8192
             || (provider.family == ProviderFamily::LocalFile
@@ -220,6 +225,11 @@ impl KeyEnvelope {
     ) -> Result<(), KeyProviderFailure> {
         if &self.provider != provider {
             return Err(KeyProviderFailure::WrongKey);
+        }
+        if provider.family == ProviderFamily::AwsKms
+            && self.algorithm != WrappingAlgorithm::AwsKmsSymmetricDefault
+        {
+            return Err(KeyProviderFailure::ContextMismatch);
         }
         if self.context != context || self.digest != context.digest(provider)? {
             return Err(KeyProviderFailure::ContextMismatch);

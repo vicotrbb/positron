@@ -13,7 +13,9 @@ fn compaction_preserves_every_public_log_semantic_across_restart() -> Result<(),
     )?;
     let tenant = TenantId::from_bytes([0x41; 16])?;
     let scope = SegmentScope::new(tenant, SignalKind::Logs, VirtualShardId::new(6)?);
-    let retention_time = RetentionTimeAuthority::establish()?;
+    // Keep the source segments in one bucket regardless of wall-clock boundaries.
+    let (retention_time, _) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
     let key = || SegmentProtectionKey::from_owned(Box::new([0x94; 32]));
     let store = LogStore::new();
     let first = ActiveSegmentLedger::open_with_retention_time(

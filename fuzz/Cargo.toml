@@ -7,6 +7,10 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+[patch.crates-io]
+aws-types = { path = "../vendor/aws-types-1.6.0" }
+aws-config = { path = "../vendor/aws-config-1.12.0" }
+
 [dependencies]
 age = "=0.11.5"
 libfuzzer-sys = "0.4"
