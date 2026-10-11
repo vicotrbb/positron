@@ -2717,6 +2717,7 @@ dependencies = [
  "resolv-conf",
  "ring",
  "rustix",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",

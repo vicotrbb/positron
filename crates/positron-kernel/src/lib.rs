@@ -83,7 +83,7 @@ pub mod key_provider {
         KeyCacheHealth, KeyCacheLease, KeyEnvelope, KeyProviderConformance, KeyProviderFailure,
         KeyScope, LocalKeyProvider, ProviderConformanceTarget, ProviderCredentialModel,
         ProviderFailureDisposition, ProviderFamily, ProviderKeyUri, TransitAuthentication,
-        WrappingAlgorithm,
+        VaultTransitKeyProvider, WrappingAlgorithm,
     };
     #[cfg(fuzzing)]
     #[doc(hidden)]

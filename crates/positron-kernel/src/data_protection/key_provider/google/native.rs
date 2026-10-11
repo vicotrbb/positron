@@ -105,6 +105,7 @@ pub(in crate::data_protection::key_provider) struct NativeRuntime {
     resources: Arc<dns::Resources>,
     counts: Arc<Counts>,
     dns: dns::NativeDns,
+    tls_roots: Vec<reqwest::Certificate>,
 }
 impl std::fmt::Debug for NativeRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -120,6 +121,7 @@ impl NativeRuntime {
         Ok(Arc::new(Self {
             resources,
             dns,
+            tls_roots: Vec::new(),
             counts: Arc::new(Counts {
                 tasks: AtomicUsize::new(0),
                 http: AtomicUsize::new(0),
@@ -129,6 +131,59 @@ impl NativeRuntime {
                 connections: AtomicUsize::new(0),
             }),
         }))
+    }
+    /// Additional operator-selected public CA roots, never an insecure TLS mode.
+    pub(in crate::data_protection::key_provider) fn add_trust_roots(
+        &mut self,
+        pem: &[u8],
+    ) -> Result<(), KeyProviderFailure> {
+        if pem.len() > 32768 {
+            return Err(KeyProviderFailure::LimitExceeded);
+        }
+        let roots = reqwest::Certificate::from_pem_bundle(pem)
+            .map_err(|_| KeyProviderFailure::InvalidConfiguration)?;
+        if roots.is_empty() || roots.len() > 16 {
+            return Err(KeyProviderFailure::InvalidConfiguration);
+        }
+        self.tls_roots = roots;
+        Ok(())
+    }
+    pub(in crate::data_protection::key_provider) fn read_trust_roots(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Zeroizing<Vec<u8>>, KeyProviderFailure> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let _lease = self
+            .acquire(Kind::Files, 4)
+            .map_err(super::native_failure)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            )
+            .open(path)
+            .map_err(|_| KeyProviderFailure::InvalidConfiguration)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| KeyProviderFailure::Unavailable)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || ![0, rustix::process::geteuid().as_raw()].contains(&metadata.uid())
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(KeyProviderFailure::PermissionDenied);
+        }
+        if metadata.len() > 32768 {
+            return Err(KeyProviderFailure::LimitExceeded);
+        }
+        let mut bytes = Zeroizing::new(Vec::with_capacity(32769));
+        file.take(32769)
+            .read_to_end(&mut bytes)
+            .map_err(|_| KeyProviderFailure::Unavailable)?;
+        if bytes.len() > 32768 {
+            return Err(KeyProviderFailure::LimitExceeded);
+        }
+        Ok(bytes)
     }
     fn acquire(&self, kind: Kind, maximum: usize) -> native::Result<Lease> {
         self.counts
@@ -184,8 +239,11 @@ impl NativeRuntime {
             counts: self.counts.clone(),
             refused: AtomicBool::new(false),
         });
-        let builder = credentials_http::client_builder(self.dns.clone())
+        let mut builder = credentials_http::client_builder(self.dns.clone())
             .connection_task_executor(executor.clone());
+        for certificate in &self.tls_roots {
+            builder = builder.add_root_certificate(certificate.clone());
+        }
         let client = match uri.scheme() {
             "https" => builder
                 .https_only(true)
