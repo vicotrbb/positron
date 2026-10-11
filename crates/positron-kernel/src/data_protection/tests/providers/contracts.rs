@@ -403,7 +403,7 @@ fn external_key_envelope_preserves_its_actual_wrapping_algorithm()
     let identity = ProviderKeyUri::new(
         ProviderFamily::Kmip21,
         "kmip://hsm.test/objects/immutable-id",
-        "immutable",
+        "sha256:0606060606060606060606060606060606060606060606060606060606060606",
     )?;
     let context = EnvelopeContext::new([1; 16], KeyScope::System, [2; 32], 1, 1)?;
     let envelope = protection::key_provider::KeyEnvelope::from_provider_response(

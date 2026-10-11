@@ -152,6 +152,13 @@ impl NativeRuntime {
         &self,
         path: &std::path::Path,
     ) -> Result<Zeroizing<Vec<u8>>, KeyProviderFailure> {
+        self.read_protected(path, false)
+    }
+    pub(in crate::data_protection::key_provider) fn read_protected(
+        &self,
+        path: &std::path::Path,
+        private: bool,
+    ) -> Result<Zeroizing<Vec<u8>>, KeyProviderFailure> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         let _lease = self
             .acquire(Kind::Files, 4)
@@ -170,6 +177,9 @@ impl NativeRuntime {
             || metadata.nlink() != 1
             || ![0, rustix::process::geteuid().as_raw()].contains(&metadata.uid())
             || metadata.mode() & 0o022 != 0
+            || (private
+                && (metadata.uid() != rustix::process::geteuid().as_raw()
+                    || metadata.mode() & 0o077 != 0))
         {
             return Err(KeyProviderFailure::PermissionDenied);
         }
@@ -184,6 +194,12 @@ impl NativeRuntime {
             return Err(KeyProviderFailure::LimitExceeded);
         }
         Ok(bytes)
+    }
+    pub(in crate::data_protection::key_provider) async fn native_addresses(
+        &self,
+        host: &str,
+    ) -> Result<Vec<std::net::SocketAddr>, KeyProviderFailure> {
+        self.dns.addresses(host).await
     }
     fn acquire(&self, kind: Kind, maximum: usize) -> native::Result<Lease> {
         self.counts

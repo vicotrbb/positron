@@ -21,7 +21,9 @@ mod google;
 pub use google::GoogleCloudKmsKeyProvider;
 #[cfg(fuzzing)]
 mod fuzzing;
+mod kmip;
 mod local;
+pub use kmip::Kmip21KeyProvider;
 mod openbao;
 pub(super) mod owner;
 mod payload;
@@ -121,7 +123,14 @@ impl ProviderKeyUri {
             ProviderFamily::VaultTransit | ProviderFamily::OpenBaoTransit => {
                 transit_key_uri(locator, version)
             },
-            ProviderFamily::Kmip21 => version == "immutable",
+            ProviderFamily::Kmip21 => {
+                version.strip_prefix("sha256:").is_some_and(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+                }) && kmip_key_uri(locator)
+            },
             ProviderFamily::LocalFile => true,
         };
         if !text(locator, 512) || !text(version, 128) || !pinned {
@@ -145,6 +154,31 @@ impl ProviderKeyUri {
     pub fn version(&self) -> &str {
         &self.version
     }
+}
+
+fn kmip_key_uri(locator: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(locator) else {
+        return false;
+    };
+    let Some(object) = url.path().strip_prefix("/objects/") else {
+        return false;
+    };
+    url.scheme() == "kmip"
+        && url.as_str() == locator
+        && url.host_str().is_some_and(|host| {
+            rustls_pki_types::ServerName::try_from(host.trim_matches(['[', ']'])).is_ok()
+        })
+        && url.port() != Some(0)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && !object.is_empty()
+        && object.len() <= 256
+        && !matches!(object, "." | "..")
+        && object
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 fn transit_key_uri(locator: &str, version: &str) -> bool {

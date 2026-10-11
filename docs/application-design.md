@@ -906,6 +906,13 @@ Google Cloud KMS, Azure Key Vault and Managed HSM, Vault Transit, OpenBao
 Transit, and KMIP 2.1. Rotation and migration are Data Protection workflows
 over immutable Key Epochs and multiple envelopes, not extra provider methods.
 
+The [KMIP 2.1 adapter](operations/kmip-21.md) uses authenticated binary TTLV,
+an exact object identifier and Raw SHA-256 material fingerprint in the existing
+Provider Key URI version field. Its server policy must prevent replacement or
+rebinding throughout that object's use and recovery lifetime, as required by
+ADR 0042. The adapter checks metadata before remote encryption and decryption;
+KMIP does not offer an atomic digest condition on those operations.
+
 Local Recovery Bundle creation and verification are explicit Data Protection
 workflows. A bundle is never a Backup Snapshot or Key Provider adapter, and
 backup readiness remains false until the applicable local or external recovery
