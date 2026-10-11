@@ -16,6 +16,9 @@ default = []
 test-support = []
 
 [dependencies]
+azure_identity = { version = "=1.0.0", default-features = false }
+azure_core = { version = "=1.0.0", default-features = false }
+async-trait = "=0.1.89"
 hickory-resolver = { version = "=0.26.3", default-features = false, features = ["tokio"] }
 resolv-conf = "=0.7.6"
 aws-config = { version = "=1.12.0", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }

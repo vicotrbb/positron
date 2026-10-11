@@ -3,6 +3,9 @@
 use std::fmt::{Display, Formatter};
 
 mod aws;
+mod azure;
+mod wire;
+pub use azure::{AzureKeyVaultKeyProvider, AzureManagedIdentityId, AzureWorkloadIdentity};
 mod cache;
 pub use aws::AwsKmsKeyProvider;
 mod conformance;
@@ -106,7 +109,8 @@ impl ProviderKeyUri {
             ProviderFamily::GoogleCloudKms => {
                 positive_version && google_version_resource(locator, version)
             },
-            ProviderFamily::AzureKeyVault | ProviderFamily::AzureManagedHsm => {
+            ProviderFamily::AzureKeyVault => azure_key_vault_uri(locator, version),
+            ProviderFamily::AzureManagedHsm => {
                 locator.starts_with("https://")
                     && locator.split_once("/keys/").is_some_and(|(_, path)| {
                         path.split_once('/').is_some_and(|(name, actual)| {
@@ -297,4 +301,38 @@ impl KeyProviderFailure {
             _ => ProviderFailureDisposition::Permanent,
         }
     }
+}
+
+/// Public Azure vault DNS names only; aliases, HSM endpoints and URL normalization are refused.
+fn azure_key_vault_uri(locator: &str, version: &str) -> bool {
+    let Some((host, path)) = locator
+        .strip_prefix("https://")
+        .and_then(|s| s.split_once("/keys/"))
+    else {
+        return false;
+    };
+    let vault = [
+        ".vault.azure.net",
+        ".vault.azure.cn",
+        ".vault.usgovcloudapi.net",
+    ]
+    .iter()
+    .find_map(|suffix| host.strip_suffix(suffix));
+    vault.is_some_and(|vault| {
+        (3..=24).contains(&vault.len())
+            && !vault.starts_with('-')
+            && !vault.ends_with('-')
+            && !vault.contains("--")
+            && vault
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    }) && path.split_once('/').is_some_and(|(name, actual)| {
+        !name.is_empty()
+            && name.len() <= 127
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && actual == version
+    }) && version.len() == 32
+        && version
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }

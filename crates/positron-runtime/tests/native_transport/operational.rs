@@ -23,6 +23,32 @@ impl TraceService for Collector {
     }
 }
 
+struct HeldExport {
+    request: ExportTraceServiceRequest,
+    arrived: std::time::Instant,
+    release: tokio::sync::oneshot::Sender<()>,
+}
+struct HeldCollector(std::sync::mpsc::SyncSender<HeldExport>);
+#[tonic::async_trait]
+impl TraceService for HeldCollector {
+    async fn export(
+        &self,
+        request: tonic::Request<ExportTraceServiceRequest>,
+    ) -> Result<tonic::Response<ExportTraceServiceResponse>, tonic::Status> {
+        let (release, held) = tokio::sync::oneshot::channel();
+        self.0
+            .try_send(HeldExport {
+                request: request.into_inner(),
+                arrived: std::time::Instant::now(),
+                release,
+            })
+            .map_err(|_| tonic::Status::resource_exhausted("bounded collector"))?;
+        held.await
+            .map_err(|_| tonic::Status::cancelled("collector response released"))?;
+        Ok(tonic::Response::new(ExportTraceServiceResponse::default()))
+    }
+}
+
 #[test]
 fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -302,10 +328,7 @@ fn stalled_collector_has_bounded_deadline_and_drain_starts_no_more_exports()
                 tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?,
             );
             tonic::transport::Server::builder()
-                .add_service(TraceServiceServer::new(Collector(
-                    sent,
-                    Duration::from_millis(1500),
-                )))
+                .add_service(TraceServiceServer::new(HeldCollector(sent)))
                 .serve_with_incoming_shutdown(incoming, async {
                     let _ = stopped.await;
                 })
@@ -313,62 +336,130 @@ fn stalled_collector_has_bounded_deadline_and_drain_starts_no_more_exports()
                 .map_err(|error| error.to_string())
         })
     });
-    let (process, administrator, _, _) = operational_process(&roots, destination, false)?;
-    received.recv_timeout(Duration::from_secs(2))?;
-    let operations = address(
-        &process.bound_endpoints(),
-        positron_runtime::ListenerRole::Operations,
-    )?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        let scrape = http(
-            operations,
-            "GET",
-            "/metrics",
-            &[("Authorization", &format!("Bearer {administrator}"))],
-            b"",
-        )?;
-        if scrape.lines().any(|line| {
-            line.strip_prefix("positron_operational_trace_failures_total ")
-                .and_then(|value| value.parse::<u64>().ok())
-                .is_some_and(|value| value > 0)
-        }) {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "bounded stalled-collector outcome: {scrape}"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    let api = address(
-        &process.bound_endpoints(),
-        positron_runtime::ListenerRole::Api,
-    )?;
-    assert_status(
-        http(
-            api,
-            "GET",
-            "/deadline-canary",
-            &[("Authorization", &format!("Bearer {administrator}"))],
-            b"",
-        )?,
-        404,
-    );
-    // Synchronize on the next actual send, then drain while it is in flight.
-    received.recv_timeout(Duration::from_secs(2))?;
-    let mut draining = process.begin_shutdown();
-    assert!(received.recv_timeout(Duration::from_millis(1200)).is_err());
-    draining.poll()?;
-    assert_eq!(
-        draining.finish(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
-    stop.send(()).map_err(|_| "collector stopped early")?;
-    collector
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<(), Box<dyn std::error::Error>> {
+            let (process, administrator, _, _) = operational_process(&roots, destination, false)?;
+            let initial = received
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| format!("initial stalled export arrival: {error}"))?;
+            let counter = |metric: &str| -> Result<u64, Box<dyn std::error::Error>> {
+                process
+                    .health()
+                    .operational_telemetry_snapshot()
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&format!("{metric} ")))
+                    .ok_or_else(|| format!("missing counter {metric}").into())
+                    .and_then(|value| Ok(value.parse()?))
+            };
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while counter("positron_operational_trace_failures_total")? == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "bounded stalled export"
+                );
+                std::thread::yield_now();
+            }
+            drop(initial.release);
+            let failures = counter("positron_operational_trace_failures_total")?;
+            let api = address(
+                &process.bound_endpoints(),
+                positron_runtime::ListenerRole::Api,
+            )?;
+            let request = |path| -> Result<(), Box<dyn std::error::Error>> {
+                assert_status(
+                    http(
+                        api,
+                        "GET",
+                        path,
+                        &[("Authorization", &format!("Bearer {administrator}"))],
+                        b"",
+                    )?,
+                    404,
+                );
+                Ok(())
+            };
+            // A completed marker flushes every earlier FIFO startup export. Counter reads
+            // use the public health port and generate no additional request events.
+            request("/deadline-marker")?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let arrival = received
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .map_err(|error| format!("marker export arrival: {error}"))?;
+                let marker = arrival
+                    .request
+                    .resource_spans
+                    .iter()
+                    .flat_map(|resource| &resource.scope_spans)
+                    .flat_map(|scope| &scope.spans)
+                    .any(|span| span.name == "request_completed");
+                let exported = counter("positron_operational_trace_exported_total")?;
+                arrival
+                    .release
+                    .send(())
+                    .map_err(|_| "export handler canceled before marker acknowledgment")?;
+                if marker {
+                    while counter("positron_operational_trace_exported_total")? == exported {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "marker response completion"
+                        );
+                        std::thread::yield_now();
+                    }
+                    break;
+                }
+            }
+            assert_eq!(
+                counter("positron_operational_trace_failures_total")?,
+                failures
+            );
+            let canary_started = std::time::Instant::now();
+            request("/deadline-canary")?;
+            let canary = received
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| format!("canary export arrival: {error}"))?;
+            assert!(
+                canary
+                    .request
+                    .resource_spans
+                    .iter()
+                    .flat_map(|resource| &resource.scope_spans)
+                    .flat_map(|scope| &scope.spans)
+                    .any(|span| span.name == "request_completed")
+            );
+            assert!(canary_started.elapsed() < Duration::from_secs(1));
+            assert!(canary.arrived.elapsed() < Duration::from_secs(1));
+            assert!(
+                !canary.release.is_closed(),
+                "canary handler must remain pending at Drain"
+            );
+            assert_eq!(
+                counter("positron_operational_trace_failures_total")?,
+                failures
+            );
+            let mut draining = process.begin_shutdown();
+            assert!(received.recv_timeout(Duration::from_millis(1200)).is_err());
+            draining.poll()?;
+            assert_eq!(
+                draining.finish(ShutdownTrigger::FirstSignal),
+                positron_runtime::ExitOutcome::Graceful
+            );
+            drop(canary.release);
+            Ok(())
+        },
+    ));
+    drop(received);
+    let stopped = stop.send(()).map_err(|_| "collector stopped early");
+    let joined = collector
         .join()
-        .map_err(|_| "collector panic")?
-        .map_err(std::io::Error::other)?;
+        .map_err(|_| "collector panic")
+        .and_then(|result| result.map_err(|_| "collector server failed"));
+    match outcome {
+        Ok(result) => result?,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+    stopped?;
+    joined?;
     Ok(())
 }
 
@@ -406,5 +497,36 @@ fn fenced_metrics_preserve_authenticated_process_truth_and_explicit_owner_absenc
     assert!(scrape.contains("positron_operational_owner_available 0\n"));
     assert!(!scrape.contains("positron_resource_usage{"));
     shutdown_gracefully(process, &roots)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn controlled_collector_receipt_keeps_the_exact_rpc_pending_until_release()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let collector = HeldCollector(sent);
+    let request = ExportTraceServiceRequest::default();
+    let call = collector.export(tonic::Request::new(request.clone()));
+    tokio::pin!(call);
+    tokio::select! {
+        biased;
+        result = &mut call => panic!("collector completed before receipt ownership: {result:?}"),
+        () = tokio::task::yield_now() => {},
+    }
+    let arrival = received.try_recv()?;
+    assert_eq!(arrival.request, request);
+    tokio::select! {
+        biased;
+        result = &mut call => panic!("receipt alone completed held RPC: {result:?}"),
+        () = tokio::task::yield_now() => {},
+    }
+    arrival
+        .release
+        .send(())
+        .map_err(|_| "held RPC ended before release")?;
+    assert_eq!(
+        call.await?.into_inner(),
+        ExportTraceServiceResponse::default()
+    );
     Ok(())
 }

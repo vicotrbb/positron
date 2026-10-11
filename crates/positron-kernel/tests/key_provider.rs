@@ -4,7 +4,7 @@
 use positron_kernel::BootstrapKeyCustody;
 use positron_kernel::key_provider::{
     EnvelopeContext, KeyEnvelope, KeyProviderConformance, KeyScope, LocalKeyProvider,
-    ProviderConformanceTarget, ProviderFamily,
+    ProviderConformanceTarget, ProviderFamily, ProviderKeyUri,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -353,3 +353,6 @@ fn google_native_identity_failure_releases_real_refresh_ownership_before_runtime
     drop(runtime);
     Ok(())
 }
+
+#[path = "key_provider/azure.rs"]
+mod azure;

@@ -142,7 +142,8 @@ fn spawn_status_body(
 ) -> JoinHandle<io::Result<()>> {
     thread::spawn(move || {
         let mut stream = accept_direct_request(&listener, &done, "status listener")?;
-        read_request(&mut stream)?;
+        let request_deadline = Instant::now() + REQUEST_BOUND;
+        read_request(&mut stream, request_deadline)?;
         stream.write_all(
             format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -163,7 +164,8 @@ fn spawn_proxy_listener(
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    read_request(&mut stream)?;
+                    let request_deadline = Instant::now() + REQUEST_BOUND;
+                    read_request(&mut stream, request_deadline)?;
                     stream.write_all(
                         b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                     )?;
@@ -232,16 +234,47 @@ fn accept_direct_request(
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-    let mut request = [0_u8; 4096];
-    if stream.read(&mut request)? == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "Doctor connected without sending an HTTP request",
-        ));
+fn read_request(stream: &mut TcpStream, deadline: Instant) -> io::Result<()> {
+    let mut request = Vec::with_capacity(4096);
+    let mut buffer = [0_u8; 512];
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Doctor request did not arrive within its bound",
+                )
+            })?;
+        stream.set_read_timeout(Some(remaining.min(Duration::from_secs(1))))?;
+        let capacity = buffer.len().min(4096 - request.len());
+        match stream.read(&mut buffer[..capacity]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Doctor connected without completing an HTTP request",
+                ));
+            },
+            Ok(length) => {
+                request.extend_from_slice(&buffer[..length]);
+                if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    return Ok(());
+                }
+                if request.len() == 4096 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Doctor request headers exceeded the fixture bound",
+                    ));
+                }
+            },
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) => {},
+            Err(error) => return Err(error),
+        }
     }
-    Ok(())
 }
 
 fn join_listener<T>(
@@ -487,5 +520,34 @@ fn online_doctor_excludes_unknown_family_values_and_does_not_claim_complete_evid
     assert_eq!(output.status.code(), Some(3));
     assert!(stdout.contains("catalog_audit_chain=missing"));
     assert!(stdout.contains("required_diagnostic_families_complete=false"));
+    Ok(())
+}
+
+#[test]
+fn healthy_status_peer_consumes_delayed_request_before_responding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let done = Arc::new(AtomicBool::new(false));
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = listener.local_addr()?;
+    let server = spawn_status_listener(listener, Arc::clone(&done));
+    let mut stream = TcpStream::connect(endpoint)?;
+    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    thread::sleep(Duration::from_millis(1_100));
+    let sent = stream.write_all(b"GET /operations/status HTTP/1.1\r\nHost: localhost\r\n");
+    let completed = if sent.is_ok() {
+        thread::sleep(Duration::from_millis(20));
+        stream.write_all(b"\r\n")
+    } else {
+        Ok(())
+    };
+    let mut response = String::new();
+    let received = stream.read_to_string(&mut response);
+    done.store(true, Ordering::Release);
+    join_listener(server, "delayed healthy status listener")?;
+    sent?;
+    completed?;
+    received?;
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(response.ends_with(STATUS_BODY));
     Ok(())
 }
