@@ -110,9 +110,15 @@ impl IdentityRuntime {
         identity: &ProviderKeyUri,
     ) -> azure_core::http::ClientOptions {
         use azure_core::cloud::CloudConfiguration;
-        let cloud = if identity.locator().contains(".vault.azure.cn/") {
+        let cloud = if identity.locator().contains(".vault.azure.cn/")
+            || identity.locator().contains(".managedhsm.azure.cn/")
+        {
             CloudConfiguration::AzureChina
-        } else if identity.locator().contains(".vault.usgovcloudapi.net/") {
+        } else if identity.locator().contains(".vault.usgovcloudapi.net/")
+            || identity
+                .locator()
+                .contains(".managedhsm.usgovcloudapi.net/")
+        {
             CloudConfiguration::AzureGovernment
         } else {
             CloudConfiguration::AzurePublic

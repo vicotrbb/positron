@@ -190,3 +190,23 @@ async fn retry_classification_is_bounded_and_provider_messages_are_redacted()
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn managed_hsm_rejects_software_rsa_even_at_exact_hsm_key_uri()
+-> Result<(), Box<dyn std::error::Error>> {
+    let identity = ProviderKeyUri::new(
+        ProviderFamily::AzureManagedHsm,
+        "https://fixture.managedhsm.azure.net/keys/root/0123456789abcdef0123456789abcdef",
+        "0123456789abcdef0123456789abcdef",
+    )?;
+    let body = String::from_utf8(metadata())?
+        .replace(uri().locator(), identity.locator())
+        .into_bytes();
+    let mut provider = fixture(vec![body]);
+    provider.identity = identity;
+    assert_eq!(
+        provider.probe(context()).await.err(),
+        Some(KeyProviderFailure::PermissionDenied)
+    );
+    Ok(())
+}

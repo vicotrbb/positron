@@ -45,7 +45,7 @@ async fn shared_cache_reports_azure_outage_without_creating_a_lease()
 -> Result<(), Box<dyn std::error::Error>> {
     let provider = fixture(vec![]);
     let kernel = crate::data_protection::tests::providers::provider_governor(2_000_000_000)?;
-    let bytes = KeyProviderCache::<AzureKeyVaultKeyProvider>::required_memory_bytes(1)?;
+    let bytes = KeyProviderCache::<AzureProvider>::required_memory_bytes(1)?;
     let grant = kernel.reserve(crate::WorkClaim::system_maintenance(
         crate::ResourceAmounts::new([bytes, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0]),
     )?)?;
@@ -113,7 +113,9 @@ async fn rotation_and_local_migration_preserve_the_source_and_verify_successor_c
         dest_result(successor_plain.as_provider_plaintext()),
     ]);
     dest.identity = dest_id.clone();
-    let successor = source.rewrap_envelope(&envelope, context(), &dest).await?;
+    let successor = KeyProviderSession::new(&source)
+        .rewrap(&envelope, context(), &KeyProviderSession::new(&dest))
+        .await?;
     assert_eq!(successor.identity(), &dest_id);
     assert_eq!(envelope.identity(), &source_id);
     let root = crate::data_protection::local_key::test_support::SecurityRoot::create()?;

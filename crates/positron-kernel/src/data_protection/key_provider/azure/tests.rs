@@ -95,8 +95,8 @@ fn result(value: &[u8]) -> Vec<u8> {
     )
     .into_bytes()
 }
-fn fixture(bodies: Vec<Vec<u8>>) -> AzureKeyVaultKeyProvider {
-    AzureKeyVaultKeyProvider {
+fn fixture(bodies: Vec<Vec<u8>>) -> AzureProvider {
+    AzureProvider {
         identity: uri(),
         credentials: Arc::new(FictionalIdentity),
         credential_model: ProviderCredentialModel::AzureManagedIdentity,
@@ -126,3 +126,5 @@ fn payload(context: EnvelopeContext, identity: &ProviderKeyUri) -> SecretWrapped
 mod identity;
 mod lifecycle;
 mod wire;
+
+mod hsm;

@@ -360,3 +360,6 @@ fn azure_selected_app_service_remote_endpoint_is_rejected_before_http()
         Ok::<(), Box<dyn std::error::Error>>(())
     })
 }
+
+#[path = "azure/hsm.rs"]
+mod hsm;

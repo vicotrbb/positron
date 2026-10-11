@@ -5,7 +5,10 @@ use std::fmt::{Display, Formatter};
 mod aws;
 mod azure;
 mod wire;
-pub use azure::{AzureKeyVaultKeyProvider, AzureManagedIdentityId, AzureWorkloadIdentity};
+pub use azure::{
+    AzureKeyVaultKeyProvider, AzureManagedHsmKeyProvider, AzureManagedIdentityId,
+    AzureWorkloadIdentity,
+};
 mod cache;
 pub use aws::AwsKmsKeyProvider;
 mod conformance;
@@ -109,18 +112,8 @@ impl ProviderKeyUri {
             ProviderFamily::GoogleCloudKms => {
                 positive_version && google_version_resource(locator, version)
             },
-            ProviderFamily::AzureKeyVault => azure_key_vault_uri(locator, version),
-            ProviderFamily::AzureManagedHsm => {
-                locator.starts_with("https://")
-                    && locator.split_once("/keys/").is_some_and(|(_, path)| {
-                        path.split_once('/').is_some_and(|(name, actual)| {
-                            !name.is_empty()
-                                && actual == version
-                                && version.len() == 32
-                                && version.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        })
-                    })
-            },
+            ProviderFamily::AzureKeyVault => azure_key_uri(locator, version, false),
+            ProviderFamily::AzureManagedHsm => azure_key_uri(locator, version, true),
             ProviderFamily::VaultTransit | ProviderFamily::OpenBaoTransit => {
                 positive_version
                     && locator.starts_with("https://")
@@ -303,21 +296,28 @@ impl KeyProviderFailure {
     }
 }
 
-/// Public Azure vault DNS names only; aliases, HSM endpoints and URL normalization are refused.
-fn azure_key_vault_uri(locator: &str, version: &str) -> bool {
+/// Canonical Azure service DNS names only; aliases and URL normalization are refused.
+fn azure_key_uri(locator: &str, version: &str, hsm: bool) -> bool {
     let Some((host, path)) = locator
         .strip_prefix("https://")
         .and_then(|s| s.split_once("/keys/"))
     else {
         return false;
     };
-    let vault = [
-        ".vault.azure.net",
-        ".vault.azure.cn",
-        ".vault.usgovcloudapi.net",
-    ]
-    .iter()
-    .find_map(|suffix| host.strip_suffix(suffix));
+    let suffixes = if hsm {
+        [
+            ".managedhsm.azure.net",
+            ".managedhsm.azure.cn",
+            ".managedhsm.usgovcloudapi.net",
+        ]
+    } else {
+        [
+            ".vault.azure.net",
+            ".vault.azure.cn",
+            ".vault.usgovcloudapi.net",
+        ]
+    };
+    let vault = suffixes.iter().find_map(|suffix| host.strip_suffix(suffix));
     vault.is_some_and(|vault| {
         (3..=24).contains(&vault.len())
             && !vault.starts_with('-')
