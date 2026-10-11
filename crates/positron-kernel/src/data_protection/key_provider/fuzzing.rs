@@ -8,6 +8,7 @@ pub fn fuzz_key_provider_envelope(data: &[u8]) {
     if let Ok(envelope) = KeyEnvelope::decode(bounded) {
         assert_eq!(KeyEnvelope::decode(&envelope.encode()), Ok(envelope));
     }
+    azure::fuzz_wire(data.get(..data.len().min(32_769)).unwrap_or_default());
     google::fuzz_wire(data.get(..data.len().min(32_769)).unwrap_or_default());
     // Pure bounded native wire decoding, never an emulated named provider.
     let aws = ProviderKeyUri::new(

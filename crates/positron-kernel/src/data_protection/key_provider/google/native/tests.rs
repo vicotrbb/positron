@@ -427,3 +427,30 @@ fn metadata_peer_policy_accepts_exact_native_addresses_and_rejects_mixed_peers()
     }
     Ok(())
 }
+
+#[test]
+fn selected_azure_app_service_accepts_local_link_local_peers() {
+    let addresses = [std::net::SocketAddr::from(([169, 254, 42, 7], 8081))];
+    assert_eq!(super::validate_app_service_peers(&addresses), Ok(()));
+}
+
+#[test]
+fn app_service_peer_policy_refuses_empty_remote_and_mixed_addresses() {
+    for addresses in [
+        vec![],
+        vec![std::net::SocketAddr::from(([192, 0, 2, 1], 80))],
+        vec![
+            std::net::SocketAddr::from(([169, 254, 42, 7], 80)),
+            std::net::SocketAddr::from(([192, 0, 2, 1], 80)),
+        ],
+    ] {
+        assert_eq!(
+            super::validate_app_service_peers(&addresses),
+            Err(native::Error::InvalidConfiguration)
+        );
+    }
+    assert_eq!(
+        super::validate_metadata_peers(&[std::net::SocketAddr::from(([169, 254, 42, 7], 80))]),
+        Err(native::Error::InvalidConfiguration)
+    );
+}

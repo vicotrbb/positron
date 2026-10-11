@@ -101,7 +101,7 @@ impl reqwest::ConnectionTaskExecutor for ConnectionExecutor {
     }
 }
 
-pub(super) struct NativeRuntime {
+pub(in crate::data_protection::key_provider) struct NativeRuntime {
     resources: Arc<dns::Resources>,
     counts: Arc<Counts>,
     dns: dns::NativeDns,
@@ -112,7 +112,7 @@ impl std::fmt::Debug for NativeRuntime {
     }
 }
 impl NativeRuntime {
-    pub(super) fn new(
+    pub(in crate::data_protection::key_provider) fn new(
         grant: TransferredResourceReservation,
     ) -> Result<Arc<Self>, KeyProviderFailure> {
         let resources = dns::Resources::new(grant);
@@ -144,7 +144,18 @@ impl NativeRuntime {
         })
     }
 
-    async fn http_request(&self, mut request: native::Request) -> native::Result<native::Response> {
+    pub(in crate::data_protection::key_provider) fn app_service_http(
+        &self,
+        request: native::Request,
+    ) -> native::BoxFuture<'_, native::Response> {
+        Box::pin(async move { self.http_request(request, true).await })
+    }
+
+    async fn http_request(
+        &self,
+        mut request: native::Request,
+        app_service: bool,
+    ) -> native::Result<native::Response> {
         let _lease = self.acquire(Kind::Http, 2)?;
         if request.url.len() > 4096 || request.body.len() > MAXIMUM {
             return Err(native::Error::LimitExceeded);
@@ -182,14 +193,25 @@ impl NativeRuntime {
                 .map_err(|_| native::Error::InvalidConfiguration)?,
             "http" => {
                 let host = uri.host_str().ok_or(native::Error::InvalidConfiguration)?;
-                let addresses = match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+                let mut addresses = match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>()
+                {
                     Ok(ip) => vec![std::net::SocketAddr::new(
                         ip,
                         uri.port_or_known_default().unwrap_or(80),
                     )],
                     Err(_) => self.dns.addresses(host).await.map_err(map_failure)?,
                 };
-                validate_metadata_peers(&addresses)?;
+                if app_service {
+                    for address in &mut addresses {
+                        address.set_port(
+                            uri.port_or_known_default()
+                                .ok_or(native::Error::InvalidConfiguration)?,
+                        );
+                    }
+                    validate_app_service_peers(&addresses)?;
+                } else {
+                    validate_metadata_peers(&addresses)?;
+                }
                 builder
                     .resolve_to_addrs(host, &addresses)
                     .build()
@@ -367,7 +389,7 @@ impl Runtime for NativeRuntime {
         Ok(body)
     }
     fn http(&self, request: native::Request) -> native::BoxFuture<'_, native::Response> {
-        Box::pin(async move { self.http_request(request).await })
+        Box::pin(async move { self.http_request(request, false).await })
     }
     fn execute<'a>(
         &'a self,
@@ -425,6 +447,18 @@ impl Runtime for NativeRuntime {
             .with_subscriber(tracing::subscriber::NoSubscriber::default()),
         ))
     }
+}
+
+fn validate_app_service_peers(addresses: &[std::net::SocketAddr]) -> native::Result<()> {
+    if addresses.is_empty()
+        || addresses.iter().any(|address| !match address.ip() {
+            std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_link_local(),
+            std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unicast_link_local(),
+        })
+    {
+        return Err(native::Error::InvalidConfiguration);
+    }
+    Ok(())
 }
 
 fn validate_metadata_peers(addresses: &[std::net::SocketAddr]) -> native::Result<()> {

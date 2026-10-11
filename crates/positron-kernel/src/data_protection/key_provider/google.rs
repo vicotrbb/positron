@@ -14,7 +14,7 @@ use std::{
 };
 use tracing::instrument::WithSubscriber;
 use zeroize::Zeroizing;
-mod native;
+pub(super) mod native;
 mod protocol;
 #[cfg(test)]
 mod tests;
@@ -78,7 +78,7 @@ impl Drop for ActiveOperation<'_> {
         self.0.store(false, Ordering::Release);
     }
 }
-fn native_failure(error: google_cloud_auth::native::Error) -> KeyProviderFailure {
+pub(super) fn native_failure(error: google_cloud_auth::native::Error) -> KeyProviderFailure {
     match error {
         google_cloud_auth::native::Error::LimitExceeded => KeyProviderFailure::LimitExceeded,
         google_cloud_auth::native::Error::PermissionDenied => KeyProviderFailure::PermissionDenied,

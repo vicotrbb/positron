@@ -77,12 +77,12 @@ mod data_protection;
 /// ```
 pub mod key_provider {
     pub use crate::data_protection::key_provider::{
-        AwsKmsKeyProvider, CacheInvalidation, ConformanceFailure, ConformanceStep,
-        CredentialFileReference, EnvelopeContext, GoogleCloudKmsKeyProvider, KeyCacheHealth,
-        KeyCacheLease, KeyEnvelope, KeyProviderConformance, KeyProviderFailure, KeyScope,
-        LocalKeyProvider, ProviderConformanceTarget, ProviderCredentialModel,
-        ProviderFailureDisposition, ProviderFamily, ProviderKeyUri, TransitAuthentication,
-        WrappingAlgorithm,
+        AwsKmsKeyProvider, AzureKeyVaultKeyProvider, AzureManagedIdentityId, AzureWorkloadIdentity,
+        CacheInvalidation, ConformanceFailure, ConformanceStep, CredentialFileReference,
+        EnvelopeContext, GoogleCloudKmsKeyProvider, KeyCacheHealth, KeyCacheLease, KeyEnvelope,
+        KeyProviderConformance, KeyProviderFailure, KeyScope, LocalKeyProvider,
+        ProviderConformanceTarget, ProviderCredentialModel, ProviderFailureDisposition,
+        ProviderFamily, ProviderKeyUri, TransitAuthentication, WrappingAlgorithm,
     };
     #[cfg(fuzzing)]
     #[doc(hidden)]
