@@ -27,7 +27,18 @@ impl Operation {
     }
 }
 pub(super) fn scope(identity: &ProviderKeyUri) -> &'static str {
-    if identity.locator().contains(".vault.azure.cn/") {
+    if identity.family() == ProviderFamily::AzureManagedHsm {
+        if identity.locator().contains(".managedhsm.azure.cn/") {
+            "https://managedhsm.azure.cn/.default"
+        } else if identity
+            .locator()
+            .contains(".managedhsm.usgovcloudapi.net/")
+        {
+            "https://managedhsm.usgovcloudapi.net/.default"
+        } else {
+            "https://managedhsm.azure.net/.default"
+        }
+    } else if identity.locator().contains(".vault.azure.cn/") {
         "https://vault.azure.cn/.default"
     } else if identity.locator().contains(".vault.usgovcloudapi.net/") {
         "https://vault.usgovcloudapi.net/.default"
@@ -93,9 +104,10 @@ struct Attributes {
     nbf: Option<u64>,
     exp: Option<u64>,
 }
-pub(super) fn verify_metadata(
+pub(super) fn verify_metadata_for(
     bytes: &[u8],
     identity: &ProviderKeyUri,
+    operation: Operation,
 ) -> Result<usize, KeyProviderFailure> {
     let metadata: Metadata<'_> = parse(bytes)?;
     if metadata.key.kid.as_str() != identity.locator() {
@@ -105,10 +117,15 @@ pub(super) fn verify_metadata(
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| KeyProviderFailure::Unavailable)?
         .as_secs();
+    let hsm = identity.family() == ProviderFamily::AzureManagedHsm;
+    // Managed HSM permits unwrap outside the key validity window for recovery.
+    // Disabled keys never gain that exception; live probe/wrap still require validity.
+    let recovery = hsm && matches!(operation, Operation::Unwrap);
     if !metadata.attributes.enabled
-        || metadata.attributes.nbf.is_some_and(|nbf| nbf > now)
-        || metadata.attributes.exp.is_some_and(|exp| exp <= now)
-        || !matches!(metadata.key.kty.as_str(), "RSA" | "RSA-HSM")
+        || (!recovery
+            && (metadata.attributes.nbf.is_some_and(|nbf| nbf > now)
+                || metadata.attributes.exp.is_some_and(|exp| exp <= now)))
+        || !(metadata.key.kty.as_str() == "RSA-HSM" || (!hsm && metadata.key.kty.as_str() == "RSA"))
         || !["wrapKey", "unwrapKey"].iter().all(|op| {
             metadata
                 .key

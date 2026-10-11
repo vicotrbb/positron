@@ -1,6 +1,6 @@
 use super::*;
 
-impl AzureKeyVaultKeyProvider {
+impl AzureProvider {
     pub(super) fn begin(&self) -> Result<ActiveOperation<'_>, KeyProviderFailure> {
         self.active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -87,6 +87,7 @@ impl AzureKeyVaultKeyProvider {
     pub(super) async fn metadata(
         &self,
         deadline: tokio::time::Instant,
+        operation: protocol::Operation,
     ) -> Result<usize, KeyProviderFailure> {
         let bytes = self
             .request(
@@ -95,7 +96,7 @@ impl AzureKeyVaultKeyProvider {
                 deadline,
             )
             .await?;
-        protocol::verify_metadata(&bytes, &self.identity)
+        protocol::verify_metadata_for(&bytes, &self.identity, operation)
     }
 }
 
