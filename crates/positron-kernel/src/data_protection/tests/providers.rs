@@ -63,9 +63,15 @@ impl super::super::key_provider::KeyProvider for ControlledLocal {
         self.inner.unwrap(envelope, context).await
     }
 }
-fn cache_governor() -> Result<governor_support::TestKernel, Box<dyn std::error::Error>> {
+pub(in crate::data_protection) fn cache_governor()
+-> Result<governor_support::TestKernel, Box<dyn std::error::Error>> {
+    provider_governor(20_000_000)
+}
+pub(in crate::data_protection) fn provider_governor(
+    amount: u64,
+) -> Result<governor_support::TestKernel, Box<dyn std::error::Error>> {
     use crate::*;
-    let total = ResourceAmounts::new([20_000_000; 11]);
+    let total = ResourceAmounts::new([amount; 11]);
     let raw = governor_support::raw_capacity_for_governed_work(total, 8)?;
     let reserve = governor_support::minimum_recovery_reserve_for_tenants(1)?;
     let inventory = ResourceInventory::new(
@@ -81,18 +87,18 @@ fn cache_governor() -> Result<governor_support::TestKernel, Box<dyn std::error::
         [TenantQuota::new(
             tenant,
             1,
-            ResourceAmounts::new([10_000_000; 11]),
+            ResourceAmounts::new([amount / 2; 11]),
         )?],
         OrdinaryPoolPolicy::new(
-            ResourceAmounts::new([4_000_000; 11]),
-            ResourceAmounts::new([3_000_000; 11]),
-            ResourceAmounts::new([2_000_000; 11]),
-            ResourceAmounts::new([1_000_000; 11]),
+            ResourceAmounts::new([amount / 5; 11]),
+            ResourceAmounts::new([amount * 3 / 20; 11]),
+            ResourceAmounts::new([amount / 10; 11]),
+            ResourceAmounts::new([amount / 20; 11]),
         )?,
     )?;
     governor_support::TestKernel::establish(inventory, policy)
 }
-fn cache_reservation(
+pub(in crate::data_protection) fn cache_reservation(
     kernel: &governor_support::TestKernel,
     capacity: usize,
 ) -> Result<crate::ResourceReservation<'_>, Box<dyn std::error::Error>> {

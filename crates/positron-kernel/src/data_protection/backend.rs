@@ -77,6 +77,58 @@ pub(super) enum CryptoBackendFailure {
 }
 
 pub(super) trait CryptoBackend {
+    /// AWS protocol authentication uses the reviewed, pinned native signer.
+    /// No AWS credential or authorization value is exposed to diagnostics.
+    fn aws_kms_request_headers(
+        &self,
+        credentials: &aws_credential_types::Credentials,
+        endpoint: &str,
+        region: &str,
+        target: &str,
+        body: &[u8],
+    ) -> Result<Vec<(&'static str, Zeroizing<String>)>, CryptoBackendFailure> {
+        use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
+        let identity = credentials.clone().into();
+        let parameters = aws_sigv4::sign::v4::SigningParams::builder()
+            .identity(&identity)
+            .region(region)
+            .name("kms")
+            .time(std::time::SystemTime::now())
+            .settings(SigningSettings::default())
+            .build()
+            .map_err(|_| CryptoBackendFailure::SignatureFailed)?
+            .into();
+        use std::fmt::Write;
+        let mut body_hash = String::with_capacity(64);
+        for byte in self.sha256(body)? {
+            write!(&mut body_hash, "{byte:02x}").map_err(|_| CryptoBackendFailure::HashFailed)?;
+        }
+        let request = SignableRequest::new(
+            "POST",
+            endpoint,
+            [
+                ("content-type", "application/x-amz-json-1.1"),
+                ("x-amz-target", target),
+            ]
+            .into_iter(),
+            SignableBody::Precomputed(body_hash),
+        )
+        .map_err(|_| CryptoBackendFailure::SignatureFailed)?;
+        let (instructions, _) =
+            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                sign(request, &parameters)
+            })
+            .map_err(|_| CryptoBackendFailure::SignatureFailed)?
+            .into_parts();
+        let (headers, query) = instructions.into_parts();
+        if !query.is_empty() {
+            return Err(CryptoBackendFailure::SignatureFailed);
+        }
+        Ok(headers
+            .into_iter()
+            .map(|header| (header.name(), Zeroizing::new(header.value().to_owned())))
+            .collect())
+    }
     fn sign_recovery(
         &self,
         purpose: RecoveryCryptoPurpose,

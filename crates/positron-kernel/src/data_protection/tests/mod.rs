@@ -12,4 +12,4 @@ mod signatures;
 mod vectors;
 
 use backend_and_persistence::protected_segment_fixture;
-mod providers;
+pub(in crate::data_protection) mod providers;

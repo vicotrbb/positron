@@ -530,7 +530,7 @@ fn same_endpoint_reload_drains_accepted_old_work_before_the_successor_serves()
 fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_request()
 -> Result<(), Box<dyn std::error::Error>> {
     use positron_kernel::{CatalogPublicationFault, with_catalog_publication_event_hook_after};
-    use std::io::{Read, Write};
+    use std::io::Write;
 
     let roots = TestRoots::new("configuration-listener-catalog-drain")?;
     let operations_port = available_loopback_port()?;
@@ -650,12 +650,7 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
                     .map_err(|error| error.to_string())?;
                 old.write_all(request_head.as_bytes())
                     .map_err(|error| error.to_string())?;
-                let mut interim = [0; b"HTTP/1.1 100 Continue\r\n\r\n".len()];
-                old.read_exact(&mut interim)
-                    .map_err(|error| error.to_string())?;
-                if interim != *b"HTTP/1.1 100 Continue\r\n\r\n" {
-                    return Err("predecessor did not accept the request body".to_owned());
-                }
+                read_continue_response(&mut old)?;
                 Ok(old)
             })();
             accepted
@@ -931,9 +926,110 @@ fn read_terminal_response(stream: &mut std::net::TcpStream) -> Result<Vec<u8>, s
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
                 return Ok(response);
             },
-            Err(error) => return Err(error),
+            Err(error) => {
+                let phase = match response.windows(4).position(|window| window == b"\r\n\r\n") {
+                    None => "headers",
+                    Some(end) => {
+                        let length = std::str::from_utf8(&response[..end]).ok().and_then(|head| {
+                            head.lines().find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                        });
+                        match length {
+                            Some(length) if response.len() - end - 4 >= length => "EOF",
+                            Some(_) => "body",
+                            None => "body or EOF",
+                        }
+                    },
+                };
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "terminal response {phase} read failed after {} bytes: {error}",
+                        response.len(),
+                    ),
+                ));
+            },
         }
     }
+}
+
+fn read_continue_response(stream: &mut std::net::TcpStream) -> Result<(), String> {
+    let mut interim = [0; b"HTTP/1.1 100 Continue\r\n\r\n".len()];
+    std::io::Read::read_exact(stream, &mut interim)
+        .map_err(|error| format!("predecessor 100 Continue read failed: {error}"))?;
+    if interim != *b"HTTP/1.1 100 Continue\r\n\r\n" {
+        return Err("predecessor did not accept the request body".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn interim_response_timeout_is_distinct_from_terminal_progress()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let mut client = std::net::TcpStream::connect(address)?;
+    let (_peer, _) = listener.accept()?;
+    client.set_read_timeout(Some(Duration::from_millis(50)))?;
+    let diagnostic = read_continue_response(&mut client)
+        .expect_err("an open silent peer must not accept the request body");
+    assert!(diagnostic.contains("predecessor 100 Continue read failed"));
+    assert!(!diagnostic.contains("terminal response"));
+    Ok(())
+}
+
+#[test]
+fn terminal_response_timeouts_report_progress_without_disclosing_received_bytes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    for (response, phase) in [
+        (b"".as_slice(), "headers"),
+        (b"HTTP/1.1 200 OK\r\nsecret-canary".as_slice(), "headers"),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nsecret-canary".as_slice(),
+            "body",
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nsecret-canary".as_slice(),
+            "EOF",
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let (release, released) = mpsc::sync_channel(1);
+        let (ready, written) = mpsc::sync_channel(0);
+        let server = std::thread::spawn(move || -> Result<(), std::io::Error> {
+            let (mut socket, _) = listener.accept()?;
+            socket.write_all(response)?;
+            ready
+                .send(())
+                .map_err(|_| std::io::Error::other("response observer dropped"))?;
+            let _ = released.recv_timeout(Duration::from_secs(1));
+            Ok(())
+        });
+        let mut client = std::net::TcpStream::connect(address)?;
+        written.recv_timeout(Duration::from_secs(1))?;
+        client.set_read_timeout(Some(Duration::from_millis(50)))?;
+        let failure = read_terminal_response(&mut client)
+            .expect_err("an open peer must not report a terminal response");
+        release.send(())?;
+        server.join().map_err(|_| "response peer panicked")??;
+        let diagnostic = failure.to_string();
+        assert!(
+            diagnostic.contains(&format!("terminal response {phase}")),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&format!("after {} bytes", response.len())),
+            "{diagnostic}"
+        );
+        assert!(!diagnostic.contains("secret-canary"));
+    }
+    Ok(())
 }
 
 fn listener_configuration(control_path: std::path::PathBuf, operations_port: u16) -> String {

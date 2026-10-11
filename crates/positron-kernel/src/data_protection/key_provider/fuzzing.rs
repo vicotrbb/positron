@@ -8,6 +8,24 @@ pub fn fuzz_key_provider_envelope(data: &[u8]) {
     if let Ok(envelope) = KeyEnvelope::decode(bounded) {
         assert_eq!(KeyEnvelope::decode(&envelope.encode()), Ok(envelope));
     }
+    // Pure bounded native wire decoding, never an emulated named provider.
+    let aws = ProviderKeyUri::new(
+        ProviderFamily::AwsKms,
+        "arn:aws:kms:us-east-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+        "immutable",
+    )
+    .expect("published AWS example identity");
+    let _ = aws::protocol::verify_metadata(bounded, &aws);
+    drop(aws::protocol::wrapped_response(bounded, &aws));
+    drop(aws::protocol::plaintext_response(bounded, &aws));
+    for operation in [
+        aws::protocol::Operation::Describe,
+        aws::protocol::Operation::Encrypt,
+        aws::protocol::Operation::Decrypt,
+    ] {
+        let status = 400 + u16::from(bounded.first().copied().unwrap_or_default());
+        let _ = aws::protocol::classify(operation, status, bounded);
+    }
     let context =
         EnvelopeContext::new([1; 16], KeyScope::System, [2; 32], 1, 1).expect("fixed context");
     let identity = ProviderKeyUri::new(ProviderFamily::LocalFile, "fuzz-local-corpus", "v1")

@@ -114,6 +114,166 @@ fn provider_identity_requires_an_exact_key_and_version() {
 }
 
 #[test]
+fn aws_key_identity_rejects_malformed_arns_before_provider_access() {
+    for locator in [
+        "arn:aws:kms::123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+        "arn:aws:kms:us-east-1:not-an-account:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+        "arn:aws:kms:us-east-1:123456789012:key/-",
+        "arn:aws:kms:us-east-1:123456789012:key/mrk",
+        "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab:extra",
+        "arn:aws-cn:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+        "arn:aws:kms:cn-north-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+        "arn:aws:kms:-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+    ] {
+        assert_eq!(
+            ProviderKeyUri::new(ProviderFamily::AwsKms, locator, "immutable"),
+            Err(KeyProviderFailure::InvalidConfiguration)
+        );
+    }
+}
+
+#[test]
+fn native_aws_credential_file_collection_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
+    let root = protection::local_key::test_support::SecurityRoot::create()?;
+    let path = root.path.join("oversized-credential-input");
+    std::fs::write(&path, vec![b'x'; 65_537])?;
+    let failure = ready(aws_types::os_shim_internal::Fs::real().read_to_end(&path));
+    assert!(failure.is_err());
+    Ok(())
+}
+
+#[test]
+fn native_aws_credential_process_failure_does_not_return_stderr_secrets()
+-> Result<(), Box<dyn std::error::Error>> {
+    use aws_credential_types::provider::ProvideCredentials;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let provider = aws_config::credential_process::CredentialProcessProvider::new(
+        "printf provider-credential-stderr-canary >&2; exit 1".to_owned(),
+    );
+    let error = runtime
+        .block_on(provider.provide_credentials())
+        .err()
+        .ok_or("unexpected credentials")?;
+    assert!(!format!("{error:?}{error}").contains("provider-credential-stderr-canary"));
+    Ok(())
+}
+
+#[test]
+fn native_aws_credential_process_output_limit_is_explicit() -> Result<(), Box<dyn std::error::Error>>
+{
+    use aws_credential_types::provider::ProvideCredentials;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let provider = aws_config::credential_process::CredentialProcessProvider::new(
+        "printf '%65537s' x".to_owned(),
+    );
+    let error = runtime
+        .block_on(provider.provide_credentials())
+        .err()
+        .ok_or("unexpected credentials")?;
+    let source = std::error::Error::source(&error).ok_or("missing SDK failure classification")?;
+    assert!(source.to_string().contains("output limit exceeded"));
+    Ok(())
+}
+
+#[test]
+fn native_aws_credential_process_parse_errors_discard_output_sources()
+-> Result<(), Box<dyn std::error::Error>> {
+    use aws_credential_types::provider::ProvideCredentials;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let provider = aws_config::credential_process::CredentialProcessProvider::new(
+        "printf '%s' '{\"Version\":1,\"AccessKeyId\":\"fixture\",\"SecretAccessKey\":\"fixture\",\"Expiration\":\"credential-parse-canary\"}'".to_owned(),
+    );
+    let error = runtime
+        .block_on(provider.provide_credentials())
+        .err()
+        .ok_or("unexpected credentials")?;
+    let source = std::error::Error::source(&error).ok_or("missing SDK failure classification")?;
+    assert_eq!(source.to_string(), "credential process response invalid");
+    assert!(!format!("{error:?}{error}{source:?}").contains("credential-parse-canary"));
+    Ok(())
+}
+
+#[test]
+fn native_aws_credential_process_timeout_kills_and_reaps_the_direct_child()
+-> Result<(), Box<dyn std::error::Error>> {
+    use aws_credential_types::provider::ProvideCredentials;
+    let root = protection::local_key::test_support::SecurityRoot::create()?;
+    let path = root.path.join("native-child-pid");
+    let command = format!(
+        "printf '%s' \"$$\" > '{}'; exec sleep 60",
+        path.to_string_lossy().replace('\'', "'\"'\"'")
+    );
+    let provider = aws_config::credential_process::CredentialProcessProvider::new(command);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let error = runtime
+        .block_on(provider.provide_credentials())
+        .err()
+        .ok_or("unexpected credentials")?;
+    let source = std::error::Error::source(&error).ok_or("missing SDK failure classification")?;
+    assert!(source.to_string().contains("timed out"));
+    let pid = std::fs::read_to_string(path)?.parse::<i32>()?;
+    let pid = rustix::process::Pid::from_raw(pid).ok_or("invalid child PID")?;
+    assert_eq!(
+        rustix::process::test_kill_process(pid),
+        Err(rustix::io::Errno::SRCH)
+    );
+    Ok(())
+}
+
+#[test]
+fn dropping_native_aws_credential_refresh_kills_and_reaps_the_direct_child()
+-> Result<(), Box<dyn std::error::Error>> {
+    use aws_credential_types::provider::ProvideCredentials;
+    let root = protection::local_key::test_support::SecurityRoot::create()?;
+    let path = root.path.join("native-cancel-child-pid");
+    let command = format!(
+        "printf '%s' \"$$\" > '{}'; exec sleep 60",
+        path.to_string_lossy().replace('\'', "'\"'\"'")
+    );
+    let provider = aws_config::credential_process::CredentialProcessProvider::new(command);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let mut refresh = Box::pin(provider.provide_credentials());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&path)
+                .and_then(|value| value.parse::<i32>().map_err(std::io::Error::other))
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native process did not start"
+            );
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(10), refresh.as_mut()).await;
+            assert!(result.is_err(), "credential process unexpectedly completed");
+        };
+        let pid = rustix::process::Pid::from_raw(pid).ok_or("invalid child PID")?;
+        drop(refresh);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while rustix::process::test_kill_process(pid).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native child survived cancellation"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+}
+
+#[test]
 fn provider_outcomes_never_turn_ambiguous_or_denied_into_retryable() {
     use protection::key_provider::ProviderFailureDisposition;
     assert_eq!(

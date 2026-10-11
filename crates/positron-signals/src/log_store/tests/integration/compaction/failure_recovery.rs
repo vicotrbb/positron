@@ -14,7 +14,9 @@ fn compaction_preserves_logical_records_positions_and_snapshot_visibility()
     )?;
     let tenant = TenantId::from_bytes([0x41; 16])?;
     let scope = SegmentScope::new(tenant, SignalKind::Logs, VirtualShardId::new(1)?);
-    let retention_time = RetentionTimeAuthority::establish()?;
+    // Keep the source segments in one bucket regardless of wall-clock boundaries.
+    let (retention_time, _) =
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
     let key = || SegmentProtectionKey::from_owned(Box::new([0xd5; 32]));
     let first = ActiveSegmentLedger::open_with_retention_time(
         &authority,
