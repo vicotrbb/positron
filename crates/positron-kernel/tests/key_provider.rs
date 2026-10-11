@@ -12,6 +12,82 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn kmip_key_material_digest_is_required_for_version_pinning() {
+    let locator = "kmip://hsm.test/objects/immutable-id";
+    let pinned = "sha256:0606060606060606060606060606060606060606060606060606060606060606";
+    assert!(ProviderKeyUri::new(ProviderFamily::Kmip21, locator, pinned).is_ok());
+    for version in [
+        "immutable",
+        "sha256:06",
+        "SHA256:0606060606060606060606060606060606060606060606060606060606060606",
+    ] {
+        assert!(ProviderKeyUri::new(ProviderFamily::Kmip21, locator, version).is_err());
+    }
+}
+
+#[test]
+fn kmip_identity_requires_exact_immutable_object_and_native_endpoint() {
+    for locator in [
+        "https://hsm.test/objects/root",
+        "kmip://hsm.test/objects/../root",
+        "kmip://hsm.test/objects/root%2fother",
+        "kmip://hsm.test/objects/root/extra",
+        "kmip://hsm.test/aliases/root",
+        "kmip://hsm.test:0/objects/root",
+        "kmip://host%20name/objects/root",
+    ] {
+        assert!(
+            ProviderKeyUri::new(
+                ProviderFamily::Kmip21,
+                locator,
+                "sha256:0606060606060606060606060606060606060606060606060606060606060606"
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        ProviderKeyUri::new(
+            ProviderFamily::Kmip21,
+            "kmip://hsm.test/objects/immutable-id",
+            "sha256:0606060606060606060606060606060606060606060606060606060606060606"
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn kmip_native_constructor_requires_admission_before_opening_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_kernel::key_provider::{
+        CredentialFileReference, KeyProviderFailure, Kmip21KeyProvider, ProviderCredentialModel,
+    };
+    let root = Root::new()?;
+    let (authority, tenant) = provider_authority(&root, Kmip21KeyProvider::required_resources())?;
+    let model = ProviderCredentialModel::KmipMutualTls {
+        certificate: CredentialFileReference::new(&root.0.join("absent-cert"))?,
+        private_key: CredentialFileReference::new(&root.0.join("absent-key"))?,
+        trust_roots: CredentialFileReference::new(&root.0.join("absent-ca"))?,
+    };
+    let grant = authority
+        .governor()
+        .reserve(positron_kernel::WorkClaim::tenant(
+            tenant,
+            positron_kernel::WorkKind::SecurityLifecycle,
+            positron_kernel::ResourceAmounts::new([1; 11]),
+        )?)?;
+    let identity = ProviderKeyUri::new(
+        ProviderFamily::Kmip21,
+        "kmip://hsm.test/objects/immutable-id",
+        "sha256:0606060606060606060606060606060606060606060606060606060606060606",
+    )?;
+    assert_eq!(
+        Kmip21KeyProvider::from_native(identity, model, grant).err(),
+        Some(KeyProviderFailure::LimitExceeded)
+    );
+    Ok(())
+}
+
+#[test]
 fn both_transit_identities_require_unsigned_canonical_decimal_versions() {
     let mut accepted = Vec::new();
     for family in [ProviderFamily::VaultTransit, ProviderFamily::OpenBaoTransit] {

@@ -2711,13 +2711,16 @@ dependencies = [
  "resolv-conf",
  "ring",
  "rustix",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "subtle",
  "tokio",
+ "tokio-rustls",
  "tracing",
+ "webpki-roots",
  "zeroize",
 ]
 

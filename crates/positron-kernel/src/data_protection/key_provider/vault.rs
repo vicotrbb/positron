@@ -207,9 +207,9 @@ impl VaultTransitKeyProvider {
             .await
     }
 }
-struct ActiveOperation<'a> {
-    active: &'a AtomicBool,
-    deadline: tokio::time::Instant,
+pub(super) struct ActiveOperation<'a> {
+    pub(super) active: &'a AtomicBool,
+    pub(super) deadline: tokio::time::Instant,
 }
 impl Drop for ActiveOperation<'_> {
     fn drop(&mut self) {

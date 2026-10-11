@@ -11,6 +11,7 @@ pub fn fuzz_key_provider_envelope(data: &[u8]) {
     azure::fuzz_wire(data.get(..data.len().min(32_769)).unwrap_or_default());
     google::fuzz_wire(data.get(..data.len().min(32_769)).unwrap_or_default());
     vault::fuzz_wire(data.get(..data.len().min(32_769)).unwrap_or_default());
+    kmip::fuzz_wire(data);
     // Pure bounded native wire decoding, never an emulated named provider.
     let aws = ProviderKeyUri::new(
         ProviderFamily::AwsKms,
