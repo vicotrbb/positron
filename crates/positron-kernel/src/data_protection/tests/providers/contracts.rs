@@ -114,6 +114,25 @@ fn provider_identity_requires_an_exact_key_and_version() {
 }
 
 #[test]
+fn google_key_identity_requires_a_canonical_version_resource() {
+    let valid = "projects/project-1/locations/us-central1/keyRings/ring/cryptoKeys/root/cryptoKeyVersions/7";
+    assert!(ProviderKeyUri::new(ProviderFamily::GoogleCloudKms, valid, "7").is_ok());
+    for locator in [
+        "projects/p/cryptoKeyVersions/7",
+        "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/07",
+        "projects/p/locations/l/keyRings/r/cryptoKeys/../cryptoKeyVersions/7",
+        "projects/p/locations/l/keyRings/r/cryptoKeys//cryptoKeyVersions/7",
+        "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/7/extra",
+    ] {
+        assert_eq!(
+            ProviderKeyUri::new(ProviderFamily::GoogleCloudKms, locator, "7"),
+            Err(KeyProviderFailure::InvalidConfiguration),
+            "noncanonical provider routing resource was accepted"
+        );
+    }
+}
+
+#[test]
 fn aws_key_identity_rejects_malformed_arns_before_provider_access() {
     for locator in [
         "arn:aws:kms::123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab",

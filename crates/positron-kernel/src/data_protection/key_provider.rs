@@ -11,6 +11,8 @@ pub use conformance::{
 };
 mod codec;
 mod credentials;
+mod google;
+pub use google::GoogleCloudKmsKeyProvider;
 #[cfg(fuzzing)]
 mod fuzzing;
 mod local;
@@ -102,11 +104,7 @@ impl ProviderKeyUri {
         let pinned = match family {
             ProviderFamily::AwsKms => version == "immutable" && aws_arn_parts(locator).is_some(),
             ProviderFamily::GoogleCloudKms => {
-                positive_version
-                    && locator.starts_with("projects/")
-                    && locator
-                        .rsplit_once("/cryptoKeyVersions/")
-                        .is_some_and(|(_, actual)| actual == version)
+                positive_version && google_version_resource(locator, version)
             },
             ProviderFamily::AzureKeyVault | ProviderFamily::AzureManagedHsm => {
                 locator.starts_with("https://")
@@ -150,6 +148,29 @@ impl ProviderKeyUri {
     pub fn version(&self) -> &str {
         &self.version
     }
+}
+
+/// Google resource names route requests directly, so reject path normalization.
+fn google_version_resource(locator: &str, version: &str) -> bool {
+    let mut parts = locator.split('/');
+    for label in ["projects", "locations", "keyRings", "cryptoKeys"] {
+        if parts.next() != Some(label)
+            || !parts.next().is_some_and(|part| {
+                !part.is_empty()
+                    && part.len() <= 128
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+        {
+            return false;
+        }
+    }
+    parts.next() == Some("cryptoKeyVersions")
+        && parts.next() == Some(version)
+        && !version.starts_with('0')
+        && version.bytes().all(|byte| byte.is_ascii_digit())
+        && parts.next().is_none()
 }
 
 /// Exact immutable AWS key ARN; aliases and partial key IDs cannot route calls.

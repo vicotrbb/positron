@@ -73,6 +73,24 @@ fn online_doctor_reports_unavailable_within_the_five_second_deadline_when_a_peer
     Ok(())
 }
 
+#[test]
+fn stalling_peer_keeps_the_connection_when_request_delivery_is_delayed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let done = Arc::new(AtomicBool::new(false));
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let endpoint = listener.local_addr()?;
+    let server = spawn_stalling_listener(listener, Arc::clone(&done));
+    let mut stream = TcpStream::connect(endpoint)?;
+    // Deliberately cross the fixture's former one-second request-read deadline.
+    thread::sleep(Duration::from_millis(1_100));
+    let sent = stream.write_all(b"GET /operations/status HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    done.store(true, Ordering::Release);
+    let accepted_at = join_listener(server, "delayed-request stalling listener")?;
+    sent?;
+    assert!(accepted_at.elapsed() < REQUEST_BOUND);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn online_doctor_rejects_an_oversized_trust_file_before_connecting()
@@ -174,8 +192,7 @@ fn spawn_stalling_listener(
     done: Arc<AtomicBool>,
 ) -> JoinHandle<io::Result<Instant>> {
     thread::spawn(move || {
-        let mut stream = accept_direct_request(&listener, &done, "stalling status listener")?;
-        read_request(&mut stream)?;
+        let _stream = accept_direct_request(&listener, &done, "stalling status listener")?;
         let accepted_at = Instant::now();
         while accepted_at.elapsed() < STALL_DURATION && !done.load(Ordering::Acquire) {
             thread::sleep(Duration::from_millis(10));

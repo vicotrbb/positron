@@ -8,7 +8,9 @@ use aws_smithy_runtime_api::client::result::ConnectorError;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::body::SdkBody;
 
-fn client_builder(dns: dns::NativeDns) -> reqwest::ClientBuilder {
+pub(in crate::data_protection::key_provider) fn client_builder(
+    dns: dns::NativeDns,
+) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .https_only(false)
         .no_proxy()
@@ -19,7 +21,9 @@ fn client_builder(dns: dns::NativeDns) -> reqwest::ClientBuilder {
         .http1_only()
         .dns_resolver(std::sync::Arc::new(dns))
 }
-pub(super) fn client(dns: dns::NativeDns) -> Result<reqwest::Client, KeyProviderFailure> {
+pub(in crate::data_protection::key_provider) fn client(
+    dns: dns::NativeDns,
+) -> Result<reqwest::Client, KeyProviderFailure> {
     client_builder(dns)
         .build()
         .map_err(|_| KeyProviderFailure::InvalidConfiguration)
@@ -67,7 +71,7 @@ pub(super) fn local_addresses(
     Ok(())
 }
 /// Bounds the entire response before AWS's non-streaming deserializer sees it.
-pub(super) async fn collect(
+pub(in crate::data_protection::key_provider) async fn collect(
     mut response: reqwest::Response,
     maximum: usize,
 ) -> Result<Zeroizing<Vec<u8>>, KeyProviderFailure> {

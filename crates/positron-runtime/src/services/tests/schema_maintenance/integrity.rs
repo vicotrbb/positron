@@ -126,10 +126,23 @@ fn cancellation_before_the_first_integrity_candidate_preserves_normal_worker_dra
 #[test]
 fn continuously_admitted_compaction_does_not_starve_due_integrity_scrub_discovery()
 -> Result<(), Box<dyn Error>> {
+    assert_continuous_compaction_scrub(10_000_000_000, false)
+}
+
+#[test]
+fn already_due_scrub_completes_under_continuously_admitted_compaction() -> Result<(), Box<dyn Error>>
+{
+    assert_continuous_compaction_scrub(900_000_000_000, true)
+}
+
+fn assert_continuous_compaction_scrub(
+    initial_nanos: i64,
+    require_early_success: bool,
+) -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let (mut initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
     let (retention_time, elapsed) =
-        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(initial_nanos));
     Arc::get_mut(&mut initialized)
         .ok_or("sole initialized instance")?
         .install_retention_time_for_test(retention_time)?;
@@ -286,20 +299,34 @@ fn continuously_admitted_compaction_does_not_starve_due_integrity_scrub_discover
         .maintenance_coordinator()
         .statuses()
         .map_err(|failure| format!("statuses during continuous compaction: {failure:?}"))?;
-    let scrub = statuses
+    let scrub_status = statuses
         .iter()
         .find(|status| {
             status.task().class() == MaintenanceTaskClass::IntegrityScrub
                 && status.task().scope() == target_maintenance_scope
+                && status
+                    .task()
+                    .source_binding()
+                    .map(|binding| binding.to_bytes())
+                    == Some(target_source)
         })
-        .ok_or("continuous admitted compaction must not starve scrub discovery")?
-        .task()
-        .clone();
+        .ok_or("continuous admitted compaction must discover the exact target source")?;
+    let scrub = scrub_status.task().clone();
     assert_eq!(
         scrub.source_binding().map(|binding| binding.to_bytes()),
         Some(target_source),
         "the discovered scrub remains bound to the untouched authenticated target source"
     );
+    if require_early_success {
+        assert_eq!(
+            scrub_status.phase(),
+            MaintenanceTaskPhase::Succeeded,
+            "an already-due exact-source scrub must complete within three continuous-work turns"
+        );
+    }
+    if scrub_status.phase() == MaintenanceTaskPhase::Succeeded {
+        return Ok(());
+    }
     let now = initialized
         .retention_time
         .governance_now_seconds()
@@ -307,8 +334,7 @@ fn continuously_admitted_compaction_does_not_starve_due_integrity_scrub_discover
     elapsed.advance(
         scrub
             .not_before()
-            .checked_sub(now)
-            .ok_or("scheduled integrity due remains monotonic")?
+            .saturating_sub(now)
             .checked_mul(1_000_000_000)
             .ok_or("scheduled integrity due nanos")?,
     )?;
@@ -363,6 +389,11 @@ fn continuously_admitted_compaction_does_not_starve_due_integrity_scrub_discover
         if statuses.iter().any(|status| {
             status.task().class() == MaintenanceTaskClass::IntegrityScrub
                 && status.task().scope() == target_maintenance_scope
+                && status
+                    .task()
+                    .source_binding()
+                    .map(|binding| binding.to_bytes())
+                    == Some(target_source)
                 && status.phase() == MaintenanceTaskPhase::Succeeded
         }) {
             return Ok(());

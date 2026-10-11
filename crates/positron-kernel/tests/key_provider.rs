@@ -86,23 +86,22 @@ fn only_opaque_envelopes_survive_an_adapter_restart() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn aws_provider(
+fn provider_authority(
     root: &Root,
+    required: positron_kernel::ResourceAmounts,
 ) -> Result<
     (
         positron_kernel::StorageKernelResourceAuthority,
-        positron_kernel::key_provider::AwsKmsKeyProvider,
-        tokio::runtime::Runtime,
+        positron_domain::identity::TenantId,
     ),
     Box<dyn std::error::Error>,
 > {
-    use positron_kernel::key_provider::{AwsKmsKeyProvider, ProviderKeyUri};
     use positron_kernel::{
         DiskPressureThresholds, GovernorPolicy, InventoryCardinalityLimits, MountQualification,
         ObservedResourceEnvironment, OperatorLimits, OrdinaryPoolPolicy, PrimaryDataVolume,
         RecoveryPoolCapacities, RecoveryReserve, RegisteredResourceBounds, ResourceAmounts,
         ResourceDimension, ResourceGovernorConfiguration, ResourceInventory,
-        StorageKernelResourceAuthority, TenantQuota, WorkClaim, WorkKind,
+        StorageKernelResourceAuthority, TenantQuota,
     };
     let volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
     let observed =
@@ -119,7 +118,6 @@ fn aws_provider(
         DiskPressureThresholds::new(disk / 10, disk / 5, disk / 3, disk / 2)?,
     )?;
     let tenant = positron_domain::identity::TenantId::from_bytes([31; 16])?;
-    let required = AwsKmsKeyProvider::required_resources();
     let quota = ResourceAmounts::new(
         ResourceDimension::ALL.map(|dimension| required.get(dimension).max(3)),
     );
@@ -140,6 +138,23 @@ fn aws_provider(
         volume,
         ResourceGovernorConfiguration::new(inventory, policy, recovery)?,
     )?;
+    Ok((authority, tenant))
+}
+
+fn aws_provider(
+    root: &Root,
+) -> Result<
+    (
+        positron_kernel::StorageKernelResourceAuthority,
+        positron_kernel::key_provider::AwsKmsKeyProvider,
+        tokio::runtime::Runtime,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    use positron_kernel::key_provider::{AwsKmsKeyProvider, ProviderKeyUri};
+    use positron_kernel::{WorkClaim, WorkKind};
+    let required = AwsKmsKeyProvider::required_resources();
+    let (authority, tenant) = provider_authority(root, required)?;
     let grant = authority.governor().reserve(WorkClaim::tenant(
         tenant,
         WorkKind::SecurityLifecycle,
@@ -277,4 +292,64 @@ impl tracing::Subscriber for IdentityEvents {
     }
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[test]
+fn google_native_identity_failure_releases_real_refresh_ownership_before_runtime_shutdown()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_kernel::key_provider::{
+        GoogleCloudKmsKeyProvider, KeyProviderFailure, ProviderKeyUri,
+    };
+    const CHILD: &str = "POSITRON_TEST_GOOGLE_IDENTITY_INTEGRATION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = Root::new()?;
+        let adc = root.0.join("adc.json");
+        std::fs::write(&adc, br#"{"type":"service_account","client_email":"fixture@example.invalid","private_key_id":"fixture-id","private_key":"native-private-key-canary","project_id":"fixture-project"}"#)?;
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "google_native_identity_failure_releases_real_refresh_ownership_before_runtime_shutdown", "--nocapture"])
+            .env_clear()
+            .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
+            .env(CHILD, "1").env("PATH", "/usr/bin:/bin").env("HOME", &root.0)
+            .env("GOOGLE_APPLICATION_CREDENTIALS", adc).status()?;
+        assert!(
+            status.success(),
+            "isolated Google native identity contract failed"
+        );
+        return Ok(());
+    }
+    let root = Root::new()?;
+    let (authority, tenant) =
+        provider_authority(&root, GoogleCloudKmsKeyProvider::required_resources())?;
+    let governor = authority.governor();
+    let grant = governor.reserve(positron_kernel::WorkClaim::tenant(
+        tenant,
+        positron_kernel::WorkKind::SecurityLifecycle,
+        GoogleCloudKmsKeyProvider::required_resources(),
+    )?)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let events = std::sync::Arc::new(std::sync::Mutex::new(
+        zeroize::Zeroizing::new(String::new()),
+    ));
+    tracing::subscriber::set_global_default(IdentityEvents(events.clone()))?;
+    runtime.block_on(async {
+        let provider = GoogleCloudKmsKeyProvider::from_application_default(ProviderKeyUri::new(ProviderFamily::GoogleCloudKms, "projects/fixture/locations/us-central1/keyRings/fixture/cryptoKeys/fixture/cryptoKeyVersions/1", "1")?, grant).await?;
+        let context = EnvelopeContext::new([1;16], KeyScope::System, [2;32], 7, 1)?;
+        let failure = provider.create_envelope(context).await.err().ok_or("invalid native RSA produced an envelope")?;
+        assert_eq!(failure, KeyProviderFailure::InvalidConfiguration);
+        assert!(!format!("{failure:?}{failure}").contains("canary"));
+        assert!(!events.lock().map_err(|_| "event capture poisoned")?.contains("canary"));
+        assert_eq!(governor.inspect()?.outstanding_reservations(), 1);
+        drop(provider);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while governor.inspect()?.outstanding_reservations() != 0 {
+            assert!(std::time::Instant::now() < deadline, "Google refresh retained its admitted owner");
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(governor.inspect()?.usage(positron_kernel::ResourceDimension::MemoryBytes), 0);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    drop(runtime);
+    Ok(())
 }

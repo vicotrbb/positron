@@ -23,7 +23,7 @@ positron-policy = { path = "../positron-policy" }
 positron-signals = { path = "../positron-signals" }
 prost = "=0.14.3"
 serde = "=1.0.229"
-serde_json = { version = "=1.0.149", features = ["unbounded_depth"] }
+serde_json = { version = "=1.0.150", features = ["unbounded_depth"] }
 snap = "=1.1.1"
 
 [dev-dependencies]
