@@ -77,6 +77,53 @@ pub(super) enum CryptoBackendFailure {
 }
 
 pub(super) trait CryptoBackend {
+    /// Native workload-identity HMAC keys are variable length, unlike KEKs.
+    fn native_identity_hmac(
+        &self,
+        key: &[u8],
+        bytes: &[u8],
+    ) -> Result<[u8; 32], CryptoBackendFailure> {
+        if key.is_empty() || key.len() > 8192 || bytes.len() > 131_072 {
+            return Err(CryptoBackendFailure::InvalidKey);
+        }
+        let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key)
+            .map_err(|_| CryptoBackendFailure::InvalidKey)?;
+        mac.update(bytes);
+        Ok(mac.finalize().into_bytes().into())
+    }
+
+    /// Google native service-account JWTs use reviewed RSA PKCS#1 SHA-256.
+    /// Key parsing/signing stays behind the existing backend, with no global
+    /// rustls provider installation or separate credential crypto authority.
+    fn native_identity_rsa_sign(
+        &self,
+        pem: &[u8],
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, CryptoBackendFailure> {
+        use rustls_pki_types::pem::PemObject;
+        if pem.len() > 16_384 || bytes.len() > 131_072 {
+            return Err(CryptoBackendFailure::InvalidKey);
+        }
+        let der = Zeroizing::new(
+            rustls_pki_types::PrivatePkcs8KeyDer::from_pem_slice(pem)
+                .map_err(|_| CryptoBackendFailure::InvalidKey)?,
+        );
+        let key = ring::signature::RsaKeyPair::from_pkcs8(der.secret_pkcs8_der())
+            .map_err(|_| CryptoBackendFailure::InvalidKey)?;
+        let length = key.public().modulus_len();
+        if !(256..=1024).contains(&length) {
+            return Err(CryptoBackendFailure::InvalidKey);
+        }
+        let mut signature = Zeroizing::new(vec![0; length]);
+        key.sign(
+            &ring::signature::RSA_PKCS1_SHA256,
+            &ring::rand::SystemRandom::new(),
+            bytes,
+            &mut signature,
+        )
+        .map_err(|_| CryptoBackendFailure::SignatureFailed)?;
+        Ok(std::mem::take(&mut *signature))
+    }
     /// AWS protocol authentication uses the reviewed, pinned native signer.
     /// No AWS credential or authorization value is exposed to diagnostics.
     fn aws_kms_request_headers(

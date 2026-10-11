@@ -78,10 +78,11 @@ mod data_protection;
 pub mod key_provider {
     pub use crate::data_protection::key_provider::{
         AwsKmsKeyProvider, CacheInvalidation, ConformanceFailure, ConformanceStep,
-        CredentialFileReference, EnvelopeContext, KeyCacheHealth, KeyCacheLease, KeyEnvelope,
-        KeyProviderConformance, KeyProviderFailure, KeyScope, LocalKeyProvider,
-        ProviderConformanceTarget, ProviderCredentialModel, ProviderFailureDisposition,
-        ProviderFamily, ProviderKeyUri, TransitAuthentication, WrappingAlgorithm,
+        CredentialFileReference, EnvelopeContext, GoogleCloudKmsKeyProvider, KeyCacheHealth,
+        KeyCacheLease, KeyEnvelope, KeyProviderConformance, KeyProviderFailure, KeyScope,
+        LocalKeyProvider, ProviderConformanceTarget, ProviderCredentialModel,
+        ProviderFailureDisposition, ProviderFamily, ProviderKeyUri, TransitAuthentication,
+        WrappingAlgorithm,
     };
     #[cfg(fuzzing)]
     #[doc(hidden)]
@@ -327,11 +328,29 @@ const PRIMARY_DATA_VOLUME_BOOTSTRAP_BOUNDS: PrimaryDataVolumeBootstrapBounds =
 /// A process-lifetime ownership claim over one Primary Data Volume.
 pub struct OwnedPrimaryDataVolume {
     _root: File,
-    _ownership_lock: File,
+    _ownership_lock: OwnershipLock,
     _root_identity: VolumeRootIdentity,
     qualification: MountQualification,
     filesystem: VolumeFileSystem,
     mount_identity: VolumeMountIdentity,
+}
+
+// Closing a descriptor alone can leave its lock held by a concurrent native
+// process launch until that child's CLOEXEC cleanup. Release the shared lock
+// explicitly when the successful owner leaves scope, including probe failures.
+struct OwnershipLock(File);
+
+impl Drop for OwnershipLock {
+    fn drop(&mut self) {
+        if self.0.unlock().is_err() {
+            tracing::error!(
+                target: "positron_kernel::volume",
+                operation = "release_ownership_lock",
+                outcome = "unlock_failed",
+                "Storage ownership unlock failed; descriptor close cleanup remains active"
+            );
+        }
+    }
 }
 
 impl std::fmt::Debug for OwnedPrimaryDataVolume {
@@ -853,15 +872,16 @@ impl PrimaryDataVolume {
         try_lock_ownership(&ownership_lock).map_err(|source| {
             VolumeFailure::from_io(VolumeOperation::AcquireOwnershipLock, source)
         })?;
+        let ownership_lock = OwnershipLock(ownership_lock);
         acquisition_event(
             VolumeEvent::VerifyOwnershipAfterLock,
             VolumeOperation::OpenOwnershipLock,
         )?;
-        verify_ownership_artifact(&root_file, &ownership_lock, handle_identity)?;
+        verify_ownership_artifact(&root_file, &ownership_lock.0, handle_identity)?;
         if !read_only {
             run_capability_probe(&root_file)?;
         }
-        verify_ownership_artifact(&root_file, &ownership_lock, handle_identity)?;
+        verify_ownership_artifact(&root_file, &ownership_lock.0, handle_identity)?;
         let final_metadata = fs::symlink_metadata(root).map_err(|source| {
             let mut failure = VolumeFailure::from_io(VolumeOperation::VerifyRootIdentity, source);
             failure.completion_state = VolumeCompletionState::ProbeCleanupSynchronized;
@@ -1838,6 +1858,43 @@ mod tests {
         );
         assert!(fs::read_dir(&root.0)?.next().is_none());
         Ok(())
+    }
+
+    #[test]
+    fn dropped_volume_reacquires_during_bounded_native_process_launches()
+    -> Result<(), Box<dyn Error>> {
+        let root = TestRoot::new()?;
+        let mut volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
+        let barrier = std::sync::Barrier::new(9);
+        std::thread::scope(|scope| -> Result<(), Box<dyn Error>> {
+            let launches = (0..8)
+                .map(|_| {
+                    scope.spawn(|| -> Result<(), std::io::Error> {
+                        barrier.wait();
+                        for _ in 0..128 {
+                            let status = std::process::Command::new("/usr/bin/true").status()?;
+                            assert!(status.success());
+                        }
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            let lifecycle = (|| -> Result<(), Box<dyn Error>> {
+                for _ in 0..128 {
+                    drop(volume);
+                    volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
+                }
+                drop(volume);
+                Ok(())
+            })();
+            for worker in launches {
+                worker
+                    .join()
+                    .expect("bounded launch worker must not panic")?;
+            }
+            lifecycle
+        })
     }
 
     #[test]

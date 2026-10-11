@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::instrument::WithSubscriber;
 use zeroize::Zeroizing;
-mod credentials_http;
-mod dns;
+pub(super) mod credentials_http;
+pub(super) mod dns;
 pub(super) mod protocol;
 #[cfg(test)]
 mod tests;

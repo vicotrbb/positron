@@ -404,6 +404,60 @@ fn loopback_otlp_is_authenticated_durable_and_observable_across_restart()
     Ok(())
 }
 
+const LOG_CAPACITY_REPLY: &str = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/x-protobuf\r\nContent-Length: 44\r\nRetry-After: 1\r\nConnection: close\r\n\r\n\x08\x08\x12(OTLP Logs ingest capacity is unavailable";
+
+fn accepted_proxy_ingest(
+    mut submit: impl FnMut() -> Result<String, Box<dyn std::error::Error>>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let response = submit()?;
+    if response == LOG_CAPACITY_REPLY {
+        submit()
+    } else {
+        Ok(response)
+    }
+}
+
+#[test]
+fn accepted_proxy_setup_retries_only_the_exact_precommit_capacity_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    let success = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    for (first, second, expected_calls) in [
+        (LOG_CAPACITY_REPLY.to_owned(), success.to_owned(), 2),
+        (
+            LOG_CAPACITY_REPLY.to_owned(),
+            LOG_CAPACITY_REPLY.to_owned(),
+            2,
+        ),
+        (
+            "HTTP/1.1 500 Internal Server Error\r\n\r\n".to_owned(),
+            success.to_owned(),
+            1,
+        ),
+        (
+            LOG_CAPACITY_REPLY.replace("Retry-After: 1\r\n", ""),
+            success.to_owned(),
+            1,
+        ),
+        (
+            LOG_CAPACITY_REPLY.replace("capacity is unavailable", "authentication rejected"),
+            success.to_owned(),
+            1,
+        ),
+    ] {
+        let mut replies = std::collections::VecDeque::from([first.clone(), second.clone()]);
+        let mut calls = 0;
+        let observed = accepted_proxy_ingest(|| {
+            calls += 1;
+            replies
+                .pop_front()
+                .ok_or_else(|| "fixture submitted beyond its fixed attempt bound".into())
+        })?;
+        assert_eq!(calls, expected_calls);
+        assert_eq!(observed, if expected_calls == 2 { second } else { first });
+    }
+    Ok(())
+}
+
 #[test]
 fn configured_proxy_cidr_metadata_requires_the_trusted_peer_and_fixed_hop_before_ingest()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -441,19 +495,21 @@ fn configured_proxy_cidr_metadata_requires_the_trusted_peer_and_fixed_hop_before
     )?;
 
     let body = otlp_body("trusted-proxy-attribution");
-    let accepted = http(
-        otlp,
-        "POST",
-        "/v1/logs",
-        &[
-            ("Authorization", &authorization),
-            ("Content-Type", "application/x-protobuf"),
-            ("X-Forwarded-For", "198.51.100.24"),
-            ("X-Forwarded-User", "proxied-operator"),
-            ("X-Forwarded-Authorization", "Bearer pos_forged"),
-        ],
-        &body,
-    )?;
+    let accepted = accepted_proxy_ingest(|| {
+        http(
+            otlp,
+            "POST",
+            "/v1/logs",
+            &[
+                ("Authorization", &authorization),
+                ("Content-Type", "application/x-protobuf"),
+                ("X-Forwarded-For", "198.51.100.24"),
+                ("X-Forwarded-User", "proxied-operator"),
+                ("X-Forwarded-Authorization", "Bearer pos_forged"),
+            ],
+            &body,
+        )
+    })?;
     assert_status(accepted, 200);
 
     let wrong_hops = http(
@@ -548,19 +604,21 @@ fn configured_proxy_cidr_metadata_requires_the_trusted_peer_and_fixed_hop_before
         &unconfigured_process.bound_endpoints(),
         positron_runtime::ListenerRole::OtlpHttp,
     )?;
-    let unconfigured = http(
-        unconfigured_otlp,
-        "POST",
-        "/v1/logs",
-        &[
-            ("Authorization", &authorization),
-            ("Content-Type", "application/x-protobuf"),
-            ("X-Forwarded-For", "198.51.100.24"),
-            ("X-Forwarded-User", "forged-user"),
-            ("X-Forwarded-Authorization", "Bearer pos_forged"),
-        ],
-        &otlp_body("unconfigured-forwarded-http"),
-    )?;
+    let unconfigured = accepted_proxy_ingest(|| {
+        http(
+            unconfigured_otlp,
+            "POST",
+            "/v1/logs",
+            &[
+                ("Authorization", &authorization),
+                ("Content-Type", "application/x-protobuf"),
+                ("X-Forwarded-For", "198.51.100.24"),
+                ("X-Forwarded-User", "forged-user"),
+                ("X-Forwarded-Authorization", "Bearer pos_forged"),
+            ],
+            &otlp_body("unconfigured-forwarded-http"),
+        )
+    })?;
     assert_status(unconfigured, 200);
     assert_eq!(
         unconfigured_process
