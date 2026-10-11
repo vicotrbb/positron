@@ -12,6 +12,51 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn both_transit_identities_require_unsigned_canonical_decimal_versions() {
+    let mut accepted = Vec::new();
+    for family in [ProviderFamily::VaultTransit, ProviderFamily::OpenBaoTransit] {
+        for version in ["+1", "01", "-1", "0", "2147483648"] {
+            if ProviderKeyUri::new(
+                family,
+                "https://transit.example/v1/transit/keys/root",
+                version,
+            )
+            .is_ok()
+            {
+                accepted.push((family, version));
+            }
+        }
+        for version in ["1", "2147483647"] {
+            assert!(
+                ProviderKeyUri::new(
+                    family,
+                    "https://transit.example/v1/transit/keys/root",
+                    version
+                )
+                .is_ok()
+            );
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "noncanonical versions accepted: {accepted:?}"
+    );
+}
+
+#[test]
+fn openbao_transit_identity_rejects_noncanonical_mounts_and_versions() {
+    for (locator, version) in [
+        ("https://bao.example/transit/keys/root", "1"),
+        ("https://bao.example/v1/transit/keys/root%2fother", "1"),
+        ("https://bao.example/v1/transit//keys/root", "1"),
+        ("https://bao.example/v1/transit/keys/root", "01"),
+        ("https://bao.example/v1/transit/keys/root", "2147483648"),
+    ] {
+        assert!(ProviderKeyUri::new(ProviderFamily::OpenBaoTransit, locator, version).is_err());
+    }
+}
+
+#[test]
 fn vault_transit_identity_refuses_url_normalization_and_unpinned_mounts() {
     for locator in [
         "https://vault.example/v1/transit/keys/../root",
@@ -379,5 +424,7 @@ fn google_native_identity_failure_releases_real_refresh_ownership_before_runtime
 #[path = "key_provider/azure.rs"]
 mod azure;
 
+#[path = "key_provider/openbao.rs"]
+mod openbao;
 #[path = "key_provider/vault.rs"]
 mod vault;

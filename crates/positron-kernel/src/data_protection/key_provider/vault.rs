@@ -41,7 +41,26 @@ impl VaultTransitKeyProvider {
         trust_roots: Option<&CredentialFileReference>,
         reservation: ResourceReservation<'_>,
     ) -> Result<Self, KeyProviderFailure> {
-        if identity.family() != ProviderFamily::VaultTransit {
+        Self::from_native_target(
+            identity,
+            authentication,
+            authentication_mount,
+            trust_roots,
+            reservation,
+            ProviderFamily::VaultTransit,
+        )
+    }
+    // The shared operations are separately verified against each pinned native
+    // source. Public constructors cannot select a different provider family.
+    pub(super) fn from_native_target(
+        identity: ProviderKeyUri,
+        authentication: TransitAuthentication,
+        authentication_mount: &str,
+        trust_roots: Option<&CredentialFileReference>,
+        reservation: ResourceReservation<'_>,
+        family: ProviderFamily,
+    ) -> Result<Self, KeyProviderFailure> {
+        if identity.family() != family {
             return Err(KeyProviderFailure::InvalidConfiguration);
         }
         let required = Self::required_resources();
@@ -62,7 +81,7 @@ impl VaultTransitKeyProvider {
                 .add_trust_roots(&pem)?;
         }
         let credential_model = ProviderCredentialModel::Transit(authentication);
-        credential_model.validate(ProviderFamily::VaultTransit)?;
+        credential_model.validate(family)?;
         authentication::validate_mount(&credential_model, authentication_mount)?;
         drop(authentication::read_credential(&credential_model)?);
         Ok(Self {
@@ -159,7 +178,7 @@ impl VaultTransitKeyProvider {
                 deadline,
             )
             .await?;
-        protocol::verify_health(&health)?;
+        protocol::verify_health(&health, self.identity.family())?;
         let metadata = self
             .request(
                 protocol::Operation::Metadata,
@@ -278,17 +297,19 @@ impl KeyProvider for VaultTransitKeyProvider {
 
 #[cfg(fuzzing)]
 pub(super) fn fuzz_wire(bytes: &[u8]) {
-    let identity = ProviderKeyUri::new(
-        ProviderFamily::VaultTransit,
-        "https://vault.example:8200/v1/transit/keys/root",
-        "1",
-    )
-    .expect("fixed Vault wire identity");
-    let _ = protocol::verify_health(bytes);
-    let _ = protocol::verify_metadata(bytes, &identity, false);
-    let _ = protocol::verify_metadata(bytes, &identity, true);
-    let _ = protocol::verify_ciphertext(bytes, &identity);
-    drop(protocol::encrypted_response(bytes, &identity));
+    for family in [ProviderFamily::VaultTransit, ProviderFamily::OpenBaoTransit] {
+        let identity = ProviderKeyUri::new(
+            family,
+            "https://transit.example:8200/v1/transit/keys/root",
+            "1",
+        )
+        .expect("fixed Transit wire identity");
+        let _ = protocol::verify_health(bytes, family);
+        let _ = protocol::verify_metadata(bytes, &identity, false);
+        let _ = protocol::verify_metadata(bytes, &identity, true);
+        let _ = protocol::verify_ciphertext(bytes, &identity);
+        drop(protocol::encrypted_response(bytes, &identity));
+    }
     drop(protocol::decrypted_response(bytes));
     let now = tokio::time::Instant::now();
     drop(protocol::authentication_response(bytes, now));

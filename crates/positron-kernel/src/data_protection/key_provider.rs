@@ -22,6 +22,7 @@ pub use google::GoogleCloudKmsKeyProvider;
 #[cfg(fuzzing)]
 mod fuzzing;
 mod local;
+mod openbao;
 pub(super) mod owner;
 mod payload;
 mod session;
@@ -34,6 +35,7 @@ pub use credentials::{CredentialFileReference, ProviderCredentialModel, TransitA
 #[doc(hidden)]
 pub use fuzzing::{fuzz_key_cache_stateful, fuzz_key_provider_envelope};
 pub use local::LocalKeyProvider;
+pub use openbao::OpenBaoTransitKeyProvider;
 pub(crate) use owner::DataProtectionProvider;
 pub use payload::{
     EnvelopeContext, KeyEnvelope, KeyScope, SecretKek, SecretWrappedKeyPayload, WrappingAlgorithm,
@@ -116,13 +118,8 @@ impl ProviderKeyUri {
             },
             ProviderFamily::AzureKeyVault => azure_key_uri(locator, version, false),
             ProviderFamily::AzureManagedHsm => azure_key_uri(locator, version, true),
-            ProviderFamily::VaultTransit => vault_key_uri(locator, version),
-            ProviderFamily::OpenBaoTransit => {
-                positive_version
-                    && locator.starts_with("https://")
-                    && locator
-                        .rsplit_once("/keys/")
-                        .is_some_and(|(_, name)| !name.is_empty() && !name.contains('/'))
+            ProviderFamily::VaultTransit | ProviderFamily::OpenBaoTransit => {
+                transit_key_uri(locator, version)
             },
             ProviderFamily::Kmip21 => version == "immutable",
             ProviderFamily::LocalFile => true,
@@ -150,7 +147,7 @@ impl ProviderKeyUri {
     }
 }
 
-fn vault_key_uri(locator: &str, version: &str) -> bool {
+fn transit_key_uri(locator: &str, version: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(locator) else {
         return false;
     };
@@ -177,6 +174,7 @@ fn vault_key_uri(locator: &str, version: &str) -> bool {
         && url.fragment().is_none()
         && mount.split('/').all(component)
         && component(name)
+        && version.bytes().all(|byte| byte.is_ascii_digit())
         && !version.starts_with('0')
         && version.parse::<i32>().is_ok_and(|v| v > 0)
 }

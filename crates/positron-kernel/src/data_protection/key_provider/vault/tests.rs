@@ -2,6 +2,7 @@ use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use google_cloud_auth::native;
 mod lifecycle;
+mod openbao;
 
 struct Transcript {
     replies: Mutex<std::collections::VecDeque<native::Response>>,
@@ -134,10 +135,12 @@ fn published_vault_212_health_receipt_pins_service_version()
 -> Result<(), Box<dyn std::error::Error>> {
     protocol::verify_health(
         br#"{"version":"2.1.2","initialized":true,"sealed":false,"standby":false}"#,
+        ProviderFamily::VaultTransit,
     )?;
     assert_eq!(
         protocol::verify_health(
-            br#"{"version":"2.1.1","initialized":true,"sealed":false,"standby":false}"#
+            br#"{"version":"2.1.1","initialized":true,"sealed":false,"standby":false}"#,
+            ProviderFamily::VaultTransit,
         ),
         Err(KeyProviderFailure::InvalidConfiguration)
     );

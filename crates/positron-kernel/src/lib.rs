@@ -81,9 +81,9 @@ pub mod key_provider {
         AzureManagedIdentityId, AzureWorkloadIdentity, CacheInvalidation, ConformanceFailure,
         ConformanceStep, CredentialFileReference, EnvelopeContext, GoogleCloudKmsKeyProvider,
         KeyCacheHealth, KeyCacheLease, KeyEnvelope, KeyProviderConformance, KeyProviderFailure,
-        KeyScope, LocalKeyProvider, ProviderConformanceTarget, ProviderCredentialModel,
-        ProviderFailureDisposition, ProviderFamily, ProviderKeyUri, TransitAuthentication,
-        VaultTransitKeyProvider, WrappingAlgorithm,
+        KeyScope, LocalKeyProvider, OpenBaoTransitKeyProvider, ProviderConformanceTarget,
+        ProviderCredentialModel, ProviderFailureDisposition, ProviderFamily, ProviderKeyUri,
+        TransitAuthentication, VaultTransitKeyProvider, WrappingAlgorithm,
     };
     #[cfg(fuzzing)]
     #[doc(hidden)]
