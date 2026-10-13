@@ -77,8 +77,8 @@ fn phase(
     action: &str,
     index: usize,
 ) -> TestResult<ProviderMigrationResponse> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let rendered = loop {
+    let admission_deadline = Instant::now() + Duration::from_secs(10);
+    let (rendered, completion_deadline) = loop {
         let current = status(client, bearer, None)?;
         let mut arguments = vec![
             "--expected-generation".into(),
@@ -94,10 +94,13 @@ fn phase(
         }
         let output = command(endpoint, bearer, action, &arguments)?;
         if output.status.success() {
-            break String::from_utf8(output.stdout)?;
+            break (
+                String::from_utf8(output.stdout)?,
+                Instant::now() + Duration::from_secs(10),
+            );
         }
         let error = String::from_utf8(output.stderr)?;
-        if Instant::now() >= deadline || !error.contains("stale Catalog generation") {
+        if Instant::now() >= admission_deadline || !error.contains("stale Catalog generation") {
             return Err(format!("{action} admission: {error}").into());
         }
     };
@@ -128,7 +131,7 @@ fn phase(
         {
             break current;
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= completion_deadline {
             let last = current.operation.as_ref();
             return Err(format!(
                     "CLI operation completion deadline: action={action} status={:?} phase={:?} progress={:?}",
