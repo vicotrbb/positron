@@ -119,19 +119,27 @@ fn phase(
         .find_map(|field| field.strip_prefix("operation_id="))
         .ok_or("operation ID")?
         .to_owned();
-    let terminal =
-        loop {
-            let current = status(client, bearer, Some(operation.clone()))?;
-            if current.operation.as_ref().is_some_and(|operation| {
-                !matches!(operation.status.as_str(), "pending" | "running")
-            }) {
-                break current;
-            }
-            if Instant::now() >= deadline {
-                return Err("CLI operation completion deadline".into());
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
+    let terminal = loop {
+        let current = status(client, bearer, Some(operation.clone()))?;
+        if current
+            .operation
+            .as_ref()
+            .is_some_and(|operation| !matches!(operation.status.as_str(), "pending" | "running"))
+        {
+            break current;
+        }
+        if Instant::now() >= deadline {
+            let last = current.operation.as_ref();
+            return Err(format!(
+                    "CLI operation completion deadline: action={action} status={:?} phase={:?} progress={:?}",
+                    last.map(|operation| operation.status.as_str()),
+                    last.map(|operation| operation.phase.as_str()),
+                    last.map(|operation| operation.progress_percent),
+                )
+                .into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
     Ok(terminal)
 }
 
