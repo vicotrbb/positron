@@ -79,6 +79,42 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// Revalidates a persisted system operation's original Principal. Only
+    /// Administration's accepted-operation owner calls this recovery seam;
+    /// it never accepts a bearer replacement or a caller-selected scope.
+    pub(crate) fn resume_system_operation_actor(
+        &self,
+        principal: PrincipalId,
+        instance: [u8; 16],
+        now: u64,
+    ) -> Result<AuthorizedContext, AttributionFailure> {
+        if instance != self.instance
+            || now == 0
+            || if self.credentials.is_empty() {
+                principal != self.principal
+            } else {
+                !self.credentials.iter().any(|credential| {
+                    credential.principal == principal
+                        && credential.scope == Scope::SystemAdministration
+                        && credential.active
+                        && credential
+                            .expires_at_unix_seconds
+                            .is_none_or(|expiry| now < expiry)
+                })
+            }
+        {
+            return Err(AttributionFailure);
+        }
+        Ok(AuthorizedContext {
+            principal,
+            scope: Scope::SystemAdministration,
+            tenant: None,
+            authority: self.instance,
+            generation: self.generation,
+            lifecycle: self.lifecycle,
+            proxy_actor: None,
+        })
+    }
     /// Authorizes a system-wide Governance Audit retention mutation. Tenant
     /// scopes and data-plane credentials never acquire this authority.
     pub fn authorize_system_audit_retention(

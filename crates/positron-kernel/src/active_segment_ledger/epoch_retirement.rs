@@ -17,6 +17,22 @@ impl ActiveSegmentLedger<'_, '_> {
         authority: &'a StorageKernelResourceAuthority,
         catalog: &Catalog<'_>,
     ) -> Result<KeyEpochRetirementGuard<'a>, LedgerFailure> {
+        Self::guard_local_root_retirement_inner(authority, catalog, None)
+    }
+    /// The coordinator proof permits only its exact running reference-free
+    /// migration association, on the same authenticated Catalog basis.
+    pub fn guard_local_root_retirement_with_references<'a>(
+        authority: &'a StorageKernelResourceAuthority,
+        catalog: &Catalog<'_>,
+        references: &crate::RootRetirementReferenceGuard<'_>,
+    ) -> Result<KeyEpochRetirementGuard<'a>, LedgerFailure> {
+        Self::guard_local_root_retirement_inner(authority, catalog, Some(references))
+    }
+    fn guard_local_root_retirement_inner<'a>(
+        authority: &'a StorageKernelResourceAuthority,
+        catalog: &Catalog<'_>,
+        references: Option<&crate::RootRetirementReferenceGuard<'_>>,
+    ) -> Result<KeyEpochRetirementGuard<'a>, LedgerFailure> {
         let work = RootRewrapSession::admit(authority)
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ResourceAdmissionRefused))?;
         let barrier = authority
@@ -26,6 +42,14 @@ impl ActiveSegmentLedger<'_, '_> {
         let basis = catalog.pin()?;
         let _inspection = catalog.reserve_catalog_proposal_copy(&basis)?;
         for bytes in basis.plaintext_objects() {
+            if references
+                .map(|proof| proof.proves_reference_free_record(authority, basis.identity(), bytes))
+                .transpose()
+                .map_err(|_| LedgerFailure::new(LedgerFailureCode::ConcurrentWriter))?
+                .unwrap_or(false)
+            {
+                continue;
+            }
             if crate::maintenance::durable_task_retains_unproved_root_reference(bytes)
                 .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?
             {

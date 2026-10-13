@@ -7,6 +7,52 @@ use super::{ActiveSegmentLedger, LedgerFailure, LedgerFailureCode, SnapshotProte
 use crate::{MaintenanceCoordinator, MaintenanceExecution, MaintenanceTaskClass};
 
 impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
+    /// Checks the surviving continuity marker after the dedicated reclamation
+    /// completion owner atomically removed the other input metadata bindings.
+    /// The caller holds the snapshot barrier and authenticated Catalog basis.
+    pub(crate) fn completed_reclamation_references_absent(
+        authority: &crate::StorageKernelResourceAuthority,
+        basis: &crate::CatalogSnapshot,
+        task: &crate::MaintenanceTask,
+    ) -> Result<bool, LedgerFailure> {
+        let crate::MaintenanceScope::Segment {
+            tenant,
+            signal,
+            shard,
+        } = task.scope()
+        else {
+            return Ok(false);
+        };
+        if task.trigger() != crate::MaintenanceTrigger::Event
+            || task.preconditions().resource_generation() != 1
+            || task.preconditions().catalog_generation() >= basis.number()
+            || task.reservations() != super::retention_publication::retention_publication_claim()?
+            || task.source_binding().is_some()
+        {
+            return Ok(false);
+        }
+        let volume = authority
+            .primary_data_volume()
+            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::RecoveryRequired))?;
+        let storage = super::storage::LedgerStorage::open_observed(volume)?;
+        let scope = super::SegmentScope::new(tenant, signal, shard);
+        let metadata = storage.catalog_segments(basis, scope)?;
+        let mut marker = None;
+        for candidate in metadata {
+            if task
+                .inputs()
+                .contains(&metadata_binding(&storage, candidate)?)
+                && (candidate.state != SegmentState::Retired || marker.replace(candidate).is_some())
+            {
+                return Ok(false);
+            }
+        }
+        match marker {
+            Some(marker) => storage.retired_files_absent(marker),
+            None => Ok(false),
+        }
+    }
+
     /// Reclaims the exact retired metadata bound to one durable Reclamation
     /// task. A protected input remains durably queued for the same descriptor.
     pub fn complete_running_retention_reclamation_task(

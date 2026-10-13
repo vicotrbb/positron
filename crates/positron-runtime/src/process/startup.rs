@@ -549,6 +549,20 @@ fn bootstrap_once(
         })?;
         paths = paths.with_key_cache_lease(lease);
     }
+    if let Some(effective) = configuration
+        .effective_configuration
+        .as_ref()
+        .filter(|effective| effective.provider_access().is_some())
+    {
+        // Authentication of the initialized record and Catalog determines the
+        // active root. Access configuration cannot initialize or select a route.
+        return InstanceBootstrap::reopen_configured(&paths, effective)
+            .map(|instance| (crate::BootstrapState::Initialized, instance))
+            .map_err(|failure| BootstrapAttemptFailure {
+                classified: None,
+                failure,
+            });
+    }
     let classified =
         InstanceBootstrap::classify(&paths).map_err(|failure| BootstrapAttemptFailure {
             classified: None,

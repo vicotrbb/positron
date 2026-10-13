@@ -76,6 +76,8 @@ pub enum SettingKind {
     Integer,
     /// A TOML string.
     String,
+    /// A closed native provider access table with protected file references.
+    ProviderAccess,
     /// A bounded list of named durable-export destination scopes.
     ExportDestinations,
     /// A bounded list of literal trusted-proxy CIDRs.
@@ -90,6 +92,7 @@ impl SettingKind {
         match self {
             Self::Integer => "integer",
             Self::String => "string",
+            Self::ProviderAccess => "table",
             Self::ExportDestinations => "export_destinations",
             Self::TrustedProxyCidrs => "trusted_proxy_cidrs",
             Self::CorsAllowedOrigins => "cors_allowed_origins",
@@ -116,6 +119,8 @@ pub enum ValueDomain {
     AbsolutePath(usize),
     /// A secret-bearing absolute normalized path with a byte ceiling.
     ProtectedAbsolutePath(usize),
+    /// Bounded locator, version, and protected reference selector lengths.
+    ProviderAccess(usize, usize, usize),
     /// Bounded named durable-export destination definitions.
     ExportDestinations(usize, usize, usize),
     /// Bounded literal IPv4 or IPv6 CIDRs for one listener profile.
@@ -317,6 +322,7 @@ pub enum Setting {
     StorageSecretsDirectory,
     SecurityKeyCacheLeaseSeconds,
     SecurityLocalKeyFile,
+    SecurityProviderAccess,
     ExportDestinations,
     DiagnosticsTraceOtlpGrpcAddress,
 }
@@ -365,6 +371,7 @@ impl Setting {
                 | Self::StorageDataDirectory
                 | Self::StorageSecretsDirectory
                 | Self::SecurityLocalKeyFile
+                | Self::SecurityProviderAccess
                 | Self::ExportDestinations
         )
     }

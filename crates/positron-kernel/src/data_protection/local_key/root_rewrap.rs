@@ -7,7 +7,9 @@ use crate::data_protection::key_provider::{
 use crate::{
     InstanceId, ResourceAmounts, ResourceReservation, StorageKernelResourceAuthority, WorkClaim,
 };
+mod provider_migration;
 mod retirement;
+pub use provider_migration::PreparedProviderMigration;
 #[cfg(feature = "test-support")]
 pub use retirement::RootCustodyPublicationFault;
 pub use retirement::RootPredecessorEnvelope;
@@ -112,23 +114,40 @@ impl<'a> RootRewrapSession<'a> {
         if current_epoch.checked_add(1) != Some(epoch) {
             return Err(BootstrapKeyFailure::InvalidInput);
         }
-        let original = self.wrap_system(current, current, instance, current_epoch)?;
+        let native_source = current.active_provider_identity()?.family()
+            != crate::key_provider::ProviderFamily::LocalFile;
+        let original = if native_source {
+            current.stored_system_envelope(instance)?
+        } else {
+            self.wrap_system(current, current, instance, current_epoch)?
+        };
         let replacement = self.wrap_system(current, successor, instance, epoch)?;
-        let mut bytes = Vec::with_capacity(4096);
-        bytes.extend_from_slice(BRIDGE_MAGIC);
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(if native_source {
+                MAX_BRIDGE_BYTES
+            } else {
+                MAX_LEGACY_BRIDGE_BYTES
+            })
+            .map_err(|_| BootstrapKeyFailure::LimitExceeded)?;
+        bytes.extend_from_slice(if native_source {
+            PROVIDER_BRIDGE_MAGIC
+        } else {
+            BRIDGE_MAGIC
+        });
         bytes.extend_from_slice(&instance.to_bytes());
         write_identity(&mut bytes, current.bootstrap_identity());
         bytes.extend_from_slice(&2_u16.to_be_bytes());
         for (identity, epoch, envelope) in [
-            (identity, current_epoch, original),
-            (successor.identity(), epoch, replacement),
+            (identity, current_epoch, original.as_slice()),
+            (successor.identity(), epoch, replacement.as_slice()),
         ] {
             write_identity(&mut bytes, identity);
             bytes.extend_from_slice(&epoch.to_be_bytes());
             let length =
                 u32::try_from(envelope.len()).map_err(|_| BootstrapKeyFailure::LimitExceeded)?;
             bytes.extend_from_slice(&length.to_be_bytes());
-            bytes.extend_from_slice(&envelope);
+            bytes.extend_from_slice(envelope);
         }
         if access
             .exists(crate::BootstrapArtifact::SystemKeyEnvelope)
@@ -146,8 +165,7 @@ impl<'a> RootRewrapSession<'a> {
                     || bridge.routes.len() != 1
                     || only.epoch != current_epoch
                     || only.root != identity
-                    || only.envelope
-                        != self.wrap_system(current, current, instance, current_epoch)?
+                    || only.envelope != original
                 {
                     return Err(BootstrapKeyFailure::Authentication);
                 }
@@ -165,7 +183,8 @@ impl<'a> RootRewrapSession<'a> {
         epoch: u64,
         envelope: &[u8],
     ) -> Result<super::VerifiedRootActivation, BootstrapKeyFailure> {
-        let (predecessor, predecessor_epoch) = current.active_root_route()?;
+        let source = current.root_admission_receipt()?;
+        let predecessor_epoch = source.epoch();
         if predecessor_epoch.checked_add(1) != Some(epoch) {
             return Err(BootstrapKeyFailure::InvalidInput);
         }
@@ -189,11 +208,10 @@ impl<'a> RootRewrapSession<'a> {
         drop(original_system);
         drop(successor_system);
         let successor = self.lease_system(verified, instance, current.cache_lease()?)?;
-        Ok(super::VerifiedRootActivation::new(
-            successor,
-            predecessor,
-            predecessor_epoch,
-        ))
+        if current.root_admission_receipt()? != source {
+            return Err(BootstrapKeyFailure::Authentication);
+        }
+        Ok(super::VerifiedRootActivation::new(successor, source))
     }
     pub fn admit(
         authority: &'a StorageKernelResourceAuthority,
@@ -243,6 +261,17 @@ impl<'a> RootRewrapSession<'a> {
         clock: fn() -> std::time::Instant,
     ) -> Result<BootstrapKeyCustody, BootstrapKeyFailure> {
         use crate::data_protection::key_provider::KeyProviderCache;
+        if custody.active_provider_identity()?.family()
+            != crate::key_provider::ProviderFamily::LocalFile
+        {
+            if custody.cache_lease()? != lease
+                || custody.system_route()? != Some((instance, custody.bootstrap_identity()))
+            {
+                return Err(BootstrapKeyFailure::Authentication);
+            }
+            custody.attach_segment_reference_authority(self.authority)?;
+            return Ok(custody);
+        }
         let memory = KeyProviderCache::<LocalKeyProvider>::required_memory_bytes(1)
             .map_err(|_| BootstrapKeyFailure::LimitExceeded)?;
         let amounts =
@@ -304,7 +333,7 @@ impl<'a> RootRewrapSession<'a> {
         let recovered = SecretWrappedKeyPayload(payload)
             .verify(context, &provider)
             .map_err(|_| BootstrapKeyFailure::Authentication)?;
-        let system = source.system_kek(instance)?;
+        let system = source.control_system_key(instance)?;
         use subtle::ConstantTimeEq;
         if !bool::from(
             system
@@ -375,7 +404,7 @@ fn wrap_system_at(
     let context = binding(instance, source.bootstrap_identity())?;
     let provider = LocalKeyProvider::identity_for_custody(destination, root_epoch)
         .map_err(|_| BootstrapKeyFailure::InvalidInput)?;
-    let key = SecretKek(source.system_kek(instance)?);
+    let key = SecretKek(source.control_system_key(instance)?);
     let payload = SecretWrappedKeyPayload::encode(&key, context, &provider)
         .map_err(|_| BootstrapKeyFailure::Authentication)?;
     LocalKeyProvider::wrap_for_epoch(destination, root_epoch, payload, context)
@@ -400,9 +429,13 @@ fn binding(
 }
 
 const BRIDGE_MAGIC: &[u8; 8] = b"POSSEK01";
-pub(super) const MAX_BRIDGE_BYTES: usize = 16_384;
+const PROVIDER_BRIDGE_MAGIC: &[u8; 8] = b"POSSEK02";
+const MAX_LEGACY_BRIDGE_BYTES: usize = 16_384;
+// Fixed header (82) plus at most two exact root/epoch/length/envelope routes.
+pub(super) const MAX_BRIDGE_BYTES: usize = 82 + 2 * (56 + 8 + 4 + 8956);
 
 impl BootstrapKeyCustody {
+    pub(crate) const MAX_ROOT_RECOVERY_ENVELOPE_BYTES: usize = MAX_BRIDGE_BYTES;
     pub(crate) fn write_root_envelope(
         file: &mut std::fs::File,
         bytes: &[u8],
@@ -451,7 +484,7 @@ impl BootstrapKeyCustody {
             return Err(BootstrapKeyFailure::Authentication);
         }
         let recovered = self.system_kek(instance)?;
-        let previous = original.system_kek(instance)?;
+        let previous = original.control_system_key(instance)?;
         if !bool::from(
             recovered
                 .expose_to_backend()
@@ -466,9 +499,19 @@ impl BootstrapKeyCustody {
         let Some((instance, anchor)) = self.system_route()? else {
             return Ok(None);
         };
-        let wrapped = wrap_system(self, instance)?;
+        let native = self.active_provider_identity()?.family()
+            != crate::key_provider::ProviderFamily::LocalFile;
+        let wrapped = if native {
+            self.stored_system_envelope(instance)?
+        } else {
+            wrap_system(self, instance)?
+        };
         let mut bytes = Vec::with_capacity(150 + wrapped.len());
-        bytes.extend_from_slice(BRIDGE_MAGIC);
+        bytes.extend_from_slice(if native {
+            PROVIDER_BRIDGE_MAGIC
+        } else {
+            BRIDGE_MAGIC
+        });
         bytes.extend_from_slice(&instance.to_bytes());
         write_identity(&mut bytes, anchor);
         bytes.extend_from_slice(&1_u16.to_be_bytes());
@@ -548,7 +591,13 @@ struct Bridge<'a> {
     routes: Vec<BridgeRoute<'a>>,
 }
 fn parse_bridge(bytes: &[u8]) -> Result<Bridge<'_>, BootstrapKeyFailure> {
-    if bytes.len() > MAX_BRIDGE_BYTES || bytes.get(..8) != Some(BRIDGE_MAGIC.as_slice()) {
+    let native = bytes.get(..8) == Some(PROVIDER_BRIDGE_MAGIC.as_slice());
+    let maximum = if native {
+        MAX_BRIDGE_BYTES
+    } else {
+        MAX_LEGACY_BRIDGE_BYTES
+    };
+    if bytes.len() > maximum || (!native && bytes.get(..8) != Some(BRIDGE_MAGIC.as_slice())) {
         return Err(BootstrapKeyFailure::Authentication);
     }
     let mut cursor = BridgeCursor(bytes.get(8..).ok_or(BootstrapKeyFailure::Authentication)?);
@@ -556,7 +605,7 @@ fn parse_bridge(bytes: &[u8]) -> Result<Bridge<'_>, BootstrapKeyFailure> {
         InstanceId::new(cursor.array()?).map_err(|_| BootstrapKeyFailure::Authentication)?;
     let anchor = cursor.identity()?;
     let count = u16::from_be_bytes(cursor.array()?);
-    if !(1..=16).contains(&count) {
+    if count == 0 || count > if native { 2 } else { 16 } {
         return Err(BootstrapKeyFailure::LimitExceeded);
     }
     let mut routes = Vec::<BridgeRoute<'_>>::new();
@@ -572,7 +621,7 @@ fn parse_bridge(bytes: &[u8]) -> Result<Bridge<'_>, BootstrapKeyFailure> {
         }
         preceding_epoch = epoch;
         let length = u32::from_be_bytes(cursor.array()?);
-        if length == 0 || length > 1024 {
+        if length == 0 || length > if native { 8956 } else { 1024 } {
             return Err(BootstrapKeyFailure::LimitExceeded);
         }
         routes.push(BridgeRoute {

@@ -27,6 +27,7 @@ mod keys;
 mod local_key_cli;
 mod maintenance_cli;
 mod policy;
+mod provider_migration_cli;
 mod recovery_cli;
 mod support_bundle;
 mod tenant_alias_cli;
@@ -69,6 +70,13 @@ pub fn run_native(
     let mut arguments = arguments.into_iter().peekable();
     if arguments.peek().is_some_and(|argument| argument == "keys") {
         arguments.next();
+        if arguments
+            .peek()
+            .is_some_and(|argument| argument == "migrate")
+        {
+            arguments.next();
+            return provider_migration_cli::run(arguments);
+        }
         if arguments.peek().is_some_and(|argument| argument == "local") {
             arguments.next();
             return local_key_cli::run(arguments);
@@ -656,6 +664,9 @@ fn exit_code(outcome: ExitOutcome) -> ExitCode {
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    // Native signals are process-wide, so their tests must own them exclusively.
+    static NATIVE_SIGNAL_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, SystemTime};
 
@@ -831,6 +842,9 @@ mod tests {
     #[test]
     fn pending_native_termination_signal_interrupts_recovery_backoff()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _signal_guard = NATIVE_SIGNAL_TEST
+            .lock()
+            .map_err(|_| "native signal test lock poisoned")?;
         let recovery = NativeRecovery::new(Signals::new([signal_hook::consts::signal::SIGTERM])?);
         signal_hook::low_level::raise(signal_hook::consts::signal::SIGTERM)?;
 
@@ -844,6 +858,9 @@ mod tests {
     #[test]
     fn native_recovery_keeps_sighup_out_of_termination_handling()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _signal_guard = NATIVE_SIGNAL_TEST
+            .lock()
+            .map_err(|_| "native signal test lock poisoned")?;
         let recovery = NativeRecovery::new(Signals::new([signal_hook::consts::signal::SIGHUP])?);
         signal_hook::low_level::raise(signal_hook::consts::signal::SIGHUP)?;
 
@@ -859,6 +876,9 @@ mod tests {
     #[test]
     fn native_drain_keeps_sighup_out_of_forced_exit_handling()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _signal_guard = NATIVE_SIGNAL_TEST
+            .lock()
+            .map_err(|_| "native signal test lock poisoned")?;
         let mut signals = Signals::new([signal_hook::consts::signal::SIGHUP])?;
         signal_hook::low_level::raise(signal_hook::consts::signal::SIGHUP)?;
 
@@ -869,6 +889,9 @@ mod tests {
     #[test]
     fn two_pending_native_termination_signals_force_the_drain()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _signal_guard = NATIVE_SIGNAL_TEST
+            .lock()
+            .map_err(|_| "native signal test lock poisoned")?;
         let mut signals = Signals::new([
             signal_hook::consts::signal::SIGINT,
             signal_hook::consts::signal::SIGTERM,
@@ -887,6 +910,9 @@ mod tests {
     #[test]
     fn owner_loop_turns_real_first_signal_into_drain_and_second_into_forced_exit()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _signal_guard = NATIVE_SIGNAL_TEST
+            .lock()
+            .map_err(|_| "native signal test lock poisoned")?;
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
@@ -957,6 +983,9 @@ mod tests {
     #[test]
     fn owner_loop_persists_a_joined_task_panic_without_its_payload()
     -> Result<(), Box<dyn std::error::Error>> {
+        let _signal_guard = NATIVE_SIGNAL_TEST
+            .lock()
+            .map_err(|_| "native signal test lock poisoned")?;
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();

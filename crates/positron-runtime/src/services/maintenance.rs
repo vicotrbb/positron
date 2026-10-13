@@ -249,6 +249,7 @@ pub(super) fn restore(instance: &crate::InitializedInstance) -> Result<(), Servi
 }
 
 const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
+    MaintenanceTaskClass::Migration,
     MaintenanceTaskClass::Compaction,
     MaintenanceTaskClass::SnapshotLeaseExpiry,
     MaintenanceTaskClass::RetentionPublication,
@@ -313,6 +314,9 @@ fn discover_after_completed_maintenance(
 }
 
 enum InstalledMaintenanceExecution<'authority> {
+    RootProviderMigration {
+        execution: MaintenanceExecution<'authority>,
+    },
     EnvelopeVerification {
         execution: MaintenanceExecution<'authority>,
     },
@@ -347,7 +351,8 @@ enum InstalledMaintenanceExecution<'authority> {
 
 fn installed_task_class(execution: &InstalledMaintenanceExecution<'_>) -> MaintenanceTaskClass {
     match execution {
-        InstalledMaintenanceExecution::EnvelopeVerification { execution }
+        InstalledMaintenanceExecution::RootProviderMigration { execution }
+        | InstalledMaintenanceExecution::EnvelopeVerification { execution }
         | InstalledMaintenanceExecution::Compaction { execution, .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { execution }
         | InstalledMaintenanceExecution::SnapshotLeaseExpiry { execution, .. }
@@ -367,6 +372,7 @@ fn start_installed_maintenance<'authority>(
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
         return Err(ServiceFailure::Cancelled);
     }
+    super::provider_migration::recover_accepted_task(services)?;
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
         return Err(ServiceFailure::CatalogBusy);
     };
@@ -386,16 +392,15 @@ fn start_installed_maintenance<'authority>(
     .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
     let coordinator = instance.maintenance_coordinator();
     let snapshot_lease_times = snapshot_lease_schedule_times(services)?;
-    let selected = coordinator
-        .start_next_with_reservation_and_persist_for_classes_with_snapshot_lease_times(
-            &catalog,
-            &instance._authority,
-            now,
-            instance.retention_time.status().state()
-                == positron_kernel::LifecycleClockState::ClockUncertain,
-            INSTALLED_TASK_CLASSES,
-            &snapshot_lease_times,
-        );
+    let selected = coordinator.start_next_with_root_migration_handler_and_snapshot_lease_times(
+        &catalog,
+        &instance._authority,
+        now,
+        instance.retention_time.status().state()
+            == positron_kernel::LifecycleClockState::ClockUncertain,
+        INSTALLED_TASK_CLASSES,
+        &snapshot_lease_times,
+    );
     let Some(execution) = (match selected {
         Ok(execution) => execution,
         Err(failure) => return Err(map_failure(failure)),
@@ -409,6 +414,9 @@ fn start_installed_maintenance<'authority>(
         return Err(ServiceFailure::Cancelled);
     }
     let execution = match execution.task().class() {
+        MaintenanceTaskClass::Migration => {
+            InstalledMaintenanceExecution::RootProviderMigration { execution }
+        },
         MaintenanceTaskClass::EnvelopeVerification => {
             InstalledMaintenanceExecution::EnvelopeVerification { execution }
         },
@@ -485,6 +493,9 @@ fn complete_installed_maintenance(
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
         return Err(ServiceFailure::Cancelled);
     }
+    if let InstalledMaintenanceExecution::RootProviderMigration { execution } = execution {
+        return super::provider_migration::complete(services, execution);
+    }
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
         return Err(ServiceFailure::CatalogBusy);
     };
@@ -532,7 +543,8 @@ fn complete_installed_maintenance(
         | InstalledMaintenanceExecution::SnapshotLeaseExpiry { scope, .. }
         | InstalledMaintenanceExecution::RetentionPublication { scope, .. }
         | InstalledMaintenanceExecution::RetentionReclamation { scope, .. } => *scope,
-        InstalledMaintenanceExecution::EnvelopeVerification { .. }
+        InstalledMaintenanceExecution::RootProviderMigration { .. }
+        | InstalledMaintenanceExecution::EnvelopeVerification { .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. }
         | InstalledMaintenanceExecution::CatalogReclamation { .. }
         | InstalledMaintenanceExecution::IntegrityScrub { .. } => {
@@ -566,7 +578,8 @@ fn complete_installed_maintenance(
                 key,
             )
         },
-        InstalledMaintenanceExecution::EnvelopeVerification { .. }
+        InstalledMaintenanceExecution::RootProviderMigration { .. }
+        | InstalledMaintenanceExecution::EnvelopeVerification { .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. } => {
             return Err(ServiceFailure::Internal);
         },
@@ -623,7 +636,8 @@ fn complete_installed_maintenance(
         return Ok(true);
     }
     let completed = match execution {
-        InstalledMaintenanceExecution::EnvelopeVerification { .. } => {
+        InstalledMaintenanceExecution::RootProviderMigration { .. }
+        | InstalledMaintenanceExecution::EnvelopeVerification { .. } => {
             return Err(ServiceFailure::Internal);
         },
         InstalledMaintenanceExecution::Compaction { .. } => return Err(ServiceFailure::Internal),

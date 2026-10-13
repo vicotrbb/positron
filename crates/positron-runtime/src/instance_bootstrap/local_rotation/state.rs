@@ -1,7 +1,15 @@
 //! Authenticated Catalog state is the sole active local-root epoch authority.
 use super::*;
+use positron_kernel::key_provider::{KeyEnvelope, ProviderFamily, ProviderKeyUri};
 use positron_kernel::{BootstrapKeyIdentity, CatalogSnapshot};
 pub(super) const MAGIC: &[u8; 8] = b"POSLROT1";
+const PROVIDER_MAGIC: &[u8; 8] = b"POSLROT2";
+const LEGACY_MAXIMUM: usize = 3424;
+// Header (96), two root routes, two presence flags and one phase byte.
+const PROVIDER_MAXIMUM: usize = 96 + (1 + 2 + 512 + 2 + 128) + 2 * (8 + 56 + 2 + 8956) + 3;
+pub(super) fn is_state(bytes: &[u8]) -> bool {
+    bytes.starts_with(MAGIC) || bytes.starts_with(PROVIDER_MAGIC)
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Route {
     pub(super) epoch: u64,
@@ -17,6 +25,9 @@ pub(super) struct State {
     pub(super) successor: Option<Route>,
     pub(super) predecessor: Option<Route>,
     pub(super) retiring: bool,
+    pub(super) cancelled: bool,
+    pub(super) provider_format: bool,
+    pub(super) migration_source: Option<ProviderKeyUri>,
 }
 impl State {
     pub(super) fn find(
@@ -28,7 +39,7 @@ impl State {
                 .object(id)
                 .map_err(|_| LocalKeyRotationFailure::Storage)?
                 .ok_or(LocalKeyRotationFailure::Authentication)?;
-            if bytes.starts_with(MAGIC) {
+            if is_state(bytes) {
                 if found.is_some() {
                     return Err(LocalKeyRotationFailure::Authentication);
                 }
@@ -42,7 +53,9 @@ impl State {
             active_epoch: self.active.epoch,
             successor_epoch: self.successor.as_ref().map(|route| route.epoch),
             predecessor_epoch: self.predecessor.as_ref().map(|route| route.epoch),
-            phase: if self.retiring {
+            phase: if self.cancelled {
+                LocalKeyRotationPhase::Cancelled
+            } else if self.retiring {
                 LocalKeyRotationPhase::Retiring
             } else if self.successor.is_some() {
                 LocalKeyRotationPhase::Prepared
@@ -57,28 +70,72 @@ impl State {
         self.validate()?;
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(3424)
+            .try_reserve_exact(if self.provider_format {
+                PROVIDER_MAXIMUM
+            } else {
+                LEGACY_MAXIMUM
+            })
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(if self.provider_format {
+            PROVIDER_MAGIC
+        } else {
+            MAGIC
+        });
         bytes.extend_from_slice(&self.instance.to_bytes());
         bytes.extend_from_slice(&self.transaction.to_bytes());
         identity(&mut bytes, self.anchor);
-        route(&mut bytes, &self.active)?;
+        if self.provider_format {
+            let source = self
+                .migration_source
+                .as_ref()
+                .ok_or(LocalKeyRotationFailure::Authentication)?;
+            bytes.push(source.family() as u8);
+            for text in [source.locator(), source.version()] {
+                bytes.extend_from_slice(
+                    &u16::try_from(text.len())
+                        .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?
+                        .to_be_bytes(),
+                );
+                bytes.extend_from_slice(text.as_bytes());
+            }
+        }
+        route(&mut bytes, &self.active, self.provider_format)?;
         bytes.push(u8::from(self.successor.is_some()));
         if let Some(successor) = &self.successor {
-            route(&mut bytes, successor)?;
+            route(&mut bytes, successor, self.provider_format)?;
         }
         bytes.push(u8::from(self.predecessor.is_some()));
         if let Some(predecessor) = &self.predecessor {
-            route(&mut bytes, predecessor)?;
+            route(&mut bytes, predecessor, self.provider_format)?;
         }
-        if self.retiring {
+        if self.provider_format {
+            bytes.push(u8::from(self.retiring) | (u8::from(self.cancelled) << 1));
+        } else if self.retiring {
             bytes.push(1);
         }
         Ok(bytes)
     }
     fn validate(&self) -> Result<(), LocalKeyRotationFailure> {
-        if self.active.epoch == 0
+        if self.provider_format != self.migration_source.is_some() {
+            return Err(LocalKeyRotationFailure::Authentication);
+        }
+        if let Some(source) = &self.migration_source {
+            let route = self
+                .predecessor
+                .as_ref()
+                .or_else(|| self.successor.as_ref().map(|_| &self.active));
+            if let Some(route) = route
+                && KeyEnvelope::decode(&route.envelope)
+                    .map_err(|_| LocalKeyRotationFailure::Authentication)?
+                    .identity()
+                    != source
+            {
+                return Err(LocalKeyRotationFailure::Authentication);
+            }
+        }
+        if self.cancelled && (!self.provider_format || self.retiring)
+            || self.cancelled && self.successor.is_none() && self.predecessor.is_none()
+            || self.active.epoch == 0
             || self.retiring && self.predecessor.is_none()
             || (self.successor.is_some() && self.predecessor.is_some())
             || self.predecessor.as_ref().is_some_and(|route| {
@@ -95,11 +152,24 @@ impl State {
         Ok(())
     }
     fn decode(bytes: &[u8]) -> Result<Self, LocalKeyRotationFailure> {
-        if bytes.len() > 3424 {
+        let provider_format = bytes.starts_with(PROVIDER_MAGIC);
+        if bytes.len()
+            > if provider_format {
+                PROVIDER_MAXIMUM
+            } else {
+                LEGACY_MAXIMUM
+            }
+        {
             return Err(LocalKeyRotationFailure::LimitExceeded);
         }
         let mut cursor = Cursor(bytes);
-        if cursor.array::<8>()? != *MAGIC {
+        if cursor.array::<8>()?
+            != *if provider_format {
+                PROVIDER_MAGIC
+            } else {
+                MAGIC
+            }
+        {
             return Err(LocalKeyRotationFailure::Authentication);
         }
         let instance = positron_kernel::InstanceId::new(cursor.array()?)
@@ -107,21 +177,33 @@ impl State {
         let transaction = TransactionId::new(cursor.array()?)
             .map_err(|_| LocalKeyRotationFailure::Authentication)?;
         let anchor = cursor.identity()?;
-        let active = cursor.route()?;
+        let migration_source = if provider_format {
+            Some(cursor.provider_identity()?)
+        } else {
+            None
+        };
+        let active = cursor.route(provider_format)?;
         let successor = match cursor.array::<1>()? {
             [0] => None,
-            [1] => Some(cursor.route()?),
+            [1] => Some(cursor.route(provider_format)?),
             _ => return Err(LocalKeyRotationFailure::Authentication),
         };
         let predecessor = match cursor.array::<1>()? {
             [0] => None,
-            [1] => Some(cursor.route()?),
+            [1] => Some(cursor.route(provider_format)?),
             _ => return Err(LocalKeyRotationFailure::Authentication),
         };
-        let retiring = match cursor.0 {
-            [] => false,
-            [1] => true,
-            _ => return Err(LocalKeyRotationFailure::Authentication),
+        let (retiring, cancelled) = if provider_format {
+            match cursor.0 {
+                [flags] if *flags <= 2 => (*flags == 1, *flags == 2),
+                _ => return Err(LocalKeyRotationFailure::Authentication),
+            }
+        } else {
+            match cursor.0 {
+                [] => (false, false),
+                [1] => (true, false),
+                _ => return Err(LocalKeyRotationFailure::Authentication),
+            }
         };
         let state = Self {
             instance,
@@ -131,6 +213,9 @@ impl State {
             successor,
             predecessor,
             retiring,
+            cancelled,
+            provider_format,
+            migration_source,
         };
         state.validate()?;
         if state.encode()? != bytes {
@@ -144,8 +229,13 @@ fn identity(bytes: &mut Vec<u8>, value: BootstrapKeyIdentity) {
     bytes.extend_from_slice(&value.fingerprint());
     bytes.extend_from_slice(&value.created_at_unix_seconds().to_be_bytes());
 }
-fn route(bytes: &mut Vec<u8>, value: &Route) -> Result<(), LocalKeyRotationFailure> {
-    if value.envelope.is_empty() || value.envelope.len() > 1024 {
+fn route(
+    bytes: &mut Vec<u8>,
+    value: &Route,
+    provider_format: bool,
+) -> Result<(), LocalKeyRotationFailure> {
+    if value.envelope.is_empty() || value.envelope.len() > if provider_format { 8956 } else { 1024 }
+    {
         return Err(LocalKeyRotationFailure::LimitExceeded);
     }
     positron_kernel::key_provider::KeyEnvelope::decode(&value.envelope)
@@ -159,7 +249,7 @@ fn route(bytes: &mut Vec<u8>, value: &Route) -> Result<(), LocalKeyRotationFailu
     Ok(())
 }
 struct Cursor<'a>(&'a [u8]);
-impl Cursor<'_> {
+impl<'a> Cursor<'a> {
     fn array<const N: usize>(&mut self) -> Result<[u8; N], LocalKeyRotationFailure> {
         let (bytes, tail) = self
             .0
@@ -178,11 +268,40 @@ impl Cursor<'_> {
         )
         .map_err(|_| LocalKeyRotationFailure::Authentication)
     }
-    fn route(&mut self) -> Result<Route, LocalKeyRotationFailure> {
+    fn provider_identity(&mut self) -> Result<ProviderKeyUri, LocalKeyRotationFailure> {
+        let family = match self.array::<1>()? {
+            [1] => ProviderFamily::LocalFile,
+            [2] => ProviderFamily::AwsKms,
+            [3] => ProviderFamily::GoogleCloudKms,
+            [4] => ProviderFamily::AzureKeyVault,
+            [5] => ProviderFamily::AzureManagedHsm,
+            [6] => ProviderFamily::VaultTransit,
+            [7] => ProviderFamily::OpenBaoTransit,
+            [8] => ProviderFamily::Kmip21,
+            _ => return Err(LocalKeyRotationFailure::Authentication),
+        };
+        let locator = self.text(512)?;
+        let version = self.text(128)?;
+        ProviderKeyUri::new(family, locator, version)
+            .map_err(|_| LocalKeyRotationFailure::Authentication)
+    }
+    fn text(&mut self, maximum: usize) -> Result<&'a str, LocalKeyRotationFailure> {
+        let length = usize::from(u16::from_be_bytes(self.array()?));
+        if length == 0 || length > maximum {
+            return Err(LocalKeyRotationFailure::LimitExceeded);
+        }
+        let (text, tail) = self
+            .0
+            .split_at_checked(length)
+            .ok_or(LocalKeyRotationFailure::Authentication)?;
+        self.0 = tail;
+        std::str::from_utf8(text).map_err(|_| LocalKeyRotationFailure::Authentication)
+    }
+    fn route(&mut self, provider_format: bool) -> Result<Route, LocalKeyRotationFailure> {
         let epoch = u64::from_be_bytes(self.array()?);
         let identity = self.identity()?;
         let length = usize::from(u16::from_be_bytes(self.array()?));
-        if length == 0 || length > 1024 {
+        if length == 0 || length > if provider_format { 8956 } else { 1024 } {
             return Err(LocalKeyRotationFailure::LimitExceeded);
         }
         let (bytes, tail) = self
@@ -197,3 +316,8 @@ impl Cursor<'_> {
         })
     }
 }
+
+#[cfg(any(test, fuzzing))]
+mod fuzzing;
+#[cfg(fuzzing)]
+pub(crate) use fuzzing::run as fuzz_key_provider_migration_stateful;

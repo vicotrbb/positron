@@ -70,15 +70,21 @@ pub(in crate::data_protection) fn cache_governor()
 pub(in crate::data_protection) fn provider_governor(
     amount: u64,
 ) -> Result<governor_support::TestKernel, Box<dyn std::error::Error>> {
+    provider_governor_with_slots(amount, 8)
+}
+pub(in crate::data_protection) fn provider_governor_with_slots(
+    amount: u64,
+    slots: u32,
+) -> Result<governor_support::TestKernel, Box<dyn std::error::Error>> {
     use crate::*;
     let total = ResourceAmounts::new([amount; 11]);
-    let raw = governor_support::raw_capacity_for_governed_work(total, 8)?;
+    let raw = governor_support::raw_capacity_for_governed_work(total, slots)?;
     let reserve = governor_support::minimum_recovery_reserve_for_tenants(1)?;
     let inventory = ResourceInventory::new(
         DetectedCapacity::new(raw)?,
         OperatorLimits::new(raw)?,
         RecoveryReserve::new(ResourceAmounts::new([reserve; 11]))?,
-        InventoryCardinalityLimits::new(1, 8)?,
+        InventoryCardinalityLimits::new(1, slots)?,
         DiskPressureThresholds::new(reserve, reserve + 1, reserve + 2, reserve + 3)?,
         DiskObservation::new(20_000_000),
     )?;

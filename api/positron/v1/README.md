@@ -8,7 +8,7 @@ the same product surface and must change together.
 `positron-api/build.rs` generates Protobuf messages, fixed enums, and the Rust
 `ApiKeyServiceClient`, `TenantQuotaServiceClient`, `TenantServiceClient`, `TenantAliasServiceClient`, `TenantLifecycleServiceClient`, `TenantRetentionServiceClient`,
 `PolicyPreviewServiceClient`, `PolicyTestServiceClient`, `PolicyDiffServiceClient`,
-`PolicyExplainServiceClient`, and `PolicyActivateServiceClient` directly from this schema using locked `prost-build 0.14.3` and
+`PolicyExplainServiceClient`, `PolicyActivateServiceClient`, and `ProviderMigrationServiceClient` directly from this schema using locked `prost-build 0.14.3` and
 `protoc-bin-vendored 3.2.0`. Ordinary Cargo builds regenerate the output in
 `OUT_DIR`; no globally installed compiler is required. API-key HTTP clients
 and the runtime service use those generated messages and client through the
@@ -232,3 +232,10 @@ The CLI is `positron maintenance abandon-segment --tenant UUID --signal logs|tra
 --shard N --segment HEX`, using the existing credential-stdin and TLS transport
 contract. Add `--expected-catalog-generation N --confirmation HEX --idempotency-key UUID
 --accept-data-loss` to confirm, or `--operation-id HEX` to inspect the receipt.
+
+`ProviderMigrationService.Manage` is exposed through the authenticated
+administrative HTTP/JSON projection at `/v1/key-provider-migrations:manage`.
+Its generated client shares the canonical 4096-byte request/response bounds.
+The operation status projection contains public outcome and retry metadata;
+protected configuration references and their digests remain private operation
+parameters. This service does not advertise a gRPC administration transport.

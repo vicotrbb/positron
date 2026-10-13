@@ -89,10 +89,7 @@ impl BootstrapKeyCustody {
             )));
         }
         if let RootCustody::Leased(lease) = &self.key {
-            return lease
-                .lock()
-                .map_err(|_| BootstrapKeyFailure::Custody)?
-                .system_key(instance);
+            return super::system_lease::SystemLease::system_key(lease, instance);
         }
         self.with_root_key(|root| derive_child(root, instance, b"system-kek", &[]))?
             .map(SecretKeyBytes::from_owned)

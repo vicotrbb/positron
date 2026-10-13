@@ -88,6 +88,9 @@ mod window;
 #[path = "maintenance_api_tests/abandonment.rs"]
 mod abandonment;
 
+#[path = "maintenance_api_tests/provider_migration.rs"]
+mod provider_migration;
+
 #[cfg(unix)]
 #[path = "maintenance_api_tests/fencing_causes.rs"]
 mod fencing_causes;

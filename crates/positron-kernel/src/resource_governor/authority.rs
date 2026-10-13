@@ -17,6 +17,38 @@ impl Drop for ObservationFaultReset {
 }
 
 impl StorageKernelResourceAuthority {
+    /// Completes the tenantless bootstrap policy after encrypted custody has
+    /// authenticated the instance. Exclusive ownership preserves the same grant
+    /// ledger and permits outstanding transferred system provider reservations.
+    /// Tenant enrollment must follow through the existing quota authority.
+    pub fn activate_bootstrap_principal_policy(
+        &mut self,
+        quota: PrincipalQuota,
+    ) -> Result<(), GovernorFailure> {
+        {
+            let state = self.inner.try_lock_for_control()?;
+            if state.lifecycle.get() != GovernorLifecycle::Open
+                || !state.tenant_quotas.is_empty()
+                || state.pending_tenant.is_some()
+                || state
+                    .grant_records
+                    .iter()
+                    .flatten()
+                    .any(|grant| grant.tenant().is_some() || grant.principal().is_some())
+            {
+                return Err(GovernorFailure::InvalidConfiguration);
+            }
+        }
+        match self.inner.principal_quota {
+            Some(current) if current == quota => Ok(()),
+            Some(_) => Err(GovernorFailure::InvalidConfiguration),
+            None => {
+                self.inner.principal_quota = Some(quota);
+                Ok(())
+            },
+        }
+    }
+
     pub(super) fn from_configuration(
         ownership: KernelOwnership,
         configuration: ResourceGovernorConfiguration,

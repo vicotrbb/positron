@@ -183,6 +183,19 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
+    pub(crate) fn migration_configuration(&self) -> Result<PathBuf, Box<dyn Error>> {
+        let path = self.root.join("migration.toml");
+        fs::write(
+            &path,
+            format!(
+                "schema_version = 1\n[storage]\ndata_directory = {:?}\nsecrets_directory = {:?}\n[security]\nlocal_key_file = {:?}\n",
+                self.root.join("data"),
+                self.root.join("secrets"),
+                self.root.join("secrets/successor.key")
+            ),
+        )?;
+        Ok(path)
+    }
     pub(crate) fn control_socket_path(&self) -> PathBuf {
         self.root.join("control.sock")
     }

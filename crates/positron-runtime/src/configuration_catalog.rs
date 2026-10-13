@@ -552,6 +552,15 @@ impl ConfigurationAuditBinding {
     }
 }
 
+pub(crate) fn accepts_key_provider_migration_configuration(
+    basis: &positron_kernel::CatalogSnapshot,
+    configuration: &EffectiveConfiguration,
+) -> Result<bool, BootstrapFailure> {
+    Ok(configuration_catalog_state(basis)?.is_none_or(|active| {
+        active.immutable_digest == configuration.immutable_configuration_digest()
+    }))
+}
+
 fn configuration_catalog_state(
     basis: &positron_kernel::CatalogSnapshot,
 ) -> Result<Option<ConfigurationCatalogState>, BootstrapFailure> {

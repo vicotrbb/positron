@@ -152,6 +152,9 @@ fn render_schema_value(definition: SettingDefinition) -> String {
         ValueDomain::ProtectedAbsolutePath(maximum) => {
             render_path_schema(definition, maximum, true)
         },
+        ValueDomain::ProviderAccess(uri, version, path) => {
+            super::provider_access::schema(uri, version, path)
+        },
         ValueDomain::ExportDestinations(maximum, maximum_name_bytes, maximum_tenants) => format!(
             "{{\"type\": \"array\", \"maxItems\": {maximum}, \"items\": {{\"type\": \"object\", \"additionalProperties\": false, \"required\": [\"name\", \"identity\", \"allowed_tenants\"], \"properties\": {{\"name\": {{\"type\": \"string\", \"minLength\": 1, \"maxLength\": {maximum_name_bytes}, \"pattern\": \"^[a-z0-9]+(?:-[a-z0-9]+)*$\"}}, \"identity\": {{\"type\": \"string\", \"pattern\": \"^[0-9a-f]{{32}}$\", \"not\": {{\"const\": \"00000000000000000000000000000000\"}}}}, \"allowed_tenants\": {{\"type\": \"array\", \"minItems\": 1, \"maxItems\": {maximum_tenants}, \"uniqueItems\": true, \"items\": {{\"type\": \"string\", \"pattern\": \"^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$\"}}}}}}}}}}"
         ),
@@ -296,7 +299,8 @@ fn append_example_setting(output: &mut String, definition: SettingDefinition) {
     let value = match definition.kind() {
         SettingKind::Integer => definition.default_value().to_owned(),
         SettingKind::String => render_toml_basic_string(definition.default_value()),
-        SettingKind::ExportDestinations
+        SettingKind::ProviderAccess
+        | SettingKind::ExportDestinations
         | SettingKind::TrustedProxyCidrs
         | SettingKind::CorsAllowedOrigins => return,
     };
@@ -395,6 +399,7 @@ fn reference_domain(definition: SettingDefinition) -> String {
             ValueDomain::OptionalSocketAddress(maximum) => format!("disabled or explicit external numeric OTLP gRPC address; at most {maximum} bytes"),
             ValueDomain::AbsolutePath(maximum) => format!("absolute path; at most {maximum} bytes"),
             ValueDomain::ProtectedAbsolutePath(maximum) => format!("protected absolute path; at most {maximum} bytes"),
+            ValueDomain::ProviderAccess(uri, version, path) => format!("closed native access table; immutable `uri` at most {uri} bytes, pinned `version` at most {version} bytes; provider-native authentication selector and protected absolute file references at most {path} bytes; never credential values; must match the authenticated active migration route"),
             ValueDomain::ExportDestinations(maximum, name, tenants) => format!("at most {maximum} named destinations; each has a lowercase `name` of at most {name} bytes, a nonzero 16-byte lowercase hexadecimal `identity`, and one to {tenants} unique canonical `allowed_tenants`"),
             ValueDomain::TrustedProxyCidrs(maximum, maximum_bytes) => format!("at most {maximum} literal IPv4 or IPv6 CIDRs, each at most {maximum_bytes} bytes; forwarded headers remain ignored unless this list and the matching nonzero fixed hop count are both configured"),
             ValueDomain::CorsAllowedOrigins(maximum, maximum_bytes) => format!("at most {maximum} exact `http` or `https` origins, each at most {maximum_bytes} bytes; CORS is disabled when the list is empty and never enables credential forwarding"),

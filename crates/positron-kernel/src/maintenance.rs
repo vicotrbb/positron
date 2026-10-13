@@ -19,11 +19,13 @@ mod envelope_checkpoint;
 mod envelope_verification;
 pub use envelope_checkpoint::EnvelopeVerificationCheckpoint;
 pub use persistence::{EnvelopeVerificationProgress, EnvelopeVerificationPublication};
-#[cfg(fuzzing)]
+#[cfg(any(test, fuzzing))]
 mod fuzzing;
 mod persistence;
 mod record;
+mod root_provider_migration;
 mod root_retirement;
+pub use root_provider_migration::RootProviderMigrationBinding;
 pub use root_retirement::RootRetirementReferenceGuard;
 
 #[cfg(fuzzing)]
@@ -349,10 +351,18 @@ pub struct MaintenanceCoordinator {
 }
 
 #[derive(Clone)]
+struct PendingRootReclamation {
+    transaction: crate::TransactionId,
+    basis: crate::CatalogGenerationId,
+    removed: Vec<MaintenanceTaskId>,
+}
+
+#[derive(Clone)]
 struct CoordinatorState {
     tasks: BTreeMap<MaintenanceTaskId, TaskState>,
     pending_submissions: BTreeSet<MaintenanceTaskId>,
     pending_terminal_reclamations: BTreeSet<MaintenanceTaskId>,
+    pending_root_reclamation: Option<PendingRootReclamation>,
     pending_task_transitions: BTreeSet<MaintenanceTaskId>,
     window: Option<MaintenanceWindow>,
     clock_uncertain_durable_eligibility: BTreeSet<MaintenanceTaskId>,
@@ -848,6 +858,7 @@ impl MaintenanceCoordinator {
                 tasks: BTreeMap::new(),
                 pending_submissions: BTreeSet::new(),
                 pending_terminal_reclamations: BTreeSet::new(),
+                pending_root_reclamation: None,
                 pending_task_transitions: BTreeSet::new(),
                 window: None,
                 clock_uncertain_durable_eligibility: BTreeSet::new(),
@@ -1265,6 +1276,7 @@ impl MaintenanceCoordinator {
         }
         state.pending_submissions.clear();
         state.pending_terminal_reclamations.clear();
+        state.pending_root_reclamation = None;
         state.pending_task_transitions.clear();
         Ok(())
     }

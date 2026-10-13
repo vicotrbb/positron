@@ -150,6 +150,9 @@ fn render_explanation(output: &mut String, definition: SettingDefinition) {
 
 fn domain_description(domain: ValueDomain) -> String {
     match domain {
+        ValueDomain::ProviderAccess(uri, version, path) => format!(
+            "closed native access table; uri <= {uri} bytes; version <= {version} bytes; protected file selectors <= {path} bytes; no credential values"
+        ),
         ValueDomain::ExactUnsignedInteger(value) => format!("exact_unsigned_integer:{value}"),
         ValueDomain::StringEnumeration(values) => format!("enum:{}", values.join(",")),
         ValueDomain::UnsignedIntegerRange(minimum, maximum) => {

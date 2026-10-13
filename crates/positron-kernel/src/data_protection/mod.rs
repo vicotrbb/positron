@@ -62,9 +62,10 @@ pub(crate) use local_key::CrashRecordProtector;
 pub use local_key::RootCustodyPublicationFault;
 pub use local_key::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
-    BootstrapObjectPurpose, RecoveryFailure, RecoveryIdentity, RecoveryMetadata,
-    RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession, RecoveryUnlock,
-    RootPredecessorEnvelope, RootRewrapSession, VerifiedRootActivation,
+    BootstrapObjectPurpose, PreparedProviderMigration, RecoveryFailure, RecoveryIdentity,
+    RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession,
+    RecoveryUnlock, RootAdmissionReceipt, RootPredecessorEnvelope, RootRewrapSession,
+    VerifiedRootActivation,
 };
 pub(crate) use service::DataProtection;
 

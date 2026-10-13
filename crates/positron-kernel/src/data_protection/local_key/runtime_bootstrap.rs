@@ -35,7 +35,7 @@ use derivation::{
 };
 pub(crate) use segment_lease::LocalSegmentKeySource;
 use system_lease::RootCustody;
-pub use system_lease::VerifiedRootActivation;
+pub use system_lease::{RootAdmissionReceipt, VerifiedRootActivation};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BootstrapObjectPurpose {

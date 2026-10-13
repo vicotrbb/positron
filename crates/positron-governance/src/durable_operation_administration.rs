@@ -12,6 +12,10 @@ use sha2::{Digest, Sha256};
 
 mod abandonment;
 mod codec;
+mod provider_migration_parameters;
+pub use provider_migration_parameters::{
+    KeyProviderMigrationAction, KeyProviderMigrationParameters,
+};
 mod types;
 
 #[cfg(fuzzing)]
@@ -38,6 +42,62 @@ const MAX_OPERATION_RECORDS: usize = 1_024;
 pub struct DurableOperationAdministration;
 
 impl DurableOperationAdministration {
+    /// Bounded recovery cursor over accepted root-provider work. The Catalog
+    /// operation record remains the sole owner of the action and parameters.
+    pub fn next_key_provider_migration_operation(
+        catalog: &Catalog<'_>,
+        after: Option<OperationId>,
+    ) -> Result<Option<DurableOperation>, DurableOperationFailure> {
+        let basis = catalog.pin().map_err(map_catalog)?;
+        let mut next: Option<DurableOperation> = None;
+        for identity in basis.object_identities() {
+            let bytes = basis
+                .object(identity)
+                .map_err(map_catalog)?
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+            let Some(operation) = decode_operation(bytes)? else {
+                continue;
+            };
+            if operation.kind() != DurableOperationKind::KeyProviderMigration
+                || operation.status().is_terminal()
+                || after
+                    .is_some_and(|after| operation.operation_id().to_bytes() <= after.to_bytes())
+            {
+                continue;
+            }
+            if next.is_none_or(|next| {
+                operation.operation_id().to_bytes() < next.operation_id().to_bytes()
+            }) {
+                next = Some(operation);
+            }
+        }
+        Ok(next)
+    }
+    /// Reattaches a background handler to its accepted Principal after restart.
+    /// The authenticated Catalog operation and current durable credential grant
+    /// are both checked before returning the narrow administration context.
+    pub fn resume_key_provider_migration_actor(
+        catalog: &Catalog<'_>,
+        operation_id: OperationId,
+        now: u64,
+    ) -> Result<crate::AuthorizedContext, DurableOperationFailure> {
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        let operation = find_by_id(&snapshot, operation_id)?
+            .ok_or(DurableOperationFailure::UnknownOperation)?;
+        if operation.kind() != DurableOperationKind::KeyProviderMigration {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        crate::Identity::open(&snapshot)
+            .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?
+            .resume_system_operation_actor(
+                operation.request.principal,
+                operation
+                    .target_identity()
+                    .ok_or(DurableOperationFailure::InvalidState)?,
+                now,
+            )
+            .map_err(|_| DurableOperationFailure::Unauthorized)
+    }
     /// Accepts or exactly replays a catalog-format operation before draining work.
     pub fn accept_catalog_format_migration(
         catalog: &Catalog<'_>,
@@ -48,7 +108,7 @@ impl DurableOperationAdministration {
         let snapshot = catalog.pin().map_err(map_catalog)?;
         if let Some(existing) = find_by_key(&snapshot, request.idempotency)? {
             return match existing {
-                OperationKeyLookup::Operation(operation) => exact_replay(operation, request),
+                OperationKeyLookup::Operation(operation) => exact_replay(*operation, request),
                 OperationKeyLookup::Expired(binding) => {
                     binding.exact_replay(request)?;
                     Err(DurableOperationFailure::CompletedLookupExpired)
@@ -73,6 +133,45 @@ impl DurableOperationAdministration {
         publish(catalog, &snapshot, operation)
     }
 
+    /// Accepts or exactly replays a root-provider phase before provider work.
+    pub fn accept_key_provider_migration(
+        catalog: &Catalog<'_>,
+        actor: crate::AuthorizedContext,
+        request: DurableOperationRequest,
+        parameters: KeyProviderMigrationParameters,
+    ) -> Result<DurableOperation, DurableOperationFailure> {
+        validate_system_actor(actor, request.principal)?;
+        if request.kind != DurableOperationKind::KeyProviderMigration
+            || request.operation_request_digest != Some(parameters.intent_digest())
+        {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        if let Some(existing) = find_by_key(&snapshot, request.idempotency)? {
+            return match existing {
+                OperationKeyLookup::Operation(operation) => exact_replay(*operation, request),
+                OperationKeyLookup::Expired(binding) => {
+                    binding.exact_replay(request)?;
+                    Err(DurableOperationFailure::CompletedLookupExpired)
+                },
+            };
+        }
+        let mut operation = DurableOperation::accepted(request);
+        operation.key_provider_migration_parameters = Some(parameters);
+        if let Some(resumed) = resume_prepared_operation(
+            catalog,
+            transition_transaction(operation)?,
+            transition_request_digest(operation),
+            operation.operation_id(),
+        )? {
+            return Ok(resumed);
+        }
+        if snapshot.number() != request.accepted_generation() {
+            return Err(DurableOperationFailure::StaleGeneration);
+        }
+        publish(catalog, &snapshot, operation)
+    }
+
     /// Accepts or exactly replays an authenticated tenant Query export.
     ///
     /// The Query module owns the typed plan, snapshot, output receipt, and
@@ -90,7 +189,7 @@ impl DurableOperationAdministration {
         let snapshot = catalog.pin().map_err(map_catalog)?;
         if let Some(existing) = find_by_key(&snapshot, request.idempotency)? {
             return match existing {
-                OperationKeyLookup::Operation(operation) => exact_replay(operation, request),
+                OperationKeyLookup::Operation(operation) => exact_replay(*operation, request),
                 OperationKeyLookup::Expired(binding) => {
                     binding.exact_replay(request)?;
                     Err(DurableOperationFailure::CompletedLookupExpired)
@@ -139,7 +238,7 @@ impl DurableOperationAdministration {
         idempotency: AdministrativeIdempotencyKey,
     ) -> Result<Option<DurableOperation>, DurableOperationFailure> {
         match find_by_key(&catalog.pin().map_err(map_catalog)?, idempotency)? {
-            Some(OperationKeyLookup::Operation(operation)) => Ok(Some(operation)),
+            Some(OperationKeyLookup::Operation(operation)) => Ok(Some(*operation)),
             Some(OperationKeyLookup::Expired(_)) | None => Ok(None),
         }
     }
@@ -248,6 +347,23 @@ impl DurableOperationAdministration {
         publish(catalog, &snapshot, operation.succeeded(now)?)
     }
 
+    /// Records a root-provider phase's authenticated Catalog publication.
+    pub fn succeed_key_provider_migration(
+        catalog: &Catalog<'_>,
+        actor: crate::AuthorizedContext,
+        operation_id: OperationId,
+        now: u64,
+    ) -> Result<DurableOperation, DurableOperationFailure> {
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        let operation = find_by_id(&snapshot, operation_id)?
+            .ok_or(DurableOperationFailure::UnknownOperation)?;
+        validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::KeyProviderMigration {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        publish(catalog, &snapshot, operation.succeeded(now)?)
+    }
+
     /// Commits the terminal success transition after the Query module has
     /// durably published its signed output manifest.
     pub fn succeed_query_export(
@@ -268,6 +384,79 @@ impl DurableOperationAdministration {
             return Err(DurableOperationFailure::InvalidState);
         }
         publish(catalog, &snapshot, operation.succeeded(now)?)
+    }
+
+    /// Fails only an accepted root operation whose original grant is currently
+    /// denied. This cannot mint an authorization context or reject valid work.
+    pub fn reject_key_provider_migration_authorization(
+        catalog: &Catalog<'_>,
+        operation_id: OperationId,
+        now: u64,
+    ) -> Result<DurableOperation, DurableOperationFailure> {
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        let operation = find_by_id(&snapshot, operation_id)?
+            .ok_or(DurableOperationFailure::UnknownOperation)?;
+        if operation.kind() != DurableOperationKind::KeyProviderMigration
+            || operation.target_identity()
+                != Some(
+                    snapshot
+                        .governance_object()
+                        .map_err(map_catalog)?
+                        .1
+                        .instance(),
+                )
+            || operation.status().is_terminal()
+        {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        let identity = crate::Identity::open(&snapshot)
+            .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?;
+        if identity
+            .resume_system_operation_actor(
+                operation.request.principal,
+                snapshot
+                    .governance_object()
+                    .map_err(map_catalog)?
+                    .1
+                    .instance(),
+                now,
+            )
+            .is_ok()
+        {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        let operation = if operation.status() == DurableOperationStatus::Pending {
+            operation.begin(now)?
+        } else {
+            operation
+        };
+        publish(
+            catalog,
+            &snapshot,
+            operation.failed(now, DurableOperationTerminalError::HandlerRejected)?,
+        )
+    }
+
+    /// Records a definite root-migration precondition rejection. Transport and
+    /// publication ambiguity must remain nonterminal for receipt reconciliation.
+    pub fn fail_key_provider_migration(
+        catalog: &Catalog<'_>,
+        actor: crate::AuthorizedContext,
+        operation_id: OperationId,
+        now: u64,
+    ) -> Result<DurableOperation, DurableOperationFailure> {
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        let operation = find_by_id(&snapshot, operation_id)?
+            .ok_or(DurableOperationFailure::UnknownOperation)?;
+        validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::KeyProviderMigration {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        publish(
+            catalog,
+            &snapshot,
+            operation.failed(now, DurableOperationTerminalError::HandlerRejected)?,
+        )
     }
 
     /// Persists a known terminal handler rejection. Ambiguous persistence and
@@ -335,6 +524,47 @@ impl DurableOperationAdministration {
             &snapshot,
             operation.failed_after_manifest_publication(now, error)?,
         )
+    }
+
+    /// Cancels a root migration phase with exact generation-bound replay.
+    pub fn cancel_key_provider_migration(
+        catalog: &Catalog<'_>,
+        actor: crate::AuthorizedContext,
+        operation_id: OperationId,
+        idempotency: AdministrativeIdempotencyKey,
+        expected_generation: u64,
+        now: u64,
+    ) -> Result<DurableOperation, DurableOperationFailure> {
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        let operation = find_by_id(&snapshot, operation_id)?
+            .ok_or(DurableOperationFailure::UnknownOperation)?;
+        validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::KeyProviderMigration
+            || operation.target_identity()
+                != Some(
+                    snapshot
+                        .governance_object()
+                        .map_err(map_catalog)?
+                        .1
+                        .instance(),
+                )
+        {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        if operation.cancellation_idempotency_key() == Some(idempotency) {
+            let commit = catalog
+                .confirm_committed_transaction(transition_transaction(operation)?)
+                .map_err(map_catalog)?
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+            if commit.number().checked_sub(1) != Some(expected_generation) {
+                return Err(DurableOperationFailure::IdempotencyConflict);
+            }
+            return Ok(operation);
+        }
+        if snapshot.number() != expected_generation {
+            return Err(DurableOperationFailure::StaleGeneration);
+        }
+        Self::cancel(catalog, actor, operation_id, idempotency, now)
     }
 
     /// Cancels only at the documented pre-drain cancellation point.
@@ -628,7 +858,7 @@ fn find_by_id(
 }
 
 enum OperationKeyLookup {
-    Operation(DurableOperation),
+    Operation(Box<DurableOperation>),
     Expired(ExpiredOperationBinding),
 }
 
@@ -645,7 +875,7 @@ fn find_by_key(
         if let Some(operation) = decode_operation(bytes)? {
             if operation.request.idempotency == key
                 && found
-                    .replace(OperationKeyLookup::Operation(operation))
+                    .replace(OperationKeyLookup::Operation(Box::new(operation)))
                     .is_some()
             {
                 return Err(DurableOperationFailure::PersistenceUnavailable);

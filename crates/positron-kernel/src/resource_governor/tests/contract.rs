@@ -1126,3 +1126,45 @@ fn every_registered_resource_dimension_is_charged_and_released_independently()
 }
 use super::resource_governor_test_support as resource_governor_support;
 use resource_governor_support::TestKernel;
+
+#[test]
+fn authenticated_bootstrap_promotion_keeps_provider_charge_and_bounds_principals()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut kernel = governor(amounts(20), amounts(20), [])?;
+    let provider = kernel
+        .reserve(WorkClaim::system_security(ResourceAmounts::only(
+            ResourceDimension::MemoryBytes,
+            1,
+        )?)?)?
+        .transfer();
+    let tenant = tenant(0xda)?;
+    let principal = principal(0xdb)?;
+    let policy = PrincipalQuota::new(1, amounts(2), amounts(2))?;
+    kernel.activate_bootstrap_principal_policy(policy)?;
+    kernel.activate_bootstrap_principal_policy(policy)?;
+    assert!(
+        kernel
+            .activate_bootstrap_principal_policy(PrincipalQuota::new(2, amounts(2), amounts(2))?)
+            .is_err()
+    );
+    kernel.enroll_tenant(tenant, amounts(20))?;
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 1);
+    assert!(kernel.activate_bootstrap_principal_policy(policy).is_err());
+    let claim = || {
+        WorkClaim::authenticated(
+            tenant,
+            principal,
+            WorkKind::InteractiveQueryTail,
+            ResourceAmounts::only(ResourceDimension::MemoryBytes, 1)?,
+        )
+    };
+    let admitted = kernel.reserve(claim()?)?;
+    let refusal = kernel
+        .reserve(claim()?)
+        .expect_err("one operation per principal");
+    assert_eq!(refusal.code(), AdmissionFailureCode::PrincipalQuotaExceeded);
+    drop(admitted);
+    drop(provider);
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    Ok(())
+}

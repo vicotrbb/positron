@@ -13,7 +13,7 @@ impl BootstrapArtifactAccess {
                 .len(),
         )
         .map_err(|_| BootstrapKeyFailure::LimitExceeded)?;
-        if size == 0 || size > 16_384 {
+        if size == 0 || size > BootstrapKeyCustody::MAX_ROOT_RECOVERY_ENVELOPE_BYTES {
             return Err(BootstrapKeyFailure::LimitExceeded);
         }
         let mut bytes = Vec::new();
@@ -44,7 +44,9 @@ impl BootstrapArtifactAccess {
         expected: &[u8],
         bytes: &[u8],
     ) -> Result<(), BootstrapKeyFailure> {
-        if expected.is_empty() || expected.len() > 16_384 {
+        if expected.is_empty()
+            || expected.len() > BootstrapKeyCustody::MAX_ROOT_RECOVERY_ENVELOPE_BYTES
+        {
             return Err(BootstrapKeyFailure::LimitExceeded);
         }
         self.publish_system_envelope(bytes, Some(expected))
@@ -54,7 +56,7 @@ impl BootstrapArtifactAccess {
         bytes: &[u8],
         expected: Option<&[u8]>,
     ) -> Result<(), BootstrapKeyFailure> {
-        if bytes.is_empty() || bytes.len() > 16_384 {
+        if bytes.is_empty() || bytes.len() > BootstrapKeyCustody::MAX_ROOT_RECOVERY_ENVELOPE_BYTES {
             return Err(BootstrapKeyFailure::LimitExceeded);
         }
         let final_artifact = BootstrapArtifact::SystemKeyEnvelope;

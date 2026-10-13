@@ -31,7 +31,8 @@ use crate::{
 };
 
 pub use rotation::{
-    CatalogRootRotationAuditEntry, CatalogRootRotationStage, catalog_root_rotation_audit_intent,
+    CatalogRootRotationAuditEntry, CatalogRootRotationStage, catalog_root_migration_audit_intent,
+    catalog_root_rotation_audit_intent,
 };
 
 const MAGIC_V1: [u8; 8] = *b"POSAUD01";

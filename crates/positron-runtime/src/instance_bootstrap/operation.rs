@@ -21,6 +21,8 @@ use super::{
 };
 
 mod classification;
+mod provider_reopen;
+pub(super) use provider_reopen::reopen as reopen_with_provider;
 mod compatibility;
 mod completion;
 mod offline_integrity;
@@ -297,6 +299,32 @@ fn reopen_with_access(
     let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)?;
     require_key_identity(&record, key.bootstrap_identity())?;
     let authority = resources::establish(volume, record.tenant, max_registered_tenants)?;
+    reopen_authenticated(
+        bootstrap_storage,
+        key_cache_lease,
+        max_registered_tenants,
+        access,
+        key,
+        record,
+        authority,
+        read_only,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "authenticated bootstrap handoff transfers each existing authority once"
+)]
+fn reopen_authenticated(
+    bootstrap_storage: positron_kernel::InstanceBootstrapStorage,
+    key_cache_lease: positron_kernel::key_provider::KeyCacheLease,
+    max_registered_tenants: u16,
+    access: BootstrapArtifactAccess,
+    key: BootstrapKeyCustody,
+    record: BootstrapRecord,
+    authority: StorageKernelResourceAuthority,
+    read_only: bool,
+) -> Result<InitializedInstance, BootstrapFailure> {
     let (current, audit_records) = if read_only {
         let view = Catalog::read_current_view(
             &authority,

@@ -106,6 +106,10 @@ impl TestKernel {
         Ok(Self { authority })
     }
 
+    pub fn into_authority(self) -> StorageKernelResourceAuthority {
+        self.authority
+    }
+
     pub const fn governor(&self) -> ResourceGovernor<'_> {
         self.authority.governor()
     }
@@ -128,6 +132,14 @@ impl TestKernel {
         limits: ResourceAmounts,
     ) -> Result<(), GovernorFailure> {
         self.authority.update_tenant_quota(tenant, 1, limits)
+    }
+
+    pub fn activate_bootstrap_principal_policy(
+        &mut self,
+        principal: positron_kernel::PrincipalQuota,
+    ) -> Result<(), GovernorFailure> {
+        self.authority
+            .activate_bootstrap_principal_policy(principal)
     }
 
     pub fn enroll_tenant(

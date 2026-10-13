@@ -351,6 +351,31 @@ fn resource_failure<T>(_failure: T) -> BootstrapFailure {
     BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable)
 }
 
+/// Promotes the same pre-decryption authority only after the owning Runtime has
+/// authenticated the immutable bootstrap record. Retained system provider grants
+/// and their original accounting ledger stay attached to this instance.
+pub(super) fn activate_authenticated_bootstrap(
+    authority: &mut StorageKernelResourceAuthority,
+    tenant: TenantId,
+    max_registered_tenants: u16,
+) -> Result<(), BootstrapFailure> {
+    let sizing = resource_sizing(max_registered_tenants)?;
+    let quota = PrincipalQuota::new(
+        DEFAULT_PRINCIPAL_MAXIMUM_OPERATIONS,
+        ResourceAmounts::new(DEFAULT_PRINCIPAL_OPERATION_QUOTA),
+        ResourceAmounts::new(DEFAULT_PRINCIPAL_AGGREGATE_QUOTA),
+    )
+    .map_err(resource_failure)?;
+    authority
+        .activate_bootstrap_principal_policy(quota)
+        .map_err(resource_failure)?;
+    let mut enrollment = authority
+        .prepare_tenant_enrollment(tenant, 1, sizing.per_tenant_ordinary_capacity)
+        .map_err(resource_failure)?;
+    enrollment.activate();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

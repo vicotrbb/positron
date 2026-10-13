@@ -2,6 +2,7 @@ use super::*;
 
 fn preflight_toml(file: &str) -> Result<(), ConfigurationFailure> {
     let mut entry_count = 0_usize;
+    let mut provider_table = false;
     for raw_line in file.lines() {
         let line = content_before_comment(raw_line)?.trim();
         if line.is_empty() {
@@ -9,6 +10,10 @@ fn preflight_toml(file: &str) -> Result<(), ConfigurationFailure> {
         }
         if line.starts_with('[') {
             preflight_table_header(line)?;
+            provider_table = line
+                .strip_prefix('[')
+                .and_then(|header| header.strip_suffix(']'))
+                .is_some_and(|header| header.trim() == "security.provider_access");
             entry_count = entry_count
                 .checked_add(1)
                 .ok_or_else(|| document_failure(ConfigurationFailureCode::ResourceLimit))?;
@@ -35,7 +40,13 @@ fn preflight_toml(file: &str) -> Result<(), ConfigurationFailure> {
         if entry_count > MAX_TOML_ENTRIES {
             return Err(document_failure(ConfigurationFailureCode::ResourceLimit));
         }
-        preflight_scalar(value)?;
+        if provider_table && key == "uri" {
+            if value.len() > 514 {
+                return Err(document_failure(ConfigurationFailureCode::ResourceLimit));
+            }
+        } else {
+            preflight_scalar(value)?;
+        }
     }
     Ok(())
 }
@@ -98,6 +109,9 @@ fn preflight_table_header(line: &str) -> Result<(), ConfigurationFailure> {
         .and_then(|value| value.strip_suffix(']'))
         .ok_or_else(|| document_failure(ConfigurationFailureCode::Malformed))?
         .trim();
+    if name == "security.provider_access" {
+        return Ok(());
+    }
     if let Some(role) = name.strip_prefix("listener.") {
         return if is_known_listener_role(role) {
             Ok(())
@@ -326,6 +340,15 @@ fn apply_toml_value(
     value: &toml::Value,
 ) -> Result<(), ConfigurationFailure> {
     match (setting_definition(setting).kind(), value) {
+        (SettingKind::ProviderAccess, toml::Value::Table(table)) => {
+            candidate.provider_access = Some(ProviderAccess::parse(table)?);
+            let source = candidate
+                .sources
+                .get_mut(setting_index(setting))
+                .ok_or_else(|| document_failure(ConfigurationFailureCode::Malformed))?;
+            *source = SettingSource::ConfigurationFile;
+            Ok(())
+        },
         (SettingKind::Integer, toml::Value::Integer(value)) => candidate.apply(
             setting,
             &value.to_string(),

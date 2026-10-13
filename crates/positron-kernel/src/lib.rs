@@ -81,7 +81,8 @@ pub mod key_provider {
         AzureManagedIdentityId, AzureWorkloadIdentity, CacheInvalidation, ConformanceFailure,
         ConformanceStep, CredentialFileReference, EnvelopeContext, GoogleCloudKmsKeyProvider,
         KeyCacheHealth, KeyCacheLease, KeyEnvelope, KeyProviderConformance, KeyProviderFailure,
-        KeyScope, Kmip21KeyProvider, LocalKeyProvider, OpenBaoTransitKeyProvider,
+        KeyScope, Kmip21KeyProvider, LocalKeyProvider, NativeAzureAuthentication,
+        NativeRootConfiguration, NativeRootKey, NativeRootProvider, OpenBaoTransitKeyProvider,
         ProviderConformanceTarget, ProviderCredentialModel, ProviderFailureDisposition,
         ProviderFamily, ProviderKeyUri, TransitAuthentication, VaultTransitKeyProvider,
         WrappingAlgorithm,
@@ -110,15 +111,18 @@ pub use catalog::{
     PreparedTransactionResolution, SystemAuditRetentionPolicy, SystemAuditRetentionPublication,
     TransactionId,
 };
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub use catalog::{
-    CatalogPublicationFault, with_catalog_generation_ambiguity_hook_after,
-    with_catalog_publication_ambiguity_hook_after, with_catalog_publication_event_hook_after,
-    with_catalog_publication_fault_after, with_catalog_publication_fault_sequence_after,
-    with_catalog_publication_hook_after,
+    CatalogPublicationFault, with_catalog_publication_fault_after,
+    with_catalog_publication_fault_sequence_after,
 };
 #[cfg(feature = "test-support")]
 pub use catalog::{GovernanceFixtureObject, GovernanceFixtureTarget};
+#[cfg(feature = "test-support")]
+pub use catalog::{
+    with_catalog_generation_ambiguity_hook_after, with_catalog_publication_ambiguity_hook_after,
+    with_catalog_publication_event_hook_after, with_catalog_publication_hook_after,
+};
 
 #[cfg(feature = "test-support")]
 pub use active_segment_ledger::publish_snapshot_lease_marker_for_test;
@@ -147,9 +151,10 @@ pub use data_protection::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose, ControlTokenAuthentication, ControlTokenFailure, ControlTokenProtector,
     ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
-    QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure, RecoveryIdentity,
-    RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession,
-    RecoveryUnlock, RootPredecessorEnvelope, RootRewrapSession, VerifiedRootActivation,
+    PreparedProviderMigration, QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure,
+    RecoveryIdentity, RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients,
+    RecoverySession, RecoveryUnlock, RootAdmissionReceipt, RootPredecessorEnvelope,
+    RootRewrapSession, VerifiedRootActivation,
 };
 pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{
@@ -175,7 +180,7 @@ pub use maintenance::{
     MaintenancePriority, MaintenanceReservation, MaintenanceReservationAuthority, MaintenanceScope,
     MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase,
     MaintenanceTaskRecord, MaintenanceTaskStatus, MaintenanceTerminalFailure, MaintenanceTrigger,
-    NO_DURABLE_PROGRESS_SLO_SECONDS, RootRetirementReferenceGuard,
+    NO_DURABLE_PROGRESS_SLO_SECONDS, RootProviderMigrationBinding, RootRetirementReferenceGuard,
 };
 #[cfg(feature = "test-support")]
 pub use retention_time::ManualRetentionTime;

@@ -1,11 +1,9 @@
 use crate as positron_runtime;
+use crate::process_lifecycle as lifecycle;
 use crate::{
     ApplicationRuntime, ExitOutcome, HostInputs, InitializationMode, ProcessPhase, Readiness,
     ServeConfiguration, ShutdownTrigger, TaskRole,
 };
-#[allow(dead_code)]
-#[path = "../../tests/support/process_lifecycle.rs"]
-mod lifecycle;
 use lifecycle::{ObservingListeners, ObservingTasks, TestRoots};
 #[test]
 fn failed_candidate_cleanup_reconciles_the_owner_before_fenced_inspection()

@@ -906,6 +906,20 @@ Google Cloud KMS, Azure Key Vault and Managed HSM, Vault Transit, OpenBao
 Transit, and KMIP 2.1. Rotation and migration are Data Protection workflows
 over immutable Key Epochs and multiple envelopes, not extra provider methods.
 
+The [root-provider migration workflow](operations/key-provider-migration.md)
+rewraps the stable SYSTEM KEK and uses the existing authenticated root-rotation
+Catalog journal as its phase authority. At most two bootstrap recovery envelopes
+coexist; a locator selects a candidate before decryption, while the verified
+Catalog authorizes the active route. Preparation verifies destination custody
+and rechecks the Catalog generation and source admission receipt. Cutover selects
+the destination for new object keys without rewriting encrypted frames.
+Cancellation and resume are audited durable transitions; cancellation after
+cutover preserves the destination. Retirement requires independent recovery and
+all existing managed reference owners' proof, and removes only Positron's
+external predecessor envelope and route. Canonical provider access settings are
+restart-required, protected configuration inputs and cannot override the active
+root identity.
+
 The [KMIP 2.1 adapter](operations/kmip-21.md) uses authenticated binary TTLV,
 an exact object identifier and Raw SHA-256 material fingerprint in the existing
 Provider Key URI version field. Its server policy must prevent replacement or
