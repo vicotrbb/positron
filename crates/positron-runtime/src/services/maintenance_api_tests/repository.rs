@@ -1,0 +1,481 @@
+use super::*;
+use crate::services::repository_administration::RepositoryAdmission;
+use positron_governance::{AdministrativeIdempotencyKey, DurableOperationStatus, RepositoryAction};
+use std::os::unix::fs::PermissionsExt;
+#[test]
+fn serving_repository_initialize_and_doctor_are_authenticated_durable_tasks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let repository_path = std::env::temp_dir().join(format!(
+        "positron-runtime-repository-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&repository_path)?;
+    std::fs::set_permissions(&repository_path, std::fs::Permissions::from_mode(0o700))?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(initialized)?;
+    let generation = services
+        .open_maintenance_catalog()
+        .expect("catalog")
+        .pin()?
+        .number();
+    let admission = RepositoryAdmission {
+        action: RepositoryAction::Initialize,
+        locator: &repository_path,
+        repository: [91; 16],
+        expected_generation: generation,
+        idempotency: AdministrativeIdempotencyKey::new([92; 16])?,
+    };
+    assert_eq!(
+        services.accept_repository_operation(&ingest, admission),
+        Err(MaintenanceServiceFailure::AuthenticationRejected)
+    );
+    assert_eq!(std::fs::read_dir(&repository_path)?.count(), 0);
+    let stale = RepositoryAdmission {
+        expected_generation: generation
+            .checked_sub(1)
+            .filter(|value| *value > 0)
+            .ok_or("fixture stale generation")?,
+        ..admission
+    };
+    assert_eq!(
+        services.accept_repository_operation(&administrator, stale),
+        Err(MaintenanceServiceFailure::PreconditionFailed)
+    );
+    assert_eq!(std::fs::read_dir(&repository_path)?.count(), 0);
+
+    let accepted = services
+        .accept_repository_operation(&administrator, admission)
+        .expect("accepted initialization");
+    assert_eq!(accepted.status(), DurableOperationStatus::Pending);
+    for _ in 0..32 {
+        let operation = services
+            .repository_operation_status(&administrator, accepted.operation_id())
+            .expect("initialization status");
+        if operation.status().is_terminal() {
+            break;
+        }
+        crate::services::maintenance::wake_runtime_maintenance(&services, None)?;
+    }
+    assert_eq!(
+        services
+            .repository_operation_status(&administrator, accepted.operation_id())
+            .expect("initialization status")
+            .status(),
+        DurableOperationStatus::Succeeded
+    );
+    let generation = services
+        .open_maintenance_catalog()
+        .expect("catalog")
+        .pin()?
+        .number();
+    let doctor = services
+        .accept_repository_operation(
+            &administrator,
+            RepositoryAdmission {
+                action: RepositoryAction::Doctor,
+                expected_generation: generation,
+                idempotency: AdministrativeIdempotencyKey::new([93; 16])?,
+                ..admission
+            },
+        )
+        .expect("accepted doctor");
+    for _ in 0..32 {
+        let operation = services
+            .repository_operation_status(&administrator, doctor.operation_id())
+            .expect("doctor status");
+        if operation.status().is_terminal() {
+            break;
+        }
+        crate::services::maintenance::wake_runtime_maintenance(&services, None)?;
+    }
+    assert_eq!(
+        services
+            .repository_operation_status(&administrator, doctor.operation_id())
+            .expect("doctor status")
+            .status(),
+        DurableOperationStatus::Succeeded
+    );
+    assert_eq!(std::fs::read_dir(&repository_path)?.count(), 1);
+    let catalog = services
+        .open_maintenance_catalog()
+        .expect("reclamation catalog");
+    let session = positron_kernel::RootRewrapSession::admit(&services.instance._authority)?;
+    services
+        .instance
+        .maintenance_coordinator()
+        .reclaim_terminal_records_for_root_retirement(&session, &catalog)
+        .expect("reference-free terminal reclamation");
+    for id in [accepted.operation_id(), doctor.operation_id()] {
+        assert!(matches!(
+            services.instance.maintenance_coordinator().status(
+                positron_kernel::MaintenanceTaskId::new(id.to_bytes()).expect("task identity")
+            ),
+            Err(positron_kernel::MaintenanceFailure::UnknownTask)
+        ));
+    }
+    drop(session);
+    drop(catalog);
+    assert_eq!(
+        services
+            .repository_operation_status(&administrator, doctor.operation_id())
+            .expect("terminal receipt retained")
+            .status(),
+        DurableOperationStatus::Succeeded
+    );
+
+    std::fs::remove_dir_all(repository_path)?;
+    Ok(())
+}
+
+#[test]
+fn accepted_repository_initialization_recovers_task_publication_gap_after_reopen()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let path = std::env::temp_dir().join(format!("positron-repository-gap-{}", std::process::id()));
+    std::fs::create_dir(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(initialized)?;
+    let generation = services
+        .open_maintenance_catalog()
+        .expect("catalog")
+        .pin()?
+        .number();
+    let key = AdministrativeIdempotencyKey::new([95; 16])?;
+    let admission = RepositoryAdmission {
+        action: RepositoryAction::Initialize,
+        locator: &path,
+        repository: [96; 16],
+        expected_generation: generation,
+        idempotency: key,
+    };
+    let result =
+        with_catalog_publication_fault_after(CatalogPublicationFault::RenameMarker, 1, || {
+            services.accept_repository_operation(&administrator, admission)
+        });
+    assert_eq!(result, Err(MaintenanceServiceFailure::TaskUnavailable));
+    assert_eq!(std::fs::read_dir(&path)?.count(), 0);
+    drop(services);
+    let services = ServiceHandle::new(fixture.reopen()?)?;
+    let accepted = services
+        .repository_operation_by_idempotency(&administrator, key)
+        .expect("accepted operation survives gap");
+    assert_eq!(accepted.status(), DurableOperationStatus::Pending);
+    for _ in 0..32 {
+        if services
+            .repository_operation_status(&administrator, accepted.operation_id())
+            .expect("operation status")
+            .status()
+            .is_terminal()
+        {
+            break;
+        }
+        crate::services::maintenance::wake_runtime_maintenance(&services, None)?;
+    }
+    let completed = services
+        .repository_operation_status(&administrator, accepted.operation_id())
+        .expect("completed status");
+    assert_eq!(completed.status(), DurableOperationStatus::Succeeded);
+    drop(services);
+    let services = ServiceHandle::new(fixture.reopen()?)?;
+    assert_eq!(
+        services
+            .repository_operation_by_idempotency(&administrator, key)
+            .expect("terminal lookup survives reopen"),
+        completed
+    );
+    assert_eq!(std::fs::read_dir(&path)?.count(), 1);
+    std::fs::remove_dir_all(path)?;
+    Ok(())
+}
+
+#[test]
+fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_api::repository::{
+        RepositoryRequest, RepositoryServiceClient, RepositoryTransport,
+    };
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let fixture = Fixture::new()?;
+    let path =
+        std::env::temp_dir().join(format!("positron-repository-http-{}", std::process::id()));
+    std::fs::create_dir(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    drop(initialized);
+    let loopback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    let host = NativeHost::new(NativeBindings::new(
+        fixture.control_socket_path(),
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+    )?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let endpoint = process
+        .bound_endpoints()
+        .into_iter()
+        .find(|endpoint| endpoint.role() == crate::ListenerRole::Api)
+        .and_then(|endpoint| endpoint.socket_address())
+        .ok_or("API endpoint")?;
+    let client = RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })?;
+    let status = RepositoryRequest {
+        action: "status".into(),
+        expected_catalog_generation: None,
+        idempotency_key: None,
+        locator: None,
+        repository_id: None,
+        operation_id: None,
+    };
+    assert!(client.manage(&ingest, &status).is_err());
+    let current = client.manage(&administrator, &status)?;
+    let mut request = RepositoryRequest {
+        action: "init".into(),
+        expected_catalog_generation: Some(current.catalog_generation),
+        idempotency_key: Some("61616161-6161-4161-8161-616161616161".into()),
+        locator: Some(path.to_string_lossy().into_owned()),
+        repository_id: Some("62626262-6262-4262-8262-626262626262".into()),
+        operation_id: None,
+    };
+    let admission_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut accepted = loop {
+        match client.manage(&administrator, &request) {
+            Ok(accepted) => break accepted,
+            Err(positron_api::repository::RepositoryServiceClientFailure::PreconditionFailed)
+                if std::time::Instant::now() < admission_deadline =>
+            {
+                request.expected_catalog_generation =
+                    Some(client.manage(&administrator, &status)?.catalog_generation);
+            },
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let id = accepted
+        .operation
+        .as_ref()
+        .ok_or("missing durable operation")?
+        .id
+        .clone();
+    let query = RepositoryRequest {
+        operation_id: Some(id),
+        ..status
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while accepted
+        .operation
+        .as_ref()
+        .is_some_and(|operation| matches!(operation.status.as_str(), "pending" | "running"))
+    {
+        if std::time::Instant::now() >= deadline {
+            return Err("Repository HTTP completion deadline".into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        accepted = client.manage(&administrator, &query)?;
+    }
+    assert_eq!(
+        accepted
+            .operation
+            .as_ref()
+            .map(|operation| operation.status.as_str()),
+        Some("succeeded")
+    );
+    assert_eq!(
+        accepted
+            .identity
+            .as_ref()
+            .map(|identity| identity.provider_kind.as_str()),
+        Some("local_filesystem")
+    );
+    let encoded = accepted.encode()?;
+    let output = std::str::from_utf8(&encoded)?;
+    assert!(!output.contains(path.to_string_lossy().as_ref()));
+    assert!(!output.contains(&administrator));
+    assert!(!output.contains(&ingest));
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        crate::ExitOutcome::Graceful
+    );
+    std::fs::remove_dir_all(path)?;
+    Ok(())
+}
+
+#[test]
+fn repository_pending_cancellation_replay_and_creator_lookup_survive_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_api::repository::RepositoryRequest;
+    let fixture = Fixture::new()?;
+    let path =
+        std::env::temp_dir().join(format!("positron-repository-cancel-{}", std::process::id()));
+    std::fs::create_dir(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(initialized)?;
+    let request = RepositoryRequest {
+        action: "init".into(),
+        expected_catalog_generation: Some(
+            services
+                .open_maintenance_catalog()
+                .expect("catalog")
+                .pin()?
+                .number(),
+        ),
+        idempotency_key: Some("81818181-8181-4181-8181-818181818181".into()),
+        repository_id: Some("82828282-8282-4282-8282-828282828282".into()),
+        locator: Some(path.to_string_lossy().into_owned()),
+        operation_id: None,
+    };
+    let encoded = request.encode()?;
+    let accepted = services
+        .manage_repository(&administrator, &encoded)
+        .expect("accepted");
+    assert_eq!(
+        services.manage_repository(&ingest, &encoded),
+        Err(MaintenanceServiceFailure::AuthenticationRejected)
+    );
+    let mut conflict = request.clone();
+    conflict.repository_id = Some("83838383-8383-4383-8383-838383838383".into());
+    assert_eq!(
+        services.manage_repository(&administrator, &conflict.encode()?),
+        Err(MaintenanceServiceFailure::IdempotencyConflict)
+    );
+    let id = accepted.operation.as_ref().expect("operation").id.clone();
+    let cancel = RepositoryRequest {
+        action: "cancel".into(),
+        expected_catalog_generation: Some(accepted.catalog_generation),
+        idempotency_key: Some("84848484-8484-4484-8484-848484848484".into()),
+        operation_id: Some(id.clone()),
+        locator: None,
+        repository_id: None,
+    };
+    let cancelled = services
+        .manage_repository(&administrator, &cancel.encode()?)
+        .expect("cancelled");
+    assert_eq!(
+        cancelled.operation.as_ref().map(|op| op.status.as_str()),
+        Some("cancelled")
+    );
+    assert_eq!(
+        services
+            .manage_repository(&administrator, &cancel.encode()?)
+            .expect("cancel retry")
+            .operation,
+        cancelled.operation
+    );
+    assert_eq!(std::fs::read_dir(&path)?.count(), 0);
+    drop(services);
+    let reopened = ServiceHandle::new(fixture.reopen()?)?;
+    let query = RepositoryRequest {
+        action: "status".into(),
+        expected_catalog_generation: None,
+        idempotency_key: None,
+        locator: None,
+        repository_id: None,
+        operation_id: Some(id),
+    };
+    assert_eq!(
+        reopened
+            .manage_repository(&administrator, &query.encode()?)
+            .expect("terminal lookup")
+            .operation,
+        cancelled.operation
+    );
+    crate::services::maintenance::wake_runtime_maintenance(&reopened, None)?;
+    assert_eq!(std::fs::read_dir(&path)?.count(), 0);
+    std::fs::remove_dir_all(path)?;
+    Ok(())
+}
+
+#[test]
+fn accepted_repository_work_fails_closed_when_native_requesters_grant_is_revoked()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let path = std::env::temp_dir().join(format!(
+        "positron-repository-revoked-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(initialized)?;
+    let generation = services
+        .open_maintenance_catalog()
+        .expect("catalog")
+        .pin()?
+        .number();
+    let accepted = services
+        .accept_repository_operation(
+            &administrator,
+            RepositoryAdmission {
+                action: RepositoryAction::Initialize,
+                locator: &path,
+                repository: [131; 16],
+                expected_generation: generation,
+                idempotency: AdministrativeIdempotencyKey::new([132; 16])?,
+            },
+        )
+        .expect("accepted");
+    // The owning persistent credential schema permits a revoked grant. The
+    // operator API deliberately has no system-credential rotation surface.
+    {
+        let catalog = services
+            .open_maintenance_catalog()
+            .expect("credential fixture catalog");
+        let basis = catalog.pin()?;
+        let (identity, governance) = basis.governance_object()?;
+        let credentials = governance
+            .credentials()
+            .iter()
+            .map(|credential| {
+                if credential.scope_code() == 4 {
+                    credential.with_active(false)
+                } else {
+                    *credential
+                }
+            })
+            .collect::<Vec<_>>();
+        let changed = positron_kernel::CatalogObject::new(
+            governance.with_credentials(governance.credential_generation() + 1, &credentials)?,
+        )?;
+        let mut objects = basis
+            .object_identities()
+            .map(|identity| {
+                let bytes = basis.object(identity)?.expect("fixture object missing");
+                positron_kernel::CatalogObject::new(bytes.to_vec())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        objects.retain(|object| object.identity() != identity);
+        objects.push(changed);
+        catalog.commit(
+            basis.identity(),
+            positron_kernel::CatalogProposal::new(
+                positron_kernel::TransactionId::new([0xd3; 16])?,
+                positron_kernel::FormatEpoch::CATALOG_V1,
+                objects,
+            )?,
+            None,
+        )?;
+    }
+
+    crate::services::maintenance::wake_runtime_maintenance(&services, None)?;
+    let catalog = services
+        .open_maintenance_catalog()
+        .expect("outcome catalog");
+    let failed = positron_governance::DurableOperationAdministration::inspect(
+        &catalog,
+        accepted.operation_id(),
+    )?
+    .ok_or("failed operation")?;
+    assert_eq!(failed.status(), DurableOperationStatus::Failed);
+    assert_eq!(std::fs::read_dir(&path)?.count(), 0);
+    assert_eq!(
+        services.repository_operation_status(&administrator, accepted.operation_id()),
+        Err(MaintenanceServiceFailure::AuthenticationRejected)
+    );
+    std::fs::remove_dir_all(path)?;
+    Ok(())
+}

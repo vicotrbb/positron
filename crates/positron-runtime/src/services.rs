@@ -29,6 +29,7 @@ mod otlp;
 pub(crate) mod policy;
 mod provider_migration;
 mod query;
+mod repository_administration;
 mod schema_bootstrap;
 mod schema_maintenance;
 mod segment_abandonment;

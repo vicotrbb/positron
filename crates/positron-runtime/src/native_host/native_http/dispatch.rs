@@ -44,6 +44,7 @@ pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
         return MAX_API_BODY_BYTES;
     }
     match path {
+        positron_api::repository::HTTP_PATH => positron_api::repository::MAX_REQUEST_BYTES,
         positron_api::provider_migration::HTTP_PATH => {
             positron_api::provider_migration::MAX_REQUEST_BYTES
         },
@@ -103,6 +104,7 @@ fn api_path_is_known(path: &str) -> bool {
     matches!(
         path,
         positron_api::api_keys::HTTP_PATH
+            | positron_api::repository::HTTP_PATH
             | positron_api::provider_migration::HTTP_PATH
             | positron_api::tenant_quotas::HTTP_PATH
             | positron_api::tenant_lifecycle::HTTP_PATH
@@ -408,6 +410,27 @@ fn route_inner<S: Read + Write>(
                 positron_api::provider_migration::MAX_REQUEST_BYTES,
             )?;
             match services.manage_provider_migration(&bearer, &body) {
+                Ok(response) => Ok(Response {
+                    status: 200,
+                    content_type: "application/json",
+                    body: response.encode().map_err(|_| Response::empty(503))?,
+                    retry_after_seconds: None,
+                    diagnostics_reservation: None,
+                }),
+                Err(failure) => Ok(maintenance_failure_response(failure)),
+            }
+        },
+        (ListenerRole::Api, "POST", positron_api::repository::HTTP_PATH) => {
+            let services = services.ok_or_else(|| Response::empty(503))?;
+            let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
+                Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+            })?);
+            let body = read_body(
+                stream,
+                head.content_length,
+                positron_api::repository::MAX_REQUEST_BYTES,
+            )?;
+            match services.manage_repository(&bearer, &body) {
                 Ok(response) => Ok(Response {
                     status: 200,
                     content_type: "application/json",

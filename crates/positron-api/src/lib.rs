@@ -14,6 +14,7 @@ pub mod api_keys;
 pub mod maintenance;
 pub mod policy;
 pub mod provider_migration;
+pub mod repository;
 
 /// V1 tenant-quota administration wire types and bounded client encoding.
 pub mod tenant_quotas;

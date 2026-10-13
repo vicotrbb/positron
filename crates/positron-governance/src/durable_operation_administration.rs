@@ -16,6 +16,9 @@ mod provider_migration_parameters;
 pub use provider_migration_parameters::{
     KeyProviderMigrationAction, KeyProviderMigrationParameters,
 };
+mod repository_administration;
+mod repository_parameters;
+pub use repository_parameters::{RepositoryAction, RepositoryOperationParameters};
 mod types;
 
 #[cfg(fuzzing)]
@@ -172,6 +175,7 @@ impl DurableOperationAdministration {
         publish(catalog, &snapshot, operation)
     }
 
+    /// Atomically accepts exact native Repository work before provider access.
     /// Accepts or exactly replays an authenticated tenant Query export.
     ///
     /// The Query module owns the typed plan, snapshot, output receipt, and

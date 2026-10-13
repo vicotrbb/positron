@@ -29,6 +29,7 @@ mod maintenance_cli;
 mod policy;
 mod provider_migration_cli;
 mod recovery_cli;
+mod repository_cli;
 mod support_bundle;
 mod tenant_alias_cli;
 mod tenant_lifecycle;
@@ -68,6 +69,13 @@ pub fn run_native(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
     let mut arguments = arguments.into_iter().peekable();
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "repository")
+    {
+        arguments.next();
+        return repository_cli::run(arguments);
+    }
     if arguments.peek().is_some_and(|argument| argument == "keys") {
         arguments.next();
         if arguments

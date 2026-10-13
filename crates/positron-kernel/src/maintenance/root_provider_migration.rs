@@ -96,6 +96,6 @@ impl MaintenanceCoordinator {
             // Catalog publication retain their independently admitted grants.
             ResourceAmounts::new([16_384, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0]),
         )?;
-        self.submit_root_migration(catalog, task, binding.checkpoint()?, now)
+        self.submit_bound_operation(catalog, task, binding.checkpoint()?, now)
     }
 }

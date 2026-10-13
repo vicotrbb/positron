@@ -713,3 +713,46 @@ message ProviderMigrationIdentity {
   string locator = 2;
   string version = 3;
 }
+
+// Native Repository administration is served by the authenticated HTTP API.
+// Locator is a server-local native credential context, never a serialized secret.
+service RepositoryService {
+  rpc Manage(RepositoryRequest) returns (RepositoryResponse);
+}
+message RepositoryRequest {
+  string action = 1;
+  optional uint64 expected_catalog_generation = 2;
+  optional string idempotency_key = 3;
+  optional string locator = 4;
+  optional string repository_id = 5;
+  optional string operation_id = 6;
+}
+message RepositoryOperation {
+  string id = 1;
+  string status = 2;
+  string phase = 3;
+  uint32 progress_percent = 4;
+  string retry = 5;
+  string cancellation = 6;
+  string irreversible_boundary = 7;
+  optional uint64 lookup_expires_at_unix_seconds = 8;
+}
+message RepositoryIdentity {
+  string repository_id = 1;
+  string instance_id = 2;
+  string provider_kind = 3;
+  uint32 format_epoch = 4;
+  string integrity_fingerprint = 5;
+  string prefix_commitment = 6;
+}
+message RepositoryDoctorResult {
+  bool verified = 1;
+  bool probes_deleted = 2;
+  string external_retention = 3;
+}
+message RepositoryResponse {
+  uint64 catalog_generation = 1;
+  optional RepositoryOperation operation = 2;
+  optional RepositoryIdentity identity = 3;
+  optional RepositoryDoctorResult doctor = 4;
+}

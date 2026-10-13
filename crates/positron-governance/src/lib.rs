@@ -61,7 +61,8 @@ pub use durable_operation_administration::{
     DurableOperationLookupRetention, DurableOperationPhase, DurableOperationRequest,
     DurableOperationRetry, DurableOperationStatus, DurableOperationTerminalError,
     DurableQueryBudgetDimension, DurableQueryExportFailure, DurableQueryExportFailureCode,
-    KeyProviderMigrationAction, KeyProviderMigrationParameters, OperationId,
+    KeyProviderMigrationAction, KeyProviderMigrationParameters, OperationId, RepositoryAction,
+    RepositoryOperationParameters,
 };
 pub use format_migration_administration::{
     CatalogFormatMigration, CatalogFormatMigrationAdministration, CatalogFormatMigrationFailure,

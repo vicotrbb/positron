@@ -22,6 +22,8 @@ pub enum DurableOperationKind {
     SegmentAbandonment,
     /// One authenticated phase of the online root-provider rewrap workflow.
     KeyProviderMigration,
+    /// Native Repository initialization and bounded verification/diagnostics.
+    RepositoryInspection,
 }
 
 impl DurableOperationKind {
@@ -32,7 +34,9 @@ impl DurableOperationKind {
             Self::CatalogFormatMigration => DurableOperationBoundary::CatalogGenerationPublished,
             Self::QueryExport => DurableOperationBoundary::ExportManifestPublished,
             Self::SegmentAbandonment => DurableOperationBoundary::CatalogGenerationPublished,
-            Self::KeyProviderMigration => DurableOperationBoundary::CatalogGenerationPublished,
+            Self::KeyProviderMigration | Self::RepositoryInspection => {
+                DurableOperationBoundary::CatalogGenerationPublished
+            },
         }
     }
 
@@ -42,6 +46,7 @@ impl DurableOperationKind {
             Self::QueryExport => 2,
             Self::SegmentAbandonment => 3,
             Self::KeyProviderMigration => 4,
+            Self::RepositoryInspection => 5,
         }
     }
 
@@ -51,6 +56,7 @@ impl DurableOperationKind {
             2 => Ok(Self::QueryExport),
             3 => Ok(Self::SegmentAbandonment),
             4 => Ok(Self::KeyProviderMigration),
+            5 => Ok(Self::RepositoryInspection),
             _ => Err(DurableOperationFailure::PersistenceUnavailable),
         }
     }
@@ -138,7 +144,8 @@ impl DurableOperationRequest {
                 }
                 hasher.update(accepted_generation.to_be_bytes());
             },
-            DurableOperationKind::KeyProviderMigration => {
+            DurableOperationKind::KeyProviderMigration
+            | DurableOperationKind::RepositoryInspection => {
                 if applicable_tenant.is_some() {
                     return Err(DurableOperationFailure::InvalidInput);
                 }
@@ -352,6 +359,43 @@ impl DurableOperationRequest {
         })
     }
 
+    pub fn repository(
+        principal: PrincipalId,
+        idempotency: AdministrativeIdempotencyKey,
+        instance: [u8; 16],
+        accepted_generation: u64,
+        accepted_at_unix_seconds: u64,
+        intent: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        if accepted_generation == 0
+            || accepted_at_unix_seconds == 0
+            || instance.iter().all(|byte| *byte == 0)
+            || intent.iter().all(|byte| *byte == 0)
+        {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        let kind = DurableOperationKind::RepositoryInspection;
+        let mut hasher = Sha256::new();
+        hasher.update(REQUEST_DOMAIN);
+        hasher.update(principal.to_bytes());
+        hasher.update(idempotency.to_bytes());
+        hasher.update([kind.code()]);
+        hasher.update(instance);
+        hasher.update(accepted_generation.to_be_bytes());
+        hasher.update(intent);
+        Ok(Self {
+            principal,
+            idempotency,
+            kind,
+            target_identity: Some(instance),
+            applicable_tenant: None,
+            accepted_generation,
+            accepted_at_unix_seconds,
+            operation_request_digest: Some(intent),
+            digest: hasher.finalize().into(),
+        })
+    }
+
     #[must_use]
     pub const fn kind(&self) -> DurableOperationKind {
         self.kind
@@ -393,7 +437,8 @@ impl DurableOperationRequest {
             DurableOperationKind::QueryExport => self.operation_request_digest,
             DurableOperationKind::CatalogFormatMigration
             | DurableOperationKind::SegmentAbandonment
-            | DurableOperationKind::KeyProviderMigration => None,
+            | DurableOperationKind::KeyProviderMigration
+            | DurableOperationKind::RepositoryInspection => None,
         }
     }
 
@@ -467,6 +512,23 @@ impl DurableOperationRequest {
                         return None;
                     }
                     Self::key_provider_migration(
+                        self.principal,
+                        self.idempotency,
+                        instance,
+                        self.accepted_generation,
+                        self.accepted_at_unix_seconds,
+                        self.operation_request_digest?,
+                    )
+                    .ok()
+                })
+                .is_some_and(|canonical| canonical == self),
+            DurableOperationKind::RepositoryInspection => self
+                .target_identity
+                .and_then(|instance| {
+                    if self.applicable_tenant.is_some() {
+                        return None;
+                    }
+                    Self::repository(
                         self.principal,
                         self.idempotency,
                         instance,
@@ -884,6 +946,7 @@ impl DurableQueryBudgetDimension {
 pub struct DurableOperation {
     pub(super) request: DurableOperationRequest,
     pub(super) key_provider_migration_parameters: Option<super::KeyProviderMigrationParameters>,
+    pub(super) repository_parameters: Option<super::RepositoryOperationParameters>,
     pub(super) status: DurableOperationStatus,
     pub(super) phase: DurableOperationPhase,
     pub(super) progress_percent: u8,
@@ -898,6 +961,10 @@ pub struct DurableOperation {
 }
 
 impl DurableOperation {
+    pub const fn repository_parameters(self) -> Option<super::RepositoryOperationParameters> {
+        self.repository_parameters
+    }
+
     /// Handler-only non-secret parameters; public wire inspection redacts them.
     pub const fn key_provider_migration_parameters(
         self,
@@ -990,6 +1057,7 @@ impl DurableOperation {
         Self {
             request,
             key_provider_migration_parameters: None,
+            repository_parameters: None,
             status: DurableOperationStatus::Pending,
             phase: DurableOperationPhase::Accepted,
             progress_percent: 0,
@@ -1180,6 +1248,15 @@ impl DurableOperation {
                     || self.request.operation_request_digest != Some(parameters.intent_digest())
             },
             None => self.request.kind == DurableOperationKind::KeyProviderMigration,
+        } {
+            return false;
+        }
+        if match self.repository_parameters {
+            Some(parameters) => {
+                self.request.kind != DurableOperationKind::RepositoryInspection
+                    || self.request.operation_request_digest != Some(parameters.intent_digest())
+            },
+            None => self.request.kind == DurableOperationKind::RepositoryInspection,
         } {
             return false;
         }

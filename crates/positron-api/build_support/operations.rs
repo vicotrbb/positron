@@ -135,6 +135,14 @@ const POLICY_METHODS: &[MethodSpec] = &[
 
 pub(crate) const SERVICES: &[ServiceSpec] = &[
     ServiceSpec {
+        name: "RepositoryService",
+        methods: &[MethodSpec {
+            name: "Manage",
+            input: ".positron.v1.RepositoryRequest",
+            output: ".positron.v1.RepositoryResponse",
+        }],
+    },
+    ServiceSpec {
         name: "ProviderMigrationService",
         methods: &[MethodSpec {
             name: "Manage",

@@ -400,8 +400,8 @@ const fn hex_value(value: u8) -> Option<u8> {
     }
 }
 
-pub(super) fn hex(bytes: [u8; 16]) -> String {
-    let mut rendered = String::with_capacity(32);
+pub(super) fn hex<const N: usize>(bytes: [u8; N]) -> String {
+    let mut rendered = String::with_capacity(N.saturating_mul(2));
     for byte in bytes {
         rendered.push(hex_digit(byte >> 4));
         rendered.push(hex_digit(byte & 0x0f));

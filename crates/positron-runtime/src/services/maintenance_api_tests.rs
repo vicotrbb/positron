@@ -98,3 +98,6 @@ mod fencing_causes;
 #[cfg(unix)]
 #[path = "maintenance_api_tests/live_key_fencing.rs"]
 mod live_key_fencing;
+
+#[path = "maintenance_api_tests/repository.rs"]
+mod repository;

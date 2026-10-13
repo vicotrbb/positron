@@ -2,6 +2,7 @@
 members = [
     "crates/positron",
     "crates/positron-api",
+    "crates/positron-backup",
     "crates/positron-config",
     "crates/positron-darwin-acl",
     "crates/positron-darwin-system",

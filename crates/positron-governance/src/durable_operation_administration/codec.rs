@@ -13,6 +13,7 @@ const OPERATION_MAGIC_V1: [u8; 8] = *b"POSOPR01";
 const OPERATION_MAGIC_V2: [u8; 8] = *b"POSOPR02";
 const OPERATION_MAGIC_V3: [u8; 8] = *b"POSOPR03";
 const OPERATION_MAGIC: [u8; 8] = *b"POSOPR04";
+const REPOSITORY_PARAMETERS_MAGIC: [u8; 8] = *b"POSREP02";
 const ROOT_PARAMETERS_MAGIC: [u8; 8] = *b"POSKPM01";
 const EXPIRED_OPERATION_BINDING_MAGIC_V1: [u8; 8] = *b"POSOPX01";
 const EXPIRED_OPERATION_BINDING_MAGIC_V2: [u8; 8] = *b"POSOPX02";
@@ -73,6 +74,10 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
     }
     if let Some(parameters) = operation.key_provider_migration_parameters {
         encoded.extend_from_slice(&ROOT_PARAMETERS_MAGIC);
+        parameters.encode(&mut encoded);
+    }
+    if let Some(parameters) = operation.repository_parameters {
+        encoded.extend_from_slice(&REPOSITORY_PARAMETERS_MAGIC);
         parameters.encode(&mut encoded);
     }
     encoded
@@ -174,13 +179,16 @@ pub(super) fn decode_operation(
     // Keeping the recognized outer magic makes old readers reject the newer
     // root-kind layout by their exact-length check, rather than ignore it.
     let root_parameters = v4 && encoded.get(56) == Some(&4);
+    let repository_parameters_present = v4 && encoded.get(56) == Some(&5);
     let v3 = encoded.starts_with(&OPERATION_MAGIC_V3);
     let v2 = encoded.starts_with(&OPERATION_MAGIC_V2);
     if !v4 && !v3 && !v2 && !encoded.starts_with(&OPERATION_MAGIC_V1) {
         return Ok(None);
     }
-    if (root_parameters && !(261..=2309).contains(&encoded.len()))
+    if (repository_parameters_present && !(310..=2358).contains(&encoded.len()))
+        || (root_parameters && !(261..=2309).contains(&encoded.len()))
         || (!root_parameters
+            && !repository_parameters_present
             && encoded.len()
                 != if v4 {
                     218
@@ -293,6 +301,20 @@ pub(super) fn decode_operation(
     } else {
         None
     };
+    let repository_parameters = if repository_parameters_present {
+        if take_array::<8>(encoded, &mut offset)? != REPOSITORY_PARAMETERS_MAGIC {
+            return Err(DurableOperationFailure::PersistenceUnavailable);
+        }
+        let parameters = super::RepositoryOperationParameters::decode(
+            encoded
+                .get(offset..)
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
+        )?;
+        offset = encoded.len();
+        Some(parameters)
+    } else {
+        None
+    };
     if offset != encoded.len() {
         return Err(DurableOperationFailure::PersistenceUnavailable);
     }
@@ -304,6 +326,7 @@ pub(super) fn decode_operation(
     let operation = DurableOperation {
         request,
         key_provider_migration_parameters,
+        repository_parameters,
         status,
         phase,
         progress_percent,
@@ -390,6 +413,52 @@ pub(super) fn encode_audit(operation: DurableOperation) -> Vec<u8> {
 pub fn fuzz_durable_operation_record(data: &[u8]) {
     let _ = decode_operation(data);
     let _ = decode_expired_binding(data);
+    let parameters = crate::RepositoryOperationParameters::local(
+        crate::RepositoryAction::Doctor,
+        "/fuzz/repository",
+        [0x44; 16],
+        [0x55; 32],
+        [0x66; 32],
+    )
+    .expect("bounded fixture");
+    let request = DurableOperationRequest::repository(
+        PrincipalId::from_bytes([0x11; 16]).expect("actor"),
+        AdministrativeIdempotencyKey::new([0x22; 16]).expect("key"),
+        [0x33; 16],
+        1,
+        17,
+        parameters.intent_digest(),
+    )
+    .expect("request");
+    let mut operation = DurableOperation::accepted(request);
+    operation.repository_parameters = Some(parameters);
+    let mut record = encode_operation(operation);
+    for mutation in data.chunks(3).take(128) {
+        let Some(kind) = mutation.first() else {
+            continue;
+        };
+        let position = usize::from(mutation.get(1).copied().unwrap_or_default());
+        let value = mutation.get(2).copied().unwrap_or_default();
+        match kind % 3 {
+            0 => {
+                if let Some(byte) = record.get_mut(position) {
+                    *byte ^= value;
+                }
+            },
+            1 => record.truncate(position.min(record.len())),
+            _ => {
+                if record.len() < 2400 {
+                    record.push(value);
+                }
+            },
+        }
+        if let Ok(Some(decoded)) = decode_operation(&record) {
+            assert_eq!(
+                decode_operation(&encode_operation(decoded)).expect("accepted record round trip"),
+                Some(decoded)
+            );
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -481,6 +550,54 @@ mod tests {
         }
         assert_eq!(baseline_v4_admission(legacy), Some(Ok(())));
         assert_eq!(baseline_v4_admission(&encoded), Some(Err(())));
+    }
+
+    #[test]
+    fn repository_record_extension_preserves_baseline_and_rejects_unknown_native_tail() {
+        let legacy = include_bytes!("../../tests/fixtures/durable-operation-v4-pending.bin");
+        let old = decode_operation(legacy)
+            .expect("baseline decode")
+            .expect("baseline operation");
+        assert_eq!(encode_operation(old), legacy);
+        let parameters = crate::RepositoryOperationParameters::local(
+            crate::RepositoryAction::Doctor,
+            "/protected/repository",
+            [0x44; 16],
+            [0x55; 32],
+            [0x66; 32],
+        )
+        .expect("native parameters");
+        let request = DurableOperationRequest::repository(
+            PrincipalId::from_bytes([0x11; 16]).expect("actor"),
+            AdministrativeIdempotencyKey::new([0x22; 16]).expect("key"),
+            [0x33; 16],
+            1,
+            17,
+            parameters.intent_digest(),
+        )
+        .expect("request");
+        let mut operation = DurableOperation::accepted(request);
+        operation.repository_parameters = Some(parameters);
+        let encoded = encode_operation(operation);
+        assert_eq!(
+            decode_operation(&encoded).expect("repository decode"),
+            Some(operation)
+        );
+        // abc6388's reader recognizes POSOPR04 and rejects lengths other
+        // than218 unless kind4 has the known root-parameter tail.
+        assert!(encoded.starts_with(b"POSOPR04"));
+        assert_ne!(encoded.len(), 218);
+        assert_ne!(encoded.get(56), Some(&4));
+        for index in [218, 226, encoded.len() - 1] {
+            let mut changed = encoded.clone();
+            if let Some(byte) = changed.get_mut(index) {
+                *byte ^= 0xff;
+            }
+            assert!(decode_operation(&changed).is_err());
+        }
+        let mut extra = encoded;
+        extra.push(0);
+        assert!(decode_operation(&extra).is_err());
     }
 
     #[test]
