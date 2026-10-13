@@ -10,10 +10,19 @@ use positron_api::maintenance::{
     OnlineVerificationReport, OnlineVerificationRequest, SegmentAbandonmentRequest, SegmentAbandonmentResponse,
 };
 use positron_kernel::IntegrityScrubContinuation;
+use positron_api::provider_migration::{ProviderMigrationRequest, ProviderMigrationResponse};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_RESPONSE_BYTES.saturating_add(1) {
         return;
+    }
+    if let Ok(request) = ProviderMigrationRequest::decode(data) {
+        let encoded = request.encode().expect("accepted migration request encodes");
+        assert_eq!(ProviderMigrationRequest::decode(&encoded), Ok(request));
+    }
+    if let Ok(response) = ProviderMigrationResponse::decode(data) {
+        let encoded = response.encode().expect("accepted migration response encodes");
+        assert_eq!(ProviderMigrationResponse::decode(&encoded), Ok(response));
     }
     if let Ok(request) = SegmentAbandonmentRequest::decode(data) {
         let encoded = request.encode().expect("accepted abandonment request encodes");
