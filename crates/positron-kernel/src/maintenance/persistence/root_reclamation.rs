@@ -146,9 +146,12 @@ impl MaintenanceCoordinator {
                         // task progress is never a reference-retirement proof.
                         retention_publication_frontier(live.checkpoint.as_ref())?;
                     }
+                    let signed_checkpoint =
+                        completed_audit_checkpoint_is_reference_free(live, catalog, &basis)?;
                     if terminal
                         && (completed_publication
                             || completed_reclamation
+                            || signed_checkpoint
                             || reference_free_scrub
                             || released_lease
                             || RootProviderMigrationBinding::from_task(
@@ -289,4 +292,54 @@ impl MaintenanceCoordinator {
         }
         Ok(pending.removed.len())
     }
+}
+
+// The task descriptor binds only an audit hash and the unchanged Integrity key.
+// Its signed artifact and audit history retain their separate owners.
+fn completed_audit_checkpoint_is_reference_free(
+    live: &TaskState,
+    catalog: &Catalog<'_>,
+    basis: &crate::CatalogSnapshot,
+) -> Result<bool, MaintenanceFailure> {
+    if live.phase != MaintenanceTaskPhase::Succeeded
+        || live.task.class != MaintenanceTaskClass::GovernanceAuditCheckpoint
+        || live.task.scope != MaintenanceScope::System
+    {
+        return Ok(false);
+    }
+    let binding = GovernanceAuditCheckpointBinding::from_checkpoint(live.checkpoint.as_ref())?;
+    if live.task.inputs.as_slice() != [MaintenanceObjectId::new(binding.record_hash())?]
+        || live.task.outputs.as_slice()
+            != [MaintenanceObjectId::new(
+                binding.integrity_key_fingerprint(),
+            )?]
+    {
+        return Ok(false);
+    }
+    let (_, governance) = basis.governance_object().map_err(map_catalog_failure)?;
+    if binding.integrity_key_fingerprint() != governance.integrity_key_fingerprint() {
+        return Ok(false);
+    }
+    let Some(checkpoint) = catalog
+        .latest_audit_checkpoint()
+        .map_err(map_catalog_failure)?
+    else {
+        return Ok(false);
+    };
+    checkpoint
+        .verify(governance.integrity_public_key())
+        .map_err(map_catalog_failure)?;
+    if checkpoint.instance().to_bytes() != governance.instance()
+        || checkpoint.position() < binding.position()
+        || checkpoint.position() > basis.governance_audit_frontier()
+    {
+        return Ok(false);
+    }
+    Ok(catalog
+        .governance_audit_records()
+        .map_err(map_catalog_failure)?
+        .iter()
+        .any(|record| {
+            record.position() == binding.position() && record.record_hash() == binding.record_hash()
+        }))
 }

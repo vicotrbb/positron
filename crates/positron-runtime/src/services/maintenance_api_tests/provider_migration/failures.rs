@@ -324,3 +324,77 @@ fn cancelling_pending_phase_keeps_route_and_original_terminal_operation()
     assert_eq!(reopened.active_epoch, 1);
     Ok(())
 }
+
+#[test]
+fn root_retirement_retains_checkpoint_without_signed_publication_proof()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _, _) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(initialized)?;
+    let catalog = services.open_maintenance_catalog().expect("catalog");
+    let basis = catalog.pin()?;
+    let (_, governance) = basis.governance_object()?;
+    let records = catalog.governance_audit_records()?;
+    let frontier = records.last().ok_or("audit frontier")?;
+    let (task, binding) = positron_kernel::Catalog::governance_audit_checkpoint_task(
+        frontier,
+        governance.integrity_key_fingerprint(),
+    )?;
+    let coordinator = services.instance.maintenance_coordinator();
+    let wrong_binding = positron_kernel::GovernanceAuditCheckpointBinding::new(
+        binding.position(),
+        [0xef; 32],
+        binding.integrity_key_fingerprint(),
+    )
+    .expect("binding");
+    let generation = catalog.pin()?.number();
+    assert!(matches!(
+        coordinator.submit_governance_audit_checkpoint_and_persist(
+            &catalog,
+            task.clone(),
+            wrong_binding,
+            17,
+        ),
+        Err(positron_kernel::MaintenanceFailure::InvalidInput)
+    ));
+    assert_eq!(catalog.pin()?.number(), generation);
+    coordinator
+        .submit_governance_audit_checkpoint_and_persist(&catalog, task.clone(), binding, 17)
+        .expect("submit checkpoint");
+    let execution = coordinator
+        .start_task_with_reservation_and_persist(
+            &catalog,
+            &services.instance._authority,
+            18,
+            false,
+            task.identity(),
+        )
+        .expect("dispatch")
+        .ok_or("checkpoint execution")?;
+    // A terminal descriptor alone cannot stand in for its signed artifact.
+    execution
+        .complete_and_persist(coordinator, &catalog, true)
+        .expect("terminal descriptor");
+    drop(execution);
+    let session =
+        positron_kernel::RootRewrapSession::admit_provider(&services.instance._authority)?;
+    assert_eq!(
+        coordinator
+            .reclaim_terminal_records_for_root_retirement(&session, &catalog)
+            .expect("guarded reclamation"),
+        0
+    );
+    assert_eq!(
+        coordinator
+            .status(task.identity())
+            .expect("retained checkpoint")
+            .phase(),
+        positron_kernel::MaintenanceTaskPhase::Succeeded
+    );
+    assert!(
+        coordinator
+            .guard_root_retirement_references(&session, &catalog, &catalog.pin()?)
+            .is_err()
+    );
+    Ok(())
+}

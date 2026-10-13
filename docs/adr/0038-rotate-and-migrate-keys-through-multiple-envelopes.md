@@ -79,3 +79,12 @@ basis, and the ledger independently checks that proof before inspecting managed
 references. Other Migration tasks and stale dispatches remain fences. Terminal
 association reclamation removes only the maintenance descriptor, preserving
 Durable Operation outcomes and governance audit history.
+
+Completed Governance Audit checkpoint task descriptors may be reclaimed by the
+existing Maintenance owner only when their System scope, typed position/hash/
+Integrity binding, exact inputs and outputs, and current signed checkpoint
+coverage are verified against Catalog. The signed checkpoint artifact and audit
+history retain their existing owners; opaque or unproved descriptors still
+block retirement. Migration's local recovery preflight preserves admission and
+storage failures as unavailable proof, distinct from authenticated absence of
+independent recovery.

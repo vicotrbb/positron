@@ -59,7 +59,7 @@ fn write_response(
         }
     }
     if let Some(operation) = &response.operation {
-        writeln!(output, "operation_id={} status={} phase={} progress_percent={} cancellation={} irreversible_boundary={}", operation.id, operation.status, operation.phase, operation.progress_percent, operation.cancellation, operation.irreversible_boundary).map_err(|_| "migration output unavailable")?;
+        writeln!(output, "operation_id={} status={} phase={} progress_percent={} cancellation={} irreversible_boundary={} retry={} lookup_expires_at_unix_seconds={:?}", operation.id, operation.status, operation.phase, operation.progress_percent, operation.cancellation, operation.irreversible_boundary, operation.retry, operation.lookup_expires_at_unix_seconds).map_err(|_| "migration output unavailable")?;
     }
     Ok(())
 }

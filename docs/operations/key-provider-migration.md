@@ -77,7 +77,9 @@ Retirement performs a bounded Catalog transaction to reclaim completed
 maintenance descriptors before checking the unchanged reference guards. Only
 reference-free descriptors, canonical digest-only scrubs, released lease descriptors
 whose exact lease object is absent, successful Retention Publications with their
-typed frontier, typed terminal root-migration associations, and dedicated completed Retention Reclamations with an exact
+typed frontier, typed terminal root-migration associations, successful typed Governance Audit
+checkpoint descriptors covered by the current authenticated signed checkpoint
+(the signed artifact and audit records remain retained), and dedicated completed Retention Reclamations with an exact
 retired continuity binding and absent segment/frontier files are eligible.
 Continuity metadata is retained. Expiring a digest-only scrub descriptor does
 not assert that a historical scrub succeeded. Opaque inputs, outputs, or

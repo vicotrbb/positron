@@ -61,12 +61,41 @@ impl InitializedInstance {
         let basis = if let Some(configuration) = configuration {
             Some(self.provider_retirement_proof(&session, configuration, Some(context))?)
         } else {
-            if self
-                .backup_key_recovery_readiness()
-                .map_err(|_| LocalKeyRotationFailure::Custody)?
-                != RecoveryReadiness::Verified
-            {
-                return Err(LocalKeyRotationFailure::Custody);
+            let readiness = {
+                let _gate = context
+                    .catalog_gate
+                    .lock()
+                    .map_err(|_| LocalKeyRotationFailure::Storage)?;
+                self.checked_backup_key_recovery_readiness()
+                    .map_err(|failure| match failure {
+                        positron_kernel::RecoveryFailure::Admission
+                        | positron_kernel::RecoveryFailure::LimitExceeded => {
+                            LocalKeyRotationFailure::LimitExceeded
+                        },
+                        positron_kernel::RecoveryFailure::Storage => {
+                            LocalKeyRotationFailure::Storage
+                        },
+                        _ => LocalKeyRotationFailure::Custody,
+                    })?
+            };
+            if readiness != RecoveryReadiness::Verified {
+                let catalog = self.rotation_catalog_for_operation(&session, Some(context))?;
+                let basis = catalog
+                    .pin()
+                    .map_err(|_| LocalKeyRotationFailure::Storage)?;
+                let state = State::find(&basis)?.ok_or(LocalKeyRotationFailure::InvalidInput)?;
+                self.publish_rotation_for_operation(
+                    &catalog,
+                    &basis,
+                    &state,
+                    CatalogRootRotationStage::RetirementRefused,
+                    self.operation_rotation_transaction(
+                        Some(context),
+                        CatalogRootRotationStage::RetirementRefused,
+                    )?,
+                    Some(context),
+                )?;
+                return Err(LocalKeyRotationFailure::RetirementRefused);
             }
             None
         };
