@@ -19,38 +19,48 @@ protected-token authentication uses `token_file` without an authentication
 `mount`. JWT and Kubernetes authentication additionally select their role,
 protected JWT file, and native authentication mount.
 
-Stop the serving owner before using the exclusive-owner CLI. Preserve access to
-both immutable roots throughout overlap. Start with status and prepare:
+The running instance owns the workflow. Use an authenticated System
+Administration credential on the administrative HTTP listener. Supply it on
+standard input through `--credential-stdin`; use the listener's TLS server name
+and trust file. `--allow-plaintext` is explicit opt-in for a plaintext listener.
+The configuration reference is an absolute protected path on the server, read
+through the canonical configuration owner. It never transfers credentials in
+operation parameters.
 
 ```console
-positron keys migrate status --config source.toml
-positron keys migrate prepare --config source.toml --target-config target.toml
-positron keys migrate activate --config source.toml --target-config target.toml
-positron keys migrate status --config target.toml
+positron keys migrate status --endpoint localhost:4319 --credential-stdin --server-name positron.local --trust-file trust.pem
+positron keys migrate prepare --endpoint localhost:4319 --credential-stdin --server-name positron.local --trust-file trust.pem --target-config /protected/target.toml --expected-generation 42 --idempotency-key 11111111-1111-4111-8111-111111111111
 ```
 
-Preparation admits resources and verifies custody before recording a prepared
-route. Activation commits the destination as the route for new object keys.
-Restart the server using the canonical destination access configuration after
-cutover. A configuration URI or version that differs from the authenticated
-active route is refused; configuration cannot perform a migration.
+Each mutating phase (`prepare`, `activate`, `cancel`, `resume`, `verify`, `retire`)
+accepts an Administrative Idempotency Key and the current Catalog generation.
+Prepare, activate, verify, and retire also require `--target-config`. Inspect
+status for the current generation before submitting a new phase. An identical
+retry returns the original stable Operation ID; changed parameters conflict.
+The accepted operation atomically retains its bounded configuration reference
+and semantic digest, while the root Catalog journal remains phase authority.
+The existing persisted Maintenance coordinator owns execution and recovery.
+Ingestion remains available across preparation and cutover. Activation commits
+the destination as the route for new keys and invalidates provider caches.
 
-Cancellation preserves both routes. After cutover it preserves the committed
-destination for new writes. Use the configuration of the committed active route:
+Use `lookup --idempotency-key UUID`, `status --operation-id ID`, or
+`wait --operation-id ID --wait-seconds N` with the same connection and
+credential flags to resolve the outcome. Wait is bounded to at most 60 seconds.
+A timeout or transport failure leaves the caller's outcome unknown; inspect
+that operation before resubmitting. Temporary admission backpressure is an
+explicit unavailable response. `cancel-operation --operation-id ID
+--expected-generation N --idempotency-key UUID` requests durable operation
+cancellation. The separate `cancel` and `resume` phases suspend and resume the
+root migration journal. Cancellation preserves the last committed route and
+never rolls back an activated destination.
 
-```console
-positron keys migrate cancel --config target.toml
-positron keys migrate resume --config target.toml
-positron keys migrate verify --config target.toml
-positron keys migrate retire --config target.toml
-```
-
-Before cutover, use the source configuration for cancel and resume. Retrying a
-prepared operation requires the same immutable destination. After interruption,
-inspect authenticated status before continuing; failed publication may require
-reconfirmation of the committed route. Status reports exact nonsecret source,
-active, and target identities, epochs, and phase, including historical source
-identity after retirement.
+Restart reconstructs an accepted operation's missing task and resumes the
+same task/operation association. The exact accepted configuration digest must
+still match. Root phase execution rechecks the original requesting principal's
+current System Administration grant; root audit records retain that principal
+and Operation ID. Start a restarted server with the canonical access
+configuration for the committed active provider. A differing immutable URI or
+version is refused, and configuration alone cannot perform migration.
 
 Verification and retirement use independent target recovery and the existing
 managed reference owners. Retained recovery artifacts, snapshot and export
@@ -67,7 +77,7 @@ Retirement performs a bounded Catalog transaction to reclaim completed
 maintenance descriptors before checking the unchanged reference guards. Only
 reference-free descriptors, canonical digest-only scrubs, released lease descriptors
 whose exact lease object is absent, successful Retention Publications with their
-typed frontier, and dedicated completed Retention Reclamations with an exact
+typed frontier, typed terminal root-migration associations, and dedicated completed Retention Reclamations with an exact
 retired continuity binding and absent segment/frontier files are eligible.
 Continuity metadata is retained. Expiring a digest-only scrub descriptor does
 not assert that a historical scrub succeeded. Opaque inputs, outputs, or

@@ -4,9 +4,15 @@ impl InitializedInstance {
     pub fn activate_local_key_rotation(
         &self,
     ) -> Result<LocalKeyRotationStatus, LocalKeyRotationFailure> {
+        self.activate_local_key_rotation_for_operation(None)
+    }
+    pub(crate) fn activate_local_key_rotation_for_operation(
+        &self,
+        context: Option<RootMigrationContext<'_>>,
+    ) -> Result<LocalKeyRotationStatus, LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let mut catalog = self.rotation_catalog(&session)?;
+        let mut catalog = self.rotation_catalog_for_operation(&session, context)?;
         let snapshot = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -42,7 +48,7 @@ impl InitializedInstance {
             session
                 .confirm_active_provider(&self.key, state.active.identity, state.active.epoch)
                 .map_err(|_| LocalKeyRotationFailure::Custody)?;
-            catalog = self.rotation_catalog(&session)?;
+            catalog = self.rotation_catalog_for_operation(&session, context)?;
             if catalog
                 .pin()
                 .map_err(|_| LocalKeyRotationFailure::Storage)?
@@ -102,7 +108,7 @@ impl InitializedInstance {
                         &state.active.envelope,
                     )
                     .map_err(|_| LocalKeyRotationFailure::Authentication)?;
-                let catalog = self.rotation_catalog(&session)?;
+                let catalog = self.rotation_catalog_for_operation(&session, context)?;
                 let current = catalog
                     .pin()
                     .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -145,7 +151,7 @@ impl InitializedInstance {
                 &route.envelope,
             )
             .map_err(|_| LocalKeyRotationFailure::Authentication)?;
-        let catalog = self.rotation_catalog(&session)?;
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
         let current = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -159,13 +165,17 @@ impl InitializedInstance {
             return Err(LocalKeyRotationFailure::Busy);
         }
         state.predecessor = Some(std::mem::replace(&mut state.active, route));
-        state.transaction = self.rotation_transaction()?;
-        if let Err(failure) = self.publish_rotation(
+        state.transaction = match context {
+            Some(context) => context.transaction(CatalogRootRotationStage::Cutover)?,
+            None => self.rotation_transaction()?,
+        };
+        if let Err(failure) = self.publish_rotation_for_operation(
             &catalog,
             &snapshot,
             &state,
             CatalogRootRotationStage::Cutover,
             state.transaction,
+            context,
         ) {
             // Durability confirmation refreshes the exact authenticated committed
             // state before synchronizing it. A visible cutover must not leave the
@@ -178,7 +188,7 @@ impl InitializedInstance {
                 let activation = activation
                     .revalidate(&self.key, self.instance)
                     .map_err(|_| LocalKeyRotationFailure::Custody)?;
-                let catalog = self.rotation_catalog(&session)?;
+                let catalog = self.rotation_catalog_for_operation(&session, context)?;
                 if catalog
                     .pin()
                     .map_err(|_| LocalKeyRotationFailure::Storage)?

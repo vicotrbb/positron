@@ -44,10 +44,20 @@ pub(crate) use transitions::{
 
 struct SchedulerSelection<'times> {
     requested_identity: Option<MaintenanceTaskId>,
+    root_migration_handler: bool,
     snapshot_lease_times: &'times BTreeMap<MaintenanceScope, u64>,
 }
 
 impl MaintenanceCoordinator {
+    pub(super) fn submit_root_migration(
+        &self,
+        catalog: &Catalog<'_>,
+        task: MaintenanceTask,
+        checkpoint: MaintenanceCheckpoint,
+        now: u64,
+    ) -> Result<MaintenanceTask, MaintenanceFailure> {
+        self.submit_task_and_persist(catalog, task, Some(checkpoint), now, None)
+    }
     /// Selects, reserves, and durably marks one task Running before handing its
     /// execution to a handler. A failed publication drops the fresh reservation
     /// and leaves the task queued for the same stable retry.
@@ -133,6 +143,32 @@ impl MaintenanceCoordinator {
             classes,
             SchedulerSelection {
                 requested_identity: None,
+                root_migration_handler: false,
+                snapshot_lease_times,
+            },
+        )
+    }
+
+    /// Adds only the installed typed root-migration handler to the existing
+    /// class selection. Generic Migration descriptors remain undispatched.
+    pub fn start_next_with_root_migration_handler_and_snapshot_lease_times<'authority>(
+        &self,
+        catalog: &Catalog<'_>,
+        authority: &'authority StorageKernelResourceAuthority,
+        now: u64,
+        clock_uncertain: bool,
+        classes: &[MaintenanceTaskClass],
+        snapshot_lease_times: &BTreeMap<MaintenanceScope, u64>,
+    ) -> Result<Option<MaintenanceExecution<'authority>>, MaintenanceFailure> {
+        self.start_next_with_reservation_and_persist_matching_with_snapshot_lease_times(
+            catalog,
+            authority,
+            now,
+            clock_uncertain,
+            classes,
+            SchedulerSelection {
+                requested_identity: None,
+                root_migration_handler: true,
                 snapshot_lease_times,
             },
         )
@@ -235,6 +271,7 @@ impl MaintenanceCoordinator {
             classes,
             SchedulerSelection {
                 requested_identity,
+                root_migration_handler: false,
                 snapshot_lease_times: &BTreeMap::new(),
             },
         )
@@ -277,6 +314,17 @@ impl MaintenanceCoordinator {
                 .ok_or(MaintenanceFailure::UnknownTask)?;
             if !classes.is_empty() && !classes.contains(&task.class()) {
                 continue;
+            }
+            if selection.root_migration_handler && task.class() == MaintenanceTaskClass::Migration {
+                let stored = prospective
+                    .tasks
+                    .get(&identity)
+                    .ok_or(MaintenanceFailure::UnknownTask)?;
+                if RootProviderMigrationBinding::from_task(&stored.task, stored.checkpoint.as_ref())
+                    .is_err()
+                {
+                    continue;
+                }
             }
             let reservation = match reserve_task(authority, &task) {
                 Ok(reservation) => reservation,

@@ -45,10 +45,10 @@ pub use audit::{
     RecoveryBundleAction, RecoveryBundleAuditEntry, SchemaCheckpointAuditEntry,
     SystemAuditRetentionUpdateAuditEntry, TenantDisplayNameUpdateAuditEntry,
     TenantQuotaUpdateAuditEntry, TlsMaterialReloadAuditEntry, TlsMaterialReloadAuditRequest,
-    TlsMaterialReloadListenerSet, TlsMaterialReloadOutcome, catalog_root_rotation_audit_intent,
-    integrity_quarantine_audit_intent, maintenance_control_audit_intent,
-    maintenance_run_audit_intent, maintenance_window_audit_intent, recovery_bundle_audit_intent,
-    schema_checkpoint_audit_intent,
+    TlsMaterialReloadListenerSet, TlsMaterialReloadOutcome, catalog_root_migration_audit_intent,
+    catalog_root_rotation_audit_intent, integrity_quarantine_audit_intent,
+    maintenance_control_audit_intent, maintenance_run_audit_intent,
+    maintenance_window_audit_intent, recovery_bundle_audit_intent, schema_checkpoint_audit_intent,
 };
 pub use audit::{
     TenantKeyRotationAuditEntry, TenantKeyRotationStage, tenant_key_rotation_audit_intent,
@@ -61,7 +61,7 @@ pub use durable_operation_administration::{
     DurableOperationLookupRetention, DurableOperationPhase, DurableOperationRequest,
     DurableOperationRetry, DurableOperationStatus, DurableOperationTerminalError,
     DurableQueryBudgetDimension, DurableQueryExportFailure, DurableQueryExportFailureCode,
-    OperationId,
+    KeyProviderMigrationAction, KeyProviderMigrationParameters, OperationId,
 };
 pub use format_migration_administration::{
     CatalogFormatMigration, CatalogFormatMigrationAdministration, CatalogFormatMigrationFailure,

@@ -13,7 +13,7 @@ impl InitializedInstance {
         {
             return Err(LocalKeyRotationFailure::Custody);
         }
-        self.retire_root_predecessor(&session, None, true)
+        self.retire_root_predecessor(&session, None, true, None, None)
     }
     pub fn verify_key_provider_migration(
         &self,
@@ -21,8 +21,8 @@ impl InitializedInstance {
     ) -> Result<super::KeyProviderMigrationStatus, LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let basis = self.provider_retirement_proof(&session, configuration)?;
-        self.retire_root_predecessor(&session, Some(&basis), false)?;
+        let basis = self.provider_retirement_proof(&session, configuration, None)?;
+        self.retire_root_predecessor(&session, Some(&basis), false, None, None)?;
         self.key_provider_migration_status()
     }
     pub fn verify_local_key_rotation(
@@ -37,7 +37,7 @@ impl InitializedInstance {
         {
             return Err(LocalKeyRotationFailure::Custody);
         }
-        self.retire_root_predecessor(&session, None, false)?;
+        self.retire_root_predecessor(&session, None, false, None, None)?;
         self.local_key_rotation_status()
     }
     pub fn retire_key_provider_predecessor(
@@ -46,15 +46,50 @@ impl InitializedInstance {
     ) -> Result<(), LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let basis = self.provider_retirement_proof(&session, configuration)?;
-        self.retire_root_predecessor(&session, Some(&basis), true)
+        let basis = self.provider_retirement_proof(&session, configuration, None)?;
+        self.retire_root_predecessor(&session, Some(&basis), true, None, None)
+    }
+    pub(crate) fn verify_or_retire_key_provider_for_operation(
+        &self,
+        configuration: Option<positron_kernel::key_provider::NativeRootConfiguration>,
+        context: RootMigrationContext<'_>,
+        execution: &positron_kernel::MaintenanceExecution<'_>,
+        retire: bool,
+    ) -> Result<(), LocalKeyRotationFailure> {
+        let session = RootRewrapSession::admit_provider(&self._authority)
+            .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
+        let basis = if let Some(configuration) = configuration {
+            Some(self.provider_retirement_proof(&session, configuration, Some(context))?)
+        } else {
+            if self
+                .backup_key_recovery_readiness()
+                .map_err(|_| LocalKeyRotationFailure::Custody)?
+                != RecoveryReadiness::Verified
+            {
+                return Err(LocalKeyRotationFailure::Custody);
+            }
+            None
+        };
+        let binding = positron_kernel::RootProviderMigrationBinding::from_execution(execution)
+            .map_err(|_| LocalKeyRotationFailure::Authentication)?;
+        if binding.operation_id() != context.operation.to_bytes() {
+            return Err(LocalKeyRotationFailure::Authentication);
+        }
+        self.retire_root_predecessor(
+            &session,
+            basis.as_ref(),
+            retire,
+            Some(context),
+            Some((execution, binding)),
+        )
     }
     fn provider_retirement_proof(
         &self,
         session: &RootRewrapSession<'_>,
         configuration: positron_kernel::key_provider::NativeRootConfiguration,
+        context: Option<RootMigrationContext<'_>>,
     ) -> Result<positron_kernel::CatalogSnapshot, LocalKeyRotationFailure> {
-        let catalog = self.rotation_catalog(session)?;
+        let catalog = self.rotation_catalog_for_operation(session, context)?;
         let mut basis = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -108,8 +143,13 @@ impl InitializedInstance {
         session: &RootRewrapSession<'_>,
         native_proof: Option<&positron_kernel::CatalogSnapshot>,
         retire: bool,
+        context: Option<RootMigrationContext<'_>>,
+        own_execution: Option<(
+            &positron_kernel::MaintenanceExecution<'_>,
+            positron_kernel::RootProviderMigrationBinding,
+        )>,
     ) -> Result<(), LocalKeyRotationFailure> {
-        let catalog = self.rotation_catalog(session)?;
+        let catalog = self.rotation_catalog_for_operation(session, context)?;
         let mut basis = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -158,14 +198,22 @@ impl InitializedInstance {
             .map_err(|_| LocalKeyRotationFailure::Authentication)?;
         let Some(predecessor) = state.predecessor.clone() else {
             if !recovery_predecessor_absent {
-                self.publish_rotation(
+                self.publish_rotation_for_operation(
                     &catalog,
                     &basis,
                     &state,
                     CatalogRootRotationStage::RetirementRefused,
-                    self.rotation_transaction()?,
+                    self.operation_rotation_transaction(
+                        context,
+                        CatalogRootRotationStage::RetirementRefused,
+                    )?,
+                    context,
                 )?;
-                return Err(LocalKeyRotationFailure::Busy);
+                return Err(if context.is_some() {
+                    LocalKeyRotationFailure::RetirementRefused
+                } else {
+                    LocalKeyRotationFailure::Busy
+                });
             }
             catalog
                 .confirm_current_publication()
@@ -202,84 +250,124 @@ impl InitializedInstance {
                 .map_err(|_| LocalKeyRotationFailure::Custody)?;
         }
         if !recovery_predecessor_absent {
-            self.publish_rotation(
+            self.publish_rotation_for_operation(
                 &catalog,
                 &basis,
                 &state,
                 CatalogRootRotationStage::RetirementRefused,
-                self.rotation_transaction()?,
+                self.operation_rotation_transaction(
+                    context,
+                    CatalogRootRotationStage::RetirementRefused,
+                )?,
+                context,
             )?;
-            return Err(LocalKeyRotationFailure::Busy);
+            return Err(if context.is_some() {
+                LocalKeyRotationFailure::RetirementRefused
+            } else {
+                LocalKeyRotationFailure::Busy
+            });
         }
-        let guard = match positron_kernel::ActiveSegmentLedger::guard_local_root_retirement(
-            &self._authority,
-            &catalog,
-        ) {
-            Ok(guard) => guard,
-            Err(failure)
-                if failure.code() == positron_kernel::LedgerFailureCode::ConcurrentWriter =>
-            {
-                self.publish_rotation(
-                    &catalog,
-                    &basis,
-                    &state,
-                    CatalogRootRotationStage::RetirementRefused,
-                    self.rotation_transaction()?,
-                )?;
-                return Err(LocalKeyRotationFailure::Busy);
-            },
-            Err(failure)
-                if failure.code()
-                    == positron_kernel::LedgerFailureCode::ResourceAdmissionRefused =>
-            {
-                return Err(LocalKeyRotationFailure::LimitExceeded);
-            },
-            Err(_) => return Err(LocalKeyRotationFailure::Authentication),
+        let coordinator = self.maintenance_coordinator();
+        let references = match own_execution {
+            Some((execution, binding)) => coordinator
+                .guard_root_retirement_for_migration(session, &catalog, &basis, execution, binding),
+            None => coordinator.guard_root_retirement_references(session, &catalog, &basis),
         };
-        if guard.catalog_basis().identity() != basis.identity() {
-            return Err(LocalKeyRotationFailure::Busy);
-        }
-        let _references = match self
-            .maintenance_coordinator()
-            .guard_root_retirement_references(session, &catalog, &basis)
-        {
+        let _references = match references {
             Ok(guard) => guard,
-            Err(positron_kernel::MaintenanceFailure::ConcurrentAccess) => {
-                self.publish_rotation(
+            Err(
+                positron_kernel::MaintenanceFailure::ConcurrentAccess
+                | positron_kernel::MaintenanceFailure::PreconditionFailed,
+            ) => {
+                self.publish_rotation_for_operation(
                     &catalog,
                     &basis,
                     &state,
                     CatalogRootRotationStage::RetirementRefused,
-                    self.rotation_transaction()?,
+                    self.operation_rotation_transaction(
+                        context,
+                        CatalogRootRotationStage::RetirementRefused,
+                    )?,
+                    context,
                 )?;
-                return Err(LocalKeyRotationFailure::Busy);
+                return Err(if context.is_some() {
+                    LocalKeyRotationFailure::RetirementRefused
+                } else {
+                    LocalKeyRotationFailure::Busy
+                });
             },
             Err(_) => return Err(LocalKeyRotationFailure::Busy),
         };
+        let guard =
+            match positron_kernel::ActiveSegmentLedger::guard_local_root_retirement_with_references(
+                &self._authority,
+                &catalog,
+                &_references,
+            ) {
+                Ok(guard) => guard,
+                Err(failure)
+                    if failure.code() == positron_kernel::LedgerFailureCode::ConcurrentWriter =>
+                {
+                    self.publish_rotation_for_operation(
+                        &catalog,
+                        &basis,
+                        &state,
+                        CatalogRootRotationStage::RetirementRefused,
+                        self.operation_rotation_transaction(
+                            context,
+                            CatalogRootRotationStage::RetirementRefused,
+                        )?,
+                        context,
+                    )?;
+                    return Err(if context.is_some() {
+                        LocalKeyRotationFailure::RetirementRefused
+                    } else {
+                        LocalKeyRotationFailure::Busy
+                    });
+                },
+                Err(failure)
+                    if failure.code()
+                        == positron_kernel::LedgerFailureCode::ResourceAdmissionRefused =>
+                {
+                    return Err(LocalKeyRotationFailure::LimitExceeded);
+                },
+                Err(_) => return Err(LocalKeyRotationFailure::Authentication),
+            };
+        if guard.catalog_basis().identity() != basis.identity() {
+            return Err(LocalKeyRotationFailure::Busy);
+        }
         let prepared = if !state.retiring {
             let verified =
                 if super::root_verification_audit::confirm_existing(&catalog, &basis, &state)? {
                     basis.clone()
                 } else {
-                    self.publish_rotation(
+                    self.publish_rotation_for_operation(
                         &catalog,
                         &basis,
                         &state,
                         CatalogRootRotationStage::Verified,
-                        self.rotation_transaction()?,
+                        self.operation_rotation_transaction(
+                            context,
+                            CatalogRootRotationStage::Verified,
+                        )?,
+                        context,
                     )?
                 };
             if !retire {
                 return Ok(());
             }
             state.retiring = true;
-            state.transaction = self.rotation_transaction()?;
-            self.publish_rotation(
+            state.transaction = self.operation_rotation_transaction(
+                context,
+                CatalogRootRotationStage::RetirementPrepared,
+            )?;
+            self.publish_rotation_for_operation(
                 &catalog,
                 &verified,
                 &state,
                 CatalogRootRotationStage::RetirementPrepared,
                 state.transaction,
+                context,
             )?
         } else {
             super::cutover::confirm_state(&catalog, &state)?;
@@ -301,13 +389,15 @@ impl InitializedInstance {
         }
         state.predecessor = None;
         state.retiring = false;
-        state.transaction = self.rotation_transaction()?;
-        self.publish_rotation(
+        state.transaction =
+            self.operation_rotation_transaction(context, CatalogRootRotationStage::Completed)?;
+        self.publish_rotation_for_operation(
             &catalog,
             &prepared,
             &state,
             CatalogRootRotationStage::Completed,
             state.transaction,
+            context,
         )
         .map(|_| ())
     }

@@ -20,6 +20,8 @@ pub enum DurableOperationKind {
     QueryExport,
     /// Explicit, confirmed unpublication of one unrecoverable quarantined segment.
     SegmentAbandonment,
+    /// One authenticated phase of the online root-provider rewrap workflow.
+    KeyProviderMigration,
 }
 
 impl DurableOperationKind {
@@ -30,6 +32,7 @@ impl DurableOperationKind {
             Self::CatalogFormatMigration => DurableOperationBoundary::CatalogGenerationPublished,
             Self::QueryExport => DurableOperationBoundary::ExportManifestPublished,
             Self::SegmentAbandonment => DurableOperationBoundary::CatalogGenerationPublished,
+            Self::KeyProviderMigration => DurableOperationBoundary::CatalogGenerationPublished,
         }
     }
 
@@ -38,6 +41,7 @@ impl DurableOperationKind {
             Self::CatalogFormatMigration => 1,
             Self::QueryExport => 2,
             Self::SegmentAbandonment => 3,
+            Self::KeyProviderMigration => 4,
         }
     }
 
@@ -46,6 +50,7 @@ impl DurableOperationKind {
             1 => Ok(Self::CatalogFormatMigration),
             2 => Ok(Self::QueryExport),
             3 => Ok(Self::SegmentAbandonment),
+            4 => Ok(Self::KeyProviderMigration),
             _ => Err(DurableOperationFailure::PersistenceUnavailable),
         }
     }
@@ -132,6 +137,15 @@ impl DurableOperationRequest {
                     hasher.update(target_identity);
                 }
                 hasher.update(accepted_generation.to_be_bytes());
+            },
+            DurableOperationKind::KeyProviderMigration => {
+                if applicable_tenant.is_some() {
+                    return Err(DurableOperationFailure::InvalidInput);
+                }
+                hasher.update(target_identity.ok_or(DurableOperationFailure::InvalidInput)?);
+                hasher.update(accepted_generation.to_be_bytes());
+                hasher
+                    .update(operation_request_digest.ok_or(DurableOperationFailure::InvalidInput)?);
             },
             DurableOperationKind::QueryExport | DurableOperationKind::SegmentAbandonment => {
                 hasher.update(
@@ -298,6 +312,46 @@ impl DurableOperationRequest {
         OperationId::from_request(self)
     }
 
+    /// Binds a phase, exact root identity and protected access references by
+    /// their canonical non-secret intent digest. Catalog generation is the
+    /// expected generation of this system-scoped mutable resource.
+    pub fn key_provider_migration(
+        principal: PrincipalId,
+        idempotency: AdministrativeIdempotencyKey,
+        instance: [u8; 16],
+        accepted_generation: u64,
+        accepted_at_unix_seconds: u64,
+        intent: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        if accepted_generation == 0
+            || accepted_at_unix_seconds == 0
+            || instance.iter().all(|byte| *byte == 0)
+            || intent.iter().all(|byte| *byte == 0)
+        {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        let kind = DurableOperationKind::KeyProviderMigration;
+        let mut hasher = Sha256::new();
+        hasher.update(REQUEST_DOMAIN);
+        hasher.update(principal.to_bytes());
+        hasher.update(idempotency.to_bytes());
+        hasher.update([kind.code()]);
+        hasher.update(instance);
+        hasher.update(accepted_generation.to_be_bytes());
+        hasher.update(intent);
+        Ok(Self {
+            principal,
+            idempotency,
+            kind,
+            target_identity: Some(instance),
+            applicable_tenant: None,
+            accepted_generation,
+            accepted_at_unix_seconds,
+            operation_request_digest: Some(intent),
+            digest: hasher.finalize().into(),
+        })
+    }
+
     #[must_use]
     pub const fn kind(&self) -> DurableOperationKind {
         self.kind
@@ -338,7 +392,8 @@ impl DurableOperationRequest {
         match self.kind {
             DurableOperationKind::QueryExport => self.operation_request_digest,
             DurableOperationKind::CatalogFormatMigration
-            | DurableOperationKind::SegmentAbandonment => None,
+            | DurableOperationKind::SegmentAbandonment
+            | DurableOperationKind::KeyProviderMigration => None,
         }
     }
 
@@ -398,6 +453,23 @@ impl DurableOperationRequest {
                         self.applicable_tenant?,
                         self.idempotency,
                         target_identity,
+                        self.accepted_generation,
+                        self.accepted_at_unix_seconds,
+                        self.operation_request_digest?,
+                    )
+                    .ok()
+                })
+                .is_some_and(|canonical| canonical == self),
+            DurableOperationKind::KeyProviderMigration => self
+                .target_identity
+                .and_then(|instance| {
+                    if self.applicable_tenant.is_some() {
+                        return None;
+                    }
+                    Self::key_provider_migration(
+                        self.principal,
+                        self.idempotency,
+                        instance,
                         self.accepted_generation,
                         self.accepted_at_unix_seconds,
                         self.operation_request_digest?,
@@ -811,6 +883,7 @@ impl DurableQueryBudgetDimension {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DurableOperation {
     pub(super) request: DurableOperationRequest,
+    pub(super) key_provider_migration_parameters: Option<super::KeyProviderMigrationParameters>,
     pub(super) status: DurableOperationStatus,
     pub(super) phase: DurableOperationPhase,
     pub(super) progress_percent: u8,
@@ -825,6 +898,12 @@ pub struct DurableOperation {
 }
 
 impl DurableOperation {
+    /// Handler-only non-secret parameters; public wire inspection redacts them.
+    pub const fn key_provider_migration_parameters(
+        self,
+    ) -> Option<super::KeyProviderMigrationParameters> {
+        self.key_provider_migration_parameters
+    }
     #[must_use]
     pub fn operation_id(self) -> OperationId {
         self.request.operation_id()
@@ -910,6 +989,7 @@ impl DurableOperation {
     pub(super) fn accepted(request: DurableOperationRequest) -> Self {
         Self {
             request,
+            key_provider_migration_parameters: None,
             status: DurableOperationStatus::Pending,
             phase: DurableOperationPhase::Accepted,
             progress_percent: 0,
@@ -1094,6 +1174,15 @@ impl DurableOperation {
     }
 
     pub(super) fn is_legal_persisted_state(self) -> bool {
+        if match self.key_provider_migration_parameters {
+            Some(parameters) => {
+                self.request.kind != DurableOperationKind::KeyProviderMigration
+                    || self.request.operation_request_digest != Some(parameters.intent_digest())
+            },
+            None => self.request.kind == DurableOperationKind::KeyProviderMigration,
+        } {
+            return false;
+        }
         if !self.request.is_valid_persisted_request()
             || self.updated_at_unix_seconds < self.request.accepted_at_unix_seconds
             || self.revision == 0

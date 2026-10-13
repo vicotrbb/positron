@@ -1021,3 +1021,188 @@ fn root_reclamation_keeps_snapshot_expiry_until_its_exact_lease_object_is_absent
     ));
     Ok(())
 }
+
+#[test]
+fn root_retirement_accepts_only_the_exact_running_root_migration_binding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = CatalogRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+        volume,
+        70_000_001,
+        1_048_576 + 16_384,
+    )?;
+    let instance = InstanceId::new(nonzero_id(91))?;
+    let catalog = Catalog::open(
+        &authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([0xb1; 32]), Box::new([0xb2; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(92))?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(b"root migration basis".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let binding = RootProviderMigrationBinding::new([0xb3; 16], [0xb4; 32]).expect("binding");
+    coordinator
+        .submit_root_provider_migration_and_persist(
+            &catalog,
+            binding,
+            MaintenancePreconditions::new(catalog.pin()?.number(), 1).expect("preconditions"),
+            7,
+        )
+        .expect("submit bound migration");
+    let execution = coordinator
+        .start_next_with_reservation_and_persist(&catalog, &authority, 8, false)
+        .expect("start")
+        .ok_or("root migration execution")?;
+    let session = crate::RootRewrapSession::admit(&authority)?;
+    assert!(
+        coordinator
+            .guard_root_retirement_references(&session, &catalog, &catalog.pin()?)
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .guard_root_retirement_for_migration(
+                &session,
+                &catalog,
+                &catalog.pin()?,
+                &execution,
+                binding
+            )
+            .is_ok()
+    );
+    {
+        let proof = coordinator
+            .guard_root_retirement_for_migration(
+                &session,
+                &catalog,
+                &catalog.pin()?,
+                &execution,
+                binding,
+            )
+            .expect("exact coordinator proof");
+        assert!(
+            crate::ActiveSegmentLedger::guard_local_root_retirement(&authority, &catalog).is_err()
+        );
+        drop(
+            crate::ActiveSegmentLedger::guard_local_root_retirement_with_references(
+                &authority, &catalog, &proof,
+            )
+            .expect("ledger accepts exact proof"),
+        );
+        let other_root = CatalogRoot::new()?;
+        let other_authority =
+            crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+                PrimaryDataVolume::acquire(&other_root.0, MountQualification::LocalHost)?,
+                70_000_001,
+                1_048_576 + 16_384,
+            )?;
+        assert!(
+            crate::ActiveSegmentLedger::guard_local_root_retirement_with_references(
+                &other_authority,
+                &catalog,
+                &proof,
+            )
+            .is_err()
+        );
+        let basis = catalog.pin()?;
+        let objects = basis
+            .plaintext_objects()
+            .map(|bytes| CatalogObject::new(bytes.to_vec()))
+            .collect::<Result<Vec<_>, _>>()?;
+        catalog.commit(
+            basis.identity(),
+            CatalogProposal::new(
+                TransactionId::new(nonzero_id(93))?,
+                FormatEpoch::CATALOG_V1,
+                objects,
+            )?,
+            None,
+        )?;
+        assert!(
+            crate::ActiveSegmentLedger::guard_local_root_retirement_with_references(
+                &authority, &catalog, &proof,
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        coordinator
+            .guard_root_retirement_for_migration(
+                &session,
+                &catalog,
+                &catalog.pin()?,
+                &execution,
+                RootProviderMigrationBinding::new([0xb5; 16], [0xb4; 32]).expect("other binding")
+            )
+            .is_err()
+    );
+    let restored = MaintenanceCoordinator::restore_from_catalog(&catalog).expect("restore");
+    assert!(
+        restored
+            .guard_root_retirement_for_migration(
+                &session,
+                &catalog,
+                &catalog.pin()?,
+                &execution,
+                binding
+            )
+            .is_err()
+    );
+    drop(restored);
+    let unrelated = MaintenanceTask::with_contract(
+        MaintenanceTaskId::new([0xb6; 16]).expect("task identity"),
+        MaintenanceTaskClass::Migration,
+        MaintenanceScope::system(),
+        MaintenanceTrigger::Event,
+        MaintenancePreconditions::new(catalog.pin()?.number(), 1).expect("preconditions"),
+        Vec::new(),
+        Vec::new(),
+        ResourceAmounts::new([1; 11]),
+    )
+    .expect("unrelated task");
+    coordinator
+        .submit_and_persist(&catalog, unrelated, 9)
+        .expect("unrelated submission");
+    assert!(
+        coordinator
+            .guard_root_retirement_for_migration(
+                &session,
+                &catalog,
+                &catalog.pin()?,
+                &execution,
+                binding
+            )
+            .is_err()
+    );
+    execution
+        .complete_and_persist(&coordinator, &catalog, true)
+        .expect("complete bound migration");
+    drop(execution);
+    assert_eq!(
+        coordinator
+            .reclaim_terminal_records_for_root_retirement(&session, &catalog)
+            .expect("terminal reclamation"),
+        1
+    );
+    assert!(
+        coordinator
+            .status(MaintenanceTaskId::new(binding.operation_id()).expect("owned task"))
+            .is_err()
+    );
+    assert_eq!(
+        coordinator
+            .status(MaintenanceTaskId::new([0xb6; 16]).expect("unrelated identity"))
+            .expect("unrelated task retained")
+            .phase(),
+        MaintenanceTaskPhase::Queued
+    );
+    Ok(())
+}

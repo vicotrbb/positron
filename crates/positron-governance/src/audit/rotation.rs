@@ -1,6 +1,7 @@
 use crate::identity::IdentityFailure;
 
 use super::ROOT_ROTATION_MAGIC;
+pub(super) const ROOT_MIGRATION_MAGIC: &[u8] = b"catalog-root-migration-v1\0";
 
 /// Closed stages durably published by one Catalog root rotation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +40,8 @@ pub struct CatalogRootRotationAuditEntry {
     provider_key_reference: [u8; 16],
     key_epoch: u64,
     transaction_id: [u8; 16],
+    requesting_principal: Option<positron_domain::identity::PrincipalId>,
+    operation_id: Option<crate::OperationId>,
 }
 
 impl CatalogRootRotationAuditEntry {
@@ -47,8 +50,13 @@ impl CatalogRootRotationAuditEntry {
         transaction_id: [u8; 16],
         intent: &[u8],
     ) -> Result<Self, IdentityFailure> {
+        let migration = intent.starts_with(ROOT_MIGRATION_MAGIC);
         let remaining = intent
-            .strip_prefix(ROOT_ROTATION_MAGIC)
+            .strip_prefix(if migration {
+                ROOT_MIGRATION_MAGIC
+            } else {
+                ROOT_ROTATION_MAGIC
+            })
             .ok_or(IdentityFailure)?;
         let stage_end = remaining
             .iter()
@@ -86,12 +94,38 @@ impl CatalogRootRotationAuditEntry {
         {
             return Err(IdentityFailure);
         }
+        let (requesting_principal, operation_id) = if migration {
+            if administration_intent.len() != 32 {
+                return Err(IdentityFailure);
+            }
+            let actor = administration_intent
+                .get(..16)
+                .ok_or(IdentityFailure)?
+                .try_into()
+                .map_err(|_| IdentityFailure)?;
+            let operation = administration_intent
+                .get(16..)
+                .ok_or(IdentityFailure)?
+                .try_into()
+                .map_err(|_| IdentityFailure)?;
+            (
+                Some(
+                    positron_domain::identity::PrincipalId::from_bytes(actor)
+                        .map_err(|_| IdentityFailure)?,
+                ),
+                Some(crate::OperationId::from_bytes(operation).map_err(|_| IdentityFailure)?),
+            )
+        } else {
+            (None, None)
+        };
         Ok(Self {
             position,
             stage,
             provider_key_reference,
             key_epoch,
             transaction_id,
+            requesting_principal,
+            operation_id,
         })
     }
 
@@ -129,6 +163,30 @@ impl CatalogRootRotationAuditEntry {
     pub const fn outcome(&self) -> &'static str {
         "committed"
     }
+    pub const fn requesting_principal(&self) -> Option<positron_domain::identity::PrincipalId> {
+        self.requesting_principal
+    }
+    pub const fn operation_id(&self) -> Option<crate::OperationId> {
+        self.operation_id
+    }
+}
+
+pub fn catalog_root_migration_audit_intent(
+    stage: CatalogRootRotationStage,
+    provider_key_reference: [u8; 16],
+    epoch: u64,
+    principal: positron_domain::identity::PrincipalId,
+    operation: crate::OperationId,
+) -> Result<positron_kernel::AuditIntent, IdentityFailure> {
+    let legacy = root_rotation_bytes(stage, provider_key_reference, epoch, principal)?;
+    let body = legacy
+        .strip_prefix(ROOT_ROTATION_MAGIC)
+        .ok_or(IdentityFailure)?;
+    let mut bytes = Vec::with_capacity(ROOT_MIGRATION_MAGIC.len() + body.len() + 16);
+    bytes.extend_from_slice(ROOT_MIGRATION_MAGIC);
+    bytes.extend_from_slice(body);
+    bytes.extend_from_slice(&operation.to_bytes());
+    positron_kernel::AuditIntent::new(bytes).map_err(|_| IdentityFailure)
 }
 
 pub fn catalog_root_rotation_audit_intent(
@@ -137,6 +195,21 @@ pub fn catalog_root_rotation_audit_intent(
     epoch: u64,
     administrator: positron_domain::identity::PrincipalId,
 ) -> Result<positron_kernel::AuditIntent, IdentityFailure> {
+    positron_kernel::AuditIntent::new(root_rotation_bytes(
+        stage,
+        provider_key_reference,
+        epoch,
+        administrator,
+    )?)
+    .map_err(|_| IdentityFailure)
+}
+
+fn root_rotation_bytes(
+    stage: CatalogRootRotationStage,
+    provider_key_reference: [u8; 16],
+    epoch: u64,
+    administrator: positron_domain::identity::PrincipalId,
+) -> Result<Vec<u8>, IdentityFailure> {
     if epoch == 0 || provider_key_reference == [0; 16] {
         return Err(IdentityFailure);
     }
@@ -157,5 +230,5 @@ pub fn catalog_root_rotation_audit_intent(
     bytes.extend_from_slice(&provider_key_reference);
     bytes.extend_from_slice(&epoch.to_be_bytes());
     bytes.extend_from_slice(&administrator.to_bytes());
-    positron_kernel::AuditIntent::new(bytes).map_err(|_| IdentityFailure)
+    Ok(bytes)
 }

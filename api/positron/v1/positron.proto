@@ -666,3 +666,50 @@ message SegmentAbandonmentResponse {
   optional string operation_id = 5;
   IntegrityQuarantineFinding finding = 6;
 }
+
+// Online system administration. Mutations accept a durable phase operation;
+// the authenticated root journal remains the sole phase authority. Configuration
+// references are server-local protected references, never credential contents.
+service ProviderMigrationService {
+  rpc Manage(ProviderMigrationRequest) returns (ProviderMigrationResponse);
+}
+
+message ProviderMigrationRequest {
+  string action = 1;
+  optional uint64 expected_catalog_generation = 2;
+  optional string idempotency_key = 3;
+  optional string configuration_reference = 4;
+  optional string operation_id = 5;
+}
+
+message ProviderMigrationOperation {
+  string id = 1;
+  string status = 2;
+  string phase = 3;
+  uint32 progress_percent = 4;
+  string retry = 5;
+  string cancellation = 6;
+  string irreversible_boundary = 7;
+  optional uint64 lookup_expires_at_unix_seconds = 8;
+}
+
+message ProviderMigrationResponse {
+  uint64 catalog_generation = 1;
+  string root_phase = 2;
+  uint64 active_epoch = 3;
+  optional uint64 successor_epoch = 4;
+  optional uint64 predecessor_epoch = 5;
+  optional ProviderMigrationOperation operation = 6;
+  ProviderMigrationIdentity active_provider = 7;
+  ProviderMigrationIdentity source_provider = 8;
+  optional ProviderMigrationIdentity target_provider = 9;
+}
+
+// Exact immutable locator and provider-owned version. Family codes match
+// LocalFile=1, AwsKms=2, GoogleCloudKms=3, AzureKeyVault=4,
+// AzureManagedHsm=5, VaultTransit=6, OpenBaoTransit=7, Kmip21=8.
+message ProviderMigrationIdentity {
+  uint32 family = 1;
+  string locator = 2;
+  string version = 3;
+}

@@ -151,6 +151,11 @@ impl MaintenanceCoordinator {
                             || completed_reclamation
                             || reference_free_scrub
                             || released_lease
+                            || RootProviderMigrationBinding::from_task(
+                                &live.task,
+                                live.checkpoint.as_ref(),
+                            )
+                            .is_ok()
                             || !durable_task_retains_unproved_root_reference(bytes)?)
                     {
                         removed.push(identity);

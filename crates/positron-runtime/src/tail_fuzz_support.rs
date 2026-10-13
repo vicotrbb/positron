@@ -24,6 +24,9 @@ static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 pub(super) struct FuzzRoot(PathBuf);
 
 impl FuzzRoot {
+    pub(super) fn artifact_path(&self, name: &str) -> PathBuf {
+        self.0.join(name)
+    }
     pub(super) fn new() -> Result<Self, String> {
         let root = std::env::temp_dir().join(format!(
             "positron-query-tail-fuzz-{}-{}",

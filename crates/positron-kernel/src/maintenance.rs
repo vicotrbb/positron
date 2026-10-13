@@ -23,7 +23,9 @@ pub use persistence::{EnvelopeVerificationProgress, EnvelopeVerificationPublicat
 mod fuzzing;
 mod persistence;
 mod record;
+mod root_provider_migration;
 mod root_retirement;
+pub use root_provider_migration::RootProviderMigrationBinding;
 pub use root_retirement::RootRetirementReferenceGuard;
 
 #[cfg(fuzzing)]

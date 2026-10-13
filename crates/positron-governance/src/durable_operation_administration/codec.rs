@@ -13,6 +13,7 @@ const OPERATION_MAGIC_V1: [u8; 8] = *b"POSOPR01";
 const OPERATION_MAGIC_V2: [u8; 8] = *b"POSOPR02";
 const OPERATION_MAGIC_V3: [u8; 8] = *b"POSOPR03";
 const OPERATION_MAGIC: [u8; 8] = *b"POSOPR04";
+const ROOT_PARAMETERS_MAGIC: [u8; 8] = *b"POSKPM01";
 const EXPIRED_OPERATION_BINDING_MAGIC_V1: [u8; 8] = *b"POSOPX01";
 const EXPIRED_OPERATION_BINDING_MAGIC_V2: [u8; 8] = *b"POSOPX02";
 const EXPIRED_OPERATION_BINDING_MAGIC: [u8; 8] = *b"POSOPX03";
@@ -69,6 +70,10 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
             encoded.push(0);
             encoded.extend_from_slice(&[0; 16]);
         },
+    }
+    if let Some(parameters) = operation.key_provider_migration_parameters {
+        encoded.extend_from_slice(&ROOT_PARAMETERS_MAGIC);
+        parameters.encode(&mut encoded);
     }
     encoded
 }
@@ -166,21 +171,26 @@ pub(super) fn decode_operation(
     encoded: &[u8],
 ) -> Result<Option<DurableOperation>, DurableOperationFailure> {
     let v4 = encoded.starts_with(&OPERATION_MAGIC);
+    // Keeping the recognized outer magic makes old readers reject the newer
+    // root-kind layout by their exact-length check, rather than ignore it.
+    let root_parameters = v4 && encoded.get(56) == Some(&4);
     let v3 = encoded.starts_with(&OPERATION_MAGIC_V3);
     let v2 = encoded.starts_with(&OPERATION_MAGIC_V2);
     if !v4 && !v3 && !v2 && !encoded.starts_with(&OPERATION_MAGIC_V1) {
         return Ok(None);
     }
-    if encoded.len()
-        != if v4 {
-            218
-        } else if v3 {
-            217
-        } else if v2 {
-            201
-        } else {
-            169
-        }
+    if (root_parameters && !(261..=2309).contains(&encoded.len()))
+        || (!root_parameters
+            && encoded.len()
+                != if v4 {
+                    218
+                } else if v3 {
+                    217
+                } else if v2 {
+                    201
+                } else {
+                    169
+                })
     {
         return Err(DurableOperationFailure::PersistenceUnavailable);
     }
@@ -269,6 +279,20 @@ pub(super) fn decode_operation(
         ),
         _ => return Err(DurableOperationFailure::PersistenceUnavailable),
     };
+    let key_provider_migration_parameters = if root_parameters {
+        if take_array::<8>(encoded, &mut offset)? != ROOT_PARAMETERS_MAGIC {
+            return Err(DurableOperationFailure::PersistenceUnavailable);
+        }
+        let parameters = super::KeyProviderMigrationParameters::decode(
+            encoded
+                .get(offset..)
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
+        )?;
+        offset = encoded.len();
+        Some(parameters)
+    } else {
+        None
+    };
     if offset != encoded.len() {
         return Err(DurableOperationFailure::PersistenceUnavailable);
     }
@@ -279,6 +303,7 @@ pub(super) fn decode_operation(
     };
     let operation = DurableOperation {
         request,
+        key_provider_migration_parameters,
         status,
         phase,
         progress_percent,
@@ -414,6 +439,48 @@ mod tests {
             )
             .expect("migration request"),
         )
+    }
+
+    #[test]
+    fn root_migration_records_preserve_legacy_v4_bytes_and_fail_closed_in_old_reader() {
+        let legacy = include_bytes!("../../tests/fixtures/durable-operation-v4-pending.bin");
+        let decoded = decode_operation(legacy)
+            .expect("baseline v4 decode")
+            .expect("operation");
+        assert_eq!(encode_operation(decoded), legacy);
+        assert_eq!(decoded.status(), DurableOperationStatus::Pending);
+        let parameters = crate::KeyProviderMigrationParameters::new(
+            crate::KeyProviderMigrationAction::Prepare,
+            Some("/protected/target.toml"),
+            Some([0x44; 32]),
+        )
+        .expect("parameters");
+        let request = DurableOperationRequest::key_provider_migration(
+            PrincipalId::from_bytes([0x11; 16]).expect("principal"),
+            AdministrativeIdempotencyKey::new([0x22; 16]).expect("key"),
+            [0x33; 16],
+            1,
+            17,
+            parameters.intent_digest(),
+        )
+        .expect("request");
+        let mut operation = DurableOperation::accepted(request);
+        operation.key_provider_migration_parameters = Some(parameters);
+        let encoded = encode_operation(operation);
+        assert_eq!(
+            decode_operation(&encoded).expect("new record"),
+            Some(operation)
+        );
+        // Independent first admission gate from b53689a5's v4 reader:
+        // recognized POSOPR04 records must have exactly 218 bytes. An unknown
+        // outer magic would instead be omitted, which is forbidden here.
+        fn baseline_v4_admission(bytes: &[u8]) -> Option<Result<(), ()>> {
+            bytes
+                .starts_with(b"POSOPR04")
+                .then_some(if bytes.len() == 218 { Ok(()) } else { Err(()) })
+        }
+        assert_eq!(baseline_v4_admission(legacy), Some(Ok(())));
+        assert_eq!(baseline_v4_admission(&encoded), Some(Err(())));
     }
 
     #[test]

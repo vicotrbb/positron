@@ -668,3 +668,163 @@ fn digest(
     hasher.update(key.to_bytes());
     hasher.finalize().into()
 }
+
+#[test]
+fn provider_migration_acceptance_replays_and_rejects_conflicting_or_stale_intent()
+-> Result<(), Box<dyn Error>> {
+    let root = PagedCatalogRoot::new()?;
+    let instance = positron_kernel::InstanceId::new([0xe1; 16])?;
+    let default_tenant = tenant(1)?;
+    let authority = fixture_authority(
+        PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+        default_tenant,
+    )?;
+    let keys = BootstrapKeyCustody::initialize(&root.secrets())?;
+    let catalog = Catalog::open(&authority, instance, keys.catalog_secret(instance)?)?;
+    let administrator = PrincipalId::from_bytes([0xe2; 16])?;
+    let secret = [0xe3; 32];
+    let salt = [0xe4; 32];
+    let hash = keys.salted_secret_hash(&salt, &secret)?;
+    let initial = crate::InitialGovernanceIntent::create_tenant(crate::InitialTenantIntent::new(
+        instance.to_bytes(),
+        default_tenant,
+        TenantSlug::parse_canonical("default")?,
+        "Default tenant",
+        administrator,
+        salt,
+        hash,
+        PrincipalId::from_bytes([0xe5; 16])?,
+        [0xe6; 32],
+        [0xe7; 32],
+        PrincipalId::from_bytes([0xe8; 16])?,
+        [0xe9; 32],
+        [0xea; 32],
+        [0xeb; 32],
+        [0xec; 32],
+        vec![0xed; 48],
+        keys.tenant_key_envelope(instance, default_tenant)?,
+        2_592_000,
+        1,
+        1,
+        [16; 11],
+        crate::InitialAuditContext::new(17, [0xee; 16], true)?,
+    )?)?;
+    let (governance, audit) = initial.into_parts();
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new([0xef; 16])?,
+            positron_kernel::FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(governance)?],
+        )?,
+        Some(AuditIntent::new(audit)?),
+    )?;
+    let actor = crate::Identity::open(&catalog.pin()?)?.attribute(
+        &keys,
+        crate::PresentedCredential::parse(&format!("pos_{}", "e3".repeat(32)))?,
+        crate::RequestedIntent::SystemAdministration,
+        crate::CompatibilityHints::none(),
+    )?;
+    let parameters = crate::KeyProviderMigrationParameters::new(
+        crate::KeyProviderMigrationAction::Prepare,
+        Some("/protected/target.toml"),
+        Some([0xf2; 32]),
+    )?;
+    let changed_parameters = crate::KeyProviderMigrationParameters::new(
+        crate::KeyProviderMigrationAction::Prepare,
+        Some("/protected/target.toml"),
+        Some([0xf3; 32]),
+    )?;
+    let generation = catalog.pin()?.number();
+    let key = AdministrativeIdempotencyKey::new([0xf1; 16])?;
+    let request = DurableOperationRequest::key_provider_migration(
+        actor.principal_id(),
+        key,
+        instance.to_bytes(),
+        generation,
+        18,
+        parameters.intent_digest(),
+    )?;
+    let accepted = DurableOperationAdministration::accept_key_provider_migration(
+        &catalog, actor, request, parameters,
+    )?;
+    assert_eq!(accepted.status(), DurableOperationStatus::Pending);
+    assert_eq!(
+        DurableOperationAdministration::inspect_authorized(
+            &catalog,
+            actor,
+            accepted.operation_id()
+        )?
+        .expect("persisted operation")
+        .key_provider_migration_parameters(),
+        Some(parameters)
+    );
+    assert_eq!(
+        DurableOperationAdministration::accept_key_provider_migration(
+            &catalog, actor, request, parameters
+        )?,
+        accepted
+    );
+    assert_eq!(
+        DurableOperationAdministration::accept_key_provider_migration(
+            &catalog,
+            actor,
+            DurableOperationRequest::key_provider_migration(
+                actor.principal_id(),
+                key,
+                instance.to_bytes(),
+                generation,
+                18,
+                changed_parameters.intent_digest()
+            )?,
+            changed_parameters
+        )
+        .expect_err("changed phase intent"),
+        DurableOperationFailure::IdempotencyConflict
+    );
+    assert_eq!(
+        DurableOperationAdministration::accept_key_provider_migration(
+            &catalog,
+            actor,
+            DurableOperationRequest::key_provider_migration(
+                actor.principal_id(),
+                AdministrativeIdempotencyKey::new([0xf4; 16])?,
+                instance.to_bytes(),
+                generation,
+                18,
+                parameters.intent_digest()
+            )?,
+            parameters
+        )
+        .expect_err("stale system resource"),
+        DurableOperationFailure::StaleGeneration
+    );
+    let running =
+        DurableOperationAdministration::begin(&catalog, actor, accepted.operation_id(), 19)?;
+    assert_eq!(running.status(), DurableOperationStatus::Running);
+    assert_eq!(
+        DurableOperationAdministration::resume_key_provider_migration_actor(
+            &catalog,
+            accepted.operation_id(),
+            19,
+        )?
+        .principal_id(),
+        actor.principal_id()
+    );
+    let completed = DurableOperationAdministration::succeed_key_provider_migration(
+        &catalog,
+        actor,
+        accepted.operation_id(),
+        20,
+    )?;
+    assert_eq!(completed.status(), DurableOperationStatus::Succeeded);
+    assert_eq!(
+        DurableOperationAdministration::inspect_authorized(
+            &catalog,
+            actor,
+            accepted.operation_id()
+        )?,
+        Some(completed)
+    );
+    Ok(())
+}

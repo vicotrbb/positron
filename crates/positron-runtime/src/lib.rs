@@ -137,4 +137,8 @@ pub fn fuzz_recovery_catalog_state(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_key_provider_migration_stateful(data: &[u8]) {
     instance_bootstrap::fuzz_key_provider_migration_stateful(data);
+    key_provider_migration_fuzz::run(data);
 }
+
+#[cfg(fuzzing)]
+mod key_provider_migration_fuzz;

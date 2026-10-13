@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "f51bd93ab150a68e061355ac98b90204ccfecd7e343e1d92e662694b5be63624"
+    "x-positron-schema-digest": "15e5ef7a6d695e9d29e996ed64283a5ed6bbed9bcbe1b963c4ee27b34301c6af"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -635,7 +635,39 @@
           }
         }
       }
-    }
+    },
+      "/v1/key-provider-migrations:manage": {
+        "post": {
+          "operationId": "ManageProviderMigration",
+          "security": [
+            {
+              "apiKeyBearer": []
+            }
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderMigrationRequest"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Authenticated root status or durable phase receipt",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ProviderMigrationResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
   },
   "components": {
     "schemas": {
@@ -1854,7 +1886,143 @@
           "$ref": "#/components/schemas/IntegrityQuarantineFinding"
         }
       }
-    }
+    },
+      "ProviderMigrationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "expected_catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "configuration_reference": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ProviderMigrationOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "phase",
+          "progress_percent",
+          "retry",
+          "cancellation",
+          "irreversible_boundary"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "progress_percent": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retry": {
+            "type": "string"
+          },
+          "cancellation": {
+            "type": "string"
+          },
+          "irreversible_boundary": {
+            "type": "string"
+          },
+          "lookup_expires_at_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ProviderMigrationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+            "catalog_generation",
+            "root_phase",
+            "active_epoch",
+            "active_provider",
+            "source_provider"
+      ],
+      "properties": {
+            "catalog_generation": {
+                  "type": "integer",
+                  "minimum": 0
+            },
+            "root_phase": {
+                  "type": "string"
+            },
+            "active_epoch": {
+                  "type": "integer",
+                  "minimum": 0
+            },
+            "successor_epoch": {
+                  "type": "integer",
+                  "minimum": 0
+            },
+            "predecessor_epoch": {
+                  "type": "integer",
+                  "minimum": 0
+            },
+            "operation": {
+                  "$ref": "#/components/schemas/ProviderMigrationOperation"
+            },
+            "active_provider": {
+                  "$ref": "#/components/schemas/ProviderMigrationIdentity"
+            },
+            "source_provider": {
+                  "$ref": "#/components/schemas/ProviderMigrationIdentity"
+            },
+            "target_provider": {
+                  "$ref": "#/components/schemas/ProviderMigrationIdentity"
+            }
+      }
+},
+      "ProviderMigrationIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+            "family",
+            "locator",
+            "version"
+      ],
+      "properties": {
+            "family": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8
+            },
+            "locator": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+            },
+            "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+            }
+      }
+}
   },
     "securitySchemes": {
       "apiKeyBearer": {

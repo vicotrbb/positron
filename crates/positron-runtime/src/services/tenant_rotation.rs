@@ -117,7 +117,9 @@ pub(super) fn rotation_failure(failure: LocalKeyRotationFailure) -> ServiceFailu
         LocalKeyRotationFailure::Authentication => ServiceFailure::KeyEnvelopeMismatch,
         LocalKeyRotationFailure::LimitExceeded => ServiceFailure::CapacityUnavailable,
         LocalKeyRotationFailure::Storage => ServiceFailure::CatalogUnavailable,
-        LocalKeyRotationFailure::Busy => ServiceFailure::CatalogBusy,
+        LocalKeyRotationFailure::Busy | LocalKeyRotationFailure::RetirementRefused => {
+            ServiceFailure::CatalogBusy
+        },
         LocalKeyRotationFailure::InvalidInput => ServiceFailure::InvalidRequest,
     }
 }

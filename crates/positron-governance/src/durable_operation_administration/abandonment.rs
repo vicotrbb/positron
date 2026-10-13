@@ -20,7 +20,7 @@ impl DurableOperationAdministration {
         let snapshot = catalog.pin().map_err(map_catalog)?;
         if let Some(existing) = find_by_key(&snapshot, request.idempotency)? {
             return match existing {
-                OperationKeyLookup::Operation(operation) => exact_replay(operation, request),
+                OperationKeyLookup::Operation(operation) => exact_replay(*operation, request),
                 OperationKeyLookup::Expired(binding) => {
                     binding.exact_replay(request)?;
                     Err(DurableOperationFailure::CompletedLookupExpired)

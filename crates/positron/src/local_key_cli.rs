@@ -80,7 +80,7 @@ fn failure(value: LocalKeyRotationFailure) -> &'static str {
         LocalKeyRotationFailure::Storage => {
             "local-key publication unavailable; inspect durable state before retrying"
         },
-        LocalKeyRotationFailure::Busy => {
+        LocalKeyRotationFailure::Busy | LocalKeyRotationFailure::RetirementRefused => {
             "managed references or an active rotation prevent this transition"
         },
         LocalKeyRotationFailure::InvalidInput => "invalid local-key transition",

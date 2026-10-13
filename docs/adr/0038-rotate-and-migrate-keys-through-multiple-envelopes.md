@@ -57,3 +57,25 @@ other removed input metadata bindings. The continuity marker remains intact.
 Digest-only descriptor expiration does not prove historical scrub success.
 Generic success, cancellation, or failure cannot establish that opaque inputs,
 outputs, or checkpoints are safe to retire. Unavailable storage fails closed.
+
+The authenticated administrative HTTP projection owns online phase admission;
+the CLI uses its canonical descriptor-derived client rather than acquiring an
+exclusive stopped-instance lease. Each phase is a principal-bound Durable
+Operation under ADR 0063 with an expected Catalog generation, stable Operation
+ID, and exact request-conflict semantics. Its existing operation record stores
+bounded protected server-local configuration provenance and a semantic digest,
+never plaintext credentials. The root Catalog journal remains the sole phase
+authority. Restart attaches the same persisted Migration maintenance task,
+including reconciliation of the operation-acceptance/task-publication gap.
+Current authorization is rechecked for these root operations before provider
+access, without changing other Durable Operation authorization policies.
+Migration audit records bind the actual requesting Principal and Operation ID;
+legacy local rotation audit records keep their existing decoding.
+
+A typed reference-free root-migration association may be excluded from the
+maintenance checkpoint fence only by the exact running coordinator dispatch.
+Its opaque proof binds the Task ID, resource authority, and authenticated Catalog
+basis, and the ledger independently checks that proof before inspecting managed
+references. Other Migration tasks and stale dispatches remain fences. Terminal
+association reclamation removes only the maintenance descriptor, preserving
+Durable Operation outcomes and governance audit history.

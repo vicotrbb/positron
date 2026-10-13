@@ -2,7 +2,58 @@
 use super::InitializedInstance;
 use positron_governance::{CatalogRootRotationStage, catalog_root_rotation_audit_intent};
 use positron_kernel::{Catalog, CatalogObject, CatalogProposal, RootRewrapSession, TransactionId};
+use sha2::{Digest, Sha256};
 use std::fmt::{Display, Formatter};
+
+#[derive(Clone, Copy)]
+pub(crate) struct RootMigrationContext<'runtime> {
+    pub(crate) principal: positron_domain::identity::PrincipalId,
+    pub(crate) operation: positron_governance::OperationId,
+    pub(crate) catalog_gate: &'runtime std::sync::Mutex<()>,
+}
+impl RootMigrationContext<'_> {
+    fn transaction(
+        self,
+        stage: CatalogRootRotationStage,
+    ) -> Result<TransactionId, LocalKeyRotationFailure> {
+        let mut hash = Sha256::new();
+        hash.update(b"positron.root-provider-migration.publication.v1\0");
+        hash.update(self.operation.to_bytes());
+        hash.update([match stage {
+            CatalogRootRotationStage::Started => 1,
+            CatalogRootRotationStage::Cutover => 2,
+            CatalogRootRotationStage::Verified => 3,
+            CatalogRootRotationStage::RetirementPrepared => 4,
+            CatalogRootRotationStage::RetirementRefused => 5,
+            CatalogRootRotationStage::Completed => 6,
+            CatalogRootRotationStage::Cancelled => 7,
+            CatalogRootRotationStage::Resumed => 8,
+        }]);
+        let digest = hash.finalize();
+        let bytes = digest
+            .get(..16)
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(LocalKeyRotationFailure::Storage)?;
+        TransactionId::new(bytes).map_err(|_| LocalKeyRotationFailure::Storage)
+    }
+}
+/// The serving gate and Kernel writer lease have the same lifetime. Dropping
+/// this Catalog before native I/O releases both, allowing ingestion to proceed.
+struct RootRotationCatalog<'owner> {
+    catalog: Catalog<'owner>,
+    _gate: Option<std::sync::MutexGuard<'owner, ()>>,
+}
+impl<'owner> std::ops::Deref for RootRotationCatalog<'owner> {
+    type Target = Catalog<'owner>;
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
+    }
+}
+impl std::ops::DerefMut for RootRotationCatalog<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.catalog
+    }
+}
 mod cutover;
 mod provider_migration;
 pub use provider_migration::KeyProviderMigrationStatus;
@@ -27,6 +78,8 @@ pub enum LocalKeyRotationFailure {
     LimitExceeded,
     Storage,
     Busy,
+    /// This attempt durably audited refusal of an owned migration phase.
+    RetirementRefused,
     InvalidInput,
 }
 impl Display for LocalKeyRotationFailure {
@@ -69,6 +122,25 @@ impl LocalKeyRotationStatus {
     }
 }
 impl InitializedInstance {
+    fn rotation_catalog_for_operation<'owner>(
+        &'owner self,
+        session: &RootRewrapSession<'_>,
+        context: Option<RootMigrationContext<'owner>>,
+    ) -> Result<RootRotationCatalog<'owner>, LocalKeyRotationFailure> {
+        let gate = context
+            .map(|context| {
+                context
+                    .catalog_gate
+                    .lock()
+                    .map_err(|_| LocalKeyRotationFailure::Storage)
+            })
+            .transpose()?;
+        let catalog = self.rotation_catalog(session)?;
+        Ok(RootRotationCatalog {
+            catalog,
+            _gate: gate,
+        })
+    }
     fn rotation_catalog(
         &self,
         session: &RootRewrapSession<'_>,
@@ -118,9 +190,15 @@ impl InitializedInstance {
     pub fn begin_local_key_rotation(
         &self,
     ) -> Result<LocalKeyRotationStatus, LocalKeyRotationFailure> {
+        self.begin_local_key_rotation_for_operation(None)
+    }
+    pub(crate) fn begin_local_key_rotation_for_operation(
+        &self,
+        context: Option<RootMigrationContext<'_>>,
+    ) -> Result<LocalKeyRotationStatus, LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let catalog = self.rotation_catalog(&session)?;
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
         let snapshot = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -172,7 +250,10 @@ impl InitializedInstance {
             .map_err(|_| LocalKeyRotationFailure::Custody)?;
         let state = State {
             instance: self.instance,
-            transaction: self.rotation_transaction()?,
+            transaction: match context {
+                Some(context) => context.transaction(CatalogRootRotationStage::Started)?,
+                None => self.rotation_transaction()?,
+            },
             anchor: self.key.bootstrap_identity(),
             active: Route {
                 epoch: active_epoch,
@@ -203,7 +284,7 @@ impl InitializedInstance {
                 hook(self);
             }
         });
-        let catalog = self.rotation_catalog(&session)?;
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
         let current = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -216,12 +297,13 @@ impl InitializedInstance {
         {
             return Err(LocalKeyRotationFailure::Busy);
         }
-        self.publish_rotation(
+        self.publish_rotation_for_operation(
             &catalog,
             &snapshot,
             &state,
             CatalogRootRotationStage::Started,
             state.transaction,
+            context,
         )?;
         Ok(state.status())
     }
@@ -233,13 +315,24 @@ impl InitializedInstance {
         )
         .map_err(|_| LocalKeyRotationFailure::Storage)
     }
-    fn publish_rotation(
+    fn operation_rotation_transaction(
+        &self,
+        context: Option<RootMigrationContext<'_>>,
+        stage: CatalogRootRotationStage,
+    ) -> Result<TransactionId, LocalKeyRotationFailure> {
+        match context {
+            Some(context) => context.transaction(stage),
+            None => self.rotation_transaction(),
+        }
+    }
+    fn publish_rotation_for_operation(
         &self,
         catalog: &Catalog<'_>,
         snapshot: &positron_kernel::CatalogSnapshot,
         state: &State,
         stage: CatalogRootRotationStage,
         transaction: TransactionId,
+        context: Option<RootMigrationContext<'_>>,
     ) -> Result<positron_kernel::CatalogSnapshot, LocalKeyRotationFailure> {
         let _copy = catalog
             .reserve_catalog_proposal_copy(snapshot)
@@ -264,12 +357,22 @@ impl InitializedInstance {
         }
         objects.push(object);
         let route = state.successor.as_ref().unwrap_or(&state.active);
-        let intent = catalog_root_rotation_audit_intent(
-            stage,
-            route.identity.key_id(),
-            route.epoch,
-            self.administrator,
-        )
+        let intent = if let Some(context) = context {
+            positron_governance::catalog_root_migration_audit_intent(
+                stage,
+                route.identity.key_id(),
+                route.epoch,
+                context.principal,
+                context.operation,
+            )
+        } else {
+            catalog_root_rotation_audit_intent(
+                stage,
+                route.identity.key_id(),
+                route.epoch,
+                self.administrator,
+            )
+        }
         .map_err(|_| LocalKeyRotationFailure::Storage)?;
         let proposal = CatalogProposal::new(
             transaction,

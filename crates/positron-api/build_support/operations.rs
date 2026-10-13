@@ -135,6 +135,14 @@ const POLICY_METHODS: &[MethodSpec] = &[
 
 pub(crate) const SERVICES: &[ServiceSpec] = &[
     ServiceSpec {
+        name: "ProviderMigrationService",
+        methods: &[MethodSpec {
+            name: "Manage",
+            input: ".positron.v1.ProviderMigrationRequest",
+            output: ".positron.v1.ProviderMigrationResponse",
+        }],
+    },
+    ServiceSpec {
         name: "ApiKeyService",
         methods: API_KEY_METHODS,
     },

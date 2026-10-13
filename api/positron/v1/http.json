@@ -1,5 +1,5 @@
 {
-  "schema_digest": "f51bd93ab150a68e061355ac98b90204ccfecd7e343e1d92e662694b5be63624",
+  "schema_digest": "15e5ef7a6d695e9d29e996ed64283a5ed6bbed9bcbe1b963c4ee27b34301c6af",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -1056,7 +1056,135 @@
             "409": "precondition_failed or idempotency_conflict",
             "503": "administration_unavailable"
       }
+},
+    {
+      "rpc": "positron.v1.ProviderMigrationService/Manage",
+      "method": "POST",
+      "path": "/v1/key-provider-migrations:manage",
+      "request": "ProviderMigrationRequest",
+      "response": "ProviderMigrationResponse",
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "unknown_fields": "reject",
+      "request_fields": [
+            {
+                  "proto": "action",
+                  "json": "action",
+                  "type": "string",
+                  "number": 1,
+                  "deprecated": false
+            },
+            {
+                  "proto": "expected_catalog_generation",
+                  "json": "expected_catalog_generation",
+                  "type": "uint64",
+                  "number": 2,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "idempotency_key",
+                  "json": "idempotency_key",
+                  "type": "string",
+                  "number": 3,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "configuration_reference",
+                  "json": "configuration_reference",
+                  "type": "string",
+                  "number": 4,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "operation_id",
+                  "json": "operation_id",
+                  "type": "string",
+                  "number": 5,
+                  "deprecated": false,
+                  "optional": true
+            }
+      ],
+      "response_fields": [
+            {
+                  "proto": "catalog_generation",
+                  "json": "catalog_generation",
+                  "type": "uint64",
+                  "number": 1,
+                  "deprecated": false
+            },
+            {
+                  "proto": "root_phase",
+                  "json": "root_phase",
+                  "type": "string",
+                  "number": 2,
+                  "deprecated": false
+            },
+            {
+                  "proto": "active_epoch",
+                  "json": "active_epoch",
+                  "type": "uint64",
+                  "number": 3,
+                  "deprecated": false
+            },
+            {
+                  "proto": "successor_epoch",
+                  "json": "successor_epoch",
+                  "type": "uint64",
+                  "number": 4,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "predecessor_epoch",
+                  "json": "predecessor_epoch",
+                  "type": "uint64",
+                  "number": 5,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "operation",
+                  "json": "operation",
+                  "type": "ProviderMigrationOperation",
+                  "number": 6,
+                  "deprecated": false,
+                  "optional": true
+            },
+            {
+                  "proto": "active_provider",
+                  "json": "active_provider",
+                  "type": "ProviderMigrationIdentity",
+                  "number": 7,
+                  "deprecated": false
+            },
+            {
+                  "proto": "source_provider",
+                  "json": "source_provider",
+                  "type": "ProviderMigrationIdentity",
+                  "number": 8,
+                  "deprecated": false
+            },
+            {
+                  "proto": "target_provider",
+                  "json": "target_provider",
+                  "type": "ProviderMigrationIdentity",
+                  "number": 9,
+                  "deprecated": false,
+                  "optional": true
+            }
+      ],
+      "responses": {
+            "200": "ProviderMigrationResponse",
+            "400": "invalid_request",
+            "401": "authentication_rejected",
+            "404": "source_unavailable",
+            "409": "precondition_failed or idempotency_conflict",
+            "503": "administration_unavailable"
+      }
 }
-
   ]
 }

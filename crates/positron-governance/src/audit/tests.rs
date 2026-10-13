@@ -9,6 +9,30 @@ use super::{
 };
 
 #[test]
+fn root_migration_audit_preserves_the_requesting_principal_and_operation() {
+    let mut intent = b"catalog-root-migration-v1\0cutover\0".to_vec();
+    intent.extend_from_slice(&[1; 16]);
+    intent.extend_from_slice(&2_u64.to_be_bytes());
+    intent.extend_from_slice(&[3; 16]);
+    intent.extend_from_slice(&[4; 16]);
+    let entry = GovernanceAuditEntry::decode_fields(5, [6; 16], &intent).expect("migration audit");
+    let migration = entry
+        .as_catalog_root_rotation()
+        .expect("root lifecycle audit");
+    assert_eq!(
+        migration.requesting_principal().map(PrincipalId::to_bytes),
+        Some([3; 16])
+    );
+    assert_eq!(
+        migration.operation_id().map(crate::OperationId::to_bytes),
+        Some([4; 16])
+    );
+    assert_eq!(migration.stage(), CatalogRootRotationStage::Cutover);
+    intent.push(0);
+    assert!(GovernanceAuditEntry::decode_fields(5, [6; 16], &intent).is_err());
+}
+
+#[test]
 fn maintenance_control_audit_is_closed_bounded_and_backward_safe() {
     let mut intent = Vec::with_capacity(81);
     intent.extend_from_slice(&MAINTENANCE_CONTROL_AUDIT_MAGIC);

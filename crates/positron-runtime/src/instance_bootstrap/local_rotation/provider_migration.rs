@@ -53,6 +53,12 @@ impl InitializedInstance {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
         let catalog = self.rotation_catalog(&session)?;
+        self.key_provider_migration_status_from_catalog(&catalog)
+    }
+    pub(crate) fn key_provider_migration_status_from_catalog(
+        &self,
+        catalog: &Catalog<'_>,
+    ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
         let snapshot = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -88,9 +94,16 @@ impl InitializedInstance {
         &self,
         configuration: NativeRootConfiguration,
     ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
+        self.begin_key_provider_migration_for_operation(configuration, None)
+    }
+    pub(crate) fn begin_key_provider_migration_for_operation(
+        &self,
+        configuration: NativeRootConfiguration,
+        context: Option<RootMigrationContext<'_>>,
+    ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let catalog = self.rotation_catalog(&session)?;
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
         let snapshot = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -136,7 +149,7 @@ impl InitializedInstance {
             })?;
         // Native I/O holds no Catalog/custody lock; the exact basis is refreshed
         // before installing the verified route.
-        let catalog = self.rotation_catalog(&session)?;
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
         let current = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -151,7 +164,10 @@ impl InitializedInstance {
         }
         let state = State {
             instance: self.instance,
-            transaction: self.rotation_transaction()?,
+            transaction: match context {
+                Some(context) => context.transaction(CatalogRootRotationStage::Started)?,
+                None => self.rotation_transaction()?,
+            },
             anchor: self.key.bootstrap_identity(),
             active: Route {
                 epoch: active_epoch,
@@ -175,12 +191,13 @@ impl InitializedInstance {
                     .map_err(|_| LocalKeyRotationFailure::Custody)?,
             ),
         };
-        self.publish_rotation(
+        self.publish_rotation_for_operation(
             &catalog,
             &snapshot,
             &state,
             CatalogRootRotationStage::Started,
             state.transaction,
+            context,
         )?;
         status(&state)
     }
@@ -204,9 +221,16 @@ impl InitializedInstance {
         &self,
         configuration: NativeRootConfiguration,
     ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
+        self.activate_key_provider_migration_for_operation(configuration, None)
+    }
+    pub(crate) fn activate_key_provider_migration_for_operation(
+        &self,
+        configuration: NativeRootConfiguration,
+        context: Option<RootMigrationContext<'_>>,
+    ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let catalog = self.rotation_catalog(&session)?;
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
         let snapshot = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -249,7 +273,7 @@ impl InitializedInstance {
                 .map_err(|failure| {
                     provider_failure(failure, LocalKeyRotationFailure::Authentication)
                 })?;
-            let catalog = self.rotation_catalog(&session)?;
+            let catalog = self.rotation_catalog_for_operation(&session, context)?;
             let current = catalog
                 .pin()
                 .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -286,7 +310,7 @@ impl InitializedInstance {
             .map_err(|failure| {
                 provider_failure(failure, LocalKeyRotationFailure::Authentication)
             })?;
-        let catalog = self.rotation_catalog(&session)?;
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
         let current = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -315,13 +339,17 @@ impl InitializedInstance {
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
         state.successor = None;
         state.predecessor = Some(std::mem::replace(&mut state.active, target));
-        state.transaction = self.rotation_transaction()?;
-        if let Err(failure) = self.publish_rotation(
+        state.transaction = match context {
+            Some(context) => context.transaction(CatalogRootRotationStage::Cutover)?,
+            None => self.rotation_transaction()?,
+        };
+        if let Err(failure) = self.publish_rotation_for_operation(
             &catalog,
             &snapshot,
             &state,
             CatalogRootRotationStage::Cutover,
             state.transaction,
+            context,
         ) {
             let visible = catalog
                 .pin()
@@ -347,20 +375,21 @@ impl InitializedInstance {
     pub fn cancel_key_provider_migration(
         &self,
     ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
-        self.set_key_provider_migration_cancelled(true)
+        self.set_key_provider_migration_cancelled(true, None)
     }
     pub fn resume_key_provider_migration(
         &self,
     ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
-        self.set_key_provider_migration_cancelled(false)
+        self.set_key_provider_migration_cancelled(false, None)
     }
     fn set_key_provider_migration_cancelled(
         &self,
         cancelled: bool,
+        context: Option<RootMigrationContext<'_>>,
     ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let catalog = self.rotation_catalog(&session)?;
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
         let basis = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -394,8 +423,16 @@ impl InitializedInstance {
         }
         state.provider_format = true;
         state.cancelled = cancelled;
-        state.transaction = self.rotation_transaction()?;
-        self.publish_rotation(
+        let stage = if cancelled {
+            CatalogRootRotationStage::Cancelled
+        } else {
+            CatalogRootRotationStage::Resumed
+        };
+        state.transaction = match context {
+            Some(context) => context.transaction(stage)?,
+            None => self.rotation_transaction()?,
+        };
+        self.publish_rotation_for_operation(
             &catalog,
             &basis,
             &state,
@@ -405,8 +442,16 @@ impl InitializedInstance {
                 CatalogRootRotationStage::Resumed
             },
             state.transaction,
+            context,
         )?;
         status(&state)
+    }
+    pub(crate) fn set_key_provider_migration_cancelled_for_operation(
+        &self,
+        cancelled: bool,
+        context: RootMigrationContext<'_>,
+    ) -> Result<KeyProviderMigrationStatus, LocalKeyRotationFailure> {
+        self.set_key_provider_migration_cancelled(cancelled, Some(context))
     }
 }
 
