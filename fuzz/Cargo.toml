@@ -393,3 +393,10 @@ path = "fuzz_targets/recovery_bundle_payload.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "key_provider_migration_stateful"
+path = "fuzz_targets/key_provider_migration_stateful.rs"
+test = false
+doc = false
+bench = false

@@ -3,8 +3,9 @@ mod local_rotation;
 mod operation;
 mod recovery;
 pub use local_rotation::{
-    LocalKeyRotationFailure, LocalKeyRotationPhase, LocalKeyRotationStatus,
-    TenantKeyMigrationProgress, TenantKeyRotationStatus, TenantKeyVerificationProgress,
+    KeyProviderMigrationStatus, LocalKeyRotationFailure, LocalKeyRotationPhase,
+    LocalKeyRotationStatus, TenantKeyMigrationProgress, TenantKeyRotationStatus,
+    TenantKeyVerificationProgress,
 };
 mod resources;
 pub use recovery::RecoveryReadiness;
@@ -44,6 +45,38 @@ impl InstanceBootstrap {
         plan: InitializationPlan,
     ) -> Result<InitializedInstance, BootstrapFailure> {
         Self::initialize_with_max_registered_tenants(paths, plan, DEFAULT_MAX_REGISTERED_TENANTS)
+    }
+
+    pub fn reopen_with_provider(
+        paths: &BootstrapPaths,
+        configuration: positron_kernel::key_provider::NativeRootConfiguration,
+    ) -> Result<InitializedInstance, BootstrapFailure> {
+        operation::reopen_with_provider(paths, configuration, DEFAULT_MAX_REGISTERED_TENANTS)
+    }
+
+    /// Canonical access settings cannot replace the authenticated active route.
+    pub fn reopen_configured(
+        paths: &BootstrapPaths,
+        configuration: &positron_config::EffectiveConfiguration,
+    ) -> Result<InitializedInstance, BootstrapFailure> {
+        let lease = positron_kernel::key_provider::KeyCacheLease::new(
+            std::time::Duration::from_secs(u64::from(configuration.key_cache_lease_seconds())),
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::InvalidRoots))?;
+        let paths = paths.clone().with_key_cache_lease(lease);
+        match configuration.provider_access() {
+            Some(access) => {
+                let provider = crate::native_root_configuration(access).map_err(|_| {
+                    BootstrapFailure::new(BootstrapFailureCode::KeyEnvelopeMismatch)
+                })?;
+                operation::reopen_with_provider(
+                    &paths,
+                    provider,
+                    configuration.max_registered_tenants(),
+                )
+            },
+            None => operation::reopen(&paths, configuration.max_registered_tenants()),
+        }
     }
 
     pub fn reopen(paths: &BootstrapPaths) -> Result<InitializedInstance, BootstrapFailure> {
@@ -158,3 +191,6 @@ impl InstanceBootstrap {
 
 #[cfg(fuzzing)]
 pub(crate) use recovery::fuzz_recovery_catalog_state;
+
+#[cfg(fuzzing)]
+pub(crate) use local_rotation::fuzz_key_provider_migration_stateful;

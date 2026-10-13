@@ -360,9 +360,10 @@ pub struct EffectiveConfiguration {
     pub(crate) data_directory: String,
     pub(crate) secrets_directory: String,
     pub(crate) local_key_file: ProtectedFileReference,
+    pub(crate) provider_access: Option<super::ProviderAccess>,
     pub(crate) key_cache_lease_seconds: u16,
     pub(crate) export_destinations: Vec<ExportDestinationDefinition>,
-    pub(crate) sources: [SettingSource; 102],
+    pub(crate) sources: [SettingSource; 103],
 }
 
 impl EffectiveConfiguration {
@@ -609,6 +610,10 @@ impl EffectiveConfiguration {
     }
 
     #[must_use]
+    pub fn provider_access(&self) -> Option<&super::ProviderAccess> {
+        self.provider_access.as_ref()
+    }
+
     pub fn local_key_file(&self) -> &ProtectedFileReference {
         &self.local_key_file
     }
@@ -1011,7 +1016,7 @@ impl EffectiveConfiguration {
         rendered.push_str(&super::render_toml_basic_string(&self.secrets_directory));
         rendered.push_str("\n\n[security]\nkey_cache_lease_seconds = ");
         rendered.push_str(&self.key_cache_lease_seconds.to_string());
-        rendered.push_str("\nlocal_key_file = \"<redacted>\"\n");
+        rendered.push_str("\nlocal_key_file = \"<redacted>\"\nprovider_access = \"<redacted>\"\n");
         rendered
     }
 
@@ -1150,6 +1155,7 @@ impl EffectiveConfiguration {
                 | Setting::StorageSecretsDirectory
                 | Setting::SecurityKeyCacheLeaseSeconds
                 | Setting::SecurityLocalKeyFile
+                | Setting::SecurityProviderAccess
                 | Setting::ExportDestinations => {},
             }
         }
@@ -1531,6 +1537,7 @@ impl EffectiveConfiguration {
                 self.key_cache_lease_seconds != other.key_cache_lease_seconds
             },
             Setting::SecurityLocalKeyFile => self.local_key_file != other.local_key_file,
+            Setting::SecurityProviderAccess => self.provider_access != other.provider_access,
             Setting::ExportDestinations => self.export_destinations != other.export_destinations,
         }
     }
@@ -1883,6 +1890,10 @@ impl EffectiveConfiguration {
             Setting::StorageDataDirectory => self.data_directory.clone(),
             Setting::StorageSecretsDirectory => self.secrets_directory.clone(),
             Setting::SecurityLocalKeyFile => self.local_key_file.path.clone(),
+            Setting::SecurityProviderAccess => self.provider_access.as_ref().map_or_else(
+                || "disabled".to_owned(),
+                super::ProviderAccess::identity_value,
+            ),
             Setting::ExportDestinations => self.redacted_export_destinations(),
         }
     }
@@ -1952,7 +1963,8 @@ impl EffectiveConfiguration {
             | Setting::ListenerLokiPushTlsCertificateFile
             | Setting::ListenerLokiPushTlsPrivateKeyFile
             | Setting::ListenerLokiPushTlsClientCaFile
-            | Setting::SecurityLocalKeyFile => "<redacted>".to_owned(),
+            | Setting::SecurityLocalKeyFile
+            | Setting::SecurityProviderAccess => "<redacted>".to_owned(),
             Setting::ListenerOtlpGrpcBindAddress => self.otlp_grpc_bind_address.to_string(),
             Setting::ListenerOtlpGrpcTransport => self.otlp_grpc_transport.as_str().to_owned(),
             Setting::ListenerOtlpGrpcAcceptedSocketLimit => {
@@ -2362,6 +2374,7 @@ impl Debug for EffectiveConfiguration {
             .field("secrets_directory", &self.secrets_directory)
             .field("key_cache_lease_seconds", &self.key_cache_lease_seconds)
             .field("local_key_file", &"<redacted>")
+            .field("provider_access", &"<redacted>")
             .field("export_destination_count", &self.export_destinations.len())
             .field("sources", &self.sources)
             .finish()

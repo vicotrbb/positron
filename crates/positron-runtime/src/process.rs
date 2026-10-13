@@ -9,6 +9,8 @@ use positron_kernel::OwnedPrimaryDataVolume;
 use sha2::{Digest, Sha256};
 
 use crate::health::ProcessState;
+mod provider_configuration;
+pub use provider_configuration::native_root_configuration;
 #[cfg(test)]
 #[path = "process/candidate_cleanup_tests.rs"]
 mod candidate_cleanup_tests;

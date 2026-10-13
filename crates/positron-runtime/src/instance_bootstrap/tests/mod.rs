@@ -21,3 +21,5 @@ mod local_rotation_security;
 mod recovery;
 mod root_recovery;
 mod root_retirement;
+
+mod provider_migration;

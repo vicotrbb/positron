@@ -116,3 +116,33 @@ impl<'a> Input<'a> {
             .map_err(|_| KeyProviderFailure::InvalidConfiguration)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn maximum_valid_envelope_round_trips_and_rejects_one_extra_byte()
+    -> Result<(), KeyProviderFailure> {
+        let provider = ProviderKeyUri::new(
+            ProviderFamily::LocalFile,
+            &"a".repeat(512),
+            &"b".repeat(128),
+        )?;
+        let context = EnvelopeContext::new([1; 16], KeyScope::System, [2; 32], 1, 1)?;
+        let envelope = KeyEnvelope::from_provider_response(
+            provider,
+            context,
+            WrappingAlgorithm::Aes256Kwp,
+            vec![3; 8192],
+        )?;
+        let mut encoded = envelope.encode();
+        assert_eq!(encoded.len(), 8956);
+        assert_eq!(KeyEnvelope::decode(&encoded)?, envelope);
+        encoded.push(0);
+        assert_eq!(
+            KeyEnvelope::decode(&encoded),
+            Err(KeyProviderFailure::ContextMismatch)
+        );
+        Ok(())
+    }
+}

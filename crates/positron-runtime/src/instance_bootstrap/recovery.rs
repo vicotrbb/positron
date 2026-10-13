@@ -30,6 +30,53 @@ impl InitializedInstance {
         Ok(VerifiedBundle::find(snapshot)?
             .is_some_and(|bundle| bundle.predecessor.is_none() && !bundle.retiring))
     }
+    /// Current canonical recovery owners prove absence only when neither a
+    /// verified path nor an unretired immutable creation/import receipt exists.
+    /// An unverified receipt has no authenticated path to inspect and therefore
+    /// cannot establish safe successor coverage.
+    pub(super) fn provider_recovery_references_are_absent(
+        &self,
+        catalog: &Catalog<'_>,
+        snapshot: &positron_kernel::CatalogSnapshot,
+    ) -> Result<bool, RecoveryFailure> {
+        snapshot
+            .governance_object()
+            .map_err(|_| RecoveryFailure::Authentication)?;
+        if VerifiedBundle::find(snapshot)?.is_some() {
+            return Ok(false);
+        }
+        let entries = catalog
+            .governance_audit_records()
+            .map_err(|_| RecoveryFailure::Storage)?;
+        // Created receipts are the inventory for bundles not yet verified. A
+        // retained suffix cannot prove that its pruned prefix had no such bundle.
+        if entries.first().is_none_or(|record| record.position() != 1) {
+            return Ok(false);
+        }
+        let mut references = std::collections::BTreeSet::new();
+        for record in entries {
+            if let positron_governance::GovernanceAuditEntry::RecoveryBundle(entry) =
+                positron_governance::GovernanceAuditEntry::decode(&record)
+                    .map_err(|_| RecoveryFailure::Authentication)?
+            {
+                match entry.operation() {
+                    RecoveryBundleAction::Created
+                    | RecoveryBundleAction::Imported
+                    | RecoveryBundleAction::ImportPrepared
+                    | RecoveryBundleAction::Verified
+                    | RecoveryBundleAction::ReplacementVerified => {
+                        references.insert(entry.bundle_digest());
+                    },
+                    RecoveryBundleAction::Retired => {
+                        references.remove(&entry.bundle_digest());
+                    },
+                    RecoveryBundleAction::RetirementPrepared
+                    | RecoveryBundleAction::VerificationRejected => {},
+                }
+            }
+        }
+        Ok(references.is_empty())
+    }
     fn recovery_catalog(&self) -> Result<Catalog<'_>, RecoveryFailure> {
         let secret = self
             .key

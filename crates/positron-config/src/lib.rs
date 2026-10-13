@@ -40,6 +40,8 @@ mod values;
 pub use values::*;
 mod inputs;
 pub use inputs::*;
+mod provider_access;
+pub use provider_access::{AzureManagedIdentitySelector, ProviderAccess, ProviderAuthentication};
 mod effective;
 pub use effective::*;
 mod rendering;
@@ -185,7 +187,7 @@ pub fn setting_for_path(path: &str) -> Option<Setting> {
 
 /// Returns the complete canonical contract in deterministic declaration order.
 #[must_use]
-pub const fn setting_definitions() -> [SettingDefinition; 102] {
+pub const fn setting_definitions() -> [SettingDefinition; 103] {
     contract::SETTING_DEFINITIONS
 }
 
@@ -258,9 +260,10 @@ struct Candidate {
     data_directory: String,
     secrets_directory: String,
     local_key_file: ProtectedFileReference,
+    provider_access: Option<ProviderAccess>,
     key_cache_lease_seconds: u16,
     export_destinations: Vec<ExportDestinationDefinition>,
-    sources: [SettingSource; 102],
+    sources: [SettingSource; 103],
 }
 
 impl Candidate {
@@ -515,9 +518,10 @@ impl Candidate {
                 local_key,
                 Setting::SecurityLocalKeyFile,
             )?,
+            provider_access: None,
             export_destinations: Vec::new(),
             key_cache_lease_seconds: parse_key_cache_lease_seconds(key_cache_lease)?,
-            sources: [SettingSource::CompiledDefault; 102],
+            sources: [SettingSource::CompiledDefault; 103],
         })
     }
 
@@ -890,6 +894,7 @@ impl Candidate {
             | Setting::ListenerOtlpGrpcTrustedProxyCidrs
             | Setting::ListenerOtlpHttpTrustedProxyCidrs
             | Setting::ListenerLokiPushTrustedProxyCidrs
+            | Setting::SecurityProviderAccess
             | Setting::ExportDestinations => {
                 return Err(ConfigurationFailure::new(
                     ConfigurationFailureCode::Malformed,
@@ -1128,6 +1133,7 @@ impl Candidate {
             data_directory: self.data_directory,
             secrets_directory: self.secrets_directory,
             local_key_file: self.local_key_file,
+            provider_access: self.provider_access,
             key_cache_lease_seconds: self.key_cache_lease_seconds,
             export_destinations: self.export_destinations,
             sources: self.sources,
@@ -1649,7 +1655,9 @@ fn checked_path(value: &str, setting: Setting) -> Result<String, ConfigurationFa
 
 fn validate_path(value: &str, setting: Setting) -> Result<(), ConfigurationFailure> {
     let maximum_bytes = match setting_definition(setting).domain() {
-        ValueDomain::AbsolutePath(maximum) | ValueDomain::ProtectedAbsolutePath(maximum) => maximum,
+        ValueDomain::AbsolutePath(maximum)
+        | ValueDomain::ProtectedAbsolutePath(maximum)
+        | ValueDomain::ProviderAccess(_, _, maximum) => maximum,
         _ => {
             return Err(ConfigurationFailure::new(
                 ConfigurationFailureCode::Malformed,
@@ -1908,6 +1916,7 @@ const fn failure_source(setting: Setting) -> FailureSource {
         Setting::StorageSecretsDirectory => FailureSource::StorageSecretsDirectory,
         Setting::SecurityKeyCacheLeaseSeconds => FailureSource::SecurityKeyCacheLeaseSeconds,
         Setting::SecurityLocalKeyFile => FailureSource::SecurityLocalKeyFile,
+        Setting::SecurityProviderAccess => FailureSource::SecurityProviderAccess,
         Setting::ExportDestinations => FailureSource::ExportDestinations,
     }
 }

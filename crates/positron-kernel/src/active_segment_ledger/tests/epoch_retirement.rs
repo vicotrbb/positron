@@ -460,3 +460,161 @@ fn durable_operation_with_unproved_input_refuses_epoch_retirement_after_reopen()
     )?;
     Ok(())
 }
+
+#[test]
+fn completed_reclamation_reference_proof_requires_exact_marker_and_absent_files()
+-> Result<(), Box<dyn Error>> {
+    use crate::active_segment_ledger::format::{SegmentMetadata, SegmentState, encode_metadata};
+    use crate::active_segment_ledger::recovery::{frontier_name, segment_name};
+    use crate::active_segment_ledger::storage::LedgerStorage;
+    let root = TemporaryRoot::new()?;
+    let authority = establish_authority(PrimaryDataVolume::acquire(
+        root.path(),
+        MountQualification::LocalHost,
+    )?)?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new([0xc1; 16])?,
+        CatalogSecret::from_owned(Box::new([0xc2; 32]), Box::new([0xc3; 32])),
+    )?;
+    let scope = SegmentScope::new(
+        TenantId::from_bytes([0x64; 16])?,
+        SignalKind::Logs,
+        VirtualShardId::new(1)?,
+    );
+    let marker = SegmentMetadata {
+        scope,
+        id: crate::SegmentId::new([0xc4; 16])?,
+        state: SegmentState::Retired,
+        base_position: positron_domain::routing::CommitPosition::origin(),
+        sealed_frontier: None,
+        event_range: crate::AuthenticatedEventRange::unavailable(
+            crate::EventRangeUnavailable::LegacyFormat,
+        ),
+        ingest_range: crate::AuthenticatedIngestRange::unavailable(),
+    };
+    let object = CatalogObject::new(encode_metadata(marker))?;
+    let binding =
+        crate::MaintenanceObjectId::new(object.identity().to_bytes()).map_err(|_| "binding")?;
+    let mut id = [0; 16];
+    id.copy_from_slice(&binding.to_bytes()[..16]);
+    id[0] ^= 0xa5;
+    let task = crate::MaintenanceTask::with_contract(
+        crate::MaintenanceTaskId::new(id).map_err(|_| "task")?,
+        crate::MaintenanceTaskClass::RetentionReclamation,
+        crate::MaintenanceScope::segment(scope.tenant_id(), scope.signal_kind(), scope.shard_id()),
+        crate::MaintenanceTrigger::Event,
+        crate::MaintenancePreconditions::new(0, 1).map_err(|_| "basis")?,
+        vec![binding],
+        Vec::new(),
+        crate::active_segment_ledger::retention_publication::retention_publication_claim()?,
+    )
+    .map_err(|_| "contract")?;
+    let storage = LedgerStorage::open(authority.primary_data_volume().ok_or("volume")?)?;
+    drop(storage);
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new([0xc5; 16])?,
+            crate::FormatEpoch::CATALOG_V1,
+            vec![object],
+        )?,
+        None,
+    )?;
+    let basis = catalog.pin()?;
+    let check =
+        || ActiveSegmentLedger::completed_reclamation_references_absent(&authority, &basis, &task);
+    assert!(check()?);
+    for directory in ["active", "sealed"] {
+        for name in [segment_name(marker.id), frontier_name(marker.id)] {
+            let path = root.path().join("segments").join(directory).join(name);
+            std::fs::write(&path, b"fixed opaque retained file")?;
+            assert!(!check()?);
+            std::fs::remove_file(path)?;
+        }
+    }
+    assert!(check()?);
+    assert_eq!(catalog.pin()?.identity(), basis.identity());
+    drop(basis);
+    // An unrelated marker or absent metadata cannot establish the
+    // one surviving continuity binding required by the completion owner.
+    for (index, objects) in [
+        vec![CatalogObject::new(encode_metadata(SegmentMetadata {
+            id: crate::SegmentId::new([0xc6; 16])?,
+            ..marker
+        }))?],
+        vec![CatalogObject::new(b"metadata-free basis".to_vec())?],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        catalog.commit(
+            catalog.pin()?.identity(),
+            CatalogProposal::new(
+                TransactionId::new([u8::try_from(index)? + 0xd1; 16])?,
+                crate::FormatEpoch::CATALOG_V1,
+                objects,
+            )?,
+            None,
+        )?;
+        assert!(
+            !ActiveSegmentLedger::completed_reclamation_references_absent(
+                &authority,
+                &catalog.pin()?,
+                &task
+            )?
+        );
+    }
+    let second = SegmentMetadata {
+        id: crate::SegmentId::new([0xc7; 16])?,
+        ..marker
+    };
+    let second_object = CatalogObject::new(encode_metadata(second))?;
+    let second_binding = crate::MaintenanceObjectId::new(second_object.identity().to_bytes())
+        .map_err(|_| "binding")?;
+    let mut inputs = vec![binding, second_binding];
+    inputs.sort_unstable();
+    let mut identity = [0; 16];
+    identity.copy_from_slice(&inputs[0].to_bytes()[..16]);
+    identity[0] ^= 0xa5;
+    let multiple = crate::MaintenanceTask::with_contract(
+        crate::MaintenanceTaskId::new(identity).map_err(|_| "identity")?,
+        task.class(),
+        task.scope(),
+        task.trigger(),
+        task.preconditions(),
+        inputs,
+        Vec::new(),
+        task.reservations(),
+    )
+    .map_err(|_| "contract")?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new([0xd3; 16])?,
+            crate::FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(encode_metadata(marker))?, second_object],
+        )?,
+        None,
+    )?;
+    assert!(
+        !ActiveSegmentLedger::completed_reclamation_references_absent(
+            &authority,
+            &catalog.pin()?,
+            &multiple
+        )?
+    );
+    let sealed = root.path().join("segments/sealed");
+    let moved = root.path().join("segments/sealed-unavailable");
+    std::fs::rename(&sealed, &moved)?;
+    assert!(
+        ActiveSegmentLedger::completed_reclamation_references_absent(
+            &authority,
+            &catalog.pin()?,
+            &task
+        )
+        .is_err()
+    );
+    std::fs::rename(moved, sealed)?;
+    Ok(())
+}

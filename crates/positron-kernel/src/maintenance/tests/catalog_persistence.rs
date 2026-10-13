@@ -674,3 +674,350 @@ fn catalog_failed_terminal_cause_is_atomic_and_survives_reopen()
     );
     Ok(())
 }
+
+#[test]
+fn root_terminal_reclamation_retries_ambiguous_publication_without_losing_its_fence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = CatalogRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+        volume,
+        70_000_001,
+        1_048_576 + 16_384,
+    )?;
+    let instance = InstanceId::new(nonzero_id(51))?;
+    let catalog = Catalog::open(
+        &authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([0xa1; 32]), Box::new([0xa2; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(52))?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(b"root reclamation basis".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let task = MaintenanceTask::with_contract(
+        MaintenanceTaskId::new([56; 16]).expect("task identity"),
+        MaintenanceTaskClass::SchemaStatistics,
+        MaintenanceScope::system(),
+        MaintenanceTrigger::Event,
+        MaintenancePreconditions::new(4, 9).expect("preconditions"),
+        Vec::new(),
+        Vec::new(),
+        ResourceAmounts::new([1; 11]),
+    )
+    .expect("bounded task");
+    let identity = task.identity();
+    coordinator
+        .submit_and_persist(&catalog, task, 7)
+        .expect("maintenance fixture operation");
+    let execution = coordinator
+        .start_next_with_reservation_and_persist(&catalog, &authority, 8, false)
+        .expect("maintenance fixture operation")
+        .ok_or("task dispatch")?;
+    execution
+        .complete_and_persist(&coordinator, &catalog, true)
+        .expect("maintenance fixture operation");
+    drop(execution);
+    let session = crate::RootRewrapSession::admit(&authority)?;
+    let original = catalog.pin()?.identity();
+    assert!(
+        coordinator
+            .guard_root_retirement_references(&session, &catalog, &catalog.pin()?)
+            .is_ok()
+    );
+    let definite = crate::with_catalog_publication_fault_after(
+        crate::CatalogPublicationFault::SynchronizeCommit,
+        0,
+        || coordinator.reclaim_terminal_records_for_root_retirement(&session, &catalog),
+    );
+    assert_eq!(definite, Err(MaintenanceFailure::CatalogUnavailable));
+    assert_eq!(catalog.pin()?.identity(), original);
+    assert_eq!(
+        coordinator
+            .status(identity)
+            .expect("retained terminal task")
+            .phase(),
+        MaintenanceTaskPhase::Succeeded
+    );
+    assert_eq!(
+        MaintenanceCoordinator::restore_from_catalog(&catalog)
+            .expect("authenticated original records")
+            .statuses()
+            .expect("restored statuses")
+            .len(),
+        1
+    );
+    let failure = crate::with_catalog_publication_fault_sequence_after(
+        &[
+            (
+                crate::CatalogPublicationFault::SynchronizeGenerationDirectory,
+                0,
+            ),
+            (
+                crate::CatalogPublicationFault::SynchronizeGenerationDirectory,
+                0,
+            ),
+            (
+                crate::CatalogPublicationFault::SynchronizeGenerationDirectory,
+                0,
+            ),
+        ],
+        || coordinator.reclaim_terminal_records_for_root_retirement(&session, &catalog),
+    );
+    assert_eq!(failure, Err(MaintenanceFailure::CatalogUnavailable));
+    assert_eq!(
+        coordinator
+            .status(identity)
+            .expect("maintenance fixture operation")
+            .phase(),
+        MaintenanceTaskPhase::Succeeded
+    );
+    assert!(matches!(
+        coordinator.guard_root_retirement_references(&session, &catalog, &catalog.pin()?),
+        Err(MaintenanceFailure::ConcurrentAccess)
+    ));
+    assert_eq!(
+        coordinator
+            .reclaim_terminal_records_for_root_retirement(&session, &catalog)
+            .expect("maintenance fixture operation"),
+        1
+    );
+    assert!(
+        coordinator
+            .guard_root_retirement_references(&session, &catalog, &catalog.pin()?)
+            .is_ok()
+    );
+    assert!(
+        coordinator
+            .statuses()
+            .expect("maintenance fixture operation")
+            .is_empty()
+    );
+    assert!(
+        MaintenanceCoordinator::restore_from_catalog(&catalog)
+            .expect("maintenance fixture operation")
+            .statuses()
+            .expect("maintenance fixture operation")
+            .is_empty()
+    );
+    assert_eq!(
+        coordinator
+            .reclaim_terminal_records_for_root_retirement(&session, &catalog)
+            .expect("maintenance fixture operation"),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn root_reclamation_preserves_opaque_scrub_references_and_expires_digest_only_descriptors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = CatalogRoot::new()?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+        PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+        70_000_001,
+        1_048_576 + 16_384,
+    )?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new(nonzero_id(61))?,
+        CatalogSecret::from_owned(Box::new([0xa1; 32]), Box::new([0xa2; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(62))?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(b"scrub descriptor retirement".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let scope = MaintenanceScope::segment(
+        positron_domain::identity::TenantId::from_bytes([0x43; 16])?,
+        positron_domain::routing::SignalKind::Logs,
+        positron_domain::routing::VirtualShardId::new(1)?,
+    );
+    let canonical = MaintenanceTask::integrity_scrub(
+        MaintenanceTaskId::new([63; 16]).expect("identity"),
+        scope,
+        MaintenanceTrigger::Event,
+        MaintenancePreconditions::new(catalog.pin()?.number(), 1).expect("basis"),
+        [65; 32],
+        0,
+    )
+    .expect("canonical metadata descriptor");
+    let canonical_id = canonical.identity();
+    let mut opaque = canonical.clone();
+    opaque.identity = MaintenanceTaskId::new([64; 16]).expect("identity");
+    opaque
+        .inputs
+        .push(MaintenanceObjectId::new([66; 32]).expect("opaque reference"));
+    let opaque_id = opaque.identity();
+    let mut output = canonical.clone();
+    output.identity = MaintenanceTaskId::new([67; 16]).expect("identity");
+    output
+        .outputs
+        .push(MaintenanceObjectId::new([68; 32]).expect("opaque output"));
+    output.reservations = ResourceAmounts::new([1; 11]);
+    let mut wrong_claim = canonical.clone();
+    wrong_claim.identity = MaintenanceTaskId::new([69; 16]).expect("identity");
+    wrong_claim.reservations = ResourceAmounts::new([1; 11]);
+    let retained = [opaque_id, output.identity(), wrong_claim.identity()];
+    for (index, task) in [canonical, opaque, output, wrong_claim]
+        .into_iter()
+        .enumerate()
+    {
+        let id = task.identity();
+        coordinator
+            .submit_and_persist(&catalog, task, 1)
+            .expect("persist descriptor");
+        if index < 2 {
+            coordinator
+                .cancel_and_persist(&catalog, id)
+                .expect("cancel descriptor");
+        } else {
+            let execution = coordinator
+                .start_integrity_scrub_task_with_reservation_and_persist(
+                    &catalog, &authority, 2, false, id,
+                )
+                .expect("dispatch")
+                .ok_or("dispatch")?;
+            execution
+                .complete_and_persist(&coordinator, &catalog, index == 2)
+                .expect("terminal outcome");
+        }
+    }
+    let session = crate::RootRewrapSession::admit(&authority)?;
+    assert_eq!(
+        coordinator
+            .reclaim_terminal_records_for_root_retirement(&session, &catalog)
+            .expect("bounded descriptor expiration"),
+        1
+    );
+    assert!(matches!(
+        coordinator.status(canonical_id),
+        Err(MaintenanceFailure::UnknownTask)
+    ));
+    for (identity, phase) in retained.into_iter().zip([
+        MaintenanceTaskPhase::Cancelled,
+        MaintenanceTaskPhase::Succeeded,
+        MaintenanceTaskPhase::Failed,
+    ]) {
+        assert_eq!(
+            coordinator
+                .status(identity)
+                .expect("opaque remains")
+                .phase(),
+            phase
+        );
+    }
+    assert!(
+        coordinator
+            .guard_root_retirement_references(&session, &catalog, &catalog.pin()?)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn root_reclamation_keeps_snapshot_expiry_until_its_exact_lease_object_is_absent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = CatalogRoot::new()?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+        PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+        70_000_001,
+        1_048_576 + 16_384,
+    )?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new(nonzero_id(71))?,
+        CatalogSecret::from_owned(Box::new([0xa1; 32]), Box::new([0xa2; 32])),
+    )?;
+    let retained = CatalogObject::new(b"fixed opaque retained lease object".to_vec())?;
+    let retained_id = retained.identity();
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(72))?,
+            FormatEpoch::CATALOG_V1,
+            vec![
+                retained,
+                CatalogObject::new(b"nonempty expiry catalog basis".to_vec())?,
+            ],
+        )?,
+        None,
+    )?;
+    let task = MaintenanceTask::with_contract_not_before(
+        MaintenanceTaskId::new([73; 16]).expect("identity"),
+        MaintenanceTaskClass::SnapshotLeaseExpiry,
+        MaintenanceScope::segment(
+            positron_domain::identity::TenantId::from_bytes([0x43; 16])?,
+            positron_domain::routing::SignalKind::Logs,
+            positron_domain::routing::VirtualShardId::new(1)?,
+        ),
+        MaintenanceTrigger::Scheduled,
+        MaintenancePreconditions::new(catalog.pin()?.number(), 1).expect("basis"),
+        vec![MaintenanceObjectId::new(retained_id.to_bytes()).expect("object")],
+        Vec::new(),
+        ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+        100,
+    )
+    .expect("expiry descriptor");
+    let identity = task.identity();
+    let coordinator = MaintenanceCoordinator::new();
+    coordinator
+        .submit_and_persist(&catalog, task, 1)
+        .expect("persist expiry");
+    coordinator
+        .cancel_and_persist(&catalog, identity)
+        .expect("cancel expiry");
+    let session = crate::RootRewrapSession::admit(&authority)?;
+    let basis = catalog.pin()?;
+    assert_eq!(
+        coordinator
+            .reclaim_terminal_records_for_root_retirement(&session, &catalog)
+            .expect("reference check"),
+        0
+    );
+    assert_eq!(catalog.pin()?.identity(), basis.identity());
+    assert!(
+        coordinator
+            .guard_root_retirement_references(&session, &catalog, &basis)
+            .is_err()
+    );
+    let objects = basis
+        .plaintext_objects()
+        .filter_map(|bytes| {
+            let object = CatalogObject::new(bytes.to_vec()).expect("authenticated object");
+            (object.identity() != retained_id).then_some(object)
+        })
+        .collect();
+    catalog.commit(
+        basis.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(74))?,
+            FormatEpoch::CATALOG_V1,
+            objects,
+        )?,
+        None,
+    )?;
+    drop(basis);
+    assert_eq!(
+        coordinator
+            .reclaim_terminal_records_for_root_retirement(&session, &catalog)
+            .expect("released descriptor"),
+        1
+    );
+    assert!(matches!(
+        coordinator.status(identity),
+        Err(MaintenanceFailure::UnknownTask)
+    ));
+    Ok(())
+}

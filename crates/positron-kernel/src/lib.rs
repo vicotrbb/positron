@@ -81,7 +81,8 @@ pub mod key_provider {
         AzureManagedIdentityId, AzureWorkloadIdentity, CacheInvalidation, ConformanceFailure,
         ConformanceStep, CredentialFileReference, EnvelopeContext, GoogleCloudKmsKeyProvider,
         KeyCacheHealth, KeyCacheLease, KeyEnvelope, KeyProviderConformance, KeyProviderFailure,
-        KeyScope, Kmip21KeyProvider, LocalKeyProvider, OpenBaoTransitKeyProvider,
+        KeyScope, Kmip21KeyProvider, LocalKeyProvider, NativeAzureAuthentication,
+        NativeRootConfiguration, NativeRootKey, NativeRootProvider, OpenBaoTransitKeyProvider,
         ProviderConformanceTarget, ProviderCredentialModel, ProviderFailureDisposition,
         ProviderFamily, ProviderKeyUri, TransitAuthentication, VaultTransitKeyProvider,
         WrappingAlgorithm,
@@ -147,9 +148,10 @@ pub use data_protection::{
     BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
     BootstrapObjectPurpose, ControlTokenAuthentication, ControlTokenFailure, ControlTokenProtector,
     ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
-    QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure, RecoveryIdentity,
-    RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession,
-    RecoveryUnlock, RootPredecessorEnvelope, RootRewrapSession, VerifiedRootActivation,
+    PreparedProviderMigration, QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure,
+    RecoveryIdentity, RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients,
+    RecoverySession, RecoveryUnlock, RootAdmissionReceipt, RootPredecessorEnvelope,
+    RootRewrapSession, VerifiedRootActivation,
 };
 pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{

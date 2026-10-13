@@ -8,6 +8,98 @@ use positron_domain::routing::{SignalKind, VirtualShardId};
 use super::test_support::SecurityRoot;
 
 #[test]
+fn verified_activation_is_revoked_by_source_admission_generation_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let original_root = SecurityRoot::create()?;
+    let successor_root = SecurityRoot::create()?;
+    let original = BootstrapKeyCustody::initialize(&original_root.path)?;
+    let successor = BootstrapKeyCustody::initialize(&successor_root.path)?;
+    let instance = InstanceId::new([0x86; 16])?;
+    let authority = crate::data_protection::recovery_tests::authority()?;
+    let session = super::RootRewrapSession::admit(&authority)?;
+    let envelope = session.wrap_system(&original, &successor, instance, 2)?;
+    let original = session.lease_system(
+        original,
+        instance,
+        crate::key_provider::KeyCacheLease::default(),
+    )?;
+    let identity = original.active_root_identity()?;
+    let object = original.protect(
+        instance,
+        BootstrapObjectPurpose::Initialized,
+        b"source remains authoritative",
+    )?;
+    let activation = session.prepare_activation(&original, successor, instance, 2, &envelope)?;
+    original.invalidate_for_rotation()?;
+    session.confirm_active_provider(&original, identity, 1)?;
+    assert!(
+        activation.activate(&original).is_err(),
+        "an independently revalidated source must revoke the older activation receipt"
+    );
+    assert_eq!(original.active_root_identity()?, identity);
+    assert_eq!(
+        original
+            .open_object(instance, BootstrapObjectPurpose::Initialized, &object)?
+            .as_slice(),
+        b"source remains authoritative"
+    );
+    let fresh = session.prepare_activation(
+        &original,
+        BootstrapKeyCustody::open(&successor_root.path)?,
+        instance,
+        2,
+        &envelope,
+    )?;
+    fresh.activate(&original)?;
+    assert_eq!(original.active_root_epoch()?, 2);
+    Ok(())
+}
+
+#[test]
+fn shutdown_during_key_admission_revokes_the_in_flight_result()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let root = SecurityRoot::create()?;
+    let instance = InstanceId::new([0x83; 16])?;
+    let authority = crate::data_protection::recovery_tests::authority()?;
+    let session = super::RootRewrapSession::admit(&authority)?;
+    let custody = Rc::new(session.lease_system(
+        BootstrapKeyCustody::initialize(&root.path)?,
+        instance,
+        crate::key_provider::KeyCacheLease::default(),
+    )?);
+    let closing = Rc::clone(&custody);
+    let closed = Rc::new(Cell::new(false));
+    let outcome = Rc::clone(&closed);
+    let protected = super::RootRewrapSession::with_key_admission_action(
+        move || outcome.set(closing.close_for_shutdown().is_ok()),
+        || {
+            custody.protect(
+                instance,
+                BootstrapObjectPurpose::Initialized,
+                b"must not publish",
+            )
+        },
+    );
+    assert!(
+        closed.get(),
+        "shutdown must remain callable while admission is in flight"
+    );
+    assert!(matches!(protected, Err(BootstrapKeyFailure::Custody)));
+    assert!(
+        custody
+            .protect(
+                instance,
+                BootstrapObjectPurpose::Initialized,
+                b"closed custody"
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn bootstrap_envelopes_reject_empty_and_substituted_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = SecurityRoot::create()?;

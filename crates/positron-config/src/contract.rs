@@ -31,7 +31,7 @@ macro_rules! define_settings {
     };
 }
 
-pub(crate) const SETTING_DEFINITIONS: [SettingDefinition; 102] = define_settings! {
+pub(crate) const SETTING_DEFINITIONS: [SettingDefinition; 103] = define_settings! {
     SchemaVersion | "schema_version" | Integer | "1" | ExactUnsignedInteger(1) | Public | ConfigurationFileOnly | ImmutableAfterInitialization;
     DiagnosticsLogLevel | "diagnostics.log_level" | String | "info" | StringEnumeration(&["error", "warn", "info", "debug"]) | Public | NonSecretOverrides | LiveReloadable;
     RuntimeShutdownGraceSeconds | "runtime.shutdown_grace_seconds" | Integer | "30" | UnsignedIntegerRange(1, 3600) | Public | NonSecretOverrides | RestartRequired;
@@ -132,6 +132,7 @@ pub(crate) const SETTING_DEFINITIONS: [SettingDefinition; 102] = define_settings
     StorageSecretsDirectory | "storage.secrets_directory" | String | "/var/lib/positron-secrets" | AbsolutePath(256) | Public | ConfigurationFileOnly | ImmutableAfterInitialization;
     SecurityKeyCacheLeaseSeconds | "security.key_cache_lease_seconds" | Integer | "900" | UnsignedIntegerRange(0, 3600) | Public | ConfigurationFileOnly | RestartRequired;
     SecurityLocalKeyFile | "security.local_key_file" | String | "/var/lib/positron-secrets/local-root-key.v1" | ProtectedAbsolutePath(256) | SecretBearing | ProtectedConfigurationFileOnly | ImmutableAfterInitialization;
+    SecurityProviderAccess | "security.provider_access" | ProviderAccess | "disabled" | ProviderAccess(512, 128, 256) | SecretBearing | ProtectedConfigurationFileOnly | RestartRequired;
     ExportDestinations | "export.destination" | ExportDestinations | "disabled" | ExportDestinations(8, 63, 8) | Public | ConfigurationFileOnly | ImmutableAfterInitialization;
     DiagnosticsTraceOtlpGrpcAddress | "diagnostics.trace_otlp_grpc_address" | String | "disabled" | OptionalSocketAddress(64) | Public | ConfigurationFileOnly | RestartRequired;
 };

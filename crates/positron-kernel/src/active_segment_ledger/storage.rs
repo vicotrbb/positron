@@ -513,6 +513,23 @@ impl LedgerStorage {
             .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))
     }
 
+    pub(super) fn retired_files_absent(
+        &self,
+        metadata: SegmentMetadata,
+    ) -> Result<bool, LedgerFailure> {
+        if metadata.state != SegmentState::Retired {
+            return Ok(false);
+        }
+        for directory in [&self.active, &self.sealed] {
+            for name in [segment_name(metadata.id), frontier_name(metadata.id)] {
+                if entry_exists(directory, &name)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Removes a retired sealed segment only after its catalog state has made
     /// it invisible to new snapshots. Missing entries are already reclaimed
     /// work and are therefore idempotent across crash recovery.

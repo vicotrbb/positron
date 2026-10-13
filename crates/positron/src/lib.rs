@@ -27,6 +27,7 @@ mod keys;
 mod local_key_cli;
 mod maintenance_cli;
 mod policy;
+mod provider_migration_cli;
 mod recovery_cli;
 mod support_bundle;
 mod tenant_alias_cli;
@@ -69,6 +70,13 @@ pub fn run_native(
     let mut arguments = arguments.into_iter().peekable();
     if arguments.peek().is_some_and(|argument| argument == "keys") {
         arguments.next();
+        if arguments
+            .peek()
+            .is_some_and(|argument| argument == "migrate")
+        {
+            arguments.next();
+            return provider_migration_cli::run(arguments);
+        }
         if arguments.peek().is_some_and(|argument| argument == "local") {
             arguments.next();
             return local_key_cli::run(arguments);

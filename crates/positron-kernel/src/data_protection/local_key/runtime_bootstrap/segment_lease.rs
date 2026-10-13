@@ -32,11 +32,7 @@ impl LocalSegmentKeySource {
     ) -> Result<SecretKeyBytes, BootstrapKeyFailure> {
         // The shared owner enforces expiry, live zero-lease unwrap, and rotation
         // fencing before the temporary tenant/segment wrapping key is derived.
-        let system = self
-            .lease
-            .lock()
-            .map_err(|_| BootstrapKeyFailure::Custody)?
-            .system_key(self.instance)?;
+        let system = system_lease::SystemLease::system_key(&self.lease, self.instance)?;
         tenant_epochs::segment_key_from_system(
             &system,
             self.instance,

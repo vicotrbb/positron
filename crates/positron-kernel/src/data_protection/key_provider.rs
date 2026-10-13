@@ -23,7 +23,12 @@ pub use google::GoogleCloudKmsKeyProvider;
 mod fuzzing;
 mod kmip;
 mod local;
+mod native_root;
 pub use kmip::Kmip21KeyProvider;
+pub(in crate::data_protection) use native_root::CustodyKeyProvider;
+pub use native_root::{
+    NativeAzureAuthentication, NativeRootConfiguration, NativeRootKey, NativeRootProvider,
+};
 mod openbao;
 pub(super) mod owner;
 mod payload;

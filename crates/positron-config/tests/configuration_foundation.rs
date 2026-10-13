@@ -30,3 +30,4 @@ include!("configuration_foundation/runtime_wiring.rs");
 include!("configuration_foundation/loki_listener.rs");
 include!("configuration_foundation/proxy_trust.rs");
 include!("configuration_foundation/listener_profiles.rs");
+include!("configuration_foundation/provider_access.rs");

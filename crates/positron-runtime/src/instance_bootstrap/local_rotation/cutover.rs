@@ -4,9 +4,9 @@ impl InitializedInstance {
     pub fn activate_local_key_rotation(
         &self,
     ) -> Result<LocalKeyRotationStatus, LocalKeyRotationFailure> {
-        let session = RootRewrapSession::admit(&self._authority)
+        let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let catalog = self.rotation_catalog(&session)?;
+        let mut catalog = self.rotation_catalog(&session)?;
         let snapshot = catalog
             .pin()
             .map_err(|_| LocalKeyRotationFailure::Storage)?;
@@ -20,22 +20,50 @@ impl InitializedInstance {
                 return Err(failure);
             },
         };
+        if state.cancelled {
+            return Err(LocalKeyRotationFailure::Busy);
+        }
         if state.instance != self.instance || state.anchor != self.key.bootstrap_identity() {
             self.key
                 .invalidate_for_rotation()
                 .map_err(|_| LocalKeyRotationFailure::Custody)?;
             return Err(LocalKeyRotationFailure::Authentication);
         }
-        if self
+        let mut source_receipt = self
             .key
-            .rotation_requires_confirmation()
-            .map_err(|_| LocalKeyRotationFailure::Custody)?
-            && state.successor.is_some()
+            .root_admission_receipt()
+            .map_err(|_| LocalKeyRotationFailure::Custody)?;
+        if source_receipt.requires_reconfirmation()
+            && source_receipt.identity() == state.active.identity
+            && source_receipt.epoch() == state.active.epoch
         {
             confirm_state(&catalog, &state)?;
+            drop(catalog);
             session
                 .confirm_active_provider(&self.key, state.active.identity, state.active.epoch)
+                .map_err(|_| LocalKeyRotationFailure::Custody)?;
+            catalog = self.rotation_catalog(&session)?;
+            if catalog
+                .pin()
+                .map_err(|_| LocalKeyRotationFailure::Storage)?
+                .identity()
+                != snapshot.identity()
+            {
+                return Err(LocalKeyRotationFailure::Busy);
+            }
+            source_receipt = self
+                .key
+                .root_admission_receipt()
+                .map_err(|_| LocalKeyRotationFailure::Custody)?;
+        }
+        let destination = state.successor.as_ref().unwrap_or(&state.active);
+        let destination_envelope =
+            positron_kernel::key_provider::KeyEnvelope::decode(&destination.envelope)
                 .map_err(|_| LocalKeyRotationFailure::Authentication)?;
+        if destination_envelope.identity().family()
+            != positron_kernel::key_provider::ProviderFamily::LocalFile
+        {
+            return Err(LocalKeyRotationFailure::InvalidInput);
         }
         let Some(route) = state.successor.take() else {
             if let Err(failure) = confirm_state(&catalog, &state) {
@@ -54,6 +82,7 @@ impl InitializedInstance {
                     .confirm_active_provider(&self.key, state.active.identity, state.active.epoch)
                     .map_err(|_| LocalKeyRotationFailure::Authentication)?;
             } else {
+                drop(catalog);
                 let access = self
                     .bootstrap_storage
                     .inspect()
@@ -64,7 +93,7 @@ impl InitializedInstance {
                 if active.identity() != state.active.identity {
                     return Err(LocalKeyRotationFailure::Authentication);
                 }
-                session
+                let activation = session
                     .prepare_activation(
                         &self.key,
                         active,
@@ -72,12 +101,28 @@ impl InitializedInstance {
                         state.active.epoch,
                         &state.active.envelope,
                     )
-                    .map_err(|_| LocalKeyRotationFailure::Authentication)?
+                    .map_err(|_| LocalKeyRotationFailure::Authentication)?;
+                let catalog = self.rotation_catalog(&session)?;
+                let current = catalog
+                    .pin()
+                    .map_err(|_| LocalKeyRotationFailure::Storage)?;
+                if current.identity() != snapshot.identity()
+                    || self
+                        .key
+                        .root_admission_receipt()
+                        .map_err(|_| LocalKeyRotationFailure::Custody)?
+                        != source_receipt
+                {
+                    return Err(LocalKeyRotationFailure::Busy);
+                }
+                confirm_state(&catalog, &state)?;
+                activation
                     .activate(&self.key)
                     .map_err(|_| LocalKeyRotationFailure::Custody)?;
             }
             return Ok(state.status());
         };
+        drop(catalog);
         let access = self
             .bootstrap_storage
             .inspect()
@@ -100,6 +145,19 @@ impl InitializedInstance {
                 &route.envelope,
             )
             .map_err(|_| LocalKeyRotationFailure::Authentication)?;
+        let catalog = self.rotation_catalog(&session)?;
+        let current = catalog
+            .pin()
+            .map_err(|_| LocalKeyRotationFailure::Storage)?;
+        if current.identity() != snapshot.identity()
+            || self
+                .key
+                .root_admission_receipt()
+                .map_err(|_| LocalKeyRotationFailure::Custody)?
+                != source_receipt
+        {
+            return Err(LocalKeyRotationFailure::Busy);
+        }
         state.predecessor = Some(std::mem::replace(&mut state.active, route));
         state.transaction = self.rotation_transaction()?;
         if let Err(failure) = self.publish_rotation(
@@ -116,6 +174,19 @@ impl InitializedInstance {
                 .pin()
                 .map_err(|_| LocalKeyRotationFailure::Storage)?;
             if State::find(&visible)?.as_ref() == Some(&state) {
+                drop(catalog);
+                let activation = activation
+                    .revalidate(&self.key, self.instance)
+                    .map_err(|_| LocalKeyRotationFailure::Custody)?;
+                let catalog = self.rotation_catalog(&session)?;
+                if catalog
+                    .pin()
+                    .map_err(|_| LocalKeyRotationFailure::Storage)?
+                    .identity()
+                    != visible.identity()
+                {
+                    return Err(LocalKeyRotationFailure::Busy);
+                }
                 activation
                     .activate(&self.key)
                     .map_err(|_| LocalKeyRotationFailure::Custody)?;
@@ -145,7 +216,15 @@ pub(crate) fn reopen_active_route(
     let snapshot = catalog
         .pin()
         .map_err(|_| LocalKeyRotationFailure::Storage)?;
+    let native = key
+        .active_provider_identity()
+        .map_err(|_| LocalKeyRotationFailure::Custody)?
+        .family()
+        != positron_kernel::key_provider::ProviderFamily::LocalFile;
     let Some(state) = State::find(&snapshot)? else {
+        if native {
+            return Err(LocalKeyRotationFailure::Authentication);
+        }
         return Ok(key);
     };
     if state.instance != instance || state.anchor != key.bootstrap_identity() {
@@ -164,7 +243,18 @@ pub(crate) fn reopen_active_route(
         {
             return Err(LocalKeyRotationFailure::Authentication);
         }
+        if native
+            && session
+                .active_system_envelope(&key, instance)
+                .map_err(|_| LocalKeyRotationFailure::Authentication)?
+                != state.active.envelope
+        {
+            return Err(LocalKeyRotationFailure::Authentication);
+        }
         return Ok(key);
+    }
+    if native {
+        return Err(LocalKeyRotationFailure::Authentication);
     }
     let access = storage
         .inspect()

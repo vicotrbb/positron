@@ -11,6 +11,8 @@ pub enum CatalogRootRotationStage {
     RetirementPrepared,
     RetirementRefused,
     Completed,
+    Cancelled,
+    Resumed,
 }
 
 impl CatalogRootRotationStage {
@@ -23,6 +25,8 @@ impl CatalogRootRotationStage {
             Self::RetirementPrepared => "catalog.root-rotation.retirement-prepared",
             Self::RetirementRefused => "catalog.root-rotation.retirement-refused",
             Self::Completed => "catalog.root-rotation.completed",
+            Self::Cancelled => "catalog.root-rotation.cancelled",
+            Self::Resumed => "catalog.root-rotation.resumed",
         }
     }
 }
@@ -57,6 +61,8 @@ impl CatalogRootRotationAuditEntry {
             b"retirement-prepared" => CatalogRootRotationStage::RetirementPrepared,
             b"retirement-refused" => CatalogRootRotationStage::RetirementRefused,
             b"completed" => CatalogRootRotationStage::Completed,
+            b"cancelled" => CatalogRootRotationStage::Cancelled,
+            b"resumed" => CatalogRootRotationStage::Resumed,
             _ => return Err(IdentityFailure),
         };
         let body = remaining
@@ -141,6 +147,8 @@ pub fn catalog_root_rotation_audit_intent(
         CatalogRootRotationStage::RetirementPrepared => b"retirement-prepared".as_slice(),
         CatalogRootRotationStage::RetirementRefused => b"retirement-refused".as_slice(),
         CatalogRootRotationStage::Completed => b"completed".as_slice(),
+        CatalogRootRotationStage::Cancelled => b"cancelled".as_slice(),
+        CatalogRootRotationStage::Resumed => b"resumed".as_slice(),
     };
     let mut bytes = Vec::with_capacity(ROOT_ROTATION_MAGIC.len() + stage.len() + 41);
     bytes.extend_from_slice(ROOT_ROTATION_MAGIC);

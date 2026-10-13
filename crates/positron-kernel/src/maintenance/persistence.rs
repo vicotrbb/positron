@@ -32,6 +32,7 @@ mod envelope_verification;
 pub use envelope_traversal::{EnvelopeVerificationProgress, EnvelopeVerificationPublication};
 mod execution;
 mod lifecycle;
+mod root_reclamation;
 mod transitions;
 
 use catalog::*;

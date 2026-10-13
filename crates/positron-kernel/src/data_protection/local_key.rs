@@ -17,9 +17,9 @@ mod root_rewrap;
 mod runtime_bootstrap;
 #[cfg(feature = "test-support")]
 pub use root_rewrap::RootCustodyPublicationFault;
-pub use root_rewrap::{RootPredecessorEnvelope, RootRewrapSession};
+pub use root_rewrap::{PreparedProviderMigration, RootPredecessorEnvelope, RootRewrapSession};
 pub(crate) use runtime_bootstrap::LocalSegmentKeySource;
-pub use runtime_bootstrap::VerifiedRootActivation;
+pub use runtime_bootstrap::{RootAdmissionReceipt, VerifiedRootActivation};
 mod security_directory;
 
 #[cfg(test)]

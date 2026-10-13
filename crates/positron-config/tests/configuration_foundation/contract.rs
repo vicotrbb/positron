@@ -157,6 +157,12 @@ fn generated_schema_covers_every_canonical_setting_with_its_declared_constraints
                     Some(maximum as u64)
                 );
             },
+            ValueDomain::ProviderAccess(_, _, _) => {
+                assert_eq!(
+                    property.get("type").and_then(serde_json::Value::as_str),
+                    Some("object")
+                );
+            },
             ValueDomain::ExportDestinations(maximum, maximum_name_bytes, maximum_tenants) => {
                 assert_eq!(
                     property.get("maxItems").and_then(serde_json::Value::as_u64),
@@ -568,6 +574,16 @@ fn exposes_the_complete_canonical_setting_contract_and_compiled_defaults()
             MutabilityClass::ImmutableAfterInitialization,
         ),
         (
+            Setting::SecurityProviderAccess,
+            "security.provider_access",
+            SettingKind::ProviderAccess,
+            "disabled",
+            ValueDomain::ProviderAccess(512, 128, 256),
+            SecrecyClass::SecretBearing,
+            ProvenancePolicy::ProtectedConfigurationFileOnly,
+            MutabilityClass::RestartRequired,
+        ),
+        (
             Setting::ExportDestinations,
             "export.destination",
             SettingKind::ExportDestinations,
@@ -702,7 +718,7 @@ fn exposes_the_complete_canonical_setting_contract_and_compiled_defaults()
          [listener.loki_push]\ntrusted_proxy_cidrs = []\nforwarded_hops = 0\n\n\
          [storage]\ndata_directory = \"/var/lib/positron\"\n\
          secrets_directory = \"/var/lib/positron-secrets\"\n\n\
-         [security]\nkey_cache_lease_seconds = 900\nlocal_key_file = \"<redacted>\"\n"
+         [security]\nkey_cache_lease_seconds = 900\nlocal_key_file = \"<redacted>\"\nprovider_access = \"<redacted>\"\n"
     );
     Ok(())
 }

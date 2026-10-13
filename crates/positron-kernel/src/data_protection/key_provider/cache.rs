@@ -122,6 +122,48 @@ impl<P: KeyProvider + 'static> KeyProviderCache<'static, P> {
     }
 }
 impl<'a, P: KeyProvider, C: Fn() -> Instant> KeyProviderCache<'a, P, C> {
+    /// Internal transfer after a live session has authenticated the exact stored
+    /// system envelope. Startup proves custody using that existing recovery path;
+    /// no random probe can substitute for opening the actual initialized objects.
+    pub(in crate::data_protection) fn accept_verified_system(
+        &mut self,
+        envelope: &KeyEnvelope,
+        context: EnvelopeContext,
+        key: SecretKek,
+        started: Instant,
+    ) -> Result<(), KeyProviderFailure> {
+        self.ensure_healthy()?;
+        envelope.check(self.provider.get().identity(), context)?;
+        if context.scope != KeyScope::System
+            || !self.entries.is_empty()
+            || self.required_system.is_some()
+        {
+            return Err(KeyProviderFailure::InvalidConfiguration);
+        }
+        self.required_system = Some(context);
+        self.live_verified = true;
+        if self.lease.0.is_zero() {
+            self.zero_system_verified = true;
+            drop(key);
+        } else {
+            let deadline = started
+                .checked_add(self.lease.0)
+                .ok_or(KeyProviderFailure::InvalidConfiguration)?;
+            if (self.clock)() >= deadline {
+                return Err(KeyProviderFailure::Unavailable);
+            }
+            let envelope_digest = crate::data_protection::DataProtection::hash(&envelope.encode())
+                .map_err(|_| KeyProviderFailure::ContextMismatch)?;
+            self.entries.push(Entry {
+                context,
+                envelope_digest,
+                deadline,
+                key: LockedKek::new(key)?,
+            });
+        }
+        self.expire();
+        Ok(())
+    }
     pub fn required_memory_bytes(capacity: usize) -> Result<u64, KeyProviderFailure> {
         if capacity == 0 || capacity > 128 {
             return Err(KeyProviderFailure::InvalidConfiguration);
@@ -359,6 +401,15 @@ impl KeyProviderCache<'static, LocalKeyProvider> {
         envelope: &KeyEnvelope,
         context: EnvelopeContext,
     ) -> Result<SecretKeyBytes, KeyProviderFailure> {
+        self.immediate_system_key(envelope, context)
+    }
+}
+impl<P: KeyProvider + 'static> KeyProviderCache<'static, P> {
+    fn immediate_system_key(
+        &mut self,
+        envelope: &KeyEnvelope,
+        context: EnvelopeContext,
+    ) -> Result<SecretKeyBytes, KeyProviderFailure> {
         let future = async {
             if self.lease.0.is_zero() {
                 self.live_key(envelope, context).await?.temporary_key()
@@ -373,5 +424,43 @@ impl KeyProviderCache<'static, LocalKeyProvider> {
             std::task::Poll::Ready(outcome) => outcome,
             std::task::Poll::Pending => Err(KeyProviderFailure::Unavailable),
         }
+    }
+}
+impl KeyProviderCache<'static, CustodyKeyProvider> {
+    pub(in crate::data_protection) fn custody_provider(&self) -> &CustodyKeyProvider {
+        self.provider.get()
+    }
+    pub(in crate::data_protection) fn custody_system_key(
+        &mut self,
+        envelope: &KeyEnvelope,
+        context: EnvelopeContext,
+    ) -> Result<SecretKeyBytes, KeyProviderFailure> {
+        // This closed dispatch contains native local work or an admitted blocking
+        // receipt. It never first-polls an asynchronous network adapter directly.
+        if !self.live_verified {
+            self.ensure_healthy()?;
+            let started = (self.clock)();
+            let result = {
+                let session = KeyProviderSession::new(self.provider.get());
+                let mut future = std::pin::pin!(session.unwrap(envelope, context));
+                let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+                match std::future::Future::poll(future.as_mut(), &mut task) {
+                    std::task::Poll::Ready(outcome) => outcome,
+                    std::task::Poll::Pending => Err(KeyProviderFailure::Unavailable),
+                }
+            };
+            self.record(&result);
+            let key = result?;
+            if self.lease.0.is_zero() {
+                let temporary = LockedKek::new(key)?.temporary_key()?;
+                self.required_system = Some(context);
+                self.live_verified = true;
+                self.zero_system_verified = true;
+                self.expire();
+                return Ok(temporary);
+            }
+            self.accept_verified_system(envelope, context, key, started)?;
+        }
+        self.immediate_system_key(envelope, context)
     }
 }

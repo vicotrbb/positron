@@ -14,7 +14,7 @@ impl<'a> RootPredecessorEnvelope<'a> {
         epoch: u64,
         envelope: &'a [u8],
     ) -> Result<Self, BootstrapKeyFailure> {
-        if epoch == 0 || envelope.is_empty() || envelope.len() > 1024 {
+        if epoch == 0 || envelope.is_empty() || envelope.len() > 8956 {
             return Err(BootstrapKeyFailure::InvalidInput);
         }
         Ok(Self {
@@ -96,7 +96,11 @@ impl RootRewrapSession<'_> {
     ) -> Result<(), BootstrapKeyFailure> {
         let (previous, retained) =
             self.retirement_routes(access, current, instance, predecessor, resumed)?;
-        access.retire_predecessor_key(predecessor.identity, predecessor.epoch, resumed)?;
+        let source = KeyEnvelope::decode(predecessor.envelope)
+            .map_err(|_| BootstrapKeyFailure::Authentication)?;
+        if source.identity().family() == crate::key_provider::ProviderFamily::LocalFile {
+            access.retire_predecessor_key(predecessor.identity, predecessor.epoch, resumed)?;
+        }
         access.replace_recovered_system_envelope(&previous, &retained)
     }
     fn retirement_routes(
@@ -117,7 +121,13 @@ impl RootRewrapSession<'_> {
         {
             return Err(BootstrapKeyFailure::Authentication);
         }
-        let expected = self.wrap_system(current, current, instance, epoch)?;
+        let expected = if current.active_provider_identity()?.family()
+            == crate::key_provider::ProviderFamily::LocalFile
+        {
+            self.wrap_system(current, current, instance, epoch)?
+        } else {
+            current.stored_system_envelope(instance)?
+        };
         let mut found = false;
         for route in &bridge.routes {
             if route.epoch == epoch && route.root == active && route.envelope == expected {

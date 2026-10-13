@@ -7,6 +7,11 @@
 #[cfg(test)]
 extern crate self as positron_runtime;
 
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+#[path = "../tests/support/process_lifecycle.rs"]
+mod process_lifecycle;
+
 mod configuration;
 mod configuration_catalog;
 mod health;
@@ -39,10 +44,10 @@ pub use instance_bootstrap::GovernanceTestFixture;
 pub use instance_bootstrap::{
     BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
     BootstrapPaths, BootstrapState, DoctorRuntimeFacts, GracefulShutdownRecord, InitializationPlan,
-    InitializedInstance, InstanceBootstrap, LocalKeyRotationFailure, LocalKeyRotationPhase,
-    LocalKeyRotationStatus, OfflineSupportBundleFailure, OfflineSupportBundleInspection,
-    RecoveryReadiness, TenantKeyMigrationProgress, TenantKeyRotationStatus,
-    TenantKeyVerificationProgress, TenantRetentionImpactPreview,
+    InitializedInstance, InstanceBootstrap, KeyProviderMigrationStatus, LocalKeyRotationFailure,
+    LocalKeyRotationPhase, LocalKeyRotationStatus, OfflineSupportBundleFailure,
+    OfflineSupportBundleInspection, RecoveryReadiness, TenantKeyMigrationProgress,
+    TenantKeyRotationStatus, TenantKeyVerificationProgress, TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
     OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityAggregateOutcome,
@@ -71,7 +76,7 @@ pub use process::{
     ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole, CrashInspection,
     DrainingProcess, ExitOutcome, HostInputs, InitializationMode, PublicPlaintextApiStartupIntent,
     RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision, RunningProcess, ServeConfiguration,
-    ShutdownTrigger,
+    ShutdownTrigger, native_root_configuration,
 };
 pub use services::{ConfiguredExportDestinationResolver, ServiceFailure, ServiceHandle};
 pub use task::{
@@ -126,4 +131,10 @@ pub fn fuzz_operational_state(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_recovery_catalog_state(data: &[u8]) {
     instance_bootstrap::fuzz_recovery_catalog_state(data);
+}
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_key_provider_migration_stateful(data: &[u8]) {
+    instance_bootstrap::fuzz_key_provider_migration_stateful(data);
 }

@@ -317,6 +317,7 @@ pub enum FailureSource {
     StorageSecretsDirectory,
     SecurityKeyCacheLeaseSeconds,
     SecurityLocalKeyFile,
+    SecurityProviderAccess,
     ExportDestinations,
 }
 
@@ -492,6 +493,7 @@ impl FailureSource {
             Self::StorageSecretsDirectory => "storage.secrets_directory",
             Self::SecurityKeyCacheLeaseSeconds => "security.key_cache_lease_seconds",
             Self::SecurityLocalKeyFile => "security.local_key_file",
+            Self::SecurityProviderAccess => "security.provider_access",
             Self::ExportDestinations => "export.destination",
         }
     }
