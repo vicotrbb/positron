@@ -216,10 +216,10 @@ pub(crate) fn before_current_publication_confirmation(
 
 /// Narrow catalog-publication fault controls for cross-crate integration tests.
 ///
-/// This is available only through the non-default `test-support` feature and
-/// delegates to the same one-shot catalog storage fault authority used by the
-/// kernel's own crash tests.
-#[cfg(feature = "test-support")]
+/// This is available in unit tests or through the non-default `test-support`
+/// feature and delegates to the same one-shot catalog storage fault authority
+/// used by the kernel's own crash tests.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogPublicationFault {
     RenameMarker,
@@ -230,7 +230,7 @@ pub enum CatalogPublicationFault {
     ReadGenerationDirectory,
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 impl CatalogPublicationFault {
     const fn storage_event(self) -> CatalogFileEvent {
         match self {
@@ -250,7 +250,7 @@ impl CatalogPublicationFault {
 
 /// Injects one typed catalog publication failure after the requested number of
 /// matching events. This never exists in a default product build.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_catalog_publication_fault_after<T>(
     fault: CatalogPublicationFault,
     preceding_occurrences: usize,
@@ -261,9 +261,9 @@ pub fn with_catalog_publication_fault_after<T>(
 
 /// Injects a bounded sequence of publication failures. Each entry names the
 /// publication event and the number of matching events to permit before the
-/// failure. This is test-support-only so rollback paths can be exercised in a
+/// failure. This is test-only so rollback paths can be exercised in a
 /// deterministic order without changing product storage behavior.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_catalog_publication_fault_sequence_after<T>(
     faults: &[(CatalogPublicationFault, usize)],
     action: impl FnOnce() -> T,

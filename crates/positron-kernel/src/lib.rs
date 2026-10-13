@@ -111,15 +111,18 @@ pub use catalog::{
     PreparedTransactionResolution, SystemAuditRetentionPolicy, SystemAuditRetentionPublication,
     TransactionId,
 };
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub use catalog::{
-    CatalogPublicationFault, with_catalog_generation_ambiguity_hook_after,
-    with_catalog_publication_ambiguity_hook_after, with_catalog_publication_event_hook_after,
-    with_catalog_publication_fault_after, with_catalog_publication_fault_sequence_after,
-    with_catalog_publication_hook_after,
+    CatalogPublicationFault, with_catalog_publication_fault_after,
+    with_catalog_publication_fault_sequence_after,
 };
 #[cfg(feature = "test-support")]
 pub use catalog::{GovernanceFixtureObject, GovernanceFixtureTarget};
+#[cfg(feature = "test-support")]
+pub use catalog::{
+    with_catalog_generation_ambiguity_hook_after, with_catalog_publication_ambiguity_hook_after,
+    with_catalog_publication_event_hook_after, with_catalog_publication_hook_after,
+};
 
 #[cfg(feature = "test-support")]
 pub use active_segment_ledger::publish_snapshot_lease_marker_for_test;
