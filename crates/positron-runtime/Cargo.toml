@@ -26,6 +26,7 @@ http = { version = "=1.5.0", default-features = false }
 hyper = { version = "=1.11.1", default-features = false, features = ["http1", "http2", "server"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["server-auto", "tokio"] }
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic", "logs", "trace", "with-serde"] }
+positron-backup = { path = "../positron-backup" }
 positron-api = { path = "../positron-api" }
 positron-config = { path = "../positron-config" }
 positron-domain = { path = "../positron-domain" }

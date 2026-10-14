@@ -180,7 +180,8 @@ pub use maintenance::{
     MaintenancePriority, MaintenanceReservation, MaintenanceReservationAuthority, MaintenanceScope,
     MaintenanceTask, MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase,
     MaintenanceTaskRecord, MaintenanceTaskStatus, MaintenanceTerminalFailure, MaintenanceTrigger,
-    NO_DURABLE_PROGRESS_SLO_SECONDS, RootProviderMigrationBinding, RootRetirementReferenceGuard,
+    NO_DURABLE_PROGRESS_SLO_SECONDS, RepositoryOperationBinding, RootProviderMigrationBinding,
+    RootRetirementReferenceGuard,
 };
 #[cfg(feature = "test-support")]
 pub use retention_time::ManualRetentionTime;

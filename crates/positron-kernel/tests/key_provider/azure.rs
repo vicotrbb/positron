@@ -88,11 +88,58 @@ fn azure_native_identity_is_admitted_before_files_and_releases_custody()
     Ok(())
 }
 
+fn read_native_identity_request(socket: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    socket.set_nonblocking(false)?;
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        socket.read_exact(&mut byte)?;
+        head.extend_from_slice(&byte);
+        assert!(head.len() < 4096);
+    }
+    Ok(head)
+}
+
+#[test]
+fn native_identity_fixture_reads_a_delayed_request_from_a_nonblocking_accept()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let writer = std::thread::spawn(move || -> std::io::Result<()> {
+        let mut socket = std::net::TcpStream::connect(address)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        socket.write_all(b"GET / HTTP/1.1\r\n\r\n")
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut socket = loop {
+        match listener.accept() {
+            Ok((socket, _)) => break socket,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1))
+            },
+            Err(error) => return Err(error.into()),
+        }
+    };
+    // Exercise the inherited BSD mode on every pinned platform.
+    socket.set_nonblocking(true)?;
+    let request = read_native_identity_request(&mut socket);
+    writer.join().map_err(|_| "delayed writer panicked")??;
+    assert_eq!(request?, b"GET / HTTP/1.1\r\n\r\n");
+    Ok(())
+}
+
 #[test]
 fn azure_app_service_native_http_rejection_is_bounded_and_secret_free()
 -> Result<(), Box<dyn std::error::Error>> {
     use positron_kernel::key_provider::{AzureKeyVaultKeyProvider, KeyProviderFailure};
-    use std::io::{Read, Write};
+    use std::io::Write;
     const CHILD: &str = "POSITRON_TEST_AZURE_APP_SERVICE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let root = Root::new()?;
@@ -119,14 +166,7 @@ fn azure_app_service_native_http_rejection_is_bounded_and_secret_free()
                     Err(error) => return Err(error),
                 }
             };
-            socket.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
-            let mut head = Vec::new();
-            while !head.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                socket.read_exact(&mut byte)?;
-                head.extend_from_slice(&byte);
-                assert!(head.len() < 4096);
-            }
+            let head = read_native_identity_request(&mut socket)?;
             let head = String::from_utf8(head).map_err(std::io::Error::other)?;
             assert!(head.contains("x-identity-header: fictional-secret-header"));
             assert!(head.contains("resource=https%3A%2F%2Fvault.azure.net"));

@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "15e5ef7a6d695e9d29e996ed64283a5ed6bbed9bcbe1b963c4ee27b34301c6af"
+    "x-positron-schema-digest": "4603a4044be826bfd12efc126cfa2b14aa0f6c2d25d1461cd1b6893a420ae6d5"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -345,262 +345,756 @@
               }
             }
           },
-          "400": {"description": "Invalid bounded alias-binding request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "404": {"description": "The explicit tenant is unavailable."},
-          "409": {"description": "The alias is already bound or reserved, the generation is stale, or the idempotency binding conflicts."},
-          "503": {"description": "Tenant alias administration is unavailable."}
+          "400": {
+            "description": "Invalid bounded alias-binding request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The explicit tenant is unavailable."
+          },
+          "409": {
+            "description": "The alias is already bound or reserved, the generation is stale, or the idempotency binding conflicts."
+          },
+          "503": {
+            "description": "Tenant alias administration is unavailable."
+          }
         }
       }
     },
     "/v1/tenants:create": {
       "post": {
         "operationId": "CreateTenant",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-max-request-bytes": 2048,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantCreateRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantCreateRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Redacted tenant-creation receipt.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantCreateResponse"}}}},
-          "400": {"description": "Invalid bounded tenant-creation request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "409": {"description": "The tenant already exists or the idempotency binding conflicts."},
-          "503": {"description": "Tenant administration is unavailable."}
+          "200": {
+            "description": "Redacted tenant-creation receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded tenant-creation request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "409": {
+            "description": "The tenant already exists or the idempotency binding conflicts."
+          },
+          "503": {
+            "description": "Tenant administration is unavailable."
+          }
         }
       }
     },
     "/v1/tenants:inspect": {
       "post": {
         "operationId": "InspectTenant",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-max-request-bytes": 2048,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantInspectRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantInspectRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Redacted tenant registry descriptor.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantInspectResponse"}}}},
-          "400": {"description": "Invalid bounded tenant-inspection request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "404": {"description": "The explicit tenant is unavailable."},
-          "503": {"description": "Tenant administration is unavailable."}
+          "200": {
+            "description": "Redacted tenant registry descriptor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantInspectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded tenant-inspection request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The explicit tenant is unavailable."
+          },
+          "503": {
+            "description": "Tenant administration is unavailable."
+          }
         }
       }
     },
     "/v1/tenants:list": {
       "post": {
         "operationId": "ListTenants",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-max-request-bytes": 2048,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantListRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantListRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "A snapshot-pinned page of redacted tenant registry descriptors.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantListResponse"}}}},
-          "400": {"description": "Invalid bounded tenant-list request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "409": {"description": "The opaque continuation belongs to an older Catalog snapshot; restart enumeration."},
-          "503": {"description": "Tenant administration is unavailable."}
+          "200": {
+            "description": "A snapshot-pinned page of redacted tenant registry descriptors.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded tenant-list request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "409": {
+            "description": "The opaque continuation belongs to an older Catalog snapshot; restart enumeration."
+          },
+          "503": {
+            "description": "Tenant administration is unavailable."
+          }
         }
       }
     },
     "/v1/tenants:update-display-name": {
       "post": {
         "operationId": "UpdateTenantDisplayName",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-max-request-bytes": 2048,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantDisplayNameUpdateRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantDisplayNameUpdateRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Redacted tenant-profile update receipt.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantDisplayNameUpdateResponse"}}}},
-          "400": {"description": "Invalid bounded tenant-profile update request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "409": {"description": "The display generation is stale or the idempotency binding conflicts."},
-          "503": {"description": "Tenant administration is unavailable."}
+          "200": {
+            "description": "Redacted tenant-profile update receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantDisplayNameUpdateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded tenant-profile update request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "409": {
+            "description": "The display generation is stale or the idempotency binding conflicts."
+          },
+          "503": {
+            "description": "Tenant administration is unavailable."
+          }
         }
       }
     },
     "/v1/maintenance:status": {
       "post": {
         "operationId": "StatusMaintenance",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 128,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceStatusRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceStatusRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Bounded redacted Maintenance Coordinator task status.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceStatusResponse"}}}},
-          "400": {"description": "Invalid bounded maintenance status request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "503": {"description": "Maintenance administration is unavailable."}
+          "200": {
+            "description": "Bounded redacted Maintenance Coordinator task status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded maintenance status request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "503": {
+            "description": "Maintenance administration is unavailable."
+          }
         }
       }
     },
     "/v1/maintenance:explain": {
       "post": {
         "operationId": "ExplainMaintenance",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 128,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceExplainRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceExplainRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "One bounded redacted Maintenance Coordinator task.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceExplainResponse"}}}},
-          "400": {"description": "Invalid bounded maintenance task identity."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "404": {"description": "The task is unavailable."},
-          "503": {"description": "Maintenance administration is unavailable."}
+          "200": {
+            "description": "One bounded redacted Maintenance Coordinator task.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceExplainResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded maintenance task identity."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The task is unavailable."
+          },
+          "503": {
+            "description": "Maintenance administration is unavailable."
+          }
         }
       }
     },
     "/v1/maintenance:run": {
       "post": {
         "operationId": "RunMaintenance",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 256,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceRunRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceRunRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Durably acknowledged bounded compaction task.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceRunResponse"}}}},
-          "400": {"description": "Invalid bounded compaction request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "404": {"description": "The explicit scope has no eligible sealed source."},
-          "409": {"description": "The administrative idempotency key is already bound to another task."},
-          "503": {"description": "Maintenance administration is unavailable."}
+          "200": {
+            "description": "Durably acknowledged bounded compaction task.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded compaction request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The explicit scope has no eligible sealed source."
+          },
+          "409": {
+            "description": "The administrative idempotency key is already bound to another task."
+          },
+          "503": {
+            "description": "Maintenance administration is unavailable."
+          }
         }
       }
     },
     "/v1/maintenance:pause": {
       "post": {
         "operationId": "PauseMaintenance",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 192,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenancePauseRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenancePauseRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Durable acknowledgement of one bounded optional-task pause.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceControlResponse"}}}},
-          "400": {"description": "Invalid bounded maintenance pause request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "404": {"description": "The task is unavailable."},
-          "409": {"description": "The task generation or transition precondition failed, or the idempotency binding conflicts."},
-          "503": {"description": "Maintenance administration is unavailable."}
+          "200": {
+            "description": "Durable acknowledgement of one bounded optional-task pause.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceControlResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded maintenance pause request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The task is unavailable."
+          },
+          "409": {
+            "description": "The task generation or transition precondition failed, or the idempotency binding conflicts."
+          },
+          "503": {
+            "description": "Maintenance administration is unavailable."
+          }
         }
       }
     },
     "/v1/maintenance:resume": {
       "post": {
         "operationId": "ResumeMaintenance",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 192,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceResumeRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceResumeRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Durable acknowledgement of one deferred-task resume.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceControlResponse"}}}},
-          "400": {"description": "Invalid bounded maintenance resume request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "404": {"description": "The task is unavailable."},
-          "409": {"description": "The task transition precondition failed, or the idempotency binding conflicts."},
-          "503": {"description": "Maintenance administration is unavailable."}
+          "200": {
+            "description": "Durable acknowledgement of one deferred-task resume.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceControlResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded maintenance resume request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The task is unavailable."
+          },
+          "409": {
+            "description": "The task transition precondition failed, or the idempotency binding conflicts."
+          },
+          "503": {
+            "description": "Maintenance administration is unavailable."
+          }
         }
       }
     },
     "/v1/maintenance:window": {
       "post": {
         "operationId": "SetMaintenanceWindow",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 266,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceWindowRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceWindowRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Durable acknowledgement of one finite optional-class Maintenance Window.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceWindowResponse"}}}},
-          "400": {"description": "Invalid bounded Maintenance Window request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "409": {"description": "The Catalog generation precondition failed, or the idempotency binding conflicts."},
-          "503": {"description": "Maintenance administration is unavailable."}
+          "200": {
+            "description": "Durable acknowledgement of one finite optional-class Maintenance Window.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceWindowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded Maintenance Window request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "409": {
+            "description": "The Catalog generation precondition failed, or the idempotency binding conflicts."
+          },
+          "503": {
+            "description": "Maintenance administration is unavailable."
+          }
         }
       }
     },
     "/v1/maintenance:verify": {
       "post": {
         "operationId": "VerifyOnlineIntegrity",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 512,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OnlineVerificationRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OnlineVerificationRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "One bounded authenticated online integrity Verification Report.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OnlineVerificationReport"}}}},
-          "400": {"description": "Invalid bounded verification request."},
-          "401": {"description": "System-administration authentication failed before request decoding."},
-          "404": {"description": "The explicit immutable signal scope is unavailable."},
-          "503": {"description": "Verification administration or a required key is unavailable."}
+          "200": {
+            "description": "One bounded authenticated online integrity Verification Report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineVerificationReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded verification request."
+          },
+          "401": {
+            "description": "System-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The explicit immutable signal scope is unavailable."
+          },
+          "503": {
+            "description": "Verification administration or a required key is unavailable."
+          }
         }
       }
     },
     "/v1/tenant-retention:preview": {
       "post": {
         "operationId": "PreviewTenantRetention",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 2048,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantRetentionPreviewRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantRetentionPreviewRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "A snapshot-pinned page of redacted retention impact evidence with a full-impact confirmation digest.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantRetentionPreviewResponse"}}}},
-          "400": {"description": "Invalid bounded retention preview request."},
-          "401": {"description": "Tenant-administration authentication failed before request decoding."},
-          "404": {"description": "The explicit tenant is unavailable."},
-          "409": {"description": "The opaque continuation belongs to an older impact snapshot; restart the preview."},
-          "503": {"description": "Retention administration is unavailable."}
+          "200": {
+            "description": "A snapshot-pinned page of redacted retention impact evidence with a full-impact confirmation digest.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantRetentionPreviewResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded retention preview request."
+          },
+          "401": {
+            "description": "Tenant-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The explicit tenant is unavailable."
+          },
+          "409": {
+            "description": "The opaque continuation belongs to an older impact snapshot; restart the preview."
+          },
+          "503": {
+            "description": "Retention administration is unavailable."
+          }
         }
       }
     },
     "/v1/tenant-retention:update": {
       "post": {
         "operationId": "UpdateTenantRetention",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-availability": "available",
         "x-positron-max-request-bytes": 2048,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantRetentionUpdateRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantRetentionUpdateRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Redacted retention publication receipt.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TenantRetentionUpdateResponse"}}}},
-          "400": {"description": "Invalid bounded retention update request."},
-          "401": {"description": "Tenant-administration authentication failed before request decoding."},
-          "404": {"description": "The explicit tenant is unavailable."},
-          "409": {"description": "The confirmation is invalid, the generation is stale, or the idempotency binding conflicts."},
-          "503": {"description": "Retention administration is unavailable."}
+          "200": {
+            "description": "Redacted retention publication receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantRetentionUpdateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid bounded retention update request."
+          },
+          "401": {
+            "description": "Tenant-administration authentication failed before request decoding."
+          },
+          "404": {
+            "description": "The explicit tenant is unavailable."
+          },
+          "409": {
+            "description": "The confirmation is invalid, the generation is stale, or the idempotency binding conflicts."
+          },
+          "503": {
+            "description": "Retention administration is unavailable."
+          }
         }
       }
     },
     "/v1/policies:diff": {
       "post": {
         "operationId": "DiffPolicy",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-max-request-bytes": 65536,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PolicyDiffRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyDiffRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Bounded prospective policy diff with redacted semantic categories; it never activates either candidate.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PolicyDiffResponse"}}}},
-          "400": {"description": "Invalid policy diff request or candidate."},
-          "401": {"description": "Tenant-administration authentication failed."},
-          "503": {"description": "Policy administration is unavailable."}
+          "200": {
+            "description": "Bounded prospective policy diff with redacted semantic categories; it never activates either candidate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyDiffResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid policy diff request or candidate."
+          },
+          "401": {
+            "description": "Tenant-administration authentication failed."
+          },
+          "503": {
+            "description": "Policy administration is unavailable."
+          }
         }
       }
     },
     "/v1/policies:explain": {
       "post": {
         "operationId": "ExplainPolicy",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-max-request-bytes": 65536,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PolicyExplainRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyExplainRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Bounded prospective policy explanation with redacted outcome evidence; it never activates the candidate.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PolicyExplainResponse"}}}},
-          "400": {"description": "Invalid policy explanation request or candidate."},
-          "401": {"description": "Tenant-administration authentication failed."},
-          "503": {"description": "Policy administration is unavailable."}
+          "200": {
+            "description": "Bounded prospective policy explanation with redacted outcome evidence; it never activates the candidate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyExplainResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid policy explanation request or candidate."
+          },
+          "401": {
+            "description": "Tenant-administration authentication failed."
+          },
+          "503": {
+            "description": "Policy administration is unavailable."
+          }
         }
       }
     },
     "/v1/policies:activate": {
       "post": {
         "operationId": "ActivatePolicy",
-        "security": [{"apiKeyBearer": []}],
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
         "x-positron-max-request-bytes": 65536,
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PolicyActivateRequest"}}}},
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyActivateRequest"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {"description": "Generation-checked, idempotent prospective policy activation committed with governance evidence.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PolicyActivateResponse"}}}},
-          "400": {"description": "Invalid policy activation request or candidate."},
-          "401": {"description": "Tenant-administration authentication failed."},
-          "409": {"description": "The resource generation is stale or the idempotency key binds different content."},
-          "503": {"description": "Policy administration is unavailable."}
+          "200": {
+            "description": "Generation-checked, idempotent prospective policy activation committed with governance evidence.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyActivateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid policy activation request or candidate."
+          },
+          "401": {
+            "description": "Tenant-administration authentication failed."
+          },
+          "409": {
+            "description": "The resource generation is stale or the idempotency key binds different content."
+          },
+          "503": {
+            "description": "Policy administration is unavailable."
+          }
         }
       }
     },
@@ -636,38 +1130,70 @@
         }
       }
     },
-      "/v1/key-provider-migrations:manage": {
-        "post": {
-          "operationId": "ManageProviderMigration",
-          "security": [
-            {
-              "apiKeyBearer": []
+    "/v1/key-provider-migrations:manage": {
+      "post": {
+        "operationId": "ManageProviderMigration",
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderMigrationRequest"
+              }
             }
-          ],
-          "requestBody": {
-            "required": true,
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated root status or durable phase receipt",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProviderMigrationRequest"
-                }
-              }
-            }
-          },
-          "responses": {
-            "200": {
-              "description": "Authenticated root status or durable phase receipt",
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ProviderMigrationResponse"
-                  }
+                  "$ref": "#/components/schemas/ProviderMigrationResponse"
                 }
               }
             }
           }
         }
       }
+    },
+    "/v1/repositories:manage": {
+      "post": {
+        "operationId": "ManageRepository",
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepositoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated repository provider inspection or durable operation receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   },
   "components": {
     "schemas": {
@@ -1295,366 +1821,1284 @@
         }
       },
       "TenantCreateRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["slug", "display_name", "retention_seconds", "weight", "memory_bytes", "queue_slots", "task_slots", "buffer_cache_bytes", "batch_items", "lease_slots", "retry_slots", "io_permits", "cpu_work_units", "file_descriptors", "disk_headroom_bytes", "idempotency_key"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slug",
+          "display_name",
+          "retention_seconds",
+          "weight",
+          "memory_bytes",
+          "queue_slots",
+          "task_slots",
+          "buffer_cache_bytes",
+          "batch_items",
+          "lease_slots",
+          "retry_slots",
+          "io_permits",
+          "cpu_work_units",
+          "file_descriptors",
+          "disk_headroom_bytes",
+          "idempotency_key"
+        ],
         "properties": {
-          "slug": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"},
-          "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
-          "retention_seconds": {"type": "integer", "minimum": 1},
-          "weight": {"type": "integer", "minimum": 1, "maximum": 65535},
-          "memory_bytes": {"type": "integer", "minimum": 1},
-          "queue_slots": {"type": "integer", "minimum": 1},
-          "task_slots": {"type": "integer", "minimum": 1},
-          "buffer_cache_bytes": {"type": "integer", "minimum": 1},
-          "batch_items": {"type": "integer", "minimum": 1},
-          "lease_slots": {"type": "integer", "minimum": 1},
-          "retry_slots": {"type": "integer", "minimum": 1},
-          "io_permits": {"type": "integer", "minimum": 1},
-          "cpu_work_units": {"type": "integer", "minimum": 1},
-          "file_descriptors": {"type": "integer", "minimum": 1},
-          "disk_headroom_bytes": {"type": "integer", "minimum": 1},
-          "idempotency_key": {"type": "string", "format": "uuid"}
+          "slug": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "retention_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "memory_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "queue_slots": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "task_slots": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "buffer_cache_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "batch_items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "lease_slots": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "retry_slots": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "io_permits": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "cpu_work_units": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "file_descriptors": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "disk_headroom_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "TenantCreateResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenant", "resource_generation", "audit_position"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant",
+          "resource_generation",
+          "audit_position"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid"},
-          "resource_generation": {"type": "integer", "minimum": 1},
-          "audit_position": {"type": "integer", "minimum": 1}
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "resource_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "audit_position": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       },
       "TenantInspectRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenant"],
-        "properties": {"tenant": {"type": "string", "format": "uuid"}}
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant"
+        ],
+        "properties": {
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
       },
       "TenantDescriptor": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenant", "slug", "display_name", "retention_seconds", "display_generation", "retention_generation", "lifecycle"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant",
+          "slug",
+          "display_name",
+          "retention_seconds",
+          "display_generation",
+          "retention_generation",
+          "lifecycle"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid"},
-          "slug": {"type": "string", "minLength": 1, "maxLength": 63, "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"},
-          "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
-          "retention_seconds": {"type": "integer", "minimum": 1},
-          "display_generation": {"type": "integer", "minimum": 1},
-          "retention_generation": {"type": "integer", "minimum": 1},
-          "lifecycle": {"$ref": "#/components/schemas/TenantLifecycleTarget"}
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slug": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "retention_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "display_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "retention_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/TenantLifecycleTarget"
+          }
         }
       },
       "TenantInspectResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenant"],
-        "properties": {"tenant": {"$ref": "#/components/schemas/TenantDescriptor"}}
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant"
+        ],
+        "properties": {
+          "tenant": {
+            "$ref": "#/components/schemas/TenantDescriptor"
+          }
+        }
       },
       "TenantListRequest": {
-        "type": "object", "additionalProperties": false,
-        "properties": {"continuation": {"type": "string", "pattern": "^[0-9a-f]{84}$", "minLength": 84, "maxLength": 84}}
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "continuation": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{84}$",
+            "minLength": 84,
+            "maxLength": 84
+          }
+        }
       },
       "TenantListResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenants", "continuation"],
-        "properties": {"tenants": {"type": "array", "maxItems": 48, "items": {"$ref": "#/components/schemas/TenantDescriptor"}}, "continuation": {"type": ["string", "null"], "pattern": "^[0-9a-f]{84}$", "maxLength": 84}}
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenants",
+          "continuation"
+        ],
+        "properties": {
+          "tenants": {
+            "type": "array",
+            "maxItems": 48,
+            "items": {
+              "$ref": "#/components/schemas/TenantDescriptor"
+            }
+          },
+          "continuation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{84}$",
+            "maxLength": 84
+          }
+        }
       },
       "TenantDisplayNameUpdateRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenant", "expected_display_generation", "display_name", "idempotency_key"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant",
+          "expected_display_generation",
+          "display_name",
+          "idempotency_key"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid"},
-          "expected_display_generation": {"type": "integer", "minimum": 1},
-          "display_name": {"type": "string", "minLength": 1, "maxLength": 128},
-          "idempotency_key": {"type": "string", "format": "uuid"}
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_display_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "TenantDisplayNameUpdateResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenant", "display_generation", "audit_position"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant",
+          "display_generation",
+          "audit_position"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid"},
-          "display_generation": {"type": "integer", "minimum": 1},
-          "audit_position": {"type": "integer", "minimum": 1}
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "display_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "audit_position": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       },
       "MaintenanceStatusRequest": {
-        "type": "object", "additionalProperties": false,
+        "type": "object",
+        "additionalProperties": false,
         "properties": {
-          "cursor": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$", "minLength": 32, "maxLength": 32},
-          "limit": {"type": "integer", "minimum": 1, "maximum": 32}
+          "cursor": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{32}$",
+            "minLength": 32,
+            "maxLength": 32
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
         }
       },
       "MaintenanceTaskStatus": {
-        "type": "object", "additionalProperties": false,
-        "required": ["identity", "class", "scope", "phase", "submitted_at_unix_seconds", "cancellation_requested"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity",
+          "class",
+          "scope",
+          "phase",
+          "submitted_at_unix_seconds",
+          "cancellation_requested"
+        ],
         "properties": {
-          "identity": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-          "class": {"type": "string", "minLength": 1, "maxLength": 64},
-          "scope": {"type": "string", "minLength": 1, "maxLength": 128},
-          "phase": {"type": "string", "enum": ["queued", "running", "deferred", "cancelled", "succeeded", "failed"]},
-          "submitted_at_unix_seconds": {"type": "integer", "minimum": 0},
-          "checkpoint_sequence": {"type": "integer", "minimum": 1},
-          "last_progress_at_unix_seconds": {"type": "integer", "minimum": 0},
-          "no_durable_progress_slo_breached": {"type": "boolean"},
-          "no_durable_progress_slo_seconds": {"type": "integer", "minimum": 1},
-          "capacity_risk": {"type": "string", "enum": ["foreground_reservation", "recovery_reserve"]},
-          "retention_impact": {"type": "string", "enum": ["unaffected", "eligibility_unknown"]},
-          "recovery_impact": {"type": "string", "enum": ["unaffected"]},
-          "automatic_resume_at_unix_seconds": {"type": "integer", "minimum": 1},
-          "pause_until_unix_seconds": {"type": "integer", "minimum": 1},
-          "cancellation_requested": {"type": "boolean"},
-          "resource_generation": {"type": "integer", "minimum": 1},
-          "reservations": {"$ref": "#/components/schemas/MaintenanceResourceReservations"},
-          "expected_foreground_impact": {"$ref": "#/components/schemas/MaintenanceResourceReservations"},
-          "blocked_precondition": {"type": "string", "enum": ["maintenance_pause_active", "maintenance_window_active", "conflict_owner_active", "scheduled_start_time", "clock_uncertain_destructive_schedule"]},
-          "maintenance_window_until_unix_seconds": {"type": "integer", "minimum": 1},
-          "safe_actions": {"type": "array", "maxItems": 1, "items": {"type": "string", "enum": ["pause", "resume"]}},
-          "backlog_age_seconds": {"type": "integer", "minimum": 0},
-          "conflict_owner": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-          "checkpoint_completed_inputs": {"type": "integer", "minimum": 0},
-          "input_object_count": {"type": "integer", "minimum": 0, "maximum": 16},
-          "output_object_count": {"type": "integer", "minimum": 0, "maximum": 16},
-          "estimated_output_object_amplification_milli": {"type": "integer", "minimum": 1},
-          "terminal_outcome": {"type": "string", "enum": ["cancelled", "succeeded", "failed"]},
-          "terminal_failure_class": {"type": "string", "enum": ["identity_mismatch", "stale_generation", "unclassified"]}
+          "identity": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "class": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "scope": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "deferred",
+              "cancelled",
+              "succeeded",
+              "failed"
+            ]
+          },
+          "submitted_at_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "checkpoint_sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "last_progress_at_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "no_durable_progress_slo_breached": {
+            "type": "boolean"
+          },
+          "no_durable_progress_slo_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "capacity_risk": {
+            "type": "string",
+            "enum": [
+              "foreground_reservation",
+              "recovery_reserve"
+            ]
+          },
+          "retention_impact": {
+            "type": "string",
+            "enum": [
+              "unaffected",
+              "eligibility_unknown"
+            ]
+          },
+          "recovery_impact": {
+            "type": "string",
+            "enum": [
+              "unaffected"
+            ]
+          },
+          "automatic_resume_at_unix_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "pause_until_unix_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "cancellation_requested": {
+            "type": "boolean"
+          },
+          "resource_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reservations": {
+            "$ref": "#/components/schemas/MaintenanceResourceReservations"
+          },
+          "expected_foreground_impact": {
+            "$ref": "#/components/schemas/MaintenanceResourceReservations"
+          },
+          "blocked_precondition": {
+            "type": "string",
+            "enum": [
+              "maintenance_pause_active",
+              "maintenance_window_active",
+              "conflict_owner_active",
+              "scheduled_start_time",
+              "clock_uncertain_destructive_schedule"
+            ]
+          },
+          "maintenance_window_until_unix_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "safe_actions": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "type": "string",
+              "enum": [
+                "pause",
+                "resume"
+              ]
+            }
+          },
+          "backlog_age_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "conflict_owner": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "checkpoint_completed_inputs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "input_object_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16
+          },
+          "output_object_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 16
+          },
+          "estimated_output_object_amplification_milli": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "terminal_outcome": {
+            "type": "string",
+            "enum": [
+              "cancelled",
+              "succeeded",
+              "failed"
+            ]
+          },
+          "terminal_failure_class": {
+            "type": "string",
+            "enum": [
+              "identity_mismatch",
+              "stale_generation",
+              "unclassified"
+            ]
+          }
         }
       },
       "MaintenanceTaskAcknowledgement": {
-        "type": "object", "additionalProperties": false,
-        "required": ["identity", "class", "scope", "submitted_at_unix_seconds"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity",
+          "class",
+          "scope",
+          "submitted_at_unix_seconds"
+        ],
         "properties": {
-          "identity": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-          "class": {"type": "string", "minLength": 1, "maxLength": 64},
-          "scope": {"type": "string", "minLength": 1, "maxLength": 128},
-          "submitted_at_unix_seconds": {"type": "integer", "minimum": 1}
+          "identity": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "class": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "scope": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "submitted_at_unix_seconds": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       },
       "MaintenanceResourceReservations": {
-        "type": "object", "additionalProperties": false,
-        "required": ["memory_bytes", "queue_slots", "task_slots", "buffer_cache_bytes", "batch_items", "lease_slots", "retry_slots", "io_permits", "cpu_work_units", "file_descriptors", "disk_headroom_bytes"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "memory_bytes",
+          "queue_slots",
+          "task_slots",
+          "buffer_cache_bytes",
+          "batch_items",
+          "lease_slots",
+          "retry_slots",
+          "io_permits",
+          "cpu_work_units",
+          "file_descriptors",
+          "disk_headroom_bytes"
+        ],
         "properties": {
-          "memory_bytes": {"type": "integer", "minimum": 0},
-          "queue_slots": {"type": "integer", "minimum": 0},
-          "task_slots": {"type": "integer", "minimum": 0},
-          "buffer_cache_bytes": {"type": "integer", "minimum": 0},
-          "batch_items": {"type": "integer", "minimum": 0},
-          "lease_slots": {"type": "integer", "minimum": 0},
-          "retry_slots": {"type": "integer", "minimum": 0},
-          "io_permits": {"type": "integer", "minimum": 0},
-          "cpu_work_units": {"type": "integer", "minimum": 0},
-          "file_descriptors": {"type": "integer", "minimum": 0},
-          "disk_headroom_bytes": {"type": "integer", "minimum": 0}
+          "memory_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queue_slots": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "task_slots": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "buffer_cache_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "batch_items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lease_slots": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retry_slots": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "io_permits": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cpu_work_units": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "file_descriptors": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "disk_headroom_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
         }
       },
       "MaintenanceStatusResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tasks", "returned", "total", "queued", "running", "deferred", "terminal", "integrity_findings"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tasks",
+          "returned",
+          "total",
+          "queued",
+          "running",
+          "deferred",
+          "terminal",
+          "integrity_findings"
+        ],
         "properties": {
-          "tasks": {"type": "array", "maxItems": 32, "items": {"$ref": "#/components/schemas/MaintenanceTaskStatus"}},
-          "returned": {"type": "integer", "minimum": 0, "maximum": 32},
-          "total": {"type": "integer", "minimum": 0, "maximum": 128},
-          "next_cursor": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-          "queued": {"type": "integer", "minimum": 0},
-          "running": {"type": "integer", "minimum": 0},
-          "deferred": {"type": "integer", "minimum": 0},
-          "terminal": {"type": "integer", "minimum": 0},
-          "integrity_findings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/components/schemas/IntegrityQuarantineFinding"}}
+          "tasks": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/MaintenanceTaskStatus"
+            }
+          },
+          "returned": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "next_cursor": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "queued": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "running": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deferred": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "terminal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "integrity_findings": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/IntegrityQuarantineFinding"
+            }
+          }
         }
       },
       "AuthenticatedTimeRange": {
-        "type": "object", "additionalProperties": false,
-        "required": ["provenance"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provenance"
+        ],
         "properties": {
-          "provenance": {"type": "string", "enum": ["known", "missing_source_time", "invalid_source_time", "legacy_format", "unavailable"]},
-          "earliest_unix_nanos": {"type": "integer", "format": "int64"},
-          "latest_unix_nanos": {"type": "integer", "format": "int64"}
+          "provenance": {
+            "type": "string",
+            "enum": [
+              "known",
+              "missing_source_time",
+              "invalid_source_time",
+              "legacy_format",
+              "unavailable"
+            ]
+          },
+          "earliest_unix_nanos": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "latest_unix_nanos": {
+            "type": "integer",
+            "format": "int64"
+          }
         }
       },
       "IntegrityQuarantineFinding": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenant", "signal", "shard", "segment", "base_position", "event_range", "ingest_range"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant",
+          "signal",
+          "shard",
+          "segment",
+          "base_position",
+          "event_range",
+          "ingest_range"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid"},
-          "signal": {"type": "string", "enum": ["logs", "traces"]},
-          "shard": {"type": "integer", "minimum": 1},
-          "segment": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
-          "base_position": {"type": "integer", "minimum": 0},
-          "event_range": {"$ref": "#/components/schemas/AuthenticatedTimeRange"},
-          "ingest_range": {"$ref": "#/components/schemas/AuthenticatedTimeRange"}
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "logs",
+              "traces"
+            ]
+          },
+          "shard": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "segment": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "base_position": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "event_range": {
+            "$ref": "#/components/schemas/AuthenticatedTimeRange"
+          },
+          "ingest_range": {
+            "$ref": "#/components/schemas/AuthenticatedTimeRange"
+          }
         }
       },
       "MaintenanceExplainRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["identity"],
-        "properties": {"identity": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$", "minLength": 32, "maxLength": 32}}
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity"
+        ],
+        "properties": {
+          "identity": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{32}$",
+            "minLength": 32,
+            "maxLength": 32
+          }
+        }
       },
       "MaintenanceExplainResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["task"],
-        "properties": {"task": {"$ref": "#/components/schemas/MaintenanceTaskStatus"}}
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "task": {
+            "$ref": "#/components/schemas/MaintenanceTaskStatus"
+          }
+        }
       },
       "MaintenanceRunRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["class", "tenant", "signal", "shard", "idempotency_key"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "class",
+          "tenant",
+          "signal",
+          "shard",
+          "idempotency_key"
+        ],
         "properties": {
-          "class": {"type": "string", "enum": ["compaction"]},
-          "tenant": {"type": "string", "format": "uuid"},
-          "signal": {"type": "string", "enum": ["logs", "traces"]},
-          "shard": {"type": "integer", "minimum": 1},
-          "idempotency_key": {"type": "string", "format": "uuid"}
+          "class": {
+            "type": "string",
+            "enum": [
+              "compaction"
+            ]
+          },
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "logs",
+              "traces"
+            ]
+          },
+          "shard": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "MaintenanceRunResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["task", "resource_generation"],
-        "properties": {"task": {"$ref": "#/components/schemas/MaintenanceTaskAcknowledgement"}, "resource_generation": {"type": "integer", "minimum": 1}}
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "resource_generation"
+        ],
+        "properties": {
+          "task": {
+            "$ref": "#/components/schemas/MaintenanceTaskAcknowledgement"
+          },
+          "resource_generation": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
       },
       "MaintenancePauseRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["identity", "resource_generation", "duration_seconds", "idempotency_key"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity",
+          "resource_generation",
+          "duration_seconds",
+          "idempotency_key"
+        ],
         "properties": {
-          "identity": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$", "minLength": 32, "maxLength": 32},
-          "resource_generation": {"type": "integer", "minimum": 1},
-          "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-          "idempotency_key": {"type": "string", "format": "uuid"}
+          "identity": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{32}$",
+            "minLength": 32,
+            "maxLength": 32
+          },
+          "resource_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 86400
+          },
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "MaintenanceResumeRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["identity", "idempotency_key"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity",
+          "idempotency_key"
+        ],
         "properties": {
-          "identity": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$", "minLength": 32, "maxLength": 32},
-          "idempotency_key": {"type": "string", "format": "uuid"}
+          "identity": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{32}$",
+            "minLength": 32,
+            "maxLength": 32
+          },
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "MaintenanceControlResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["task", "audit_position", "action"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "audit_position",
+          "action"
+        ],
         "properties": {
-          "task": {"$ref": "#/components/schemas/MaintenanceTaskAcknowledgement"},
-          "audit_position": {"type": "integer", "minimum": 1},
-          "action": {"type": "string", "enum": ["pause", "resume"]},
-          "resource_generation": {"type": "integer", "minimum": 1},
-          "pause_until_unix_seconds": {"type": "integer", "minimum": 1}
+          "task": {
+            "$ref": "#/components/schemas/MaintenanceTaskAcknowledgement"
+          },
+          "audit_position": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "pause",
+              "resume"
+            ]
+          },
+          "resource_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "pause_until_unix_seconds": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       },
       "MaintenanceWindowRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["deferred_classes", "expected_catalog_generation", "duration_seconds", "idempotency_key"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "deferred_classes",
+          "expected_catalog_generation",
+          "duration_seconds",
+          "idempotency_key"
+        ],
         "properties": {
-          "deferred_classes": {"type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": {"type": "string", "enum": ["compaction", "schema_promotion", "schema_demotion", "repository_verification", "backup_snapshot", "durable_export"]}},
-          "expected_catalog_generation": {"type": "integer", "minimum": 1},
-          "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
-          "idempotency_key": {"type": "string", "format": "uuid"}
+          "deferred_classes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "compaction",
+                "schema_promotion",
+                "schema_demotion",
+                "repository_verification",
+                "backup_snapshot",
+                "durable_export"
+              ]
+            }
+          },
+          "expected_catalog_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 86400
+          },
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "MaintenanceWindowResponse": {
-        "type": "object", "additionalProperties": false,
-        "required": ["deferred_classes", "until_unix_seconds", "catalog_generation", "audit_position"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "deferred_classes",
+          "until_unix_seconds",
+          "catalog_generation",
+          "audit_position"
+        ],
         "properties": {
-          "deferred_classes": {"type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": {"type": "string", "enum": ["compaction", "schema_promotion", "schema_demotion", "repository_verification", "backup_snapshot", "durable_export"]}},
-          "until_unix_seconds": {"type": "integer", "minimum": 1},
-          "catalog_generation": {"type": "integer", "minimum": 1},
-          "audit_position": {"type": "integer", "minimum": 1}
+          "deferred_classes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "compaction",
+                "schema_promotion",
+                "schema_demotion",
+                "repository_verification",
+                "backup_snapshot",
+                "durable_export"
+              ]
+            }
+          },
+          "until_unix_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "audit_position": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       },
       "OnlineVerificationRequest": {
-        "type": "object", "additionalProperties": false,
-        "required": ["tenant", "signal", "shard"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant",
+          "signal",
+          "shard"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid"},
-          "signal": {"type": "string", "enum": ["logs", "traces"]},
-          "shard": {"type": "integer", "minimum": 1},
-          "expected_catalog_generation": {"type": "integer", "minimum": 1},
-          "continuation": {"type": "string", "pattern": "^[0-9A-Fa-f]{272}$", "minLength": 272, "maxLength": 272}
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "logs",
+              "traces"
+            ]
+          },
+          "shard": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expected_catalog_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "continuation": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{272}$",
+            "minLength": 272,
+            "maxLength": 272
+          }
         }
       },
       "OnlineVerificationReport": {
-        "type": "object", "additionalProperties": false,
-        "required": ["report_version", "tenant", "signal", "shard", "catalog_generation", "examined_segments", "examined_bytes", "omitted_segments", "outcome", "verification_complete", "report_checksum", "findings"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "report_version",
+          "tenant",
+          "signal",
+          "shard",
+          "catalog_generation",
+          "examined_segments",
+          "examined_bytes",
+          "omitted_segments",
+          "outcome",
+          "verification_complete",
+          "report_checksum",
+          "findings"
+        ],
         "properties": {
-          "report_version": {"type": "integer", "const": 1},
-          "tenant": {"type": "string", "format": "uuid"},
-          "signal": {"type": "string", "enum": ["logs", "traces"]},
-          "shard": {"type": "integer", "minimum": 1},
-          "catalog_generation": {"type": "integer", "minimum": 1},
-          "examined_segments": {"type": "integer", "minimum": 0, "maximum": 128},
-          "examined_bytes": {"type": "integer", "minimum": 0},
-          "omitted_segments": {"type": "integer", "minimum": 0},
-          "outcome": {"type": "string", "enum": ["verified", "incomplete", "stale", "quarantined", "fenced"]},
-          "verification_complete": {"type": "boolean"},
-          "report_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$", "minLength": 64, "maxLength": 64},
-          "continuation": {"type": "string", "pattern": "^[0-9A-Fa-f]{272}$", "minLength": 272, "maxLength": 272},
-          "findings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/components/schemas/IntegrityQuarantineFinding"}}
+          "report_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "signal": {
+            "type": "string",
+            "enum": [
+              "logs",
+              "traces"
+            ]
+          },
+          "shard": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "examined_segments": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 128
+          },
+          "examined_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "omitted_segments": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "incomplete",
+              "stale",
+              "quarantined",
+              "fenced"
+            ]
+          },
+          "verification_complete": {
+            "type": "boolean"
+          },
+          "report_checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "continuation": {
+            "type": "string",
+            "pattern": "^[0-9A-Fa-f]{272}$",
+            "minLength": 272,
+            "maxLength": 272
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/IntegrityQuarantineFinding"
+            }
+          }
         }
       },
       "TenantRetentionPreviewRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["tenant", "proposed_retention_seconds"],
+        "required": [
+          "tenant",
+          "proposed_retention_seconds"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid", "description": "Explicit tenant-administration target; it cannot select another tenant."},
-          "proposed_retention_seconds": {"type": "integer", "minimum": 1},
-          "continuation": {"type": "string", "pattern": "^[0-9a-f]{212}$", "minLength": 212, "maxLength": 212}
+          "tenant": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Explicit tenant-administration target; it cannot select another tenant."
+          },
+          "proposed_retention_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "continuation": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{212}$",
+            "minLength": 212,
+            "maxLength": 212
+          }
         }
       },
       "TenantRetentionScopeImpact": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["signal", "shard", "catalog_identity", "catalog_generation", "evaluated_at_unix_nanos", "affected_bytes", "immediately_reclaimable_bytes", "deferred_active_segment_bytes", "deferred_mixed_sealed_segment_bytes", "earliest_reclamation"],
+        "required": [
+          "signal",
+          "shard",
+          "catalog_identity",
+          "catalog_generation",
+          "evaluated_at_unix_nanos",
+          "affected_bytes",
+          "immediately_reclaimable_bytes",
+          "deferred_active_segment_bytes",
+          "deferred_mixed_sealed_segment_bytes",
+          "earliest_reclamation"
+        ],
         "properties": {
-          "signal": {"type": "string", "enum": ["logs", "traces"]},
-          "shard": {"type": "integer", "minimum": 0},
-          "catalog_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "catalog_generation": {"type": "integer", "minimum": 1},
-          "evaluated_at_unix_nanos": {"type": "integer"},
-          "affected_start_unix_nanos": {"type": "integer"},
-          "affected_end_unix_nanos": {"type": "integer"},
-          "affected_bytes": {"type": "integer", "minimum": 0},
-          "immediately_reclaimable_bytes": {"type": "integer", "minimum": 0},
-          "deferred_active_segment_bytes": {"type": "integer", "minimum": 0},
-          "deferred_mixed_sealed_segment_bytes": {"type": "integer", "minimum": 0},
-          "earliest_reclamation": {"type": "string", "enum": ["none", "at", "blocked_by_durable_lease", "blocked_by_in_process_snapshot"]},
-          "earliest_reclamation_unix_nanos": {"type": "integer"}
+          "signal": {
+            "type": "string",
+            "enum": [
+              "logs",
+              "traces"
+            ]
+          },
+          "shard": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "catalog_identity": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "evaluated_at_unix_nanos": {
+            "type": "integer"
+          },
+          "affected_start_unix_nanos": {
+            "type": "integer"
+          },
+          "affected_end_unix_nanos": {
+            "type": "integer"
+          },
+          "affected_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "immediately_reclaimable_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deferred_active_segment_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deferred_mixed_sealed_segment_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "earliest_reclamation": {
+            "type": "string",
+            "enum": [
+              "none",
+              "at",
+              "blocked_by_durable_lease",
+              "blocked_by_in_process_snapshot"
+            ]
+          },
+          "earliest_reclamation_unix_nanos": {
+            "type": "integer"
+          }
         }
       },
       "TenantRetentionPreviewResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["tenant", "retention_generation", "proposed_retention_seconds", "catalog_identity", "catalog_generation", "confirmation_digest", "confirmation_evaluated_at_unix_nanos", "scopes", "continuation"],
+        "required": [
+          "tenant",
+          "retention_generation",
+          "proposed_retention_seconds",
+          "catalog_identity",
+          "catalog_generation",
+          "confirmation_digest",
+          "confirmation_evaluated_at_unix_nanos",
+          "scopes",
+          "continuation"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid"},
-          "retention_generation": {"type": "integer", "minimum": 1},
-          "proposed_retention_seconds": {"type": "integer", "minimum": 1},
-          "catalog_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "catalog_generation": {"type": "integer", "minimum": 1},
-          "confirmation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Opaque confirmation binding computed from current canonical evidence."},
-          "scopes": {"type": "array", "maxItems": 64, "items": {"$ref": "#/components/schemas/TenantRetentionScopeImpact"}},
-          "continuation": {"type": ["string", "null"], "pattern": "^[0-9a-f]{212}$", "maxLength": 212},
-          "confirmation_evaluated_at_unix_nanos": {"type": "integer", "minimum": 1}
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retention_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "proposed_retention_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "catalog_identity": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "confirmation_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Opaque confirmation binding computed from current canonical evidence."
+          },
+          "scopes": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/TenantRetentionScopeImpact"
+            }
+          },
+          "continuation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{212}$",
+            "maxLength": 212
+          },
+          "confirmation_evaluated_at_unix_nanos": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       },
       "TenantRetentionUpdateRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["tenant", "proposed_retention_seconds", "expected_generation", "idempotency_key"],
+        "required": [
+          "tenant",
+          "proposed_retention_seconds",
+          "expected_generation",
+          "idempotency_key"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid", "description": "Explicit tenant-administration target; it cannot select another tenant."},
-          "proposed_retention_seconds": {"type": "integer", "minimum": 1},
-          "expected_generation": {"type": "integer", "minimum": 1},
-          "confirmation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Opaque digest received from a preview; callers never submit impact fields."},
-          "confirmation_evaluated_at_unix_nanos": {"type": "integer", "minimum": 1, "description": "Trusted instant returned with the confirmation digest; the server verifies the digest at this instant."},
-          "idempotency_key": {"type": "string", "format": "uuid"}
+          "tenant": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Explicit tenant-administration target; it cannot select another tenant."
+          },
+          "proposed_retention_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expected_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "confirmation_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "Opaque digest received from a preview; callers never submit impact fields."
+          },
+          "confirmation_evaluated_at_unix_nanos": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Trusted instant returned with the confirmation digest; the server verifies the digest at this instant."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "TenantRetentionUpdateResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["tenant", "retention_generation", "audit_position", "audit_ingest_time_unix_seconds"],
+        "required": [
+          "tenant",
+          "retention_generation",
+          "audit_position",
+          "audit_ingest_time_unix_seconds"
+        ],
         "properties": {
-          "tenant": {"type": "string", "format": "uuid"},
-          "retention_generation": {"type": "integer", "minimum": 1},
-          "audit_position": {"type": "integer", "minimum": 1},
-          "audit_ingest_time_unix_seconds": {"type": "integer", "minimum": 1}
+          "tenant": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retention_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "audit_position": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "audit_ingest_time_unix_seconds": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       },
       "PolicyPreviewRequest": {
@@ -1749,52 +3193,163 @@
       "PolicyDiffRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["before_policy_json", "after_policy_json"],
+        "required": [
+          "before_policy_json",
+          "after_policy_json"
+        ],
         "properties": {
-          "before_policy_json": {"type": "string", "minLength": 1, "maxLength": 65536},
-          "after_policy_json": {"type": "string", "minLength": 1, "maxLength": 65536}
+          "before_policy_json": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "after_policy_json": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          }
         }
       },
       "PolicyExplainRequest": {
-        "type":"object", "additionalProperties":false,
-        "required":["policy_json","candidate_json"],
-        "properties":{"policy_json":{"type":"string","minLength":1,"maxLength":65536},"candidate_json":{"type":"string","minLength":1,"maxLength":65536}}
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "policy_json",
+          "candidate_json"
+        ],
+        "properties": {
+          "policy_json": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "candidate_json": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          }
+        }
       },
       "PolicyExplainResponse": {
-        "type":"object", "additionalProperties":false,
-        "required":["policy_generation","policy_digest","outcome","explanation"],
-        "properties":{"policy_generation":{"type":"integer","minimum":1},"policy_digest":{"type":"string","pattern":"^[0-9a-f]{64}$"},"outcome":{"type":"string","enum":["accepted","rejected"]},"explanation":{"type":"string","minLength":1,"maxLength":4096}}
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "policy_generation",
+          "policy_digest",
+          "outcome",
+          "explanation"
+        ],
+        "properties": {
+          "policy_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "policy_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rejected"
+            ]
+          },
+          "explanation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        }
       },
       "PolicyActivateRequest": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["policy_json", "expected_generation", "idempotency_key"],
+        "required": [
+          "policy_json",
+          "expected_generation",
+          "idempotency_key"
+        ],
         "properties": {
-          "policy_json": {"type": "string", "minLength": 1, "maxLength": 65536},
-          "expected_generation": {"type": "integer", "minimum": 1},
-          "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+          "policy_json": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "expected_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "idempotency_key": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
         }
       },
       "PolicyActivateResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["resource_generation", "policy_digest", "audit_position"],
+        "required": [
+          "resource_generation",
+          "policy_digest",
+          "audit_position"
+        ],
         "properties": {
-          "resource_generation": {"type": "integer", "minimum": 1},
-          "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "audit_position": {"type": "integer", "minimum": 1}
+          "resource_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "policy_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "audit_position": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       },
       "PolicyDiffResponse": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["before_policy_generation", "before_policy_digest", "after_policy_generation", "after_policy_digest", "semantic_changes"],
+        "required": [
+          "before_policy_generation",
+          "before_policy_digest",
+          "after_policy_generation",
+          "after_policy_digest",
+          "semantic_changes"
+        ],
         "properties": {
-          "before_policy_generation": {"type": "integer", "minimum": 1},
-          "before_policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "after_policy_generation": {"type": "integer", "minimum": 1},
-          "after_policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "semantic_changes": {"type": "array", "maxItems": 4096, "items": {"type": "string", "enum": ["generation_changed", "rule_added", "rule_removed", "rule_predicates_changed", "rule_action_changed"]}}
+          "before_policy_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "before_policy_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "after_policy_generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "after_policy_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "semantic_changes": {
+            "type": "array",
+            "maxItems": 4096,
+            "items": {
+              "type": "string",
+              "enum": [
+                "generation_changed",
+                "rule_added",
+                "rule_removed",
+                "rule_predicates_changed",
+                "rule_action_changed"
+              ]
+            }
+          }
         }
       },
       "PolicyPreviewFailure": {
@@ -1814,79 +3369,79 @@
           }
         }
       },
-    "SegmentAbandonmentRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "tenant",
-        "signal",
-        "shard",
-        "segment",
-        "accept_data_loss"
-      ],
-      "properties": {
-        "tenant": {
-          "type": "string"
-        },
-        "signal": {
-          "type": "string"
-        },
-        "shard": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "segment": {
-          "type": "string"
-        },
-        "expected_catalog_generation": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "confirmation": {
-          "type": "string"
-        },
-        "idempotency_key": {
-          "type": "string"
-        },
-        "accept_data_loss": {
-          "type": "boolean"
-        },
-        "operation_id": {
-          "type": "string"
+      "SegmentAbandonmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tenant",
+          "signal",
+          "shard",
+          "segment",
+          "accept_data_loss"
+        ],
+        "properties": {
+          "tenant": {
+            "type": "string"
+          },
+          "signal": {
+            "type": "string"
+          },
+          "shard": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "segment": {
+            "type": "string"
+          },
+          "expected_catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "confirmation": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "accept_data_loss": {
+            "type": "boolean"
+          },
+          "operation_id": {
+            "type": "string"
+          }
         }
-      }
-    },
-    "SegmentAbandonmentResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "catalog_generation",
-        "status",
-        "irreversible_boundary",
-        "finding"
-      ],
-      "properties": {
-        "catalog_generation": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "status": {
-          "type": "string"
-        },
-        "irreversible_boundary": {
-          "type": "string"
-        },
-        "confirmation": {
-          "type": "string"
-        },
-        "operation_id": {
-          "type": "string"
-        },
-        "finding": {
-          "$ref": "#/components/schemas/IntegrityQuarantineFinding"
+      },
+      "SegmentAbandonmentResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "catalog_generation",
+          "status",
+          "irreversible_boundary",
+          "finding"
+        ],
+        "properties": {
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string"
+          },
+          "irreversible_boundary": {
+            "type": "string"
+          },
+          "confirmation": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "finding": {
+            "$ref": "#/components/schemas/IntegrityQuarantineFinding"
+          }
         }
-      }
-    },
+      },
       "ProviderMigrationRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -1954,76 +3509,220 @@
         }
       },
       "ProviderMigrationResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-            "catalog_generation",
-            "root_phase",
-            "active_epoch",
-            "active_provider",
-            "source_provider"
-      ],
-      "properties": {
-            "catalog_generation": {
-                  "type": "integer",
-                  "minimum": 0
-            },
-            "root_phase": {
-                  "type": "string"
-            },
-            "active_epoch": {
-                  "type": "integer",
-                  "minimum": 0
-            },
-            "successor_epoch": {
-                  "type": "integer",
-                  "minimum": 0
-            },
-            "predecessor_epoch": {
-                  "type": "integer",
-                  "minimum": 0
-            },
-            "operation": {
-                  "$ref": "#/components/schemas/ProviderMigrationOperation"
-            },
-            "active_provider": {
-                  "$ref": "#/components/schemas/ProviderMigrationIdentity"
-            },
-            "source_provider": {
-                  "$ref": "#/components/schemas/ProviderMigrationIdentity"
-            },
-            "target_provider": {
-                  "$ref": "#/components/schemas/ProviderMigrationIdentity"
-            }
-      }
-},
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "catalog_generation",
+          "root_phase",
+          "active_epoch",
+          "active_provider",
+          "source_provider"
+        ],
+        "properties": {
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "root_phase": {
+            "type": "string"
+          },
+          "active_epoch": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "successor_epoch": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "predecessor_epoch": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ProviderMigrationOperation"
+          },
+          "active_provider": {
+            "$ref": "#/components/schemas/ProviderMigrationIdentity"
+          },
+          "source_provider": {
+            "$ref": "#/components/schemas/ProviderMigrationIdentity"
+          },
+          "target_provider": {
+            "$ref": "#/components/schemas/ProviderMigrationIdentity"
+          }
+        }
+      },
       "ProviderMigrationIdentity": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-            "family",
-            "locator",
-            "version"
-      ],
-      "properties": {
-            "family": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 8
-            },
-            "locator": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 512
-            },
-            "version": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
-            }
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "family",
+          "locator",
+          "version"
+        ],
+        "properties": {
+          "family": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "locator": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "RepositoryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "expected_catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "locator": {
+            "type": "string"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RepositoryOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "phase",
+          "progress_percent",
+          "retry",
+          "cancellation",
+          "irreversible_boundary"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "progress_percent": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retry": {
+            "type": "string"
+          },
+          "cancellation": {
+            "type": "string"
+          },
+          "irreversible_boundary": {
+            "type": "string"
+          },
+          "lookup_expires_at_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RepositoryIdentity": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repository_id",
+          "instance_id",
+          "provider_kind",
+          "format_epoch",
+          "integrity_fingerprint",
+          "prefix_commitment"
+        ],
+        "properties": {
+          "repository_id": {
+            "type": "string"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "provider_kind": {
+            "type": "string"
+          },
+          "format_epoch": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "integrity_fingerprint": {
+            "type": "string"
+          },
+          "prefix_commitment": {
+            "type": "string"
+          }
+        }
+      },
+      "RepositoryDoctorResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "verified",
+          "probes_deleted",
+          "external_retention"
+        ],
+        "properties": {
+          "verified": {
+            "type": "boolean"
+          },
+          "probes_deleted": {
+            "type": "boolean"
+          },
+          "external_retention": {
+            "type": "string"
+          }
+        }
+      },
+      "RepositoryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "catalog_generation"
+        ],
+        "properties": {
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "operation": {
+            "$ref": "#/components/schemas/RepositoryOperation"
+          },
+          "identity": {
+            "$ref": "#/components/schemas/RepositoryIdentity"
+          },
+          "doctor": {
+            "$ref": "#/components/schemas/RepositoryDoctorResult"
+          }
+        }
       }
-}
-  },
+    },
     "securitySchemes": {
       "apiKeyBearer": {
         "type": "http",

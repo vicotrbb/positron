@@ -6,6 +6,7 @@ mod policy_explain;
 mod policy_preview;
 mod policy_test;
 mod provider_migration;
+mod repository;
 mod tenant_alias;
 mod tenant_lifecycle;
 mod tenant_quota;
@@ -20,6 +21,7 @@ pub(super) fn generate_all(operations: &ValidatedOperations) -> Result<(), Box<d
     api_key::generate_api_key_client(operations)?;
     maintenance::generate_maintenance_client(operations)?;
     provider_migration::generate(operations)?;
+    repository::generate(operations)?;
     tenant_quota::generate_tenant_quota_client(operations)?;
     tenant_lifecycle::generate_tenant_lifecycle_client(operations)?;
     tenant_retention::generate_tenant_retention_client(operations)?;

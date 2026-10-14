@@ -21,6 +21,7 @@ ring = { path = "../vendor/ring-0.17.14" }
 age = "=0.11.5"
 libfuzzer-sys = "0.4"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "logs", "trace"] }
+positron-backup = { path = "../crates/positron-backup", features = ["test-support"] }
 positron-api = { path = "../crates/positron-api" }
 positron-config = { path = "../crates/positron-config" }
 positron-kernel = { path = "../crates/positron-kernel", features = ["test-support"] }
@@ -397,6 +398,20 @@ bench = false
 [[bin]]
 name = "key_provider_migration_stateful"
 path = "fuzz_targets/key_provider_migration_stateful.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "repository_stateful"
+path = "fuzz_targets/repository_stateful.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "repository_wire"
+path = "fuzz_targets/repository_wire.rs"
 test = false
 doc = false
 bench = false

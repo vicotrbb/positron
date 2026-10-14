@@ -23,7 +23,9 @@ pub use persistence::{EnvelopeVerificationProgress, EnvelopeVerificationPublicat
 mod fuzzing;
 mod persistence;
 mod record;
+mod repository_operation;
 mod root_provider_migration;
+pub use repository_operation::RepositoryOperationBinding;
 mod root_retirement;
 pub use root_provider_migration::RootProviderMigrationBinding;
 pub use root_retirement::RootRetirementReferenceGuard;

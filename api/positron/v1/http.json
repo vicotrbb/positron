@@ -1,5 +1,5 @@
 {
-  "schema_digest": "15e5ef7a6d695e9d29e996ed64283a5ed6bbed9bcbe1b963c4ee27b34301c6af",
+  "schema_digest": "4603a4044be826bfd12efc126cfa2b14aa0f6c2d25d1461cd1b6893a420ae6d5",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -1185,6 +1185,107 @@
             "409": "precondition_failed or idempotency_conflict",
             "503": "administration_unavailable"
       }
+},
+{
+  "rpc": "positron.v1.RepositoryService/Manage",
+  "method": "POST",
+  "path": "/v1/repositories:manage",
+  "request": "RepositoryRequest",
+  "response": "RepositoryResponse",
+  "authentication": "Bearer SystemAdministration",
+  "max_request_bytes": 4096,
+  "max_response_bytes": 4096,
+  "unknown_fields": "reject",
+  "request_fields": [
+    {
+      "proto": "action",
+      "json": "action",
+      "type": "string",
+      "number": 1,
+      "deprecated": false
+    },
+    {
+      "proto": "expected_catalog_generation",
+      "json": "expected_catalog_generation",
+      "type": "uint64",
+      "number": 2,
+      "deprecated": false,
+      "optional": true
+    },
+    {
+      "proto": "idempotency_key",
+      "json": "idempotency_key",
+      "type": "string",
+      "number": 3,
+      "deprecated": false,
+      "optional": true
+    },
+    {
+      "proto": "locator",
+      "json": "locator",
+      "type": "string",
+      "number": 4,
+      "deprecated": false,
+      "optional": true
+    },
+    {
+      "proto": "repository_id",
+      "json": "repository_id",
+      "type": "string",
+      "number": 5,
+      "deprecated": false,
+      "optional": true
+    },
+    {
+      "proto": "operation_id",
+      "json": "operation_id",
+      "type": "string",
+      "number": 6,
+      "deprecated": false,
+      "optional": true
+    }
+  ],
+  "response_fields": [
+    {
+      "proto": "catalog_generation",
+      "json": "catalog_generation",
+      "type": "uint64",
+      "number": 1,
+      "deprecated": false
+    },
+    {
+      "proto": "operation",
+      "json": "operation",
+      "type": "RepositoryOperation",
+      "number": 2,
+      "deprecated": false,
+      "optional": true
+    },
+    {
+      "proto": "identity",
+      "json": "identity",
+      "type": "RepositoryIdentity",
+      "number": 3,
+      "deprecated": false,
+      "optional": true
+    },
+    {
+      "proto": "doctor",
+      "json": "doctor",
+      "type": "RepositoryDoctorResult",
+      "number": 4,
+      "deprecated": false,
+      "optional": true
+    }
+  ],
+  "responses": {
+    "200": "RepositoryResponse",
+    "400": "invalid_request",
+    "401": "authentication_rejected",
+    "404": "source_unavailable",
+    "409": "precondition_failed or idempotency_conflict",
+    "503": "administration_unavailable"
+  }
 }
   ]
 }

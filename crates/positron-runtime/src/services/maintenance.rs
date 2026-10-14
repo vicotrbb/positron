@@ -249,6 +249,7 @@ pub(super) fn restore(instance: &crate::InitializedInstance) -> Result<(), Servi
 }
 
 const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
+    MaintenanceTaskClass::RepositoryVerification,
     MaintenanceTaskClass::Migration,
     MaintenanceTaskClass::Compaction,
     MaintenanceTaskClass::SnapshotLeaseExpiry,
@@ -314,6 +315,9 @@ fn discover_after_completed_maintenance(
 }
 
 enum InstalledMaintenanceExecution<'authority> {
+    RepositoryOperation {
+        execution: MaintenanceExecution<'authority>,
+    },
     RootProviderMigration {
         execution: MaintenanceExecution<'authority>,
     },
@@ -351,7 +355,8 @@ enum InstalledMaintenanceExecution<'authority> {
 
 fn installed_task_class(execution: &InstalledMaintenanceExecution<'_>) -> MaintenanceTaskClass {
     match execution {
-        InstalledMaintenanceExecution::RootProviderMigration { execution }
+        InstalledMaintenanceExecution::RepositoryOperation { execution }
+        | InstalledMaintenanceExecution::RootProviderMigration { execution }
         | InstalledMaintenanceExecution::EnvelopeVerification { execution }
         | InstalledMaintenanceExecution::Compaction { execution, .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { execution }
@@ -373,6 +378,7 @@ fn start_installed_maintenance<'authority>(
         return Err(ServiceFailure::Cancelled);
     }
     super::provider_migration::recover_accepted_task(services)?;
+    super::repository_administration::recover_accepted_task(services)?;
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
         return Err(ServiceFailure::CatalogBusy);
     };
@@ -414,6 +420,9 @@ fn start_installed_maintenance<'authority>(
         return Err(ServiceFailure::Cancelled);
     }
     let execution = match execution.task().class() {
+        MaintenanceTaskClass::RepositoryVerification => {
+            InstalledMaintenanceExecution::RepositoryOperation { execution }
+        },
         MaintenanceTaskClass::Migration => {
             InstalledMaintenanceExecution::RootProviderMigration { execution }
         },
@@ -493,6 +502,9 @@ fn complete_installed_maintenance(
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
         return Err(ServiceFailure::Cancelled);
     }
+    if let InstalledMaintenanceExecution::RepositoryOperation { execution } = execution {
+        return super::repository_administration::complete(services, execution);
+    }
     if let InstalledMaintenanceExecution::RootProviderMigration { execution } = execution {
         return super::provider_migration::complete(services, execution);
     }
@@ -543,7 +555,8 @@ fn complete_installed_maintenance(
         | InstalledMaintenanceExecution::SnapshotLeaseExpiry { scope, .. }
         | InstalledMaintenanceExecution::RetentionPublication { scope, .. }
         | InstalledMaintenanceExecution::RetentionReclamation { scope, .. } => *scope,
-        InstalledMaintenanceExecution::RootProviderMigration { .. }
+        InstalledMaintenanceExecution::RepositoryOperation { .. }
+        | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. }
         | InstalledMaintenanceExecution::CatalogReclamation { .. }
@@ -578,7 +591,8 @@ fn complete_installed_maintenance(
                 key,
             )
         },
-        InstalledMaintenanceExecution::RootProviderMigration { .. }
+        InstalledMaintenanceExecution::RepositoryOperation { .. }
+        | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. } => {
             return Err(ServiceFailure::Internal);
@@ -636,7 +650,8 @@ fn complete_installed_maintenance(
         return Ok(true);
     }
     let completed = match execution {
-        InstalledMaintenanceExecution::RootProviderMigration { .. }
+        InstalledMaintenanceExecution::RepositoryOperation { .. }
+        | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. } => {
             return Err(ServiceFailure::Internal);
         },

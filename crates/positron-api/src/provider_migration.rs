@@ -115,7 +115,7 @@ impl ProviderMigrationRequest {
     }
 }
 
-fn operation_id(value: &str) -> bool {
+pub(crate) fn operation_id(value: &str) -> bool {
     value.len() == 32
         && value.bytes().any(|byte| byte != b'0')
         && value
@@ -213,36 +213,45 @@ impl ProviderMigrationResponse {
         {
             return Err(MaintenanceWireFailure);
         }
-        if let Some(operation) = &self.operation
-            && (!operation_id(&operation.id)
-                || operation.progress_percent > 100
-                || !matches!(
-                    operation.status.as_str(),
-                    "pending" | "running" | "succeeded" | "failed" | "cancelled"
-                )
-                || !matches!(
-                    operation.phase.as_str(),
-                    "accepted"
-                        | "preflight"
-                        | "draining"
-                        | "catalog_publication"
-                        | "published"
-                        | "cancelled"
-                )
-                || !matches!(
-                    operation.retry.as_str(),
-                    "inspect_by_operation_id" | "retry_after_recovery_capacity" | "never"
-                )
-                || !matches!(
-                    operation.cancellation.as_str(),
-                    "allowed_before_drain" | "not_allowed_after_drain" | "cancelled"
-                )
-                || !matches!(
-                    operation.irreversible_boundary.as_str(),
-                    "not_crossed" | "catalog_generation_published"
-                )
-                || matches!(operation.status.as_str(), "pending" | "running")
-                    && operation.lookup_expires_at_unix_seconds.is_some())
+        if let Some(operation) = &self.operation {
+            operation.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl ProviderMigrationOperation {
+    pub(crate) fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        let operation = self;
+        if !operation_id(&operation.id)
+            || operation.progress_percent > 100
+            || !matches!(
+                operation.status.as_str(),
+                "pending" | "running" | "succeeded" | "failed" | "cancelled"
+            )
+            || !matches!(
+                operation.phase.as_str(),
+                "accepted"
+                    | "preflight"
+                    | "draining"
+                    | "catalog_publication"
+                    | "published"
+                    | "cancelled"
+            )
+            || !matches!(
+                operation.retry.as_str(),
+                "inspect_by_operation_id" | "retry_after_recovery_capacity" | "never"
+            )
+            || !matches!(
+                operation.cancellation.as_str(),
+                "allowed_before_drain" | "not_allowed_after_drain" | "cancelled"
+            )
+            || !matches!(
+                operation.irreversible_boundary.as_str(),
+                "not_crossed" | "catalog_generation_published"
+            )
+            || matches!(operation.status.as_str(), "pending" | "running")
+                && operation.lookup_expires_at_unix_seconds.is_some()
         {
             return Err(MaintenanceWireFailure);
         }

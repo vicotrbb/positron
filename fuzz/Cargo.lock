@@ -2609,6 +2609,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "positron-backup"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "getrandom 0.4.3",
+ "rustix",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "positron-config"
 version = "0.0.0"
 dependencies = [
@@ -2639,6 +2651,7 @@ dependencies = [
  "opentelemetry-proto",
  "positron",
  "positron-api",
+ "positron-backup",
  "positron-config",
  "positron-domain",
  "positron-governance",
@@ -2758,6 +2771,7 @@ dependencies = [
  "hyper-util",
  "opentelemetry-proto",
  "positron-api",
+ "positron-backup",
  "positron-config",
  "positron-domain",
  "positron-governance",

@@ -267,7 +267,7 @@ pub(super) fn operation_failure(failure: DurableOperationFailure) -> Maintenance
         _ => MaintenanceServiceFailure::AdministrationUnavailable,
     }
 }
-fn operation_response(operation: DurableOperation) -> ProviderMigrationOperation {
+pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrationOperation {
     use positron_governance::{
         DurableOperationBoundary as B, DurableOperationCancellation as C,
         DurableOperationPhase as P, DurableOperationRetry as R, DurableOperationStatus as S,

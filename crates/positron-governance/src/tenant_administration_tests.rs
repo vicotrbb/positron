@@ -828,3 +828,6 @@ fn provider_migration_acceptance_replays_and_rejects_conflicting_or_stale_intent
     );
     Ok(())
 }
+
+#[path = "repository_operation_tests.rs"]
+mod repository_operation_tests;

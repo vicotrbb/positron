@@ -76,3 +76,67 @@ fn segment_abandonment_request_binds_exact_confirmed_loss_and_declares_irreversi
         .is_err()
     );
 }
+
+#[test]
+fn repository_operation_binds_native_locator_identity_actor_and_action()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_governance::{RepositoryAction, RepositoryOperationParameters};
+    let parameters = RepositoryOperationParameters::local(
+        RepositoryAction::Doctor,
+        "/protected/repository",
+        [61; 16],
+        [62; 32],
+        [63; 32],
+    )?;
+    let principal = PrincipalId::from_bytes([64; 16])?;
+    let key = AdministrativeIdempotencyKey::new([65; 16])?;
+    let request = DurableOperationRequest::repository(
+        principal,
+        key,
+        [66; 16],
+        7,
+        100,
+        parameters.intent_digest(),
+    )?;
+    let retry = DurableOperationRequest::repository(
+        principal,
+        key,
+        [66; 16],
+        7,
+        200,
+        parameters.intent_digest(),
+    )?;
+    assert_eq!(request.operation_id(), retry.operation_id());
+    let changed = RepositoryOperationParameters::local(
+        RepositoryAction::Verify,
+        "/protected/repository",
+        [61; 16],
+        [62; 32],
+        [63; 32],
+    )?;
+    assert_ne!(
+        request.operation_id(),
+        DurableOperationRequest::repository(
+            principal,
+            key,
+            [66; 16],
+            7,
+            100,
+            changed.intent_digest()
+        )?
+        .operation_id()
+    );
+    assert_eq!(request.kind(), DurableOperationKind::RepositoryInspection);
+    assert!(!format!("{parameters:?}").contains("/protected/repository"));
+    assert!(
+        RepositoryOperationParameters::local(
+            RepositoryAction::Doctor,
+            "/protected/../other",
+            [61; 16],
+            [62; 32],
+            [63; 32]
+        )
+        .is_err()
+    );
+    Ok(())
+}

@@ -34,3 +34,6 @@ mod support;
 
 #[path = "tests/envelope_verification.rs"]
 mod envelope_verification;
+
+#[path = "tests/repository_operation.rs"]
+mod repository_operation;

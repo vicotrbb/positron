@@ -49,7 +49,7 @@ struct SchedulerSelection<'times> {
 }
 
 impl MaintenanceCoordinator {
-    pub(super) fn submit_root_migration(
+    pub(super) fn submit_bound_operation(
         &self,
         catalog: &Catalog<'_>,
         task: MaintenanceTask,
@@ -315,14 +315,32 @@ impl MaintenanceCoordinator {
             if !classes.is_empty() && !classes.contains(&task.class()) {
                 continue;
             }
-            if selection.root_migration_handler && task.class() == MaintenanceTaskClass::Migration {
+            if selection.root_migration_handler
+                && matches!(
+                    task.class(),
+                    MaintenanceTaskClass::Migration | MaintenanceTaskClass::RepositoryVerification
+                )
+            {
                 let stored = prospective
                     .tasks
                     .get(&identity)
                     .ok_or(MaintenanceFailure::UnknownTask)?;
-                if RootProviderMigrationBinding::from_task(&stored.task, stored.checkpoint.as_ref())
-                    .is_err()
-                {
+                let owned = match task.class() {
+                    MaintenanceTaskClass::Migration => RootProviderMigrationBinding::from_task(
+                        &stored.task,
+                        stored.checkpoint.as_ref(),
+                    )
+                    .is_ok(),
+                    MaintenanceTaskClass::RepositoryVerification => {
+                        RepositoryOperationBinding::from_task(
+                            &stored.task,
+                            stored.checkpoint.as_ref(),
+                        )
+                        .is_ok()
+                    },
+                    _ => false,
+                };
+                if !owned {
                     continue;
                 }
             }
