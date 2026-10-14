@@ -245,3 +245,156 @@ fn installed_repository_handler_does_not_dispatch_unbound_same_class_work()
     );
     Ok(())
 }
+
+#[test]
+fn repository_native_handoff_keeps_one_grant_until_the_last_worker_drops()
+-> Result<(), Box<dyn std::error::Error>> {
+    use aws_config::credential_process::CredentialProcessAdmission;
+    let root = CatalogRoot::new()?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+        PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+        70_000_001,
+        1_048_576 + 16_384,
+    )?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new(nonzero_id(1))?,
+        CatalogSecret::from_owned(Box::new([0x71; 32]), Box::new([0x72; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(2))?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(b"native resource owner".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let binding = RepositoryOperationBinding::new([91; 16], [92; 32]).expect("binding");
+    coordinator
+        .submit_repository_operation_and_persist(
+            &catalog,
+            binding,
+            MaintenancePreconditions::new(catalog.pin()?.number(), 1).expect("preconditions"),
+            7,
+        )
+        .expect("submission");
+    let mut execution = coordinator
+        .start_next_with_reservation_and_persist_for_class(
+            &catalog,
+            &authority,
+            8,
+            false,
+            Some(MaintenanceTaskClass::RepositoryVerification),
+        )
+        .expect("dispatch")
+        .ok_or("execution")?;
+    let before = authority.governor().inspect()?.outstanding_reservations();
+    assert!(
+        execution
+            .transfer_repository_resources(
+                RepositoryOperationBinding::new([93; 16], [92; 32]).expect("wrong binding")
+            )
+            .is_err()
+    );
+    assert!(
+        execution
+            .retained_repository_resources(binding)
+            .expect("before handoff")
+            .is_none()
+    );
+    let grant = execution
+        .transfer_repository_resources(binding)
+        .expect("handoff");
+    assert!(
+        execution
+            .retained_repository_resources(
+                RepositoryOperationBinding::new([93; 16], [92; 32]).expect("wrong retry binding")
+            )
+            .is_err()
+    );
+    let retry = execution
+        .retained_repository_resources(binding)
+        .expect("retry owner")
+        .ok_or("lost admitted owner")?;
+    assert_eq!(
+        authority.governor().inspect()?.outstanding_reservations(),
+        before
+    );
+    assert!(execution.transfer_repository_resources(binding).is_err());
+    drop(grant);
+    let resources = retry;
+    let process = crate::NativeAwsCredentialProcessAdmission::new(resources.clone());
+    let worker = process.try_acquire().ok_or("worker lease")?;
+    execution
+        .complete_and_persist(&coordinator, &catalog, false)
+        .expect("terminal publication");
+    drop(execution);
+    drop(process);
+    drop(resources);
+    assert_eq!(
+        authority.governor().inspect()?.outstanding_reservations(),
+        before
+    );
+    drop(worker);
+    assert_eq!(
+        authority.governor().inspect()?.outstanding_reservations(),
+        before - 1
+    );
+    Ok(())
+}
+
+#[test]
+fn repository_transport_peak_is_admitted_before_dispatch() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = CatalogRoot::new()?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+        PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+        70_000_001,
+        1_048_576 + 16_384,
+    )?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new(nonzero_id(1))?,
+        CatalogSecret::from_owned(Box::new([0x71; 32]), Box::new([0x72; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(2))?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(b"transport admission".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let binding = RepositoryOperationBinding::new([94; 16], [95; 32]).expect("binding");
+    coordinator
+        .submit_repository_operation_with_resources_and_persist(
+            &catalog,
+            binding,
+            MaintenancePreconditions::new(catalog.pin()?.number(), 1).expect("preconditions"),
+            ResourceAmounts::new([268_435_456, 1, 4, 0, 1, 1, 2, 4, 1, 8, 16_384]),
+            7,
+        )
+        .expect("persist native claim");
+    assert!(matches!(
+        coordinator.start_next_with_reservation_and_persist_for_class(
+            &catalog,
+            &authority,
+            8,
+            false,
+            Some(MaintenanceTaskClass::RepositoryVerification)
+        ),
+        Err(MaintenanceFailure::ResourceAdmissionRefused)
+    ));
+    assert_eq!(
+        coordinator
+            .status(MaintenanceTaskId::new(binding.operation_id()).expect("task"))
+            .expect("queued task")
+            .phase(),
+        MaintenanceTaskPhase::Queued
+    );
+    Ok(())
+}

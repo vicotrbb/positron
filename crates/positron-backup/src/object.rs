@@ -55,8 +55,12 @@ impl ImmutableObject {
 pub struct ObjectMetadata {
     pub(crate) size: u64,
     pub(crate) checksum: [u8; 32],
+    pub(crate) protection: crate::ObjectProtection,
 }
 impl ObjectMetadata {
+    pub const fn protection(self) -> crate::ObjectProtection {
+        self.protection
+    }
     pub const fn size(self) -> u64 {
         self.size
     }

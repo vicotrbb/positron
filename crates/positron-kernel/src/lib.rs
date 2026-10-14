@@ -1535,6 +1535,11 @@ fn root_identity(_metadata: &fs::Metadata) -> Result<VolumeRootIdentity, VolumeF
     ))
 }
 
+/// Admitted native AWS networking and credential-process leases shared by adapters.
+pub use data_protection::key_provider::{
+    NativeAwsCredentialProcessAdmission, NativeAwsDns, NativeAwsResources,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

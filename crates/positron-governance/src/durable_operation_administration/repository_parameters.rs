@@ -26,12 +26,26 @@ impl RepositoryAction {
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct RepositoryOperationParameters {
+    provider: RepositoryProviderKind,
     action: RepositoryAction,
     locator: [u8; 2048],
     locator_len: u16,
     repository: [u8; 16],
     fingerprint: [u8; 32],
     prefix: [u8; 32],
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositoryProviderKind {
+    LocalFilesystem,
+    AwsS3,
+}
+impl RepositoryProviderKind {
+    fn code(self) -> u8 {
+        match self {
+            Self::LocalFilesystem => 1,
+            Self::AwsS3 => 2,
+        }
+    }
 }
 impl std::fmt::Debug for RepositoryOperationParameters {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,6 +56,34 @@ impl std::fmt::Debug for RepositoryOperationParameters {
     }
 }
 impl RepositoryOperationParameters {
+    pub fn aws_s3(
+        action: RepositoryAction,
+        locator: &str,
+        repository: [u8; 16],
+        fingerprint: [u8; 32],
+        prefix: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        let mut fields = locator.split('\0');
+        for _ in 0..5 {
+            if fields.next().is_none_or(str::is_empty) {
+                return Err(DurableOperationFailure::InvalidInput);
+            }
+        }
+        if fields.next().is_some() {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        Self::bounded(
+            RepositoryProviderKind::AwsS3,
+            action,
+            locator,
+            repository,
+            fingerprint,
+            prefix,
+        )
+    }
+    pub const fn provider_kind(self) -> RepositoryProviderKind {
+        self.provider
+    }
     pub fn local(
         action: RepositoryAction,
         locator: &str,
@@ -53,6 +95,28 @@ impl RepositoryOperationParameters {
             || !locator.starts_with('/')
             || locator.contains('\0')
             || locator.split('/').any(|part| matches!(part, "." | ".."))
+        {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        Self::bounded(
+            RepositoryProviderKind::LocalFilesystem,
+            action,
+            locator,
+            repository,
+            fingerprint,
+            prefix,
+        )
+    }
+    fn bounded(
+        provider: RepositoryProviderKind,
+        action: RepositoryAction,
+        locator: &str,
+        repository: [u8; 16],
+        fingerprint: [u8; 32],
+        prefix: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        if locator.is_empty()
+            || locator.len() > 2048
             || repository == [0; 16]
             || fingerprint == [0; 32]
             || prefix == [0; 32]
@@ -65,6 +129,7 @@ impl RepositoryOperationParameters {
             .ok_or(DurableOperationFailure::InvalidInput)?
             .copy_from_slice(locator.as_bytes());
         Ok(Self {
+            provider,
             action,
             locator: bytes,
             locator_len: u16::try_from(locator.len())
@@ -101,7 +166,7 @@ impl RepositoryOperationParameters {
         Sha256::digest(bytes).into()
     }
     pub(super) fn encode(self, bytes: &mut Vec<u8>) {
-        bytes.extend_from_slice(&[1, self.action.code()]); // Native local provider, never a compatibility label.
+        bytes.extend_from_slice(&[self.provider.code(), self.action.code()]);
         bytes.extend_from_slice(&self.repository);
         bytes.extend_from_slice(&self.fingerprint);
         bytes.extend_from_slice(&self.prefix);
@@ -112,9 +177,11 @@ impl RepositoryOperationParameters {
     }
     pub(super) fn decode(bytes: &[u8]) -> Result<Self, DurableOperationFailure> {
         let mut offset = 0;
-        if super::codec::take_byte(bytes, &mut offset)? != 1 {
-            return Err(DurableOperationFailure::PersistenceUnavailable);
-        }
+        let provider = match super::codec::take_byte(bytes, &mut offset)? {
+            1 => RepositoryProviderKind::LocalFilesystem,
+            2 => RepositoryProviderKind::AwsS3,
+            _ => return Err(DurableOperationFailure::PersistenceUnavailable),
+        };
         let action = RepositoryAction::from_code(super::codec::take_byte(bytes, &mut offset)?)?;
         let repository = super::codec::take_array(bytes, &mut offset)?;
         let fingerprint = super::codec::take_array(bytes, &mut offset)?;
@@ -135,7 +202,14 @@ impl RepositoryOperationParameters {
                 .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
         )
         .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?;
-        Self::local(action, locator, repository, fingerprint, prefix)
-            .map_err(|_| DurableOperationFailure::PersistenceUnavailable)
+        match provider {
+            RepositoryProviderKind::LocalFilesystem => {
+                Self::local(action, locator, repository, fingerprint, prefix)
+            },
+            RepositoryProviderKind::AwsS3 => {
+                Self::aws_s3(action, locator, repository, fingerprint, prefix)
+            },
+        }
+        .map_err(|_| DurableOperationFailure::PersistenceUnavailable)
     }
 }

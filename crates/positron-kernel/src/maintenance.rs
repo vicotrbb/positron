@@ -541,6 +541,8 @@ pub struct MaintenanceTaskStatus {
 pub enum MaintenanceReservation<'authority> {
     Ordinary(ResourceReservation<'authority>),
     Recovery(ResourceReservation<'authority>),
+    /// Same admitted task grant, retained across native transport cancellation.
+    NativeRepository(Arc<crate::NativeAwsResources>),
 }
 
 /// The sole authority from which a task's declared reservation is admitted.
@@ -567,6 +569,7 @@ impl MaintenanceReservation<'_> {
     pub fn granted(&self) -> ResourceAmounts {
         match self {
             Self::Ordinary(reservation) | Self::Recovery(reservation) => reservation.granted(),
+            Self::NativeRepository(resources) => resources.granted(),
         }
     }
 
@@ -580,7 +583,7 @@ impl MaintenanceReservation<'_> {
                 reservation.belongs_to(governor)
                     && reservation.authorizes_ordinary_compaction(tenant)
             },
-            Self::Recovery(_) => false,
+            Self::Recovery(_) | Self::NativeRepository(_) => false,
         }
     }
 }

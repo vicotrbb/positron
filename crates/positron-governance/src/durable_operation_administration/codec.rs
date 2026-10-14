@@ -79,6 +79,9 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
     if let Some(parameters) = operation.repository_parameters {
         encoded.extend_from_slice(&REPOSITORY_PARAMETERS_MAGIC);
         parameters.encode(&mut encoded);
+        if let Some(policy) = operation.repository_policy {
+            encoded.extend(policy.encoded_bytes());
+        }
     }
     encoded
 }
@@ -185,7 +188,7 @@ pub(super) fn decode_operation(
     if !v4 && !v3 && !v2 && !encoded.starts_with(&OPERATION_MAGIC_V1) {
         return Ok(None);
     }
-    if (repository_parameters_present && !(310..=2358).contains(&encoded.len()))
+    if (repository_parameters_present && !(310..=2428).contains(&encoded.len()))
         || (root_parameters && !(261..=2309).contains(&encoded.len()))
         || (!root_parameters
             && !repository_parameters_present
@@ -305,13 +308,39 @@ pub(super) fn decode_operation(
         if take_array::<8>(encoded, &mut offset)? != REPOSITORY_PARAMETERS_MAGIC {
             return Err(DurableOperationFailure::PersistenceUnavailable);
         }
+        let length_offset = offset
+            .checked_add(82)
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        let length_end = length_offset
+            .checked_add(2)
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        let length = u16::from_be_bytes(
+            encoded
+                .get(length_offset..length_end)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
+        );
+        let end = length_end
+            .checked_add(usize::from(length))
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
         let parameters = super::RepositoryOperationParameters::decode(
+            encoded
+                .get(offset..end)
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
+        )?;
+        offset = end;
+        Some(parameters)
+    } else {
+        None
+    };
+    let repository_policy = if repository_parameters.is_some() && offset < encoded.len() {
+        let policy = super::repository_policy_codec::decode(
             encoded
                 .get(offset..)
                 .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
         )?;
         offset = encoded.len();
-        Some(parameters)
+        Some(policy)
     } else {
         None
     };
@@ -327,6 +356,7 @@ pub(super) fn decode_operation(
         request,
         key_provider_migration_parameters,
         repository_parameters,
+        repository_policy,
         status,
         phase,
         progress_percent,
@@ -413,13 +443,23 @@ pub(super) fn encode_audit(operation: DurableOperation) -> Vec<u8> {
 pub fn fuzz_durable_operation_record(data: &[u8]) {
     let _ = decode_operation(data);
     let _ = decode_expired_binding(data);
-    let parameters = crate::RepositoryOperationParameters::local(
-        crate::RepositoryAction::Doctor,
-        "/fuzz/repository",
-        [0x44; 16],
-        [0x55; 32],
-        [0x66; 32],
-    )
+    let parameters = if data.first().copied().unwrap_or_default() & 1 == 0 {
+        crate::RepositoryOperationParameters::local(
+            crate::RepositoryAction::Doctor,
+            "/fuzz/repository",
+            [0x44; 16],
+            [0x55; 32],
+            [0x66; 32],
+        )
+    } else {
+        crate::RepositoryOperationParameters::aws_s3(
+            crate::RepositoryAction::Doctor,
+            "positron-example\0us-east-1\0https://s3.us-east-1.amazonaws.com\x00123456789012\0owned/",
+            [0x44; 16],
+            [0x55; 32],
+            [0x66; 32],
+        )
+    }
     .expect("bounded fixture");
     let request = DurableOperationRequest::repository(
         PrincipalId::from_bytes([0x11; 16]).expect("actor"),
@@ -432,13 +472,43 @@ pub fn fuzz_durable_operation_record(data: &[u8]) {
     .expect("request");
     let mut operation = DurableOperation::accepted(request);
     operation.repository_parameters = Some(parameters);
+    if data.get(1).copied().unwrap_or_default() & 1 != 0 {
+        operation = operation
+            .begin(18)
+            .expect("begin fixture")
+            .succeeded(19)
+            .expect("success fixture");
+        operation.repository_policy = Some(
+            super::repository_policy_codec::RepositoryPolicyReceipt::new({
+                use positron_domain::repository::*;
+                let mut policy = RepositoryPolicy::local();
+                if data.get(2).copied().unwrap_or_default() & 1 != 0 {
+                    policy.doctor_probe = Some(ObjectProtection {
+                        retention: PolicyObservation::Observed(ObjectRetention {
+                            mode: RetentionMode::Compliance,
+                            retain_until_unix_seconds: 1_900_000_000,
+                        }),
+                        legal_hold: PolicyObservation::Unavailable(
+                            RepositoryFailure::PermissionDenied,
+                        ),
+                        event_hold: PolicyObservation::Observed(Some(RetentionPeriod::Days(7))),
+                    });
+                }
+                policy
+            })
+            .expect("policy fixture"),
+        );
+    }
     let mut record = encode_operation(operation);
-    for mutation in data.chunks(3).take(128) {
+    for mutation in data.chunks(4).take(128) {
         let Some(kind) = mutation.first() else {
             continue;
         };
-        let position = usize::from(mutation.get(1).copied().unwrap_or_default());
-        let value = mutation.get(2).copied().unwrap_or_default();
+        let position = usize::from(u16::from_be_bytes([
+            mutation.get(1).copied().unwrap_or_default(),
+            mutation.get(2).copied().unwrap_or_default(),
+        ]));
+        let value = mutation.get(3).copied().unwrap_or_default();
         match kind % 3 {
             0 => {
                 if let Some(byte) = record.get_mut(position) {
@@ -598,6 +668,95 @@ mod tests {
         let mut extra = encoded;
         extra.push(0);
         assert!(decode_operation(&extra).is_err());
+    }
+
+    #[test]
+    fn repository_policy_tail_preserves_old_frames_and_old_reader_refuses_extensions() {
+        let legacy = include_bytes!("../../tests/fixtures/durable-operation-v4-pending.bin");
+        assert_eq!(
+            encode_operation(
+                decode_operation(legacy)
+                    .expect("legacy")
+                    .expect("operation")
+            ),
+            legacy
+        );
+        let parameters = crate::RepositoryOperationParameters::local(
+            crate::RepositoryAction::Doctor,
+            "/protected/repository",
+            [0x44; 16],
+            [0x55; 32],
+            [0x66; 32],
+        )
+        .expect("parameters");
+        let request = DurableOperationRequest::repository(
+            PrincipalId::from_bytes([0x11; 16]).expect("actor"),
+            AdministrativeIdempotencyKey::new([0x22; 16]).expect("key"),
+            [0x33; 16],
+            1,
+            17,
+            parameters.intent_digest(),
+        )
+        .expect("request");
+        let mut operation = DurableOperation::accepted(request);
+        operation.repository_parameters = Some(parameters);
+        let pending = encode_operation(operation);
+        // Independent admission boundary from a5dfbfb6's Local decoder:
+        // provider byte1 and exact 84+locator-length native parameter frame.
+        fn old_local_payload_accepts(bytes: &[u8]) -> bool {
+            bytes.first() == Some(&1)
+                && bytes
+                    .get(82..84)
+                    .and_then(|length| <[u8; 2]>::try_from(length).ok())
+                    .is_some_and(|length| {
+                        bytes.len() == 84 + usize::from(u16::from_be_bytes(length))
+                    })
+        }
+        assert!(old_local_payload_accepts(
+            pending.get(226..).expect("native tail")
+        ));
+        operation = operation
+            .begin(18)
+            .expect("begin")
+            .succeeded(19)
+            .expect("success");
+        operation.repository_policy = Some(
+            super::super::repository_policy_codec::RepositoryPolicyReceipt::new(
+                positron_domain::repository::RepositoryPolicy::local(),
+            )
+            .expect("checked policy"),
+        );
+        let encoded = encode_operation(operation);
+        assert!(encoded.ends_with(b"POSRPL01\x01\x01\x01"));
+        assert!(!old_local_payload_accepts(
+            encoded.get(226..).expect("extended tail")
+        ));
+        assert_eq!(
+            decode_operation(&encoded).expect("new decode"),
+            Some(operation)
+        );
+        let native = crate::RepositoryOperationParameters::aws_s3(
+            crate::RepositoryAction::Doctor,
+            "positron-example\0us-east-1\0https://s3.us-east-1.amazonaws.com\x00123456789012\0owned/",
+            [0x44; 16],
+            [0x55; 32],
+            [0x66; 32],
+        )
+        .expect("native");
+        let mut payload = Vec::new();
+        native.encode(&mut payload);
+        assert!(!old_local_payload_accepts(&payload));
+        // A fully absent result remains valid for legacy Local receipts.
+        let mut old_terminal = operation;
+        old_terminal.repository_policy = None;
+        assert_eq!(
+            decode_operation(&encode_operation(old_terminal)).expect("legacy terminal"),
+            Some(old_terminal)
+        );
+        for length in 0..10 {
+            let end = encoded.len().checked_sub(length + 1).expect("end");
+            assert!(decode_operation(encoded.get(..end).expect("truncation")).is_err());
+        }
     }
 
     #[test]

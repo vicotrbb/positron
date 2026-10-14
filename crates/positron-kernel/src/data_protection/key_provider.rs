@@ -11,6 +11,10 @@ pub use azure::{
 };
 mod cache;
 pub use aws::AwsKmsKeyProvider;
+pub use aws::dns::{
+    NativeDns as NativeAwsDns, ProcessAdmission as NativeAwsCredentialProcessAdmission,
+    Resources as NativeAwsResources,
+};
 mod conformance;
 pub use conformance::{
     ConformanceFailure, ConformanceStep, KeyProviderConformance, ProviderConformanceTarget,

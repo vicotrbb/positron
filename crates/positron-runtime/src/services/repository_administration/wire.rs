@@ -14,6 +14,20 @@ impl ServiceHandle {
         let actor = self.authorize_system_administration(bearer)?;
         let request = RepositoryRequest::decode(bytes)
             .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        let native = request
+            .aws_s3
+            .as_ref()
+            .map(|target| {
+                positron_backup::AwsS3Target::new(
+                    &target.bucket,
+                    &target.region,
+                    &target.endpoint,
+                    &target.expected_owner,
+                    &target.prefix,
+                )
+                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
+            })
+            .transpose()?;
         let operation = match request.action.as_str() {
             "status" => request
                 .operation_id
@@ -64,12 +78,15 @@ impl ServiceHandle {
                             "verify" => RepositoryAction::Verify,
                             _ => RepositoryAction::Doctor,
                         },
-                        locator: Path::new(
-                            request
-                                .locator
-                                .as_deref()
-                                .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
-                        ),
+                        locator: match &native {
+                            Some(target) => RepositoryLocation::AwsS3(target),
+                            None => RepositoryLocation::Local(Path::new(
+                                request
+                                    .locator
+                                    .as_deref()
+                                    .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                            )),
+                        },
                         repository: TenantId::parse_canonical(
                             request
                                 .repository_id
@@ -108,7 +125,13 @@ impl ServiceHandle {
                     instance_id: TenantId::from_bytes(self.instance.instance.to_bytes())
                         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
                         .to_string(),
-                    provider_kind: "local_filesystem".into(),
+                    provider_kind: match parameters.provider_kind() {
+                        positron_governance::RepositoryProviderKind::LocalFilesystem => {
+                            "local_filesystem"
+                        },
+                        positron_governance::RepositoryProviderKind::AwsS3 => "aws_s3",
+                    }
+                    .into(),
                     format_epoch: 1,
                     integrity_fingerprint: super::super::maintenance_api::hex(
                         parameters.integrity_fingerprint(),
@@ -123,6 +146,11 @@ impl ServiceHandle {
             catalog_generation: generation,
             operation: operation.map(super::super::provider_migration::operation_response),
             identity,
+            policy: operation.and_then(|operation| {
+                operation.repository_policy().map(|policy| {
+                    super::policy_projection::receipt(policy, operation.updated_at_unix_seconds())
+                })
+            }),
             doctor: parameters
                 .filter(|parameters| parameters.action() == RepositoryAction::Doctor)
                 .map(|_| RepositoryDoctorResult {

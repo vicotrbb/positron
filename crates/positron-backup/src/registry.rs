@@ -25,6 +25,33 @@ impl std::fmt::Debug for RegistryHead {
     }
 }
 impl RegistryHead {
+    pub(crate) fn encode_frame(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.bytes.len() + 40);
+        bytes.extend_from_slice(b"POSRHD01");
+        bytes.extend_from_slice(&self.version.checksum());
+        bytes.extend_from_slice(&self.bytes);
+        bytes
+    }
+    pub(crate) fn decode_frame(bytes: &[u8]) -> Result<Self, RepositoryFailure> {
+        if bytes.len() <= 40
+            || bytes.len() > MAX_REGISTRY_HEAD_BYTES + 40
+            || bytes.get(..8) != Some(b"POSRHD01")
+        {
+            return Err(RepositoryFailure::CorruptState);
+        }
+        let digest: [u8; 32] = bytes
+            .get(8..40)
+            .and_then(|value| value.try_into().ok())
+            .ok_or(RepositoryFailure::CorruptState)?;
+        let payload = bytes.get(40..).ok_or(RepositoryFailure::CorruptState)?;
+        if <[u8; 32]>::from(Sha256::digest(payload)) != digest {
+            return Err(RepositoryFailure::ChecksumMismatch);
+        }
+        Ok(Self {
+            version: ObjectVersion(digest),
+            bytes: payload.to_vec(),
+        })
+    }
     pub const fn version(&self) -> ObjectVersion {
         self.version
     }
@@ -77,5 +104,30 @@ impl HeadSlot {
             name.push_str(&format!("{byte:02x}"));
         }
         name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn persistent_head_rejects_modified_and_truncated_frames() {
+        let head = RegistryHeadChange::new(None, b"signed registry bytes".to_vec())
+            .expect("head")
+            .successor;
+        let encoded = head.encode_frame();
+        let decoded = RegistryHead::decode_frame(&encoded).expect("decode");
+        assert_eq!(decoded.bytes(), head.bytes());
+        assert_eq!(decoded.version(), head.version());
+        let mut modified = encoded.clone();
+        *modified.last_mut().expect("payload") ^= 1;
+        assert_eq!(
+            RegistryHead::decode_frame(&modified),
+            Err(RepositoryFailure::ChecksumMismatch)
+        );
+        assert_eq!(
+            RegistryHead::decode_frame(&encoded[..39]),
+            Err(RepositoryFailure::CorruptState)
+        );
     }
 }

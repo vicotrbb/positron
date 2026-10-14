@@ -1,6 +1,21 @@
 use super::*;
 
 impl<'authority> ResourceReservation<'authority> {
+    pub(crate) fn transfer_from_borrow(&mut self) -> Option<TransferredResourceReservation> {
+        if !self.active {
+            return None;
+        }
+        self.active = false;
+        Some(TransferredResourceReservation {
+            drop_ledger: Arc::clone(&self.governor.drop_ledger),
+            slot: self.slot,
+            owner: self.owner,
+            identity: self.identity,
+            amounts: self.amounts,
+            operation: self.operation.clone(),
+            active: true,
+        })
+    }
     pub(super) fn new(
         governor: &'authority GovernorInner,
         owner: accounting::ChargeOwner,
@@ -237,6 +252,20 @@ impl<'authority> ResourceReservation<'authority> {
 }
 
 impl TransferredResourceReservation {
+    pub(crate) fn granted(&self) -> ResourceAmounts {
+        self.amounts
+    }
+    pub(crate) fn authorizes_repository_transport(&self) -> bool {
+        self.active
+            && matches!(
+                self.identity,
+                ReservationIdentity::Ordinary {
+                    tenant: None,
+                    kind: WorkKind::OrdinaryMaintenanceBackup,
+                    ..
+                }
+            )
+    }
     /// Reports whether this move-only grant can be reclaimed by `governor`
     /// without consuming or releasing the grant.
     #[must_use]

@@ -21,7 +21,9 @@ fn serving_repository_initialize_and_doctor_are_authenticated_durable_tasks()
         .number();
     let admission = RepositoryAdmission {
         action: RepositoryAction::Initialize,
-        locator: &repository_path,
+        locator: crate::services::repository_administration::RepositoryLocation::Local(
+            &repository_path,
+        ),
         repository: [91; 16],
         expected_generation: generation,
         idempotency: AdministrativeIdempotencyKey::new([92; 16])?,
@@ -96,6 +98,23 @@ fn serving_repository_initialize_and_doctor_are_authenticated_durable_tasks()
             .status(),
         DurableOperationStatus::Succeeded
     );
+    assert_eq!(
+        services
+            .repository_operation_status(&administrator, doctor.operation_id())
+            .expect("doctor policy receipt")
+            .repository_policy(),
+        Some(positron_backup::RepositoryPolicy {
+            doctor_probe: Some(positron_backup::ObjectProtection::unobservable()),
+            ..positron_backup::RepositoryPolicy::local()
+        })
+    );
+    assert_eq!(
+        services
+            .repository_operation_status(&administrator, accepted.operation_id())
+            .expect("initialization policy receipt")
+            .repository_policy(),
+        Some(positron_backup::RepositoryPolicy::local())
+    );
     assert_eq!(std::fs::read_dir(&repository_path)?.count(), 1);
     let catalog = services
         .open_maintenance_catalog()
@@ -145,7 +164,7 @@ fn accepted_repository_initialization_recovers_task_publication_gap_after_reopen
     let key = AdministrativeIdempotencyKey::new([95; 16])?;
     let admission = RepositoryAdmission {
         action: RepositoryAction::Initialize,
-        locator: &path,
+        locator: crate::services::repository_administration::RepositoryLocation::Local(&path),
         repository: [96; 16],
         expected_generation: generation,
         idempotency: key,
@@ -228,6 +247,7 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         action: "status".into(),
         expected_catalog_generation: None,
         idempotency_key: None,
+        aws_s3: None,
         locator: None,
         repository_id: None,
         operation_id: None,
@@ -238,6 +258,7 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         action: "init".into(),
         expected_catalog_generation: Some(current.catalog_generation),
         idempotency_key: Some("61616161-6161-4161-8161-616161616161".into()),
+        aws_s3: None,
         locator: Some(path.to_string_lossy().into_owned()),
         repository_id: Some("62626262-6262-4262-8262-626262626262".into()),
         operation_id: None,
@@ -291,6 +312,14 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
             .map(|identity| identity.provider_kind.as_str()),
         Some("local_filesystem")
     );
+    let policy = accepted
+        .policy
+        .as_ref()
+        .ok_or("missing native policy receipt")?;
+    assert_eq!(policy.versioning.state, "unobservable");
+    assert_eq!(policy.object_lock.state, "unobservable");
+    assert_eq!(policy.lifecycle.state, "unobservable");
+    assert!(policy.observed_at_unix_seconds > 0);
     let encoded = accepted.encode()?;
     let output = std::str::from_utf8(&encoded)?;
     assert!(!output.contains(path.to_string_lossy().as_ref()));
@@ -326,6 +355,7 @@ fn repository_pending_cancellation_replay_and_creator_lookup_survive_restart()
         ),
         idempotency_key: Some("81818181-8181-4181-8181-818181818181".into()),
         repository_id: Some("82828282-8282-4282-8282-828282828282".into()),
+        aws_s3: None,
         locator: Some(path.to_string_lossy().into_owned()),
         operation_id: None,
     };
@@ -349,6 +379,7 @@ fn repository_pending_cancellation_replay_and_creator_lookup_survive_restart()
         expected_catalog_generation: Some(accepted.catalog_generation),
         idempotency_key: Some("84848484-8484-4484-8484-848484848484".into()),
         operation_id: Some(id.clone()),
+        aws_s3: None,
         locator: None,
         repository_id: None,
     };
@@ -373,6 +404,7 @@ fn repository_pending_cancellation_replay_and_creator_lookup_survive_restart()
         action: "status".into(),
         expected_catalog_generation: None,
         idempotency_key: None,
+        aws_s3: None,
         locator: None,
         repository_id: None,
         operation_id: Some(id),
@@ -412,7 +444,9 @@ fn accepted_repository_work_fails_closed_when_native_requesters_grant_is_revoked
             &administrator,
             RepositoryAdmission {
                 action: RepositoryAction::Initialize,
-                locator: &path,
+                locator: crate::services::repository_administration::RepositoryLocation::Local(
+                    &path,
+                ),
                 repository: [131; 16],
                 expected_generation: generation,
                 idempotency: AdministrativeIdempotencyKey::new([132; 16])?,
@@ -482,3 +516,108 @@ fn accepted_repository_work_fails_closed_when_native_requesters_grant_is_revoked
 
 #[path = "repository/fifo.rs"]
 mod fifo;
+
+#[test]
+fn aws_repository_admission_binds_native_target_without_provider_io()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::repository_administration::RepositoryLocation;
+    use positron_governance::RepositoryProviderKind;
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(initialized)?;
+    let target = positron_backup::AwsS3Target::new(
+        "positron-example",
+        "us-east-1",
+        "https://s3.us-east-1.amazonaws.com",
+        "123456789012",
+        "diagnostic/",
+    )?;
+    let generation = services
+        .open_maintenance_catalog()
+        .expect("catalog")
+        .pin()?
+        .number();
+    let input = RepositoryAdmission {
+        action: RepositoryAction::Doctor,
+        locator: RepositoryLocation::AwsS3(&target),
+        repository: [101; 16],
+        expected_generation: generation,
+        idempotency: AdministrativeIdempotencyKey::new([102; 16])?,
+    };
+    assert_eq!(
+        services.accept_repository_operation(&ingest, input),
+        Err(MaintenanceServiceFailure::AuthenticationRejected)
+    );
+    let operation = services
+        .accept_repository_operation(&administrator, input)
+        .expect("accepted native target");
+    let parameters = operation
+        .repository_parameters()
+        .ok_or("missing parameters")?;
+    assert_eq!(parameters.provider_kind(), RepositoryProviderKind::AwsS3);
+    assert_eq!(parameters.prefix_commitment(), target.commitment());
+    assert_eq!(operation.status(), DurableOperationStatus::Pending);
+    assert_eq!(
+        services
+            .accept_repository_operation(&administrator, input)
+            .expect("accepted native target")
+            .operation_id(),
+        operation.operation_id()
+    );
+    let request = positron_api::repository::RepositoryRequest {
+        action: "doctor".into(),
+        expected_catalog_generation: Some(generation),
+        idempotency_key: Some("66666666-6666-4666-8666-666666666666".into()),
+        locator: None,
+        repository_id: Some("65656565-6565-4565-8565-656565656565".into()),
+        operation_id: None,
+        aws_s3: Some(positron_api::repository::RepositoryAwsS3Target {
+            bucket: target.bucket().into(),
+            region: target.region().into(),
+            endpoint: target.endpoint().into(),
+            expected_owner: target.expected_owner().into(),
+            prefix: target.prefix().into(),
+        }),
+    };
+    let mut request = request;
+    request.expected_catalog_generation = Some(
+        services
+            .open_maintenance_catalog()
+            .expect("current catalog")
+            .pin()?
+            .number(),
+    );
+    let native_response = services
+        .manage_repository(&administrator, &request.encode()?)
+        .expect("native canonical request");
+    assert_eq!(
+        native_response
+            .operation
+            .as_ref()
+            .map(|operation| operation.status.as_str()),
+        Some("pending")
+    );
+    let mut refused = false;
+    for _ in 0..32 {
+        match crate::services::maintenance::wake_runtime_maintenance(&services, None) {
+            Err(crate::ServiceFailure::CapacityUnavailable) => {
+                refused = true;
+                break;
+            },
+            Ok(_) => {},
+            Err(failure) => return Err(format!("unexpected dispatch failure: {failure:?}").into()),
+        }
+        assert_eq!(
+            services
+                .repository_operation_status(&administrator, operation.operation_id())
+                .expect("native receipt")
+                .status(),
+            DurableOperationStatus::Pending
+        );
+    }
+    assert!(
+        refused,
+        "native transport must be admitted before provider work"
+    );
+    Ok(())
+}

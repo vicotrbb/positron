@@ -18,7 +18,10 @@ pub use provider_migration_parameters::{
 };
 mod repository_administration;
 mod repository_parameters;
-pub use repository_parameters::{RepositoryAction, RepositoryOperationParameters};
+mod repository_policy_codec;
+pub use repository_parameters::{
+    RepositoryAction, RepositoryOperationParameters, RepositoryProviderKind,
+};
 mod types;
 
 #[cfg(fuzzing)]

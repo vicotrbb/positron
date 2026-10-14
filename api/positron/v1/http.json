@@ -1,5 +1,5 @@
 {
-  "schema_digest": "4603a4044be826bfd12efc126cfa2b14aa0f6c2d25d1461cd1b6893a420ae6d5",
+  "schema_digest": "fa7d38e907d4caf094dd1f1b4e35386000deb7ee74796d34d56c734f4f400c81",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -389,25 +389,129 @@
       "max_response_bytes": 1024,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"expected_generation","json":"expected_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":3,"deprecated":false},
-        {"proto":"weight","json":"weight","type":"uint32","number":4,"deprecated":false},
-        {"proto":"memory_bytes","json":"memory_bytes","type":"uint64","number":5,"deprecated":false},
-        {"proto":"queue_slots","json":"queue_slots","type":"uint64","number":6,"deprecated":false},
-        {"proto":"task_slots","json":"task_slots","type":"uint64","number":7,"deprecated":false},
-        {"proto":"buffer_cache_bytes","json":"buffer_cache_bytes","type":"uint64","number":8,"deprecated":false},
-        {"proto":"batch_items","json":"batch_items","type":"uint64","number":9,"deprecated":false},
-        {"proto":"lease_slots","json":"lease_slots","type":"uint64","number":10,"deprecated":false},
-        {"proto":"retry_slots","json":"retry_slots","type":"uint64","number":11,"deprecated":false},
-        {"proto":"io_permits","json":"io_permits","type":"uint64","number":12,"deprecated":false},
-        {"proto":"cpu_work_units","json":"cpu_work_units","type":"uint64","number":13,"deprecated":false},
-        {"proto":"file_descriptors","json":"file_descriptors","type":"uint64","number":14,"deprecated":false},
-        {"proto":"disk_headroom_bytes","json":"disk_headroom_bytes","type":"uint64","number":15,"deprecated":false}
+        {
+          "proto": "expected_generation",
+          "json": "expected_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "weight",
+          "json": "weight",
+          "type": "uint32",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "memory_bytes",
+          "json": "memory_bytes",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false
+        },
+        {
+          "proto": "queue_slots",
+          "json": "queue_slots",
+          "type": "uint64",
+          "number": 6,
+          "deprecated": false
+        },
+        {
+          "proto": "task_slots",
+          "json": "task_slots",
+          "type": "uint64",
+          "number": 7,
+          "deprecated": false
+        },
+        {
+          "proto": "buffer_cache_bytes",
+          "json": "buffer_cache_bytes",
+          "type": "uint64",
+          "number": 8,
+          "deprecated": false
+        },
+        {
+          "proto": "batch_items",
+          "json": "batch_items",
+          "type": "uint64",
+          "number": 9,
+          "deprecated": false
+        },
+        {
+          "proto": "lease_slots",
+          "json": "lease_slots",
+          "type": "uint64",
+          "number": 10,
+          "deprecated": false
+        },
+        {
+          "proto": "retry_slots",
+          "json": "retry_slots",
+          "type": "uint64",
+          "number": 11,
+          "deprecated": false
+        },
+        {
+          "proto": "io_permits",
+          "json": "io_permits",
+          "type": "uint64",
+          "number": 12,
+          "deprecated": false
+        },
+        {
+          "proto": "cpu_work_units",
+          "json": "cpu_work_units",
+          "type": "uint64",
+          "number": 13,
+          "deprecated": false
+        },
+        {
+          "proto": "file_descriptors",
+          "json": "file_descriptors",
+          "type": "uint64",
+          "number": 14,
+          "deprecated": false
+        },
+        {
+          "proto": "disk_headroom_bytes",
+          "json": "disk_headroom_bytes",
+          "type": "uint64",
+          "number": 15,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"TenantQuotaUpdateResponse","400":"invalid_request","401":"authentication_rejected","409":["stale_generation","idempotency_conflict"],"503":"administration_unavailable"},
+      "responses": {
+        "200": "TenantQuotaUpdateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
       "stale_generation_response_fields": [
-        {"json":"resource_generation","type":"uint64","minimum":1,"description":"current resource generation"},
-        {"json":"semantic_diff","type":"string","minimum_length":1,"maximum_length":1024,"description":"redacted quota change summary"}
+        {
+          "json": "resource_generation",
+          "type": "uint64",
+          "minimum": 1,
+          "description": "current resource generation"
+        },
+        {
+          "json": "semantic_diff",
+          "type": "string",
+          "minimum_length": 1,
+          "maximum_length": 1024,
+          "description": "redacted quota change summary"
+        }
       ]
     },
     {
@@ -421,23 +525,106 @@
       "max_response_bytes": 1024,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"target","json":"target","type":"TenantLifecycleTarget","number":2,"deprecated":false},
-        {"proto":"expected_generation","json":"expected_generation","type":"uint64","number":3,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":4,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "target",
+          "json": "target",
+          "type": "TenantLifecycleTarget",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_generation",
+          "json": "expected_generation",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"from","json":"from","type":"TenantLifecycleTarget","number":2,"deprecated":false},
-        {"proto":"to","json":"to","type":"TenantLifecycleTarget","number":3,"deprecated":false},
-        {"proto":"lifecycle_generation","json":"lifecycle_generation","type":"uint64","number":4,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":5,"deprecated":false},
-        {"proto":"audit_ingest_time_unix_seconds","json":"audit_ingest_time_unix_seconds","type":"uint64","number":6,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "from",
+          "json": "from",
+          "type": "TenantLifecycleTarget",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "to",
+          "json": "to",
+          "type": "TenantLifecycleTarget",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "lifecycle_generation",
+          "json": "lifecycle_generation",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_ingest_time_unix_seconds",
+          "json": "audit_ingest_time_unix_seconds",
+          "type": "uint64",
+          "number": 6,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"TenantLifecycleTransitionResponse","400":"invalid_request","401":"authentication_rejected","404":"tenant_unavailable","409":["stale_generation","idempotency_conflict","invalid_transition","purge_completion_unavailable"],"503":"administration_unavailable"},
+      "responses": {
+        "200": "TenantLifecycleTransitionResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict",
+          "invalid_transition",
+          "purge_completion_unavailable"
+        ],
+        "503": "administration_unavailable"
+      },
       "stale_generation_response_fields": [
-        {"json":"lifecycle_generation","type":"uint64","minimum":1,"description":"current lifecycle generation"},
-        {"json":"semantic_diff","type":"string","minimum_length":1,"maximum_length":1024,"description":"redacted lifecycle change summary"}
+        {
+          "json": "lifecycle_generation",
+          "type": "uint64",
+          "minimum": 1,
+          "description": "current lifecycle generation"
+        },
+        {
+          "json": "semantic_diff",
+          "type": "string",
+          "minimum_length": 1,
+          "maximum_length": 1024,
+          "description": "redacted lifecycle change summary"
+        }
       ]
     },
     {
@@ -451,18 +638,78 @@
       "max_response_bytes": 1024,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"external_alias","json":"external_alias","type":"string","number":2,"deprecated":false},
-        {"proto":"expected_generation","json":"expected_generation","type":"uint64","number":3,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":4,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "external_alias",
+          "json": "external_alias",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_generation",
+          "json": "expected_generation",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"alias_generation","json":"alias_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":3,"deprecated":false},
-        {"proto":"audit_ingest_time_unix_seconds","json":"audit_ingest_time_unix_seconds","type":"uint64","number":4,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "alias_generation",
+          "json": "alias_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_ingest_time_unix_seconds",
+          "json": "audit_ingest_time_unix_seconds",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"TenantAliasBindResponse","400":"invalid_request","401":"authentication_rejected","404":"tenant_unavailable","409":["stale_generation","idempotency_conflict","alias_already_bound","alias_conflict"],"503":"administration_unavailable"}
+      "responses": {
+        "200": "TenantAliasBindResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict",
+          "alias_already_bound",
+          "alias_conflict"
+        ],
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.TenantService/Create",
@@ -475,30 +722,159 @@
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"slug","json":"slug","type":"string","number":2,"deprecated":false},
-        {"proto":"display_name","json":"display_name","type":"string","number":3,"deprecated":false},
-        {"proto":"retention_seconds","json":"retention_seconds","type":"uint64","number":4,"deprecated":false},
-        {"proto":"weight","json":"weight","type":"uint32","number":5,"deprecated":false},
-        {"proto":"memory_bytes","json":"memory_bytes","type":"uint64","number":6,"deprecated":false},
-        {"proto":"queue_slots","json":"queue_slots","type":"uint64","number":7,"deprecated":false},
-        {"proto":"task_slots","json":"task_slots","type":"uint64","number":8,"deprecated":false},
-        {"proto":"buffer_cache_bytes","json":"buffer_cache_bytes","type":"uint64","number":9,"deprecated":false},
-        {"proto":"batch_items","json":"batch_items","type":"uint64","number":10,"deprecated":false},
-        {"proto":"lease_slots","json":"lease_slots","type":"uint64","number":11,"deprecated":false},
-        {"proto":"retry_slots","json":"retry_slots","type":"uint64","number":12,"deprecated":false},
-        {"proto":"io_permits","json":"io_permits","type":"uint64","number":13,"deprecated":false},
-        {"proto":"cpu_work_units","json":"cpu_work_units","type":"uint64","number":14,"deprecated":false},
-        {"proto":"file_descriptors","json":"file_descriptors","type":"uint64","number":15,"deprecated":false},
-        {"proto":"disk_headroom_bytes","json":"disk_headroom_bytes","type":"uint64","number":16,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":17,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "slug",
+          "json": "slug",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "display_name",
+          "json": "display_name",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "retention_seconds",
+          "json": "retention_seconds",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "weight",
+          "json": "weight",
+          "type": "uint32",
+          "number": 5,
+          "deprecated": false
+        },
+        {
+          "proto": "memory_bytes",
+          "json": "memory_bytes",
+          "type": "uint64",
+          "number": 6,
+          "deprecated": false
+        },
+        {
+          "proto": "queue_slots",
+          "json": "queue_slots",
+          "type": "uint64",
+          "number": 7,
+          "deprecated": false
+        },
+        {
+          "proto": "task_slots",
+          "json": "task_slots",
+          "type": "uint64",
+          "number": 8,
+          "deprecated": false
+        },
+        {
+          "proto": "buffer_cache_bytes",
+          "json": "buffer_cache_bytes",
+          "type": "uint64",
+          "number": 9,
+          "deprecated": false
+        },
+        {
+          "proto": "batch_items",
+          "json": "batch_items",
+          "type": "uint64",
+          "number": 10,
+          "deprecated": false
+        },
+        {
+          "proto": "lease_slots",
+          "json": "lease_slots",
+          "type": "uint64",
+          "number": 11,
+          "deprecated": false
+        },
+        {
+          "proto": "retry_slots",
+          "json": "retry_slots",
+          "type": "uint64",
+          "number": 12,
+          "deprecated": false
+        },
+        {
+          "proto": "io_permits",
+          "json": "io_permits",
+          "type": "uint64",
+          "number": 13,
+          "deprecated": false
+        },
+        {
+          "proto": "cpu_work_units",
+          "json": "cpu_work_units",
+          "type": "uint64",
+          "number": 14,
+          "deprecated": false
+        },
+        {
+          "proto": "file_descriptors",
+          "json": "file_descriptors",
+          "type": "uint64",
+          "number": 15,
+          "deprecated": false
+        },
+        {
+          "proto": "disk_headroom_bytes",
+          "json": "disk_headroom_bytes",
+          "type": "uint64",
+          "number": 16,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 17,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":3,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "resource_generation",
+          "json": "resource_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"TenantCreateResponse","400":"invalid_request","401":"authentication_rejected","409":["tenant_conflict","idempotency_conflict"],"503":"administration_unavailable"}
+      "responses": {
+        "200": "TenantCreateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "tenant_conflict",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.TenantService/Inspect",
@@ -510,9 +886,31 @@
       "max_request_bytes": 2048,
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
-      "request_fields": [{"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false}],
-      "response_fields": [{"proto":"tenant","json":"tenant","type":"TenantDescriptor","number":1,"deprecated":false}],
-      "responses":{"200":"TenantInspectResponse","400":"invalid_request","401":"authentication_rejected","404":"tenant_unavailable","503":"administration_unavailable"}
+      "request_fields": [
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        }
+      ],
+      "response_fields": [
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "TenantDescriptor",
+          "number": 1,
+          "deprecated": false
+        }
+      ],
+      "responses": {
+        "200": "TenantInspectResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.TenantService/List",
@@ -524,9 +922,39 @@
       "max_request_bytes": 2048,
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
-      "request_fields": [{"proto":"continuation","json":"continuation","type":"string","number":1,"deprecated":false}],
-      "response_fields": [{"proto":"tenants","json":"tenants","type":"TenantDescriptor","number":1,"deprecated":false,"repeated":true},{"proto":"continuation","json":"continuation","type":"string","number":2,"deprecated":false}],
-      "responses":{"200":"TenantListResponse","400":"invalid_request","401":"authentication_rejected","409":"stale_continuation","503":"administration_unavailable"}
+      "request_fields": [
+        {
+          "proto": "continuation",
+          "json": "continuation",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        }
+      ],
+      "response_fields": [
+        {
+          "proto": "tenants",
+          "json": "tenants",
+          "type": "TenantDescriptor",
+          "number": 1,
+          "deprecated": false,
+          "repeated": true
+        },
+        {
+          "proto": "continuation",
+          "json": "continuation",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        }
+      ],
+      "responses": {
+        "200": "TenantListResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": "stale_continuation",
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.TenantService/UpdateDisplayName",
@@ -539,20 +967,82 @@
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"expected_display_generation","json":"expected_display_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"display_name","json":"display_name","type":"string","number":3,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":4,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_display_generation",
+          "json": "expected_display_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "display_name",
+          "json": "display_name",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"display_generation","json":"display_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":3,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "display_generation",
+          "json": "display_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"TenantDisplayNameUpdateResponse","400":"invalid_request","401":"authentication_rejected","409":["stale_display_generation","idempotency_conflict"],"503":"administration_unavailable"},
+      "responses": {
+        "200": "TenantDisplayNameUpdateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "stale_display_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
       "stale_generation_response_fields": [
-        {"json":"display_generation","type":"uint64","minimum":1,"description":"current display generation"},
-        {"json":"semantic_diff","type":"string","minimum_length":1,"maximum_length":1024,"description":"redacted display-name change summary"}
+        {
+          "json": "display_generation",
+          "type": "uint64",
+          "minimum": 1,
+          "description": "current display generation"
+        },
+        {
+          "json": "semantic_diff",
+          "type": "string",
+          "minimum_length": 1,
+          "maximum_length": 1024,
+          "description": "redacted display-name change summary"
+        }
       ]
     },
     {
@@ -567,22 +1057,102 @@
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"proposed_retention_seconds","json":"proposed_retention_seconds","type":"uint64","number":2,"deprecated":false},
-        {"proto":"continuation","json":"continuation","type":"string","number":3,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "proposed_retention_seconds",
+          "json": "proposed_retention_seconds",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "continuation",
+          "json": "continuation",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"retention_generation","json":"retention_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"proposed_retention_seconds","json":"proposed_retention_seconds","type":"uint64","number":3,"deprecated":false},
-        {"proto":"catalog_identity","json":"catalog_identity","type":"string","number":4,"deprecated":false},
-        {"proto":"catalog_generation","json":"catalog_generation","type":"uint64","number":5,"deprecated":false},
-        {"proto":"confirmation_digest","json":"confirmation_digest","type":"string","number":6,"deprecated":false},
-        {"proto":"scopes","json":"scopes","type":"TenantRetentionScopeImpact","number":7,"deprecated":false,"repeated":true},
-        {"proto":"continuation","json":"continuation","type":"string","number":8,"deprecated":false},
-        {"proto":"confirmation_evaluated_at_unix_nanos","json":"confirmation_evaluated_at_unix_nanos","type":"sint64","number":9,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "retention_generation",
+          "json": "retention_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "proposed_retention_seconds",
+          "json": "proposed_retention_seconds",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "catalog_identity",
+          "json": "catalog_identity",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "catalog_generation",
+          "json": "catalog_generation",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false
+        },
+        {
+          "proto": "confirmation_digest",
+          "json": "confirmation_digest",
+          "type": "string",
+          "number": 6,
+          "deprecated": false
+        },
+        {
+          "proto": "scopes",
+          "json": "scopes",
+          "type": "TenantRetentionScopeImpact",
+          "number": 7,
+          "deprecated": false,
+          "repeated": true
+        },
+        {
+          "proto": "continuation",
+          "json": "continuation",
+          "type": "string",
+          "number": 8,
+          "deprecated": false
+        },
+        {
+          "proto": "confirmation_evaluated_at_unix_nanos",
+          "json": "confirmation_evaluated_at_unix_nanos",
+          "type": "sint64",
+          "number": 9,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"TenantRetentionPreviewResponse","400":"invalid_request","401":"authentication_rejected","404":"tenant_unavailable","409":"stale_continuation","503":"administration_unavailable"}
+      "responses": {
+        "200": "TenantRetentionPreviewResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "409": "stale_continuation",
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.TenantRetentionService/Update",
@@ -596,23 +1166,107 @@
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"proposed_retention_seconds","json":"proposed_retention_seconds","type":"uint64","number":2,"deprecated":false},
-        {"proto":"expected_generation","json":"expected_generation","type":"uint64","number":3,"deprecated":false},
-        {"proto":"confirmation_digest","json":"confirmation_digest","type":"string","number":4,"deprecated":false,"optional":true},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":5,"deprecated":false},
-        {"proto":"confirmation_evaluated_at_unix_nanos","json":"confirmation_evaluated_at_unix_nanos","type":"sint64","number":6,"deprecated":false,"optional":true}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "proposed_retention_seconds",
+          "json": "proposed_retention_seconds",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_generation",
+          "json": "expected_generation",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "confirmation_digest",
+          "json": "confirmation_digest",
+          "type": "string",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 5,
+          "deprecated": false
+        },
+        {
+          "proto": "confirmation_evaluated_at_unix_nanos",
+          "json": "confirmation_evaluated_at_unix_nanos",
+          "type": "sint64",
+          "number": 6,
+          "deprecated": false,
+          "optional": true
+        }
       ],
       "response_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"retention_generation","json":"retention_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":3,"deprecated":false},
-        {"proto":"audit_ingest_time_unix_seconds","json":"audit_ingest_time_unix_seconds","type":"uint64","number":4,"deprecated":false}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "retention_generation",
+          "json": "retention_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_ingest_time_unix_seconds",
+          "json": "audit_ingest_time_unix_seconds",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"TenantRetentionUpdateResponse","400":"invalid_request","401":"authentication_rejected","404":"tenant_unavailable","409":["invalid_confirmation","stale_generation","idempotency_conflict"],"503":"administration_unavailable"},
+      "responses": {
+        "200": "TenantRetentionUpdateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "409": [
+          "invalid_confirmation",
+          "stale_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
       "stale_generation_response_fields": [
-        {"json":"retention_generation","type":"uint64","minimum":1,"description":"current retention generation"},
-        {"json":"semantic_diff","type":"string","minimum_length":1,"maximum_length":1024,"description":"redacted retention change summary"}
+        {
+          "json": "retention_generation",
+          "type": "uint64",
+          "minimum": 1,
+          "description": "current retention generation"
+        },
+        {
+          "json": "semantic_diff",
+          "type": "string",
+          "minimum_length": 1,
+          "maximum_length": 1024,
+          "description": "redacted retention change summary"
+        }
       ]
     },
     {
@@ -626,21 +1280,98 @@
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"cursor","json":"cursor","type":"string","number":1,"deprecated":false,"optional":true},
-        {"proto":"limit","json":"limit","type":"uint32","number":2,"deprecated":false,"optional":true}
+        {
+          "proto": "cursor",
+          "json": "cursor",
+          "type": "string",
+          "number": 1,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "limit",
+          "json": "limit",
+          "type": "uint32",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        }
       ],
       "response_fields": [
-        {"proto":"tasks","json":"tasks","type":"MaintenanceTaskStatus","number":1,"deprecated":false,"repeated":true},
-        {"proto":"queued","json":"queued","type":"uint32","number":2,"deprecated":false},
-        {"proto":"running","json":"running","type":"uint32","number":3,"deprecated":false},
-        {"proto":"deferred","json":"deferred","type":"uint32","number":4,"deprecated":false},
-        {"proto":"terminal","json":"terminal","type":"uint32","number":5,"deprecated":false},
-        {"proto":"returned","json":"returned","type":"uint32","number":6,"deprecated":false},
-        {"proto":"total","json":"total","type":"uint32","number":7,"deprecated":false},
-        {"proto":"next_cursor","json":"next_cursor","type":"string","number":8,"deprecated":false,"optional":true},
-        {"proto":"integrity_findings","json":"integrity_findings","type":"IntegrityQuarantineFinding","number":9,"deprecated":false,"repeated":true,"maximum_items":64}
+        {
+          "proto": "tasks",
+          "json": "tasks",
+          "type": "MaintenanceTaskStatus",
+          "number": 1,
+          "deprecated": false,
+          "repeated": true
+        },
+        {
+          "proto": "queued",
+          "json": "queued",
+          "type": "uint32",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "running",
+          "json": "running",
+          "type": "uint32",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "deferred",
+          "json": "deferred",
+          "type": "uint32",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "terminal",
+          "json": "terminal",
+          "type": "uint32",
+          "number": 5,
+          "deprecated": false
+        },
+        {
+          "proto": "returned",
+          "json": "returned",
+          "type": "uint32",
+          "number": 6,
+          "deprecated": false
+        },
+        {
+          "proto": "total",
+          "json": "total",
+          "type": "uint32",
+          "number": 7,
+          "deprecated": false
+        },
+        {
+          "proto": "next_cursor",
+          "json": "next_cursor",
+          "type": "string",
+          "number": 8,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "integrity_findings",
+          "json": "integrity_findings",
+          "type": "IntegrityQuarantineFinding",
+          "number": 9,
+          "deprecated": false,
+          "repeated": true,
+          "maximum_items": 64
+        }
       ],
-      "responses":{"200":"MaintenanceStatusResponse","400":"invalid_request","401":"authentication_rejected","503":"administration_unavailable"}
+      "responses": {
+        "200": "MaintenanceStatusResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.MaintenanceService/Explain",
@@ -653,12 +1384,30 @@
       "max_response_bytes": 2048,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"identity","json":"identity","type":"string","number":1,"deprecated":false}
+        {
+          "proto": "identity",
+          "json": "identity",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"task","json":"task","type":"MaintenanceTaskStatus","number":1,"deprecated":false}
+        {
+          "proto": "task",
+          "json": "task",
+          "type": "MaintenanceTaskStatus",
+          "number": 1,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"MaintenanceExplainResponse","400":"invalid_request","401":"authentication_rejected","404":"task_unavailable","503":"administration_unavailable"}
+      "responses": {
+        "200": "MaintenanceExplainResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "task_unavailable",
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.MaintenanceService/Run",
@@ -671,17 +1420,66 @@
       "max_response_bytes": 2048,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"task_class","json":"class","type":"string","number":1,"deprecated":false},
-        {"proto":"tenant","json":"tenant","type":"string","number":2,"deprecated":false},
-        {"proto":"signal","json":"signal","type":"string","number":3,"deprecated":false},
-        {"proto":"shard","json":"shard","type":"uint32","number":4,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":5,"deprecated":false}
+        {
+          "proto": "task_class",
+          "json": "class",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "signal",
+          "json": "signal",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "shard",
+          "json": "shard",
+          "type": "uint32",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 5,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"task","json":"task","type":"MaintenanceTaskAcknowledgement","number":1,"deprecated":false},
-        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":2,"deprecated":false}
+        {
+          "proto": "task",
+          "json": "task",
+          "type": "MaintenanceTaskAcknowledgement",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "resource_generation",
+          "json": "resource_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"MaintenanceRunResponse","400":"invalid_request","401":"authentication_rejected","404":"source_unavailable","409":"idempotency_conflict","503":"administration_unavailable"}
+      "responses": {
+        "200": "MaintenanceRunResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "idempotency_conflict",
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.MaintenanceService/Pause",
@@ -694,19 +1492,85 @@
       "max_response_bytes": 2048,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"identity","json":"identity","type":"string","number":1,"deprecated":false},
-        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"duration_seconds","json":"duration_seconds","type":"uint64","number":3,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":4,"deprecated":false}
+        {
+          "proto": "identity",
+          "json": "identity",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "resource_generation",
+          "json": "resource_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "duration_seconds",
+          "json": "duration_seconds",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"task","json":"task","type":"MaintenanceTaskAcknowledgement","number":1,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":2,"deprecated":false},
-        {"proto":"action","json":"action","type":"string","number":3,"deprecated":false},
-        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":4,"deprecated":false,"optional":true},
-        {"proto":"pause_until_unix_seconds","json":"pause_until_unix_seconds","type":"uint64","number":5,"deprecated":false,"optional":true}
+        {
+          "proto": "task",
+          "json": "task",
+          "type": "MaintenanceTaskAcknowledgement",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "action",
+          "json": "action",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "resource_generation",
+          "json": "resource_generation",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "pause_until_unix_seconds",
+          "json": "pause_until_unix_seconds",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        }
       ],
-      "responses":{"200":"MaintenanceControlResponse","400":"invalid_request","401":"authentication_rejected","404":"task_unavailable","409":["precondition_failed","idempotency_conflict"],"503":"administration_unavailable"}
+      "responses": {
+        "200": "MaintenanceControlResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "task_unavailable",
+        "409": [
+          "precondition_failed",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.MaintenanceService/Resume",
@@ -719,17 +1583,71 @@
       "max_response_bytes": 2048,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"identity","json":"identity","type":"string","number":1,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":2,"deprecated":false}
+        {
+          "proto": "identity",
+          "json": "identity",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"task","json":"task","type":"MaintenanceTaskAcknowledgement","number":1,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":2,"deprecated":false},
-        {"proto":"action","json":"action","type":"string","number":3,"deprecated":false},
-        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":4,"deprecated":false,"optional":true},
-        {"proto":"pause_until_unix_seconds","json":"pause_until_unix_seconds","type":"uint64","number":5,"deprecated":false,"optional":true}
+        {
+          "proto": "task",
+          "json": "task",
+          "type": "MaintenanceTaskAcknowledgement",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "action",
+          "json": "action",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "resource_generation",
+          "json": "resource_generation",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "pause_until_unix_seconds",
+          "json": "pause_until_unix_seconds",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        }
       ],
-      "responses":{"200":"MaintenanceControlResponse","400":"invalid_request","401":"authentication_rejected","404":"task_unavailable","409":["precondition_failed","idempotency_conflict"],"503":"administration_unavailable"}
+      "responses": {
+        "200": "MaintenanceControlResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "task_unavailable",
+        "409": [
+          "precondition_failed",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.MaintenanceService/Window",
@@ -742,18 +1660,77 @@
       "max_response_bytes": 2048,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"deferred_classes","json":"deferred_classes","type":"string","number":1,"deprecated":false,"repeated":true},
-        {"proto":"expected_catalog_generation","json":"expected_catalog_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"duration_seconds","json":"duration_seconds","type":"uint64","number":3,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":4,"deprecated":false}
+        {
+          "proto": "deferred_classes",
+          "json": "deferred_classes",
+          "type": "string",
+          "number": 1,
+          "deprecated": false,
+          "repeated": true
+        },
+        {
+          "proto": "expected_catalog_generation",
+          "json": "expected_catalog_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "duration_seconds",
+          "json": "duration_seconds",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"deferred_classes","json":"deferred_classes","type":"string","number":1,"deprecated":false,"repeated":true},
-        {"proto":"until_unix_seconds","json":"until_unix_seconds","type":"uint64","number":2,"deprecated":false},
-        {"proto":"catalog_generation","json":"catalog_generation","type":"uint64","number":3,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":4,"deprecated":false}
+        {
+          "proto": "deferred_classes",
+          "json": "deferred_classes",
+          "type": "string",
+          "number": 1,
+          "deprecated": false,
+          "repeated": true
+        },
+        {
+          "proto": "until_unix_seconds",
+          "json": "until_unix_seconds",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "catalog_generation",
+          "json": "catalog_generation",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"MaintenanceWindowResponse","400":"invalid_request","401":"authentication_rejected","409":["precondition_failed","idempotency_conflict"],"503":"administration_unavailable"}
+      "responses": {
+        "200": "MaintenanceWindowResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "precondition_failed",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.MaintenanceService/Verify",
@@ -766,28 +1743,147 @@
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"tenant","json":"tenant","type":"string","number":1,"deprecated":false},
-        {"proto":"signal","json":"signal","type":"string","number":2,"deprecated":false},
-        {"proto":"shard","json":"shard","type":"uint32","number":3,"deprecated":false},
-        {"proto":"expected_catalog_generation","json":"expected_catalog_generation","type":"uint64","number":4,"deprecated":false,"optional":true},
-        {"proto":"continuation","json":"continuation","type":"string","number":5,"deprecated":false,"optional":true}
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "signal",
+          "json": "signal",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "shard",
+          "json": "shard",
+          "type": "uint32",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_catalog_generation",
+          "json": "expected_catalog_generation",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "continuation",
+          "json": "continuation",
+          "type": "string",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        }
       ],
       "response_fields": [
-        {"proto":"report_version","json":"report_version","type":"uint32","number":1,"deprecated":false},
-        {"proto":"tenant","json":"tenant","type":"string","number":2,"deprecated":false},
-        {"proto":"signal","json":"signal","type":"string","number":3,"deprecated":false},
-        {"proto":"shard","json":"shard","type":"uint32","number":4,"deprecated":false},
-        {"proto":"catalog_generation","json":"catalog_generation","type":"uint64","number":5,"deprecated":false},
-        {"proto":"examined_segments","json":"examined_segments","type":"uint32","number":6,"deprecated":false},
-        {"proto":"examined_bytes","json":"examined_bytes","type":"uint64","number":7,"deprecated":false},
-        {"proto":"omitted_segments","json":"omitted_segments","type":"uint32","number":8,"deprecated":false},
-        {"proto":"outcome","json":"outcome","type":"string","number":9,"deprecated":false},
-        {"proto":"verification_complete","json":"verification_complete","type":"bool","number":10,"deprecated":false},
-        {"proto":"continuation","json":"continuation","type":"string","number":11,"deprecated":false,"optional":true},
-        {"proto":"findings","json":"findings","type":"IntegrityQuarantineFinding","number":12,"deprecated":false,"repeated":true,"maximum_items":64},
-        {"proto":"report_checksum","json":"report_checksum","type":"string","number":13,"deprecated":false}
+        {
+          "proto": "report_version",
+          "json": "report_version",
+          "type": "uint32",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "signal",
+          "json": "signal",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "shard",
+          "json": "shard",
+          "type": "uint32",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "catalog_generation",
+          "json": "catalog_generation",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false
+        },
+        {
+          "proto": "examined_segments",
+          "json": "examined_segments",
+          "type": "uint32",
+          "number": 6,
+          "deprecated": false
+        },
+        {
+          "proto": "examined_bytes",
+          "json": "examined_bytes",
+          "type": "uint64",
+          "number": 7,
+          "deprecated": false
+        },
+        {
+          "proto": "omitted_segments",
+          "json": "omitted_segments",
+          "type": "uint32",
+          "number": 8,
+          "deprecated": false
+        },
+        {
+          "proto": "outcome",
+          "json": "outcome",
+          "type": "string",
+          "number": 9,
+          "deprecated": false
+        },
+        {
+          "proto": "verification_complete",
+          "json": "verification_complete",
+          "type": "bool",
+          "number": 10,
+          "deprecated": false
+        },
+        {
+          "proto": "continuation",
+          "json": "continuation",
+          "type": "string",
+          "number": 11,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "findings",
+          "json": "findings",
+          "type": "IntegrityQuarantineFinding",
+          "number": 12,
+          "deprecated": false,
+          "repeated": true,
+          "maximum_items": 64
+        },
+        {
+          "proto": "report_checksum",
+          "json": "report_checksum",
+          "type": "string",
+          "number": 13,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"OnlineVerificationReport","400":"invalid_request","401":"authentication_rejected","404":"source_unavailable","503":"administration_unavailable"}
+      "responses": {
+        "200": "OnlineVerificationReport",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.PolicyService/Validate",
@@ -849,16 +1945,57 @@
       "max_response_bytes": 1024,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"policy_json","json":"policy_json","type":"string","number":1,"deprecated":false},
-        {"proto":"candidate_json","json":"candidate_json","type":"string","number":2,"deprecated":false}
+        {
+          "proto": "policy_json",
+          "json": "policy_json",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "candidate_json",
+          "json": "candidate_json",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"policy_generation","json":"policy_generation","type":"uint64","number":1,"deprecated":false},
-        {"proto":"policy_digest","json":"policy_digest","type":"string","number":2,"deprecated":false},
-        {"proto":"accepted","json":"accepted","type":"bool","number":3,"deprecated":false},
-        {"proto":"applied_rule_count","json":"applied_rule_count","type":"uint32","number":4,"deprecated":false}
+        {
+          "proto": "policy_generation",
+          "json": "policy_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "policy_digest",
+          "json": "policy_digest",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "accepted",
+          "json": "accepted",
+          "type": "bool",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "applied_rule_count",
+          "json": "applied_rule_count",
+          "type": "uint32",
+          "number": 4,
+          "deprecated": false
+        }
       ],
-      "responses": {"200":"PolicyTestResponse","400":"invalid_request","401":"authentication_rejected","503":"administration_unavailable"}
+      "responses": {
+        "200": "PolicyTestResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      }
     },
     {
       "rpc": "positron.v1.PolicyService/Diff",
@@ -871,59 +2008,212 @@
       "max_response_bytes": 8192,
       "unknown_fields": "reject",
       "request_fields": [
-        {"proto":"before_policy_json","json":"before_policy_json","type":"string","number":1,"deprecated":false},
-        {"proto":"after_policy_json","json":"after_policy_json","type":"string","number":2,"deprecated":false}
+        {
+          "proto": "before_policy_json",
+          "json": "before_policy_json",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "after_policy_json",
+          "json": "after_policy_json",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        }
       ],
       "response_fields": [
-        {"proto":"before_policy_generation","json":"before_policy_generation","type":"uint64","number":1,"deprecated":false},
-        {"proto":"before_policy_digest","json":"before_policy_digest","type":"string","number":2,"deprecated":false},
-        {"proto":"after_policy_generation","json":"after_policy_generation","type":"uint64","number":3,"deprecated":false},
-        {"proto":"after_policy_digest","json":"after_policy_digest","type":"string","number":4,"deprecated":false},
-        {"proto":"semantic_changes","json":"semantic_changes","type":"string","number":5,"deprecated":false,"repeated":true}
+        {
+          "proto": "before_policy_generation",
+          "json": "before_policy_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "before_policy_digest",
+          "json": "before_policy_digest",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "after_policy_generation",
+          "json": "after_policy_generation",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "after_policy_digest",
+          "json": "after_policy_digest",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "semantic_changes",
+          "json": "semantic_changes",
+          "type": "string",
+          "number": 5,
+          "deprecated": false,
+          "repeated": true
+        }
       ],
-      "responses": {"200":"PolicyDiffResponse","400":"invalid_request","401":"authentication_rejected","503":"administration_unavailable"}
+      "responses": {
+        "200": "PolicyDiffResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      }
     },
     {
-      "rpc":"positron.v1.PolicyService/Explain",
-      "method":"POST",
-      "path":"/v1/policies:explain",
-      "request":"PolicyExplainRequest",
-      "response":"PolicyExplainResponse",
-      "authentication":"Bearer TenantAdministration",
-      "max_request_bytes":65536,
-      "max_response_bytes":8192,
-      "unknown_fields":"reject",
-      "request_fields":[{"proto":"policy_json","json":"policy_json","type":"string","number":1,"deprecated":false},{"proto":"candidate_json","json":"candidate_json","type":"string","number":2,"deprecated":false}],
-      "response_fields":[{"proto":"policy_generation","json":"policy_generation","type":"uint64","number":1,"deprecated":false},{"proto":"policy_digest","json":"policy_digest","type":"string","number":2,"deprecated":false},{"proto":"outcome","json":"outcome","type":"string","number":3,"deprecated":false},{"proto":"explanation","json":"explanation","type":"string","number":4,"deprecated":false}],
-      "responses":{"200":"PolicyExplainResponse","400":"invalid_request","401":"authentication_rejected","503":"administration_unavailable"}
+      "rpc": "positron.v1.PolicyService/Explain",
+      "method": "POST",
+      "path": "/v1/policies:explain",
+      "request": "PolicyExplainRequest",
+      "response": "PolicyExplainResponse",
+      "authentication": "Bearer TenantAdministration",
+      "max_request_bytes": 65536,
+      "max_response_bytes": 8192,
+      "unknown_fields": "reject",
+      "request_fields": [
+        {
+          "proto": "policy_json",
+          "json": "policy_json",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "candidate_json",
+          "json": "candidate_json",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        }
+      ],
+      "response_fields": [
+        {
+          "proto": "policy_generation",
+          "json": "policy_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "policy_digest",
+          "json": "policy_digest",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "outcome",
+          "json": "outcome",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "explanation",
+          "json": "explanation",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        }
+      ],
+      "responses": {
+        "200": "PolicyExplainResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      }
     },
     {
-      "rpc":"positron.v1.PolicyService/Activate",
-      "method":"POST",
-      "path":"/v1/policies:activate",
-      "request":"PolicyActivateRequest",
-      "response":"PolicyActivateResponse",
-      "authentication":"Bearer TenantAdministration",
-      "max_request_bytes":65536,
-      "max_response_bytes":1024,
-      "unknown_fields":"reject",
-      "request_fields":[
-        {"proto":"policy_json","json":"policy_json","type":"string","number":1,"deprecated":false},
-        {"proto":"expected_generation","json":"expected_generation","type":"uint64","number":2,"deprecated":false},
-        {"proto":"idempotency_key","json":"idempotency_key","type":"string","number":3,"deprecated":false}
+      "rpc": "positron.v1.PolicyService/Activate",
+      "method": "POST",
+      "path": "/v1/policies:activate",
+      "request": "PolicyActivateRequest",
+      "response": "PolicyActivateResponse",
+      "authentication": "Bearer TenantAdministration",
+      "max_request_bytes": 65536,
+      "max_response_bytes": 1024,
+      "unknown_fields": "reject",
+      "request_fields": [
+        {
+          "proto": "policy_json",
+          "json": "policy_json",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_generation",
+          "json": "expected_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        }
       ],
-      "response_fields":[
-        {"proto":"resource_generation","json":"resource_generation","type":"uint64","number":1,"deprecated":false},
-        {"proto":"policy_digest","json":"policy_digest","type":"string","number":2,"deprecated":false},
-        {"proto":"audit_position","json":"audit_position","type":"uint64","number":3,"deprecated":false}
+      "response_fields": [
+        {
+          "proto": "resource_generation",
+          "json": "resource_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "policy_digest",
+          "json": "policy_digest",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "audit_position",
+          "json": "audit_position",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        }
       ],
-      "responses":{"200":"PolicyActivateResponse","400":"invalid_request","401":"authentication_rejected","409":["stale_generation","idempotency_conflict"],"503":"administration_unavailable"},
-      "stale_generation_response_fields":[
-        {"json":"resource_generation","type":"uint64","minimum":1,"description":"current policy generation"},
-        {"json":"semantic_diff","type":"string","minimum_length":1,"maximum_length":1024,"description":"redacted policy generation change"}
+      "responses": {
+        "200": "PolicyActivateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "stale_generation_response_fields": [
+        {
+          "json": "resource_generation",
+          "type": "uint64",
+          "minimum": 1,
+          "description": "current policy generation"
+        },
+        {
+          "json": "semantic_diff",
+          "type": "string",
+          "minimum_length": 1,
+          "maximum_length": 1024,
+          "description": "redacted policy generation change"
+        }
       ]
     },
-{
+    {
       "rpc": "positron.v1.MaintenanceService/AbandonSegment",
       "method": "POST",
       "path": "/v1/maintenance:abandon-segment",
@@ -934,129 +2224,129 @@
       "max_response_bytes": 65536,
       "unknown_fields": "reject",
       "request_fields": [
-            {
-                  "proto": "tenant",
-                  "json": "tenant",
-                  "type": "string",
-                  "number": 1,
-                  "deprecated": false
-            },
-            {
-                  "proto": "signal",
-                  "json": "signal",
-                  "type": "string",
-                  "number": 2,
-                  "deprecated": false
-            },
-            {
-                  "proto": "shard",
-                  "json": "shard",
-                  "type": "uint32",
-                  "number": 3,
-                  "deprecated": false
-            },
-            {
-                  "proto": "segment",
-                  "json": "segment",
-                  "type": "string",
-                  "number": 4,
-                  "deprecated": false
-            },
-            {
-                  "proto": "expected_catalog_generation",
-                  "json": "expected_catalog_generation",
-                  "type": "uint64",
-                  "number": 5,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "confirmation",
-                  "json": "confirmation",
-                  "type": "string",
-                  "number": 6,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "idempotency_key",
-                  "json": "idempotency_key",
-                  "type": "string",
-                  "number": 7,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "accept_data_loss",
-                  "json": "accept_data_loss",
-                  "type": "bool",
-                  "number": 8,
-                  "deprecated": false
-            },
-            {
-                  "proto": "operation_id",
-                  "json": "operation_id",
-                  "type": "string",
-                  "number": 9,
-                  "deprecated": false,
-                  "optional": true
-            }
+        {
+          "proto": "tenant",
+          "json": "tenant",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "signal",
+          "json": "signal",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "shard",
+          "json": "shard",
+          "type": "uint32",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "segment",
+          "json": "segment",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_catalog_generation",
+          "json": "expected_catalog_generation",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "confirmation",
+          "json": "confirmation",
+          "type": "string",
+          "number": 6,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 7,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "accept_data_loss",
+          "json": "accept_data_loss",
+          "type": "bool",
+          "number": 8,
+          "deprecated": false
+        },
+        {
+          "proto": "operation_id",
+          "json": "operation_id",
+          "type": "string",
+          "number": 9,
+          "deprecated": false,
+          "optional": true
+        }
       ],
       "response_fields": [
-            {
-                  "proto": "catalog_generation",
-                  "json": "catalog_generation",
-                  "type": "uint64",
-                  "number": 1,
-                  "deprecated": false
-            },
-            {
-                  "proto": "status",
-                  "json": "status",
-                  "type": "string",
-                  "number": 2,
-                  "deprecated": false
-            },
-            {
-                  "proto": "irreversible_boundary",
-                  "json": "irreversible_boundary",
-                  "type": "string",
-                  "number": 3,
-                  "deprecated": false
-            },
-            {
-                  "proto": "confirmation",
-                  "json": "confirmation",
-                  "type": "string",
-                  "number": 4,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "operation_id",
-                  "json": "operation_id",
-                  "type": "string",
-                  "number": 5,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "finding",
-                  "json": "finding",
-                  "type": "IntegrityQuarantineFinding",
-                  "number": 6,
-                  "deprecated": false
-            }
+        {
+          "proto": "catalog_generation",
+          "json": "catalog_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "status",
+          "json": "status",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "irreversible_boundary",
+          "json": "irreversible_boundary",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "confirmation",
+          "json": "confirmation",
+          "type": "string",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "operation_id",
+          "json": "operation_id",
+          "type": "string",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "finding",
+          "json": "finding",
+          "type": "IntegrityQuarantineFinding",
+          "number": 6,
+          "deprecated": false
+        }
       ],
       "responses": {
-            "200": "SegmentAbandonmentResponse",
-            "400": "invalid_request",
-            "401": "authentication_rejected",
-            "404": "source_unavailable",
-            "409": "precondition_failed or idempotency_conflict",
-            "503": "administration_unavailable"
+        "200": "SegmentAbandonmentResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
       }
-},
+    },
     {
       "rpc": "positron.v1.ProviderMigrationService/Manage",
       "method": "POST",
@@ -1068,224 +2358,240 @@
       "max_response_bytes": 4096,
       "unknown_fields": "reject",
       "request_fields": [
-            {
-                  "proto": "action",
-                  "json": "action",
-                  "type": "string",
-                  "number": 1,
-                  "deprecated": false
-            },
-            {
-                  "proto": "expected_catalog_generation",
-                  "json": "expected_catalog_generation",
-                  "type": "uint64",
-                  "number": 2,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "idempotency_key",
-                  "json": "idempotency_key",
-                  "type": "string",
-                  "number": 3,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "configuration_reference",
-                  "json": "configuration_reference",
-                  "type": "string",
-                  "number": 4,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "operation_id",
-                  "json": "operation_id",
-                  "type": "string",
-                  "number": 5,
-                  "deprecated": false,
-                  "optional": true
-            }
+        {
+          "proto": "action",
+          "json": "action",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_catalog_generation",
+          "json": "expected_catalog_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "configuration_reference",
+          "json": "configuration_reference",
+          "type": "string",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "operation_id",
+          "json": "operation_id",
+          "type": "string",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        }
       ],
       "response_fields": [
-            {
-                  "proto": "catalog_generation",
-                  "json": "catalog_generation",
-                  "type": "uint64",
-                  "number": 1,
-                  "deprecated": false
-            },
-            {
-                  "proto": "root_phase",
-                  "json": "root_phase",
-                  "type": "string",
-                  "number": 2,
-                  "deprecated": false
-            },
-            {
-                  "proto": "active_epoch",
-                  "json": "active_epoch",
-                  "type": "uint64",
-                  "number": 3,
-                  "deprecated": false
-            },
-            {
-                  "proto": "successor_epoch",
-                  "json": "successor_epoch",
-                  "type": "uint64",
-                  "number": 4,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "predecessor_epoch",
-                  "json": "predecessor_epoch",
-                  "type": "uint64",
-                  "number": 5,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "operation",
-                  "json": "operation",
-                  "type": "ProviderMigrationOperation",
-                  "number": 6,
-                  "deprecated": false,
-                  "optional": true
-            },
-            {
-                  "proto": "active_provider",
-                  "json": "active_provider",
-                  "type": "ProviderMigrationIdentity",
-                  "number": 7,
-                  "deprecated": false
-            },
-            {
-                  "proto": "source_provider",
-                  "json": "source_provider",
-                  "type": "ProviderMigrationIdentity",
-                  "number": 8,
-                  "deprecated": false
-            },
-            {
-                  "proto": "target_provider",
-                  "json": "target_provider",
-                  "type": "ProviderMigrationIdentity",
-                  "number": 9,
-                  "deprecated": false,
-                  "optional": true
-            }
+        {
+          "proto": "catalog_generation",
+          "json": "catalog_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "root_phase",
+          "json": "root_phase",
+          "type": "string",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "active_epoch",
+          "json": "active_epoch",
+          "type": "uint64",
+          "number": 3,
+          "deprecated": false
+        },
+        {
+          "proto": "successor_epoch",
+          "json": "successor_epoch",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "predecessor_epoch",
+          "json": "predecessor_epoch",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "operation",
+          "json": "operation",
+          "type": "ProviderMigrationOperation",
+          "number": 6,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "active_provider",
+          "json": "active_provider",
+          "type": "ProviderMigrationIdentity",
+          "number": 7,
+          "deprecated": false
+        },
+        {
+          "proto": "source_provider",
+          "json": "source_provider",
+          "type": "ProviderMigrationIdentity",
+          "number": 8,
+          "deprecated": false
+        },
+        {
+          "proto": "target_provider",
+          "json": "target_provider",
+          "type": "ProviderMigrationIdentity",
+          "number": 9,
+          "deprecated": false,
+          "optional": true
+        }
       ],
       "responses": {
-            "200": "ProviderMigrationResponse",
-            "400": "invalid_request",
-            "401": "authentication_rejected",
-            "404": "source_unavailable",
-            "409": "precondition_failed or idempotency_conflict",
-            "503": "administration_unavailable"
+        "200": "ProviderMigrationResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
       }
-},
-{
-  "rpc": "positron.v1.RepositoryService/Manage",
-  "method": "POST",
-  "path": "/v1/repositories:manage",
-  "request": "RepositoryRequest",
-  "response": "RepositoryResponse",
-  "authentication": "Bearer SystemAdministration",
-  "max_request_bytes": 4096,
-  "max_response_bytes": 4096,
-  "unknown_fields": "reject",
-  "request_fields": [
-    {
-      "proto": "action",
-      "json": "action",
-      "type": "string",
-      "number": 1,
-      "deprecated": false
     },
     {
-      "proto": "expected_catalog_generation",
-      "json": "expected_catalog_generation",
-      "type": "uint64",
-      "number": 2,
-      "deprecated": false,
-      "optional": true
-    },
-    {
-      "proto": "idempotency_key",
-      "json": "idempotency_key",
-      "type": "string",
-      "number": 3,
-      "deprecated": false,
-      "optional": true
-    },
-    {
-      "proto": "locator",
-      "json": "locator",
-      "type": "string",
-      "number": 4,
-      "deprecated": false,
-      "optional": true
-    },
-    {
-      "proto": "repository_id",
-      "json": "repository_id",
-      "type": "string",
-      "number": 5,
-      "deprecated": false,
-      "optional": true
-    },
-    {
-      "proto": "operation_id",
-      "json": "operation_id",
-      "type": "string",
-      "number": 6,
-      "deprecated": false,
-      "optional": true
+      "rpc": "positron.v1.RepositoryService/Manage",
+      "method": "POST",
+      "path": "/v1/repositories:manage",
+      "request": "RepositoryRequest",
+      "response": "RepositoryResponse",
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "unknown_fields": "reject",
+      "request_fields": [
+        {
+          "proto": "action",
+          "json": "action",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_catalog_generation",
+          "json": "expected_catalog_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "locator",
+          "json": "locator",
+          "type": "string",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "repository_id",
+          "json": "repository_id",
+          "type": "string",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "operation_id",
+          "json": "operation_id",
+          "type": "string",
+          "number": 6,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "aws_s3",
+          "json": "aws_s3",
+          "type": "RepositoryAwsS3Target",
+          "number": 7,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "response_fields": [
+        {
+          "proto": "catalog_generation",
+          "json": "catalog_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "operation",
+          "json": "operation",
+          "type": "RepositoryOperation",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "identity",
+          "json": "identity",
+          "type": "RepositoryIdentity",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "doctor",
+          "json": "doctor",
+          "type": "RepositoryDoctorResult",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "policy",
+          "json": "policy",
+          "type": "RepositoryPolicyReceipt",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "responses": {
+        "200": "RepositoryResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
+      }
     }
-  ],
-  "response_fields": [
-    {
-      "proto": "catalog_generation",
-      "json": "catalog_generation",
-      "type": "uint64",
-      "number": 1,
-      "deprecated": false
-    },
-    {
-      "proto": "operation",
-      "json": "operation",
-      "type": "RepositoryOperation",
-      "number": 2,
-      "deprecated": false,
-      "optional": true
-    },
-    {
-      "proto": "identity",
-      "json": "identity",
-      "type": "RepositoryIdentity",
-      "number": 3,
-      "deprecated": false,
-      "optional": true
-    },
-    {
-      "proto": "doctor",
-      "json": "doctor",
-      "type": "RepositoryDoctorResult",
-      "number": 4,
-      "deprecated": false,
-      "optional": true
-    }
-  ],
-  "responses": {
-    "200": "RepositoryResponse",
-    "400": "invalid_request",
-    "401": "authentication_rejected",
-    "404": "source_unavailable",
-    "409": "precondition_failed or idempotency_conflict",
-    "503": "administration_unavailable"
-  }
-}
   ]
 }

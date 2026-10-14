@@ -23,24 +23,7 @@ pub(super) fn read(
     file.take((MAX_REGISTRY_HEAD_BYTES + 41) as u64)
         .read_to_end(&mut bytes)
         .map_err(io_failure)?;
-    if bytes.len() <= 40
-        || bytes.len() > MAX_REGISTRY_HEAD_BYTES + 40
-        || bytes.get(..8) != Some(&b"POSRHD01"[..])
-    {
-        return Err(RepositoryFailure::CorruptState);
-    }
-    let digest: [u8; 32] = bytes
-        .get(8..40)
-        .and_then(|value| value.try_into().ok())
-        .ok_or(RepositoryFailure::CorruptState)?;
-    let payload = bytes.get(40..).ok_or(RepositoryFailure::CorruptState)?;
-    if <[u8; 32]>::from(Sha256::digest(payload)) != digest {
-        return Err(RepositoryFailure::ChecksumMismatch);
-    }
-    Ok(Some(RegistryHead {
-        version: ObjectVersion(digest),
-        bytes: payload.to_vec(),
-    }))
+    RegistryHead::decode_frame(&bytes).map(Some)
 }
 pub(super) fn publish(
     root: &File,
@@ -68,10 +51,7 @@ pub(super) fn publish(
     )
     .map(File::from)
     .map_err(storage)?;
-    file.write_all(b"POSRHD01").map_err(io_failure)?;
-    file.write_all(&change.successor.version().checksum())
-        .map_err(io_failure)?;
-    file.write_all(change.successor.bytes())
+    file.write_all(&change.successor.encode_frame())
         .map_err(io_failure)?;
     file.sync_all().map_err(io_failure)?;
     faults.at(fault::LocalFaultPoint::BeforeRegistryPublication)?;

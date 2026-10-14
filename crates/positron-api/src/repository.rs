@@ -4,6 +4,12 @@ pub use crate::maintenance::MaintenanceServiceClientFailure as RepositoryService
 use crate::maintenance::MaintenanceWireFailure;
 pub use crate::provider_migration::ProviderMigrationOperation as RepositoryOperation;
 use serde::{Deserialize, Serialize};
+mod policy;
+pub use policy::{
+    RepositoryDefaultRetention, RepositoryEventHold, RepositoryLifecyclePolicy,
+    RepositoryObjectProtection, RepositoryObjectRetention, RepositoryPolicyObservation,
+    RepositoryPolicyReceipt,
+};
 mod client {
     include!(concat!(env!("OUT_DIR"), "/repository_service_client.rs"));
 }
@@ -25,6 +31,42 @@ pub struct RepositoryRequest {
     pub repository_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_s3: Option<RepositoryAwsS3Target>,
+}
+/// Non-secret native selector. Credentials are resolved by the serving owner.
+#[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryAwsS3Target {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: String,
+    pub expected_owner: String,
+    pub prefix: String,
+}
+impl std::fmt::Debug for RepositoryAwsS3Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepositoryAwsS3Target")
+            .finish_non_exhaustive()
+    }
+}
+impl RepositoryAwsS3Target {
+    fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        if [
+            (&self.bucket, 63),
+            (&self.region, 32),
+            (&self.endpoint, 256),
+            (&self.expected_owner, 12),
+            (&self.prefix, 512),
+        ]
+        .iter()
+        .any(|(text, bound)| {
+            text.is_empty() || text.len() > *bound || text.chars().any(char::is_control)
+        }) {
+            return Err(MaintenanceWireFailure);
+        }
+        Ok(())
+    }
 }
 impl std::fmt::Debug for RepositoryRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -72,15 +114,19 @@ impl RepositoryRequest {
         {
             return Err(MaintenanceWireFailure);
         }
+        if let Some(target) = &self.aws_s3 {
+            target.validate()?;
+        }
         let mutation = self
             .expected_catalog_generation
             .is_some_and(|generation| generation > 0)
             && self.idempotency_key.is_some();
-        let no_locator = self.locator.is_none() && self.repository_id.is_none();
+        let no_locator =
+            self.locator.is_none() && self.aws_s3.is_none() && self.repository_id.is_none();
         let valid = match self.action.as_str() {
             "init" | "verify" | "doctor" => {
                 mutation
-                    && self.locator.is_some()
+                    && (self.locator.is_some() != self.aws_s3.is_some())
                     && self.repository_id.is_some()
                     && self.operation_id.is_none()
             },
@@ -132,6 +178,8 @@ pub struct RepositoryResponse {
     pub identity: Option<RepositoryIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doctor: Option<RepositoryDoctorResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<RepositoryPolicyReceipt>,
 }
 impl RepositoryResponse {
     pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
@@ -167,10 +215,23 @@ impl RepositoryResponse {
             };
             if !crate::validation::identifier(&identity.repository_id)
                 || !crate::validation::identifier(&identity.instance_id)
-                || identity.provider_kind != "local_filesystem"
+                || !matches!(
+                    identity.provider_kind.as_str(),
+                    "local_filesystem" | "aws_s3"
+                )
                 || identity.format_epoch != 1
                 || !hash(&identity.integrity_fingerprint)
                 || !hash(&identity.prefix_commitment)
+            {
+                return Err(MaintenanceWireFailure);
+            }
+        }
+        if let Some(policy) = &self.policy {
+            policy.validate()?;
+            if self
+                .operation
+                .as_ref()
+                .is_none_or(|operation| operation.status != "succeeded")
             {
                 return Err(MaintenanceWireFailure);
             }

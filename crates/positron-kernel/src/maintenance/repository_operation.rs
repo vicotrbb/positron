@@ -84,6 +84,31 @@ impl MaintenanceCoordinator {
         preconditions: MaintenancePreconditions,
         now: u64,
     ) -> Result<MaintenanceTask, MaintenanceFailure> {
+        self.submit_repository_operation_with_resources_and_persist(
+            catalog,
+            binding,
+            preconditions,
+            ResourceAmounts::new([131_072, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384]),
+            now,
+        )
+    }
+
+    /// Declares the provider's bounded peak on the same persisted task authority.
+    pub fn submit_repository_operation_with_resources_and_persist(
+        &self,
+        catalog: &crate::Catalog<'_>,
+        binding: RepositoryOperationBinding,
+        preconditions: MaintenancePreconditions,
+        resources: ResourceAmounts,
+        now: u64,
+    ) -> Result<MaintenanceTask, MaintenanceFailure> {
+        let floor = ResourceAmounts::new([131_072, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384]);
+        if crate::ResourceDimension::ALL
+            .iter()
+            .any(|dimension| resources.get(*dimension) < floor.get(*dimension))
+        {
+            return Err(MaintenanceFailure::InvalidInput);
+        }
         let task = MaintenanceTask::with_contract(
             MaintenanceTaskId::new(binding.operation)?,
             MaintenanceTaskClass::RepositoryVerification,
@@ -92,10 +117,46 @@ impl MaintenanceCoordinator {
             preconditions,
             Vec::new(),
             Vec::new(),
-            // Bounded probe buffers, one native IO operation, four descriptors,
-            // and diagnostic staging. Catalog retains its own grant.
-            ResourceAmounts::new([131_072, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384]),
+            // Catalog retains its own grant; provider work owns this peak.
+            resources,
         )?;
         self.submit_bound_operation(catalog, task, binding.checkpoint()?, now)
+    }
+}
+
+impl MaintenanceExecution<'_> {
+    /// Retrieves the already transferred owner for another attempt of this exact task.
+    pub fn retained_repository_resources(
+        &self,
+        binding: RepositoryOperationBinding,
+    ) -> Result<Option<std::sync::Arc<crate::NativeAwsResources>>, MaintenanceFailure> {
+        if RepositoryOperationBinding::from_execution(self)? != binding {
+            return Err(MaintenanceFailure::PreconditionFailed);
+        }
+        Ok(match &self.reservation {
+            MaintenanceReservation::NativeRepository(resources) => Some(resources.clone()),
+            MaintenanceReservation::Ordinary(_) | MaintenanceReservation::Recovery(_) => None,
+        })
+    }
+
+    /// Retains the existing task grant in both the execution and native
+    /// workers. Completion publication remains admitted, and cancellation
+    /// cannot release capacity while a worker still owns it.
+    pub fn transfer_repository_resources(
+        &mut self,
+        binding: RepositoryOperationBinding,
+    ) -> Result<std::sync::Arc<crate::NativeAwsResources>, MaintenanceFailure> {
+        if RepositoryOperationBinding::from_execution(self)? != binding {
+            return Err(MaintenanceFailure::PreconditionFailed);
+        }
+        let MaintenanceReservation::Ordinary(reservation) = &mut self.reservation else {
+            return Err(MaintenanceFailure::InvalidTransition);
+        };
+        let grant = reservation
+            .transfer_from_borrow()
+            .ok_or(MaintenanceFailure::InvalidTransition)?;
+        let resources = crate::NativeAwsResources::new(grant);
+        self.reservation = MaintenanceReservation::NativeRepository(resources.clone());
+        Ok(resources)
     }
 }

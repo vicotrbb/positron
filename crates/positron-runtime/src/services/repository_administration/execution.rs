@@ -40,7 +40,7 @@ pub(in crate::services) fn recover_accepted_task(
         )
         .map_err(|_| ServiceFailure::CorruptState)?;
         coordinator
-            .submit_repository_operation_and_persist(
+            .submit_repository_operation_with_resources_and_persist(
                 &catalog,
                 binding,
                 MaintenancePreconditions::new(
@@ -52,6 +52,7 @@ pub(in crate::services) fn recover_accepted_task(
                     1,
                 )
                 .map_err(super::super::maintenance::map_failure)?,
+                repository_resources(parameters.provider_kind()),
                 services
                     .maintenance_status_now()
                     .map_err(|_| ServiceFailure::StorageUnavailable)?,
@@ -63,7 +64,7 @@ pub(in crate::services) fn recover_accepted_task(
 }
 pub(in crate::services) fn complete(
     services: &ServiceHandle,
-    execution: &positron_kernel::MaintenanceExecution<'_>,
+    execution: &mut positron_kernel::MaintenanceExecution<'_>,
 ) -> Result<bool, ServiceFailure> {
     let binding = RepositoryOperationBinding::from_execution(execution)
         .map_err(|_| ServiceFailure::CorruptState)?;
@@ -126,8 +127,24 @@ pub(in crate::services) fn complete(
         }
         (operation, actor, parameters)
     };
+    let native_resources =
+        if parameters.provider_kind() == positron_governance::RepositoryProviderKind::AwsS3 {
+            Some(
+                match execution
+                    .retained_repository_resources(binding)
+                    .map_err(super::super::maintenance::map_failure)?
+                {
+                    Some(resources) => resources,
+                    None => execution
+                        .transfer_repository_resources(binding)
+                        .map_err(super::super::maintenance::map_failure)?,
+                },
+            )
+        } else {
+            None
+        };
     let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .max_blocking_threads(1)
         .build()
         .map_err(|_| ServiceFailure::StorageUnavailable)?;
@@ -135,34 +152,71 @@ pub(in crate::services) fn complete(
     let started = std::time::Instant::now();
     let result = runtime.block_on(async {
         tokio::time::timeout(budget, async {
-            let path = Path::new(
-                parameters
-                    .locator()
-                    .map_err(|_| RepositoryFailure::CorruptState)?,
-            );
-            let identity = RepositoryIdentity::local(
-                parameters.repository_id(),
-                services.instance.instance.to_bytes(),
-                parameters.integrity_fingerprint(),
-                path,
-            )?;
-            if identity.prefix_commitment() != parameters.prefix_commitment() {
-                return Err(RepositoryFailure::IdentityMismatch);
-            }
-            let repository = match parameters.action() {
-                RepositoryAction::Initialize => {
-                    match LocalRepository::attach(path, &identity).await {
-                        Ok(repository) => repository,
-                        Err(RepositoryFailure::NotFound) => {
-                            LocalRepository::initialize(path, identity.clone()).await?
-                        },
-                        Err(failure) => return Err(failure),
-                    }
-                },
-                RepositoryAction::Verify | RepositoryAction::Doctor => {
-                    LocalRepository::attach(path, &identity).await?
-                },
-            };
+            let (identity, repository): (RepositoryIdentity, Box<dyn Repository>) =
+                match parameters.provider_kind() {
+                    positron_governance::RepositoryProviderKind::LocalFilesystem => {
+                        let path = Path::new(
+                            parameters
+                                .locator()
+                                .map_err(|_| RepositoryFailure::CorruptState)?,
+                        );
+                        let identity = RepositoryIdentity::local(
+                            parameters.repository_id(),
+                            services.instance.instance.to_bytes(),
+                            parameters.integrity_fingerprint(),
+                            path,
+                        )?;
+                        if identity.prefix_commitment() != parameters.prefix_commitment() {
+                            return Err(RepositoryFailure::IdentityMismatch);
+                        }
+                        let repository = match parameters.action() {
+                            RepositoryAction::Initialize => {
+                                match LocalRepository::attach(path, &identity).await {
+                                    Ok(repository) => repository,
+                                    Err(RepositoryFailure::NotFound) => {
+                                        LocalRepository::initialize(path, identity.clone()).await?
+                                    },
+                                    Err(failure) => return Err(failure),
+                                }
+                            },
+                            RepositoryAction::Verify | RepositoryAction::Doctor => {
+                                LocalRepository::attach(path, &identity).await?
+                            },
+                        };
+                        (identity, Box::new(repository))
+                    },
+                    positron_governance::RepositoryProviderKind::AwsS3 => {
+                        let target = positron_backup::AwsS3Target::decode_locator(
+                            parameters
+                                .locator()
+                                .map_err(|_| RepositoryFailure::CorruptState)?,
+                        )?;
+                        let identity = RepositoryIdentity::aws_s3(
+                            parameters.repository_id(),
+                            services.instance.instance.to_bytes(),
+                            parameters.integrity_fingerprint(),
+                            &target,
+                        )?;
+                        if identity.prefix_commitment() != parameters.prefix_commitment() {
+                            return Err(RepositoryFailure::IdentityMismatch);
+                        }
+                        let repository = positron_backup::AwsS3Repository::from_admitted_resources(
+                            target,
+                            identity.clone(),
+                            native_resources.ok_or(RepositoryFailure::PermissionDenied)?,
+                        )
+                        .await?;
+                        match parameters.action() {
+                            RepositoryAction::Initialize => {
+                                repository.initialize().await?;
+                            },
+                            RepositoryAction::Verify | RepositoryAction::Doctor => {
+                                repository.attach().await?;
+                            },
+                        }
+                        (identity, Box::new(repository))
+                    },
+                };
             if repository.identify().await? != identity {
                 return Err(RepositoryFailure::IdentityMismatch);
             }
@@ -177,8 +231,8 @@ pub(in crate::services) fn complete(
                     .get_mut(16..)
                     .ok_or(RepositoryFailure::CorruptState)?
                     .copy_from_slice(&operation_id);
-                positron_backup::doctor(
-                    &repository,
+                let report = positron_backup::doctor(
+                    repository.as_ref(),
                     positron_backup::DoctorPlan::new(
                         probe,
                         identity,
@@ -190,14 +244,16 @@ pub(in crate::services) fn complete(
                     )?,
                 )
                 .await?;
+                Ok(report.policy())
+            } else {
+                repository.storage_policy().await
             }
-            Ok(())
         })
         .await
         .map_err(|_| RepositoryFailure::OutcomeUnknown)?
     });
-    let success = match result {
-        Ok(()) => true,
+    let policy = match result {
+        Ok(policy) => Some(policy),
         Err(RepositoryFailure::Busy | RepositoryFailure::Throttled { .. }) => {
             return Err(ServiceFailure::CapacityUnavailable);
         },
@@ -206,8 +262,9 @@ pub(in crate::services) fn complete(
             | RepositoryFailure::OutcomeUnknown
             | RepositoryFailure::Interrupted,
         ) => return Err(ServiceFailure::StorageUnavailable),
-        Err(_) => false,
+        Err(_) => None,
     };
+    let success = policy.is_some();
     let _gate = services.catalog_operation()?;
     let catalog = services
         .open_maintenance_catalog()
@@ -215,8 +272,10 @@ pub(in crate::services) fn complete(
     let now = services
         .maintenance_status_now()
         .map_err(|_| ServiceFailure::StorageUnavailable)?;
-    if success {
-        DurableOperationAdministration::succeed_repository(&catalog, actor, id, now)
+    if let Some(policy) = policy {
+        DurableOperationAdministration::succeed_repository_with_policy(
+            &catalog, actor, id, now, policy,
+        )
     } else {
         DurableOperationAdministration::fail_repository(&catalog, actor, id, now)
     }

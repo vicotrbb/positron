@@ -103,7 +103,33 @@ impl DurableOperationAdministration {
         if operation.kind() != DurableOperationKind::RepositoryInspection {
             return Err(DurableOperationFailure::InvalidState);
         }
+        if operation.repository_parameters().is_some_and(|parameters| {
+            parameters.provider_kind() == super::RepositoryProviderKind::AwsS3
+        }) {
+            return Err(DurableOperationFailure::InvalidState);
+        }
         publish(catalog, &snapshot, operation.succeeded(now)?)
+    }
+
+    /// Publishes observed provider policy together with the terminal receipt.
+    pub fn succeed_repository_with_policy(
+        catalog: &Catalog<'_>,
+        actor: crate::AuthorizedContext,
+        operation_id: OperationId,
+        now: u64,
+        policy: positron_domain::repository::RepositoryPolicy,
+    ) -> Result<DurableOperation, DurableOperationFailure> {
+        let receipt = super::repository_policy_codec::RepositoryPolicyReceipt::new(policy)?;
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        let operation = find_by_id(&snapshot, operation_id)?
+            .ok_or(DurableOperationFailure::UnknownOperation)?;
+        validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::RepositoryInspection {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        let mut completed = operation.succeeded(now)?;
+        completed.repository_policy = Some(receipt);
+        publish(catalog, &snapshot, completed)
     }
 
     pub fn reject_repository_authorization(

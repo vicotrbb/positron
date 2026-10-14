@@ -276,7 +276,7 @@ pub(super) fn wake_runtime_maintenance(
     services: &super::ServiceHandle,
     cancellation: Option<&crate::TaskCancellation>,
 ) -> Result<bool, ServiceFailure> {
-    let execution = match start_installed_maintenance(services, cancellation)? {
+    let mut execution = match start_installed_maintenance(services, cancellation)? {
         Some(execution) => execution,
         None => {
             let discovered = discover_retention_publications(services, cancellation)?;
@@ -290,7 +290,7 @@ pub(super) fn wake_runtime_maintenance(
         execution,
         InstalledMaintenanceExecution::EnvelopeVerification { .. }
     );
-    let completed = complete_installed_maintenance(services, cancellation, &execution)?;
+    let completed = complete_installed_maintenance(services, cancellation, &mut execution)?;
     drop(execution);
     if envelope {
         return Ok(completed);
@@ -497,7 +497,7 @@ fn snapshot_lease_schedule_times(
 fn complete_installed_maintenance(
     services: &super::ServiceHandle,
     cancellation: Option<&crate::TaskCancellation>,
-    execution: &InstalledMaintenanceExecution<'_>,
+    execution: &mut InstalledMaintenanceExecution<'_>,
 ) -> Result<bool, ServiceFailure> {
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
         return Err(ServiceFailure::Cancelled);
@@ -1289,7 +1289,7 @@ pub(super) fn run_runtime_maintenance_worker(
     while !cancellation.is_cancelled() {
         let mut completed_integrity = false;
         let (failure_context, result) = match in_flight.take() {
-            Some(execution) => {
+            Some(mut execution) => {
                 completed_integrity = matches!(
                     execution,
                     InstalledMaintenanceExecution::IntegrityScrub { .. }
@@ -1298,7 +1298,7 @@ pub(super) fn run_runtime_maintenance_worker(
                     MaintenanceWorkerOperation::CompleteInFlight,
                 )
                 .with_task_class(installed_task_class(&execution));
-                match complete_installed_maintenance(services, Some(cancellation), &execution) {
+                match complete_installed_maintenance(services, Some(cancellation), &mut execution) {
                     Ok(completed) => {
                         let envelope = matches!(
                             execution,

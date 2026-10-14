@@ -99,6 +99,47 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
     let text = String::from_utf8(output.stdout)?;
     assert!(text.contains("catalog_generation="));
     assert!(!text.contains(claim.secret()));
+    let native = [
+        "--expected-generation".into(),
+        "1".into(),
+        "--idempotency-key".into(),
+        "74747474-7474-4474-8474-747474747474".into(),
+        "--repository-id".into(),
+        "75757575-7575-4575-8575-757575757575".into(),
+        "--aws-bucket".into(),
+        "positron-example".into(),
+        "--aws-region".into(),
+        "us-east-1".into(),
+        "--aws-endpoint".into(),
+        "https://s3.us-east-1.amazonaws.com".into(),
+        "--aws-expected-owner".into(),
+        "123456789012".into(),
+        "--aws-prefix".into(),
+        "diagnostic/".into(),
+    ];
+    let rejected = command(
+        endpoint,
+        claim.ingest_secret().ok_or("ingest credential")?,
+        "doctor",
+        &native,
+    )?;
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8(rejected.stderr)?
+            .contains("system administration authentication rejected")
+    );
+    let mut invalid = native;
+    for value in &mut invalid {
+        if value == "us-east-1" {
+            *value = "unsupported-region".into();
+        }
+    }
+    let rejected = command(endpoint, claim.secret(), "doctor", &invalid)?;
+    assert!(!rejected.status.success());
+    let error = String::from_utf8(rejected.stderr)?;
+    assert!(error.contains("invalid repository request"));
+    assert!(!error.contains(claim.secret()));
+    assert!(!error.contains("123456789012"));
     let repository = root.join("repository");
     fs::create_dir(&repository)?;
     fs::set_permissions(&repository, fs::Permissions::from_mode(0o700))?;
@@ -111,6 +152,7 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
                     action: "status".into(),
                     expected_catalog_generation: None,
                     idempotency_key: None,
+                    aws_s3: None,
                     locator: None,
                     repository_id: None,
                     operation_id: None,
@@ -166,10 +208,17 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
         );
         let text = String::from_utf8(output.stdout)?;
         assert!(text.contains("status=succeeded"), "{text}");
+        assert!(text.contains("versioning_state=unobservable"));
+        assert!(text.contains("object_lock_state=unobservable"));
+        assert!(text.contains("lifecycle_state=unobservable"));
+        assert!(text.contains("policy_observed_at_unix_seconds="));
         assert!(text.contains("retry="));
         assert!(text.contains("lookup_expires_at_unix_seconds="));
         if action == "doctor" {
             assert!(text.contains("owned_probes_deleted=true"));
+            for name in ["retention", "legal_hold", "event_hold"] {
+                assert!(text.contains(&format!("doctor_probe_{name}_state=unobservable")));
+            }
         }
     }
     assert_eq!(fs::read_dir(repository)?.count(), 1);
