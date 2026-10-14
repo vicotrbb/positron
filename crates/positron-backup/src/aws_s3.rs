@@ -1,6 +1,8 @@
 //! AWS S3 API 2006-03-01, using its native SDK and renewable workload identity.
 mod failure;
 mod fault;
+#[cfg(feature = "test-support")]
+mod simulation;
 #[cfg(not(feature = "test-support"))]
 use fault::AwsS3FaultPoint;
 #[cfg(feature = "test-support")]

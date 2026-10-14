@@ -129,3 +129,48 @@ its preparation/verification require explicit authorization; no actions have
 been executed here. Ordinary current deletion is insufficient cleanup because
 versions remain; subsequent fixture disposal must name only the operator-owned
 versions and marker IDs under separately approved cleanup scope.
+
+## Optional local simulation
+
+A separately named, ignored test can exercise native SDK calls against a
+loopback-only Moto server using literal dummy credentials. This test-support
+constructor accepts a loopback socket address, retains the same Kernel resource
+owner and bounded HTTP body handling, and never reads the native credential
+chain or configuration. It does not change the production target parser,
+regional HTTPS endpoint requirement or immutable target commitment.
+
+The observed compatible XML context is official Moto image
+`ghcr.io/getmoto/motoserver:5.1.22`, digest
+`sha256:1e3802c95726373544967b428201c548f0247c15b00db2d96a5ba0a77d8643b8`,
+which reports version `5.1.22.dev`. Run it as a disposable container with no host
+mounts, a loopback-only published port, 512 MiB memory, one CPU and 128 processes.
+Create a disposable bucket named `positron-102-simulation` in `us-east-1` and
+enable versioning using explicit dummy credentials:
+
+```console
+docker run --detach --rm --name positron-102-moto --memory 512m --cpus 1 --pids-limit 128 --publish 127.0.0.1:0:5000 ghcr.io/getmoto/motoserver@sha256:1e3802c95726373544967b428201c548f0247c15b00db2d96a5ba0a77d8643b8
+docker port positron-102-moto 5000
+docker exec positron-102-moto python -c 'import boto3; s=boto3.client("s3",endpoint_url="http://127.0.0.1:5000",region_name="us-east-1",aws_access_key_id="test",aws_secret_access_key="test"); s.create_bucket(Bucket="positron-102-simulation"); s.put_bucket_versioning(Bucket="positron-102-simulation",VersioningConfiguration={"Status":"Enabled"})'
+```
+
+Pass the reported loopback socket to:
+
+```console
+POSITRON_S3_SIMULATOR_ADDRESS=127.0.0.1:5000 cargo test --locked -p positron-backup --features test-support --test aws_s3_conformance local_s3_simulation_checks_objects_cas_and_unverifiable_multipart -- --ignored --exact
+```
+
+Use the actual published port. The test verifies object/range/checksum/listing,
+conditional registry updates and owned version cleanup. It also submits a 6 MiB
+multipart object and asserts that unverifiable completion retains its owned
+upload record and publishes no final object. Moto advertises a multipart
+composite SHA-256 value without the checksum type needed for full-body
+verification; both the native Rust SDK and an independent boto3 read refuse it.
+The shared full Doctor/conformance run therefore failed in this context. A newer
+image tagged `5.2.0` reported `5.1.23.dev` and returned an incompatible multipart
+XML root; its failure was preserved rather than normalized.
+
+These are limited simulation results, not AWS qualification or a successful
+Doctor/multipart recovery result. Expected-owner enforcement, real IAM,
+credential renewal, retention and service consistency still require the
+separately authorized real-service cases above. Stop and remove only the
+disposable test container when finished; no cloud configuration is needed.

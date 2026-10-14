@@ -36,22 +36,20 @@ fn target() -> TestResult<AwsS3Target> {
 }
 fn authority(path: &std::path::Path) -> TestResult<StorageKernelResourceAuthority> {
     let volume = PrimaryDataVolume::acquire(path, MountQualification::LocalHost)?;
-    let observed =
-        ObservedResourceEnvironment::observe(&volume, RegisteredResourceBounds::new([1000; 7])?)?;
-    let detected = observed.detected_capacity();
-    let capacity =
-        ResourceAmounts::new(ResourceDimension::ALL.map(|dimension| detected.amount(dimension)));
-    let disk = observed.initial_disk().usable_bytes();
-    let inventory = ResourceInventory::new_observed(
-        observed,
-        OperatorLimits::new(capacity)?,
-        RecoveryReserve::new(ResourceAmounts::new([20; 11]))?,
-        InventoryCardinalityLimits::new(1, 8)?,
-        DiskPressureThresholds::new(disk / 10, disk / 5, disk / 3, disk / 2)?,
-    )?;
     let one = ResourceAmounts::new([1; 11]);
     let two = ResourceAmounts::new([2; 11]);
     let three = ResourceAmounts::new([3; 11]);
+    // This published Kernel peak covers Catalog open/recovery and replacement
+    // publication. One extra unit preserves system and single-tenant recovery
+    // progress required by the Governor. Both Repair and DurabilityCompletion
+    // use this peak; the other five protected pools total nine units.
+    let claim = integrity_scrub_resource_claim();
+    let durability = ResourceAmounts::new(
+        ResourceDimension::ALL.map(|dimension| claim.get(dimension).max(1) + 1),
+    );
+    let recovery = ResourceAmounts::new(
+        ResourceDimension::ALL.map(|dimension| 2 * durability.get(dimension) + 9),
+    );
     let pool = ResourceAmounts::new([
         536_870_912,
         128,
@@ -65,24 +63,55 @@ fn authority(path: &std::path::Path) -> TestResult<StorageKernelResourceAuthorit
         128,
         1_048_576,
     ]);
-    let tenant = positron_domain::identity::TenantId::from_bytes([201; 16])?;
-    let policy = GovernorPolicy::new(
-        [TenantQuota::new(
-            tenant,
-            1,
-            ResourceAmounts::new([100; 11]),
-        )?],
-        OrdinaryPoolPolicy::new(pool, two, one, one)?,
-    )?;
+    let maintenance = ResourceAmounts::new([268_435_456, 1, 4, 1, 1, 1, 2, 4, 1, 8, 16_384]);
+    let cardinality = InventoryCardinalityLimits::new(1, 8)?;
+    let overhead = cardinality.governor_bootstrap_overhead(1)?;
+    let registered = [
+        ResourceDimension::QueueSlots,
+        ResourceDimension::TaskSlots,
+        ResourceDimension::BufferCacheBytes,
+        ResourceDimension::BatchItems,
+        ResourceDimension::LeaseSlots,
+        ResourceDimension::RetrySlots,
+        ResourceDimension::IoPermits,
+    ]
+    .map(|dimension| {
+        recovery.get(dimension)
+            + pool.get(dimension)
+            + maintenance.get(dimension)
+            + 4
+            + overhead.get(dimension)
+    });
+    let observed =
+        ObservedResourceEnvironment::observe(&volume, RegisteredResourceBounds::new(registered)?)?;
+    let detected = observed.detected_capacity();
+    let capacity =
+        ResourceAmounts::new(ResourceDimension::ALL.map(|dimension| detected.amount(dimension)));
+    let disk = observed.initial_disk().usable_bytes();
+    let inventory = ResourceInventory::new_observed(
+        observed,
+        OperatorLimits::new(capacity)?,
+        RecoveryReserve::new(recovery)?,
+        cardinality,
+        DiskPressureThresholds::new(disk / 10, disk / 5, disk / 3, disk / 2)?,
+    )
+    .map_err(|e| format!("qualification inventory: {e:?}"))?;
+    // Qualification executes only instance-owned work; no synthetic tenant
+    // partition may consume the Catalog's protected system recovery capacity.
+    let policy = GovernorPolicy::system_only(OrdinaryPoolPolicy::new(pool, two, one, maintenance)?);
     Ok(StorageKernelResourceAuthority::establish(
         volume,
         ResourceGovernorConfiguration::new(
             inventory,
             policy,
-            RecoveryPoolCapacities::new(three, two, three, two, three, one, one)?,
-        )?,
-    )?)
+            RecoveryPoolCapacities::new(durability, two, three, two, durability, one, one)
+                .map_err(|e| format!("qualification recovery pools: {e:?}"))?,
+        )
+        .map_err(|e| format!("qualification governor configuration: {e:?}"))?,
+    )
+    .map_err(|e| format!("qualification authority: {e:?}"))?)
 }
+
 async fn repository(
     target: &AwsS3Target,
     identity: &RepositoryIdentity,
@@ -311,7 +340,7 @@ async fn real_aws_s3_passes_shared_and_native_recovery_cases() -> TestResult {
             peak,
             1,
         )
-        .map_err(|_| "submission")?;
+        .map_err(|failure| format!("submission: {failure:?}"))?;
     let mut execution = coordinator
         .start_next_with_reservation_and_persist_for_class(
             &catalog,
@@ -320,7 +349,7 @@ async fn real_aws_s3_passes_shared_and_native_recovery_cases() -> TestResult {
             false,
             Some(MaintenanceTaskClass::RepositoryVerification),
         )
-        .map_err(|_| "dispatch")?
+        .map_err(|failure| format!("dispatch: {failure:?}"))?
         .ok_or("native admission")?;
     let resources = execution
         .transfer_repository_resources(binding)
@@ -392,4 +421,193 @@ async fn real_aws_s3_passes_shared_and_native_recovery_cases() -> TestResult {
     drop(authority);
     fs::remove_dir_all(path)?;
     result
+}
+
+#[tokio::test]
+#[ignore = "optional loopback simulation; does not qualify AWS"]
+async fn local_s3_simulation_checks_objects_cas_and_unverifiable_multipart() -> TestResult {
+    let address: std::net::SocketAddr = input("POSITRON_S3_SIMULATOR_ADDRESS")?.parse()?;
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| "simulation prefix entropy unavailable")?;
+    let nonce = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let target = AwsS3Target::new(
+        "positron-102-simulation",
+        "us-east-1",
+        "https://s3.us-east-1.amazonaws.com",
+        "123456789012",
+        &format!("simulation-{nonce}/"),
+    )?;
+    let identity = RepositoryIdentity::aws_s3([240; 16], [241; 16], [242; 32], &target)?;
+    let directory = tempfile::tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let authority = authority(directory.path())?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new([243; 16])?,
+        CatalogSecret::from_owned(Box::new([244; 32]), Box::new([245; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new([239; 16])?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(b"qualification owner".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let binding = RepositoryOperationBinding::new([246; 16], [247; 32]).map_err(|_| "binding")?;
+    coordinator
+        .submit_repository_operation_with_resources_and_persist(
+            &catalog,
+            binding,
+            MaintenancePreconditions::new(catalog.pin()?.number(), 1)
+                .map_err(|_| "preconditions")?,
+            ResourceAmounts::new([268_435_456, 1, 4, 0, 1, 1, 2, 4, 1, 8, 16_384]),
+            1,
+        )
+        .map_err(|failure| format!("submission: {failure:?}"))?;
+    let mut execution = coordinator
+        .start_next_with_reservation_and_persist_for_class(
+            &catalog,
+            &authority,
+            2,
+            false,
+            Some(MaintenanceTaskClass::RepositoryVerification),
+        )
+        .map_err(|failure| format!("dispatch: {failure:?}"))?
+        .ok_or("simulation admission")?;
+    let resources = execution
+        .transfer_repository_resources(binding)
+        .map_err(|_| "handoff")?;
+    let repository =
+        AwsS3Repository::from_local_simulator(target, identity.clone(), resources, address)?;
+    repository
+        .initialize()
+        .await
+        .map_err(|e| format!("simulation initialize: {e:?}"))?;
+    provider_behavior::object_conformance(&repository, identity).await?;
+    let slot = HeadSlot::from_checksum([238; 32]);
+    let CasOutcome::Published(version) = repository
+        .compare_and_swap_head_at(
+            slot,
+            RegistryHeadChange::new(None, b"simulation registry frame".to_vec())?,
+        )
+        .await?
+    else {
+        return Err("simulation registry create did not publish".into());
+    };
+    assert!(matches!(
+        repository
+            .compare_and_swap_head_at(
+                slot,
+                RegistryHeadChange::new(None, b"conflicting simulation frame".to_vec())?
+            )
+            .await?,
+        CasOutcome::Conflict(_)
+    ));
+    repository.delete_head_if_version(slot, version).await?;
+    assert!(repository.registry_head_at(slot).await?.is_none());
+    let object = ImmutableObject::new(vec![248; 6 * 1024 * 1024])?;
+    // Moto 5.1.22 advertises a composite checksum as a full checksum. Native
+    // SDK verification must refuse it, preserving the unfinished owned record.
+    assert!(matches!(complete_fixture(&repository, &object).await,
+        Err(error) if error.downcast_ref::<RepositoryFailure>() == Some(&RepositoryFailure::OutcomeUnknown)));
+    let plan = UploadPlan::new(object.id(), object.bytes().len() as u64)?;
+    assert!(repository.inspect_upload(plan.id()).await?.is_some());
+    // A subsequent read attempt remains unavailable; it cannot invent completion
+    // or discard the original owned recovery record after the uncertain mutation.
+    assert_eq!(
+        repository.begin_upload(plan).await,
+        Err(RepositoryFailure::StorageUnavailable)
+    );
+    assert!(repository.inspect_upload(plan.id()).await?.is_some());
+    assert_eq!(
+        repository.head(object.id()).await,
+        Err(RepositoryFailure::NotFound)
+    );
+    drop(repository);
+    execution
+        .complete_and_persist(&coordinator, &catalog, false)
+        .map_err(|_| "completion")?;
+    Ok(())
+}
+
+#[test]
+fn qualification_owner_admits_catalog_repair_publication_and_native_handoff() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let authority = authority(directory.path())?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new([249; 16])?,
+        CatalogSecret::from_owned(Box::new([250; 32]), Box::new([251; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new([239; 16])?,
+            FormatEpoch::CATALOG_V1,
+            vec![CatalogObject::new(b"qualification owner".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let binding = RepositoryOperationBinding::new([252; 16], [253; 32]).map_err(|_| "binding")?;
+    coordinator
+        .submit_repository_operation_with_resources_and_persist(
+            &catalog,
+            binding,
+            MaintenancePreconditions::new(catalog.pin()?.number(), 1)
+                .map_err(|_| "preconditions")?,
+            ResourceAmounts::new([268_435_456, 1, 4, 0, 1, 1, 2, 4, 1, 8, 16_384]),
+            1,
+        )
+        .map_err(|failure| format!("submission: {failure:?}"))?;
+    let mut execution = coordinator
+        .start_next_with_reservation_and_persist_for_class(
+            &catalog,
+            &authority,
+            2,
+            false,
+            Some(MaintenanceTaskClass::RepositoryVerification),
+        )
+        .map_err(|failure| format!("dispatch: {failure:?}"))?
+        .ok_or("native admission")?;
+    let resources = execution
+        .transfer_repository_resources(binding)
+        .map_err(|_| "handoff")?;
+    assert!(resources.authorizes_repository_transport());
+    let target = AwsS3Target::new(
+        "positron-102-simulation",
+        "us-east-1",
+        "https://s3.us-east-1.amazonaws.com",
+        "123456789012",
+        "repository/",
+    )?;
+    let identity = RepositoryIdentity::aws_s3([240; 16], [241; 16], [242; 32], &target)?;
+    assert!(matches!(
+        AwsS3Repository::from_local_simulator(
+            target,
+            identity,
+            resources.clone(),
+            "192.0.2.1:5000".parse()?
+        ),
+        Err(RepositoryFailure::InvalidInput)
+    ));
+    drop(resources);
+    execution
+        .complete_and_persist(&coordinator, &catalog, true)
+        .map_err(|_| "completion")?;
+    assert_eq!(
+        coordinator
+            .status(execution.task().identity())
+            .map_err(|_| "status")?
+            .phase(),
+        MaintenanceTaskPhase::Succeeded
+    );
+    Ok(())
 }

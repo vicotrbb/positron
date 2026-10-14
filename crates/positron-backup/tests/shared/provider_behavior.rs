@@ -21,6 +21,13 @@ pub async fn conformance(
     )
     .await?;
     assert!(report.verified() && report.probes_deleted());
+    object_conformance(repository, identity).await
+}
+
+pub async fn object_conformance(
+    repository: &dyn Repository,
+    identity: RepositoryIdentity,
+) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(repository.identify().await?, identity);
     let absent = ImmutableObject::new(b"conformance absent encrypted frame".to_vec())?;
     assert_eq!(

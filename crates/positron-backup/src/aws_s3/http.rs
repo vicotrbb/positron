@@ -34,6 +34,17 @@ impl BoundedClient {
             data_prefixes: data_prefixes(target),
         }
     }
+    #[cfg(feature = "test-support")]
+    pub(super) fn with_simulation_endpoint(
+        mut self,
+        target: &crate::AwsS3Target,
+        endpoint: &str,
+    ) -> Self {
+        self.endpoint = format!("{endpoint}/");
+        self.data_prefixes = ["identity", "o-", "h-", "u-", "m-"]
+            .map(|kind| format!("{endpoint}/{}/{}{kind}", target.bucket(), target.prefix()));
+        self
+    }
 }
 struct BoundedConnector {
     inner: SharedHttpConnector,
