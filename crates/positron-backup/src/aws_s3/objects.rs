@@ -46,19 +46,9 @@ impl AwsS3Repository {
             return Err(RepositoryFailure::LimitExceeded);
         }
         let protection = object_protection(&response);
-        let expected_size = response.content_length();
-        let mut bytes = Vec::new();
-        response
-            .body
-            .into_async_read()
-            .take(MAX_OBJECT_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .with_subscriber(tracing::subscriber::NoSubscriber::default())
-            .await
-            .map_err(|_| RepositoryFailure::StorageUnavailable)?;
-        if expected_size.is_some_and(|size| size as u64 != bytes.len() as u64) {
-            return Err(RepositoryFailure::CorruptState);
-        }
+        let length = response.content_length();
+        let bytes =
+            crate::aws_s3::http::read_bytes(response.body, length, MAX_OBJECT_BYTES).await?;
         validate_object(id, &bytes)?;
         Ok((bytes, protection))
     }
@@ -178,6 +168,7 @@ impl AwsS3Repository {
             .with_subscriber(tracing::subscriber::NoSubscriber::default())
             .await
             .map_err(|error| failure::sdk(error, true));
+        drop(object);
         let outcome = match result {
             Ok(_) => Ok(PutOutcome::Created),
             Err(RepositoryFailure::PreconditionFailed) => {

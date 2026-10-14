@@ -1,7 +1,6 @@
 use super::{HEADER, MAX_NATIVE_UPLOAD_ID, Record};
 use crate::aws_s3::{AwsS3Repository, failure};
 use crate::{MAX_OBJECT_BYTES, RepositoryFailure, UploadId};
-use tokio::io::AsyncReadExt;
 use tracing::instrument::WithSubscriber;
 
 impl AwsS3Repository {
@@ -47,16 +46,9 @@ impl AwsS3Repository {
             .filter(|value| !value.is_empty() && value.len() <= 1024)
             .ok_or(RepositoryFailure::CorruptState)?
             .to_owned();
-        let mut bytes = Vec::new();
-        response
-            .body
-            .into_async_read()
-            .take(max + 1)
-            .read_to_end(&mut bytes)
-            .with_subscriber(tracing::subscriber::NoSubscriber::default())
-            .await
-            .map_err(|_| RepositoryFailure::StorageUnavailable)?;
-        let record = Record::decode(&bytes, self.target.commitment(), id)?;
+        let length = response.content_length();
+        let bytes = crate::aws_s3::http::read_bytes(response.body, length, max).await?;
+        let record = Record::decode_buffer(bytes, self.target.commitment(), id)?;
         Ok(Some((record, etag)))
     }
     pub(in crate::aws_s3) async fn write_upload(

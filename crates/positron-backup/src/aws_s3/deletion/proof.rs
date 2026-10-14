@@ -1,7 +1,6 @@
 use super::Proof;
 use crate::aws_s3::{AwsS3Repository, failure, objects::validate_object, upload::Record};
 use crate::{MAX_OBJECT_BYTES, MAX_REGISTRY_HEAD_BYTES, RegistryHead, RepositoryFailure};
-use tokio::io::AsyncReadExt;
 use tracing::instrument::WithSubscriber;
 impl AwsS3Repository {
     pub(in crate::aws_s3) async fn verify_version(
@@ -38,22 +37,14 @@ impl AwsS3Repository {
         {
             return Err(RepositoryFailure::LimitExceeded);
         }
-        let mut bytes = Vec::new();
-        response
-            .body
-            .into_async_read()
-            .take(max + 1)
-            .read_to_end(&mut bytes)
-            .with_subscriber(tracing::subscriber::NoSubscriber::default())
-            .await
-            .map_err(|_| RepositoryFailure::StorageUnavailable)?;
-        if bytes.len() as u64 > max {
-            return Err(RepositoryFailure::LimitExceeded);
-        }
+        let length = response.content_length();
+        let bytes = crate::aws_s3::http::read_bytes(response.body, length, max).await?;
         match proof {
             Proof::Object(id) => validate_object(*id, &bytes),
             Proof::Head => RegistryHead::decode_frame(&bytes).map(|_| ()),
-            Proof::Upload(id) => Record::decode(&bytes, self.target.commitment(), *id).map(|_| ()),
+            Proof::Upload(id) => {
+                Record::inspect_owned(&bytes, self.target.commitment(), *id).map(|_| ())
+            },
         }
     }
 }

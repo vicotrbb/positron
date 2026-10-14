@@ -63,17 +63,16 @@ impl AwsS3Repository {
     async fn cleanup_upload(
         &self,
         id: UploadId,
-        current: Option<&Record>,
+        current: Option<super::OwnedUpload>,
         etag: Option<&str>,
     ) -> Result<bool, RepositoryFailure> {
         // A deleted current record is terminal authority. Historical frames
         // authorize cleanup only, never resurrection or resumed publication.
         let mut owned = self.retained_uploads(id).await?;
-        if let Some(current) = current {
-            let current = current.owned();
-            if !owned.contains(&current) {
-                owned.push(current);
-            }
+        if let Some(current) = current
+            && !owned.contains(&current)
+        {
+            owned.push(current);
         }
         for record in &owned {
             if record.creation_unresolved
@@ -92,19 +91,25 @@ impl AwsS3Repository {
     }
     async fn finish_upload(
         &self,
-        record: &mut Record,
-        etag: &mut String,
+        mut record: Record,
+        mut etag: String,
     ) -> Result<PutOutcome, RepositoryFailure> {
         let bytes = match self.read_object(record.plan.object).await {
             Ok(bytes) => {
                 if bytes.len() as u64 != record.plan.size {
                     return Err(RepositoryFailure::ChecksumMismatch);
                 }
-                self.cleanup_upload(record.plan.id(), Some(record), Some(etag))
+                drop(bytes);
+                let owned = record.owned();
+                drop(record);
+                self.cleanup_upload(owned.plan.id(), Some(owned), Some(&etag))
                     .await?;
                 return Ok(PutOutcome::AlreadyPresent);
             },
-            Err(RepositoryFailure::NotFound) => match self.assemble_native(record, etag).await {
+            Err(RepositoryFailure::NotFound) => match self
+                .assemble_native(&mut record, &mut etag)
+                .await
+            {
                 Ok(bytes) => bytes,
                 // A missing session may be an uncertain completed publication.
                 // Preserve its identity instead of issuing a second Create.
@@ -113,12 +118,14 @@ impl AwsS3Repository {
             },
             Err(error) => return Err(error),
         };
+        let owned = record.owned();
+        drop(record);
         let object = ImmutableObject::new(bytes)?;
-        if object.id() != record.plan.object {
+        if object.id() != owned.plan.object {
             return Err(RepositoryFailure::ChecksumMismatch);
         }
         let outcome = self.put_checked(object).await?;
-        self.cleanup_upload(record.plan.id(), Some(record), Some(etag))
+        self.cleanup_upload(owned.plan.id(), Some(owned), Some(&etag))
             .await?;
         Ok(outcome)
     }
@@ -130,13 +137,14 @@ impl AwsS3Repository {
                 if bytes.len() as u64 != plan.size {
                     return Err(RepositoryFailure::ChecksumMismatch);
                 }
+                drop(bytes);
                 let current = self.read_upload(plan.id()).await?;
-                self.cleanup_upload(
-                    plan.id(),
-                    current.as_ref().map(|(record, _)| record),
-                    current.as_ref().map(|(_, etag)| etag.as_str()),
-                )
-                .await?;
+                let (owned, etag) = match current {
+                    Some((record, etag)) => (Some(record.owned()), Some(etag)),
+                    None => (None, None),
+                };
+                self.cleanup_upload(plan.id(), owned, etag.as_deref())
+                    .await?;
                 return Ok(UploadState {
                     plan,
                     written: plan.size,
@@ -146,7 +154,7 @@ impl AwsS3Repository {
             Err(RepositoryFailure::NotFound) => {},
             Err(error) => return Err(error),
         }
-        let (mut record, mut etag) = match self.read_upload(plan.id()).await? {
+        let (record, etag) = match self.read_upload(plan.id()).await? {
             Some(record) => record,
             None => {
                 self.cleanup_upload(plan.id(), None, None).await?;
@@ -161,10 +169,11 @@ impl AwsS3Repository {
                 }
             },
         };
-        if record.state().complete() {
-            self.finish_upload(&mut record, &mut etag).await?;
+        let state = record.state();
+        if state.complete() {
+            self.finish_upload(record, etag).await?;
         }
-        Ok(record.state())
+        Ok(state)
     }
     pub async fn inspect_upload(
         &self,
@@ -194,12 +203,12 @@ impl AwsS3Repository {
             },
         };
         if let Some(next) = record.apply(&part)? {
-            etag = self.write_upload(&next, Some(&etag)).await?;
             record = next;
+            etag = self.write_upload(&record, Some(&etag)).await?;
         }
         if record.state().complete() {
             return self
-                .finish_upload(&mut record, &mut etag)
+                .finish_upload(record, etag)
                 .await
                 .map(UploadOutcome::Complete);
         }
@@ -209,13 +218,11 @@ impl AwsS3Repository {
         let _operation = self.enter()?;
         self.read_identity().await?;
         let current = self.read_upload(id).await?;
-        let deleted = self
-            .cleanup_upload(
-                id,
-                current.as_ref().map(|(record, _)| record),
-                current.as_ref().map(|(_, etag)| etag.as_str()),
-            )
-            .await?;
+        let (owned, etag) = match current {
+            Some((record, etag)) => (Some(record.owned()), Some(etag)),
+            None => (None, None),
+        };
+        let deleted = self.cleanup_upload(id, owned, etag.as_deref()).await?;
         Ok(if deleted {
             DeleteOutcome::Deleted
         } else {

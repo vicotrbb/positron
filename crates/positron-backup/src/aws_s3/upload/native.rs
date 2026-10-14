@@ -1,7 +1,6 @@
 use super::{MAX_NATIVE_UPLOAD_ID, Record};
 use crate::RepositoryFailure;
 use crate::aws_s3::{AwsS3Repository, failure, objects::validate_object};
-use tokio::io::AsyncReadExt;
 use tracing::instrument::WithSubscriber;
 
 const NATIVE_PART_BYTES: usize = 5 * 1024 * 1024;
@@ -27,15 +26,9 @@ impl AwsS3Repository {
         {
             return Err(RepositoryFailure::ChecksumMismatch);
         }
-        let mut bytes = Vec::new();
-        response
-            .body
-            .into_async_read()
-            .take(record.plan.size + 1)
-            .read_to_end(&mut bytes)
-            .with_subscriber(tracing::subscriber::NoSubscriber::default())
-            .await
-            .map_err(|_| RepositoryFailure::StorageUnavailable)?;
+        let length = response.content_length();
+        let bytes =
+            crate::aws_s3::http::read_bytes(response.body, length, record.plan.size).await?;
         if bytes.len() as u64 != record.plan.size {
             return Err(RepositoryFailure::ChecksumMismatch);
         }

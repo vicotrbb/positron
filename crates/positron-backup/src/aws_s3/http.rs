@@ -12,7 +12,42 @@ use aws_smithy_types::body::SdkBody;
 use http_body_util::{BodyExt, Limited};
 use positron_kernel::NativeAwsResources;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tracing::instrument::WithSubscriber;
+
+/// Reserve one bounded native extent before reading, avoiding geometric payload
+/// growth while another admitted object is still resident.
+pub(super) async fn read_bytes(
+    body: aws_sdk_s3::primitives::ByteStream,
+    length: Option<i64>,
+    maximum: u64,
+) -> Result<Vec<u8>, RepositoryFailure> {
+    let length = length
+        .map(|length| u64::try_from(length).map_err(|_| RepositoryFailure::CorruptState))
+        .transpose()?;
+    let limit = length.unwrap_or(maximum);
+    if limit > maximum {
+        return Err(RepositoryFailure::LimitExceeded);
+    }
+    let capacity = usize::try_from(limit)
+        .map_err(|_| RepositoryFailure::LimitExceeded)?
+        .checked_add(4096)
+        .ok_or(RepositoryFailure::LimitExceeded)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    body.into_async_read()
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .with_subscriber(tracing::subscriber::NoSubscriber::default())
+        .await
+        .map_err(|_| RepositoryFailure::StorageUnavailable)?;
+    if bytes.len() as u64 > limit {
+        return Err(RepositoryFailure::LimitExceeded);
+    }
+    if length.is_some_and(|length| bytes.len() as u64 != length) {
+        return Err(RepositoryFailure::CorruptState);
+    }
+    Ok(bytes)
+}
 
 #[derive(Clone)]
 pub(super) struct BoundedClient {
@@ -163,6 +198,44 @@ fn bounded(body: SdkBody, limit: usize) -> SdkBody {
 mod tests {
     use aws_smithy_types::body::SdkBody;
     use http_body_util::BodyExt;
+    #[tokio::test]
+    async fn native_payload_extent_is_bounded_and_truncation_fails_closed() {
+        use crate::RepositoryFailure;
+        use aws_sdk_s3::primitives::ByteStream;
+        let bytes = || ByteStream::from(vec![37; 8]);
+        assert_eq!(
+            super::read_bytes(bytes(), Some(8), 8)
+                .await
+                .expect("exact extent"),
+            vec![37; 8]
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), None, 8)
+                .await
+                .expect("bounded unknown extent"),
+            vec![37; 8]
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), Some(7), 8).await,
+            Err(RepositoryFailure::LimitExceeded)
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), Some(9), 16).await,
+            Err(RepositoryFailure::CorruptState)
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), Some(9), 8).await,
+            Err(RepositoryFailure::LimitExceeded)
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), Some(-1), 8).await,
+            Err(RepositoryFailure::CorruptState)
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), None, 7).await,
+            Err(RepositoryFailure::LimitExceeded)
+        );
+    }
     fn unknown_body(length: usize) -> SdkBody {
         SdkBody::from_body_1_x(http_body_util::StreamBody::new(futures_util::stream::once(
             async move {

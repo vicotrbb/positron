@@ -261,7 +261,6 @@ impl AwsS3Repository {
         &self,
         id: UploadId,
     ) -> Result<Vec<super::upload::OwnedUpload>, RepositoryFailure> {
-        use tokio::io::AsyncReadExt;
         let key = self.upload_key(id);
         let versions = self.versions(&key).await?;
         let mut owned = Vec::new();
@@ -290,17 +289,10 @@ impl AwsS3Repository {
             {
                 return Err(RepositoryFailure::LimitExceeded);
             }
-            let mut bytes = Vec::new();
-            response
-                .body
-                .into_async_read()
-                .take(max + 1)
-                .read_to_end(&mut bytes)
-                .with_subscriber(tracing::subscriber::NoSubscriber::default())
-                .await
-                .map_err(|_| RepositoryFailure::StorageUnavailable)?;
+            let length = response.content_length();
+            let bytes = crate::aws_s3::http::read_bytes(response.body, length, max).await?;
             let record =
-                super::upload::Record::decode(&bytes, self.target.commitment(), id)?.owned();
+                super::upload::Record::inspect_owned(&bytes, self.target.commitment(), id)?;
             if !owned.contains(&record) {
                 owned.push(record);
             }

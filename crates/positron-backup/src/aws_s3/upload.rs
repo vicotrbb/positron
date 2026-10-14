@@ -1,7 +1,8 @@
+mod frame;
 mod io;
 mod native;
 mod operations;
-use crate::{MAX_OBJECT_BYTES, ObjectId, RepositoryFailure, UploadId, UploadPlan, UploadState};
+use crate::{MAX_OBJECT_BYTES, RepositoryFailure, UploadPlan, UploadState};
 use sha2::{Digest, Sha256};
 
 const MAX_NATIVE_UPLOAD_ID: usize = 4096;
@@ -189,89 +190,72 @@ impl Record {
         frame.extend_from_slice(&checksum);
         frame
     }
-    pub(super) fn decode(
-        frame: &[u8],
-        target: [u8; 32],
-        expected: UploadId,
-    ) -> Result<Self, RepositoryFailure> {
-        if frame.len() < HEADER + 32
-            || frame.len() as u64 > MAX_OBJECT_BYTES + (HEADER + MAX_NATIVE_UPLOAD_ID + 32) as u64
-            || frame.get(..8) != Some(b"POSS3U01")
-        {
-            return Err(RepositoryFailure::CorruptState);
-        }
-        let end = frame
-            .len()
-            .checked_sub(32)
-            .ok_or(RepositoryFailure::CorruptState)?;
-        let payload = frame.get(..end).ok_or(RepositoryFailure::CorruptState)?;
-        if frame.get(end..) != Some(Sha256::digest(payload).as_slice()) {
-            return Err(RepositoryFailure::ChecksumMismatch);
-        }
-        fn field<const N: usize>(frame: &[u8], start: usize) -> Result<[u8; N], RepositoryFailure> {
-            frame
-                .get(start..start + N)
-                .and_then(|value| value.try_into().ok())
-                .ok_or(RepositoryFailure::CorruptState)
-        }
-        if field::<32>(frame, 8)? != target {
-            return Err(RepositoryFailure::IdentityMismatch);
-        }
-        let plan = UploadPlan::new(
-            ObjectId::from_checksum(field(frame, 40)?),
-            u64::from_be_bytes(field(frame, 72)?),
-        )
-        .map_err(|_| RepositoryFailure::CorruptState)?;
-        if plan.id() != expected {
-            return Err(RepositoryFailure::IdentityMismatch);
-        }
-        let written = u64::from_be_bytes(field(frame, 80)?);
-        let checksum: [u8; 32] = field(frame, 88)?;
-        let native_length = u32::from_be_bytes(field(frame, 120)?) as usize;
-        if native_length > MAX_NATIVE_UPLOAD_ID {
-            return Err(RepositoryFailure::LimitExceeded);
-        }
-        let body_start = HEADER
-            .checked_add(native_length)
-            .ok_or(RepositoryFailure::CorruptState)?;
-        let native = std::str::from_utf8(
-            frame
-                .get(HEADER..body_start)
-                .ok_or(RepositoryFailure::CorruptState)?,
-        )
-        .map_err(|_| RepositoryFailure::CorruptState)?;
-        let bytes = frame
-            .get(body_start..end)
-            .ok_or(RepositoryFailure::CorruptState)?;
-        if bytes.len() as u64 != written || <[u8; 32]>::from(Sha256::digest(bytes)) != checksum {
-            return Err(RepositoryFailure::ChecksumMismatch);
-        }
-        let selector = field::<16>(frame, 124)?;
-        let mut record = Self::restore(plan, bytes.to_vec(), None, selector)?;
-        let attempt = field::<16>(frame, 141)?;
-        record.creation = match (frame.get(140), native.is_empty(), attempt == [0; 16]) {
-            (Some(0), true, true) => NativeCreation::NotStarted,
-            (Some(1), true, false) if record.state().complete() => {
-                NativeCreation::Requested(attempt)
-            },
-            (Some(2), false, false) if record.state().complete() => {
-                if native.chars().any(char::is_control) {
-                    return Err(RepositoryFailure::CorruptState);
-                }
-                NativeCreation::Known {
-                    attempt,
-                    id: native.to_owned(),
-                }
-            },
-            _ => return Err(RepositoryFailure::CorruptState),
-        };
-        Ok(record)
-    }
 }
 
 #[cfg(test)]
 mod creation_tests {
     use super::*;
+    #[test]
+    fn ownership_inspection_authenticates_maximum_payload_and_rejects_forged_frames() {
+        let object = crate::ImmutableObject::new(vec![37; MAX_OBJECT_BYTES as usize])
+            .expect("maximum encrypted object");
+        let plan = UploadPlan::new(object.id(), MAX_OBJECT_BYTES).expect("maximum plan");
+        let record =
+            Record::restore(plan, object.bytes().to_vec(), None, [3; 16]).expect("maximum record");
+        let expected = record.owned();
+        let mut frame = record.encode([1; 32]);
+        drop(record);
+        drop(object);
+        assert!(
+            Record::inspect_owned(&frame, [1; 32], plan.id()).expect("authenticated ownership")
+                == expected
+        );
+        assert!(matches!(
+            Record::inspect_owned(&frame, [2; 32], plan.id()),
+            Err(RepositoryFailure::IdentityMismatch)
+        ));
+        frame[HEADER] ^= 1;
+        assert!(matches!(
+            Record::inspect_owned(&frame, [1; 32], plan.id()),
+            Err(RepositoryFailure::ChecksumMismatch)
+        ));
+        let end = frame.len() - 32;
+        let checksum: [u8; 32] = Sha256::digest(&frame[..end]).into();
+        frame[end..].copy_from_slice(&checksum);
+        assert!(matches!(
+            Record::inspect_owned(&frame, [1; 32], plan.id()),
+            Err(RepositoryFailure::ChecksumMismatch)
+        ));
+    }
+
+    #[test]
+    fn consumed_record_reconciles_exact_state_and_rejects_invalid_creation_metadata() {
+        let object =
+            crate::ImmutableObject::new(b"encrypted retry payload".to_vec()).expect("object");
+        let plan = UploadPlan::new(object.id(), object.bytes().len() as u64).expect("plan");
+        let mut record =
+            Record::restore(plan, object.bytes().to_vec(), None, [3; 16]).expect("record");
+        record.creation = NativeCreation::Known {
+            attempt: [2; 16],
+            id: "native-id".into(),
+        };
+        let restored =
+            Record::decode_buffer(record.encode([1; 32]), [1; 32], plan.id()).expect("retry state");
+        assert!(restored == record);
+        let mut frame = record.encode([1; 32]);
+        frame[140] = 1; // Requested state may not carry a native ID.
+        let end = frame.len() - 32;
+        let checksum: [u8; 32] = Sha256::digest(&frame[..end]).into();
+        frame[end..].copy_from_slice(&checksum);
+        assert!(matches!(
+            Record::inspect_owned(&frame, [1; 32], plan.id()),
+            Err(RepositoryFailure::CorruptState)
+        ));
+        assert!(matches!(
+            Record::decode_buffer(frame, [1; 32], plan.id()),
+            Err(RepositoryFailure::CorruptState)
+        ));
+    }
     #[test]
     fn uncertain_native_creation_survives_reopen_and_never_uses_empty_listing_as_disproof() {
         let object =
