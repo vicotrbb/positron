@@ -9,7 +9,7 @@ upload, conditional registry-head compare-and-swap, observable deletion, and
 bounded retry classification; listing is never a correctness primitive.
 Initialization writes an immutable Repository Identity only into an explicitly
 empty prefix and attaching existing contents requires exact verification.
-Credentials use native identity or protected references, all external
+Credentials use native identity or protected references, all production external
 transport requires verified TLS, and Positron encrypts before upload. Provider
 versioning, retention, legal hold, and WORM are surfaced because retained key
 envelopes keep Tenant Purge pending, while uncoordinated lifecycle deletion is
@@ -90,3 +90,13 @@ native parts, pages, cursors and resource admission remain bounded. Real AWS
 qualification requires explicit designated target authorization; see
 [the operational scope](../operations/aws-s3-repository.md). Local and pure SDK
 boundary evidence does not qualify AWS behavior.
+
+## Adapter implementation acceptance
+
+Implementation acceptance permits bounded loopback protocol simulation and
+local service simulators, alongside the existing engineering gates. This
+supersedes the earlier requirement to qualify a real provider before accepting
+an adapter implementation. Simulation exercises the native adapter's public
+behavior and failure/recovery contracts; it does not prove provider IAM,
+credential renewal, TLS, service retention, or a particular deployed target.
+Real-provider qualification is separate and remains unproven until measured.

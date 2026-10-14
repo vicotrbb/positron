@@ -136,6 +136,13 @@ fn response_limit(
         1_048_576
     }
 }
+fn declared_body_exceeds_limit(method: &str, length: Option<&str>, limit: usize) -> bool {
+    // HEAD advertises the selected object's extent, never a response body.
+    method != "HEAD"
+        && length
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|length| length > limit as u64)
+}
 impl HttpClient for BoundedClient {
     fn http_connector(
         &self,
@@ -169,11 +176,7 @@ impl HttpConnector for BoundedConnector {
                 &prefixes,
                 response.status().is_success(),
             );
-            if response
-                .headers()
-                .get("content-length")
-                .and_then(|value| value.parse::<u64>().ok())
-                .is_some_and(|length| length > limit as u64)
+            if declared_body_exceeds_limit(&method, response.headers().get("content-length"), limit)
             {
                 return Err(ConnectorError::other(
                     Box::new(RepositoryFailure::LimitExceeded),
@@ -198,6 +201,34 @@ fn bounded(body: SdkBody, limit: usize) -> SdkBody {
 mod tests {
     use aws_smithy_types::body::SdkBody;
     use http_body_util::BodyExt;
+    #[tokio::test]
+    async fn head_content_length_describes_the_object_while_actual_bodies_remain_bounded() {
+        assert!(!super::declared_body_exceeds_limit(
+            "HEAD",
+            Some("6291456"),
+            1_048_576
+        ));
+        assert!(super::declared_body_exceeds_limit(
+            "GET",
+            Some("6291456"),
+            1_048_576
+        ));
+        assert_eq!(
+            super::bounded(SdkBody::empty(), 1_048_576)
+                .collect()
+                .await
+                .expect("HEAD body")
+                .to_bytes()
+                .len(),
+            0
+        );
+        assert!(
+            super::bounded(unknown_body(1_048_577), 1_048_576)
+                .collect()
+                .await
+                .is_err()
+        );
+    }
     #[tokio::test]
     async fn native_payload_extent_is_bounded_and_truncation_fails_closed() {
         use crate::RepositoryFailure;

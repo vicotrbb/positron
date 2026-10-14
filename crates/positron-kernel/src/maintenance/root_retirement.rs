@@ -80,6 +80,7 @@ impl MaintenanceCoordinator {
                 false
             };
             if (!owned
+                && !queued_digest_scrub_is_reference_free(current)
                 && (current.task.class == MaintenanceTaskClass::Migration
                     || durable_task_retains_unproved_root_reference(bytes)?))
                 || encode_record(current)?.as_bytes() != bytes
@@ -112,6 +113,23 @@ impl RootRetirementReferenceGuard<'_> {
         if !std::ptr::eq(authority, self._session.resource_authority()) || basis != self.basis {
             return Err(MaintenanceFailure::PreconditionFailed);
         }
-        Ok(self.owned_task.is_some() && record::record_identity(bytes)? == self.owned_task)
+        let Some(identity) = record::record_identity(bytes)? else {
+            return Ok(false);
+        };
+        let current = self
+            ._state
+            .tasks
+            .get(&identity)
+            .ok_or(MaintenanceFailure::PreconditionFailed)?;
+        Ok(
+            (self.owned_task == Some(identity) || queued_digest_scrub_is_reference_free(current))
+                && encode_record(current)?.as_bytes() == bytes,
+        )
     }
+}
+
+fn queued_digest_scrub_is_reference_free(state: &TaskState) -> bool {
+    state.phase == MaintenanceTaskPhase::Queued
+        && state.active_dispatch.is_none()
+        && canonical_digest_only_integrity_scrub(state)
 }

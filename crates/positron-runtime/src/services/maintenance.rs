@@ -12,7 +12,7 @@ use positron_kernel::{
     ActiveSegmentLedger, Catalog, CatalogIntegrityVerificationRequest, IntegrityCancellation,
     IntegrityScrubBudget, IntegrityVerificationOutcome, IntegrityVerificationRequest,
     MaintenanceCheckpoint, MaintenanceExecution, MaintenanceFailure, MaintenanceScope,
-    MaintenanceTaskClass, SegmentScope, SnapshotLeaseId, TransactionId,
+    MaintenanceTaskClass, MaintenanceTaskPhase, SegmentScope, SnapshotLeaseId, TransactionId,
 };
 use positron_signals::{
     LogRetentionPolicy, LogStore, LogStoreFailureCode, MaintenanceCompactionExecution,
@@ -398,13 +398,54 @@ fn start_installed_maintenance<'authority>(
     .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
     let coordinator = instance.maintenance_coordinator();
     let snapshot_lease_times = snapshot_lease_schedule_times(services)?;
+    let retention_pending = coordinator
+        .statuses()
+        .map_err(map_failure)?
+        .iter()
+        .any(|status| {
+            matches!(
+                status.task().class(),
+                MaintenanceTaskClass::RetentionPublication
+                    | MaintenanceTaskClass::RetentionReclamation
+            ) && matches!(
+                status.phase(),
+                MaintenanceTaskPhase::Queued
+                    | MaintenanceTaskPhase::Running
+                    | MaintenanceTaskPhase::Deferred
+            )
+        });
+    let drain_retention = retention_pending
+        && super::provider_migration::has_nonterminal_reference_phase(
+            &catalog,
+            instance.instance.to_bytes(),
+        )?;
+    let mut eligible_classes = Vec::new();
+    if drain_retention {
+        eligible_classes
+            .try_reserve_exact(INSTALLED_TASK_CLASSES.len())
+            .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+        eligible_classes.extend(
+            INSTALLED_TASK_CLASSES
+                .iter()
+                .copied()
+                .filter(|class| *class != MaintenanceTaskClass::Migration),
+        );
+    }
+    // Retention owns real checkpoint references. Let its existing handlers
+    // release them before a root phase attempts its unchanged retirement proof.
+    // Other installed work retains its ordinary scheduler eligibility.
+    let classes = if drain_retention {
+        eligible_classes.as_slice()
+    } else {
+        INSTALLED_TASK_CLASSES
+    };
     let selected = coordinator.start_next_with_root_migration_handler_and_snapshot_lease_times(
         &catalog,
         &instance._authority,
         now,
         instance.retention_time.status().state()
             == positron_kernel::LifecycleClockState::ClockUncertain,
-        INSTALLED_TASK_CLASSES,
+        classes,
         &snapshot_lease_times,
     );
     let Some(execution) = (match selected {

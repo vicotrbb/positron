@@ -58,6 +58,14 @@ Digest-only descriptor expiration does not prove historical scrub success.
 Generic success, cancellation, or failure cannot establish that opaque inputs,
 outputs, or checkpoints are safe to retire. Unavailable storage fails closed.
 
+The existing locked maintenance reference guard may also prove an exact canonical
+queued Integrity Scrub descriptor reference-free without removing it. Eligibility
+requires no active dispatch, inputs, outputs, or checkpoint and the canonical
+digest-only source binding and resource contract. The retained coordinator lock
+prevents dispatch until ledger retirement inspection completes. Running, paused,
+noncanonical, and checkpointed work retains its ordinary reference fence; live
+reader handles remain protected by the existing snapshot-acquisition barrier.
+
 The authenticated administrative HTTP projection owns online phase admission;
 the CLI uses its canonical descriptor-derived client rather than acquiring an
 exclusive stopped-instance lease. Each phase is a principal-bound Durable
@@ -69,6 +77,12 @@ authority. Restart attaches the same persisted Migration maintenance task,
 including reconciliation of the operation-acceptance/task-publication gap.
 Current authorization is rechecked for these root operations before provider
 access, without changing other Durable Operation authorization policies.
+Accepted verification and retirement wait in the existing maintenance queue
+while nonterminal Retention Publication or Reclamation work owns checkpoint
+references. The installed scheduler lets those owners complete under their
+existing admission, clock, pause, and resource rules before dispatching the root
+phase. Other installed work remains eligible. The same operation then performs
+the ordinary reference proof; no checkpoint is exempted or discarded.
 Migration audit records bind the actual requesting Principal and Operation ID;
 legacy local rotation audit records keep their existing decoding.
 

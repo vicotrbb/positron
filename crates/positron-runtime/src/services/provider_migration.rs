@@ -19,13 +19,45 @@ use positron_governance::{
 use positron_kernel::{MaintenancePreconditions, RootProviderMigrationBinding};
 use std::path::Path;
 
+pub(super) fn has_nonterminal_reference_phase(
+    catalog: &positron_kernel::Catalog<'_>,
+    instance: [u8; 16],
+) -> Result<bool, crate::ServiceFailure> {
+    let mut after = None;
+    while let Some(operation) =
+        DurableOperationAdministration::next_key_provider_migration_operation(catalog, after)
+            .map_err(|_| crate::ServiceFailure::CorruptState)?
+    {
+        require_root_operation(operation, instance)
+            .map_err(|_| crate::ServiceFailure::CorruptState)?;
+        let parameters = operation
+            .key_provider_migration_parameters()
+            .ok_or(crate::ServiceFailure::CorruptState)?;
+        if matches!(
+            parameters.action(),
+            KeyProviderMigrationAction::Verify | KeyProviderMigrationAction::Retire
+        ) {
+            return Ok(true);
+        }
+        after = Some(operation.operation_id());
+    }
+    Ok(false)
+}
+
 impl ServiceHandle {
     pub(crate) fn manage_provider_migration(
         &self,
         bearer: &str,
         bytes: &[u8],
     ) -> Result<ProviderMigrationResponse, MaintenanceServiceFailure> {
-        let actor = self.authorize_system_administration(bearer)?;
+        // Root activation holds this same gate through custody replacement.
+        // Attribution must inspect one stable durable identity and key lease.
+        let actor = {
+            let _gate = self
+                .catalog_operation()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            self.authorize_system_administration(bearer)?
+        };
         let input = ProviderMigrationRequest::decode(bytes)
             .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
         // Configuration is owned by the configuration loader. Only a protected

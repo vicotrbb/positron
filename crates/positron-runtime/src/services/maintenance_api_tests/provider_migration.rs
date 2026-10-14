@@ -97,3 +97,48 @@ mod online;
 
 #[path = "provider_migration/failures.rs"]
 mod failures;
+
+#[path = "provider_migration/retention.rs"]
+mod retention;
+
+#[test]
+fn interrupted_migration_custody_does_not_reject_valid_administrator()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (instance, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(std::sync::Arc::clone(&instance))?;
+    let status = br#"{"action":"status"}"#;
+    assert!(
+        services
+            .manage_provider_migration(&administrator, status)
+            .is_ok()
+    );
+    let identity = instance.key.active_root_identity()?;
+    let epoch = instance.key.active_root_epoch()?;
+    let session = positron_kernel::RootRewrapSession::admit(&instance._authority)?;
+    let invalidating = std::sync::Arc::clone(&instance);
+    let result = positron_kernel::RootRewrapSession::with_key_admission_action(
+        move || {
+            invalidating
+                .key
+                .invalidate_for_rotation()
+                .expect("invalidate custody admission")
+        },
+        || services.manage_provider_migration(&administrator, status),
+    );
+    assert_eq!(
+        result,
+        Err(MaintenanceServiceFailure::AdministrationUnavailable)
+    );
+    session.confirm_active_provider(&instance.key, identity, epoch)?;
+    assert!(
+        services
+            .manage_provider_migration(&administrator, status)
+            .is_ok()
+    );
+    assert_eq!(
+        services.manage_provider_migration(&ingest, status),
+        Err(MaintenanceServiceFailure::AuthenticationRejected)
+    );
+    Ok(())
+}

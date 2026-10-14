@@ -92,13 +92,15 @@ The scoped identity needs bucket read inspection (`s3:ListBucket`,
 may require the designated workload identity's own STS/SSO permissions. Do not
 grant bucket configuration writes or governance bypass for this case.
 
-Acceptance still requires real-service evidence for the designated SDK/service
+Real-service qualification still requires evidence for the designated SDK/service
 version and target: permission denial, wrong owner/region, credential renewal,
 native throttling, delayed/stale observations, checksum corruption, all ambiguous
 publication/cleanup windows and configured legal hold/retention/lifecycle
 outcomes. Controlled negative IAM/retention/corruption scenarios require separate
 explicitly authorized fixtures and permissions. These criteria remain pending;
-the prepared happy-path/recovery case alone cannot qualify them.
+the prepared happy-path/recovery case alone cannot qualify them. Implementation
+acceptance permits simulation under ADR-0068; real-service qualification is a
+separate claim and is not required to accept the simulated implementation.
 
 The native API contracts are documented in the AWS [GetObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html),
 [conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html),
@@ -174,3 +176,48 @@ Doctor/multipart recovery result. Expected-owner enforcement, real IAM,
 credential renewal, retention and service consistency still require the
 separately authorized real-service cases above. Stop and remove only the
 disposable test container when finished; no cloud configuration is needed.
+
+## LocalStack implementation simulation
+
+LocalStack 4.8.0, pinned to
+`localstack/localstack@sha256:fe24345d30a3cdc3cead7d88ebbdf39ae480fa3fe4de1765b98a9a066b8515cf`,
+exercises the native Rust SDK against S3 API responses using the same admitted
+Kernel/Maintenance owners. Start a disposable S3-only container with dummy
+credentials, no host mounts or Docker socket, one GiB memory, one CPU, 256
+processes and an ephemeral loopback port:
+
+```console
+docker run --detach --rm --name positron-102-localstack --memory 1g --cpus 1 --pids-limit 256 --publish 127.0.0.1:0:4566 --env SERVICES=s3 --env AWS_ACCESS_KEY_ID=test --env AWS_SECRET_ACCESS_KEY=test --env AWS_DEFAULT_REGION=us-east-1 --env AWS_EC2_METADATA_DISABLED=true --env EAGER_SERVICE_LOADING=1 --env SKIP_SSL_CERT_DOWNLOAD=1 localstack/localstack@sha256:fe24345d30a3cdc3cead7d88ebbdf39ae480fa3fe4de1765b98a9a066b8515cf
+docker port positron-102-localstack 4566
+```
+
+Use the container's explicit localhost endpoint and dummy `test` credentials to
+create `positron-102-simulation` in `us-east-1` and enable versioning. Prepare
+`foreign-history/diagnostic` with one non-secret object version followed by an
+ordinary delete, leaving one historical version and one marker, no current
+object and no Identity. Then pass the reported loopback socket:
+
+```console
+POSITRON_S3_SIMULATOR_ADDRESS=127.0.0.1:32772 cargo test --locked -p positron-backup --features test-support --test aws_s3_conformance localstack_simulates_supported_operations_and_preserves_unknown_cleanup -- --ignored --exact --nocapture
+```
+
+Replace the example port with the actual published port. Each run prints its
+owned random `localstack-` prefix. The case verifies immutable/checksummed
+objects, bounded ranges including a 6 MiB object's HEAD, advisory listing,
+versioning observations, concurrent conditional CAS, and a cold 4 MiB-prefix
+resume through native 6 MiB multipart completion and final object publication.
+Before and after, it verifies the exact foreign history remains unchanged.
+
+This pinned LocalStack returns `501 NotImplemented` for `DeleteObject` with
+`If-Match` on a general-purpose bucket. Tests require `OutcomeUnknown`, preserve
+the object/head and upload recovery record, and refuse a successful Doctor
+report. They do not claim successful adapter cleanup or full Doctor acceptance.
+The simulator also does not qualify real expected-owner enforcement, IAM,
+credential renewal, TLS or AWS retention. No checksum or conditional-write
+guarantee is relaxed to accommodate it.
+
+Fixture cleanup may explicitly delete only the printed prefixes' exact object
+versions and abort their owned multipart sessions through the simulator API.
+Keep the foreign prefix intact until its preservation check completes. Stop
+only the disposable test container when finished. These are simulated
+implementation results; real AWS remains unqualified.

@@ -403,6 +403,22 @@ struct TaskState {
     active_dispatch: Option<MaintenanceDispatch>,
 }
 
+fn canonical_digest_only_integrity_scrub(state: &TaskState) -> bool {
+    state.task.class == MaintenanceTaskClass::IntegrityScrub
+        && state.checkpoint.is_none()
+        && state.task.integrity_scrub_source.is_some_and(|source| {
+            MaintenanceTask::integrity_scrub(
+                state.task.identity,
+                state.task.scope,
+                state.task.trigger,
+                state.task.preconditions,
+                source.to_bytes(),
+                state.task.not_before,
+            )
+            .is_ok_and(|expected| expected == state.task)
+        })
+}
+
 fn validate_retention_publication_state(state: &TaskState) -> Result<(), MaintenanceFailure> {
     if state.task.class == MaintenanceTaskClass::RetentionPublication {
         let _ = retention_publication_frontier(state.checkpoint.as_ref())?;

@@ -21,6 +21,28 @@ use std::{
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+fn maintenance_failure_context(endpoint: SocketAddr, bearer: &str) -> String {
+    use positron_api::maintenance::{
+        MaintenanceServiceClient, MaintenanceStatusRequest, MaintenanceTransport,
+    };
+    let status = MaintenanceServiceClient::new(MaintenanceTransport::PlaintextOptOut { endpoint })
+        .and_then(|client| client.status(bearer, &MaintenanceStatusRequest::default()));
+    format!(
+        "{:?}",
+        status.map(|status| status
+            .tasks
+            .into_iter()
+            .map(|task| (
+                task.class,
+                task.phase,
+                task.checkpoint_sequence,
+                task.terminal_failure_class,
+                task.blocked_precondition,
+            ))
+            .collect::<Vec<_>>())
+    )
+}
+
 fn command(
     endpoint: SocketAddr,
     bearer: &str,
@@ -288,7 +310,9 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
                 .as_ref()
                 .map(|operation| operation.status.as_str()),
             Some("succeeded"),
-            "restarted {action}"
+            "restarted {action}: operation={:?}, maintenance={}",
+            terminal.operation,
+            maintenance_failure_context(endpoint, claim.secret()),
         );
     }
     assert_eq!(

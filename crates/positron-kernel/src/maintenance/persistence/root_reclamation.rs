@@ -78,24 +78,7 @@ impl MaintenanceCoordinator {
                     );
                     let completed_publication = live.phase == MaintenanceTaskPhase::Succeeded
                         && live.task.class == MaintenanceTaskClass::RetentionPublication;
-                    let reference_free_scrub = if live.task.class
-                        == MaintenanceTaskClass::IntegrityScrub
-                        && live.checkpoint.is_none()
-                    {
-                        live.task.integrity_scrub_source.is_some_and(|source| {
-                            MaintenanceTask::integrity_scrub(
-                                live.task.identity,
-                                live.task.scope,
-                                live.task.trigger,
-                                live.task.preconditions,
-                                source.to_bytes(),
-                                live.task.not_before,
-                            )
-                            .is_ok_and(|expected| expected == live.task)
-                        })
-                    } else {
-                        false
-                    };
+                    let reference_free_scrub = canonical_digest_only_integrity_scrub(live);
                     let released_lease = if live.task.class
                         == MaintenanceTaskClass::SnapshotLeaseExpiry
                         && live.checkpoint.is_none()

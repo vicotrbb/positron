@@ -1,5 +1,7 @@
-//! Runs only on an explicitly authorized, disposable real AWS S3 prefix.
+//! Separate explicitly selected real AWS and loopback simulation cases.
 #![cfg(feature = "test-support")]
+#[path = "shared/native_authority.rs"]
+mod native_authority;
 #[path = "shared/provider_behavior.rs"]
 mod provider_behavior;
 use positron_backup::*;
@@ -35,88 +37,26 @@ fn target() -> TestResult<AwsS3Target> {
     )?)
 }
 fn authority(path: &std::path::Path) -> TestResult<StorageKernelResourceAuthority> {
-    let volume = PrimaryDataVolume::acquire(path, MountQualification::LocalHost)?;
-    let one = ResourceAmounts::new([1; 11]);
-    let two = ResourceAmounts::new([2; 11]);
-    let three = ResourceAmounts::new([3; 11]);
-    // This published Kernel peak covers Catalog open/recovery and replacement
-    // publication. One extra unit preserves system and single-tenant recovery
-    // progress required by the Governor. Both Repair and DurabilityCompletion
-    // use this peak; the other five protected pools total nine units.
-    let claim = integrity_scrub_resource_claim();
-    let durability = ResourceAmounts::new(
-        ResourceDimension::ALL.map(|dimension| claim.get(dimension).max(1) + 1),
-    );
-    let recovery = ResourceAmounts::new(
-        ResourceDimension::ALL.map(|dimension| 2 * durability.get(dimension) + 9),
-    );
-    let pool = ResourceAmounts::new([
-        536_870_912,
-        128,
-        32,
-        100,
-        128,
-        32,
-        128,
-        128,
-        128,
-        128,
-        1_048_576,
-    ]);
-    let maintenance = ResourceAmounts::new([268_435_456, 1, 4, 1, 1, 1, 2, 4, 1, 8, 16_384]);
-    let cardinality = InventoryCardinalityLimits::new(1, 8)?;
-    let overhead = cardinality.governor_bootstrap_overhead(1)?;
-    let registered = [
-        ResourceDimension::QueueSlots,
-        ResourceDimension::TaskSlots,
-        ResourceDimension::BufferCacheBytes,
-        ResourceDimension::BatchItems,
-        ResourceDimension::LeaseSlots,
-        ResourceDimension::RetrySlots,
-        ResourceDimension::IoPermits,
-    ]
-    .map(|dimension| {
-        recovery.get(dimension)
-            + pool.get(dimension)
-            + maintenance.get(dimension)
-            + 4
-            + overhead.get(dimension)
-    });
-    let observed =
-        ObservedResourceEnvironment::observe(&volume, RegisteredResourceBounds::new(registered)?)?;
-    let detected = observed.detected_capacity();
-    let capacity =
-        ResourceAmounts::new(ResourceDimension::ALL.map(|dimension| detected.amount(dimension)));
-    let disk = observed.initial_disk().usable_bytes();
-    let inventory = ResourceInventory::new_observed(
-        observed,
-        OperatorLimits::new(capacity)?,
-        RecoveryReserve::new(recovery)?,
-        cardinality,
-        DiskPressureThresholds::new(disk / 10, disk / 5, disk / 3, disk / 2)?,
+    native_authority::authority(
+        path,
+        ResourceAmounts::new([268_435_456, 1, 4, 1, 1, 1, 2, 4, 1, 8, 16_384]),
     )
-    .map_err(|e| format!("qualification inventory: {e:?}"))?;
-    // Qualification executes only instance-owned work; no synthetic tenant
-    // partition may consume the Catalog's protected system recovery capacity.
-    let policy = GovernorPolicy::system_only(OrdinaryPoolPolicy::new(pool, two, one, maintenance)?);
-    Ok(StorageKernelResourceAuthority::establish(
-        volume,
-        ResourceGovernorConfiguration::new(
-            inventory,
-            policy,
-            RecoveryPoolCapacities::new(durability, two, three, two, durability, one, one)
-                .map_err(|e| format!("qualification recovery pools: {e:?}"))?,
-        )
-        .map_err(|e| format!("qualification governor configuration: {e:?}"))?,
-    )
-    .map_err(|e| format!("qualification authority: {e:?}"))?)
 }
 
 async fn repository(
     target: &AwsS3Target,
     identity: &RepositoryIdentity,
     resources: &Arc<NativeAwsResources>,
+    simulation: Option<std::net::SocketAddr>,
 ) -> TestResult<AwsS3Repository> {
+    if let Some(address) = simulation {
+        return Ok(AwsS3Repository::from_local_simulator(
+            target.clone(),
+            identity.clone(),
+            resources.clone(),
+            address,
+        )?);
+    }
     Ok(AwsS3Repository::from_admitted_resources(
         target.clone(),
         identity.clone(),
@@ -176,18 +116,54 @@ async fn six_mebibyte_fixture_uses_bounded_interface_parts() -> TestResult {
     );
     Ok(())
 }
+#[tokio::test]
+#[ignore = "requires an explicitly selected disposable loopback LocalStack S3 fixture"]
+async fn localstack_simulates_supported_operations_and_preserves_unknown_cleanup() -> TestResult {
+    let address: std::net::SocketAddr = input("POSITRON_S3_SIMULATOR_ADDRESS")?.parse()?;
+    if !address.ip().is_loopback() || address.port() == 0 {
+        return Err("simulation requires a loopback socket".into());
+    }
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce)?;
+    let prefix = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let target = AwsS3Target::new(
+        "positron-102-simulation",
+        "us-east-1",
+        "https://s3.us-east-1.amazonaws.com",
+        "123456789012",
+        &format!("localstack-{prefix}/"),
+    )?;
+    let foreign = AwsS3Target::new(
+        target.bucket(),
+        target.region(),
+        target.endpoint(),
+        target.expected_owner(),
+        "foreign-history/",
+    )?;
+    admitted_cases(target, foreign, Some(address)).await
+}
 async fn native_cases(
     target: &AwsS3Target,
     foreign_history_target: &AwsS3Target,
     identity: &RepositoryIdentity,
     resources: &Arc<NativeAwsResources>,
     other_resources: &Arc<NativeAwsResources>,
+    simulation: Option<std::net::SocketAddr>,
 ) -> TestResult {
     // The operator separately prepares/authorizes this prefix with only hidden
     // historical versions/delete markers and independently checks preservation.
     let foreign_identity =
         RepositoryIdentity::aws_s3([224; 16], [225; 16], [226; 32], foreign_history_target)?;
-    let foreign = repository(foreign_history_target, &foreign_identity, resources).await?;
+    let foreign = repository(
+        foreign_history_target,
+        &foreign_identity,
+        resources,
+        simulation,
+    )
+    .await?;
     let before = foreign.qualification_hidden_history_snapshot().await?;
     assert_eq!(
         foreign.initialize().await,
@@ -199,15 +175,15 @@ async fn native_cases(
         before
     );
     drop(foreign);
-    let native = repository(target, identity, resources).await?;
+    let native = repository(target, identity, resources, simulation).await?;
     native.initialize().await?;
     provider_behavior::conformance(&native, identity.clone(), Duration::from_secs(30)).await?;
     drop(native);
-    let reopened = repository(target, identity, resources).await?;
+    let reopened = repository(target, identity, resources, simulation).await?;
     assert_eq!(reopened.attach().await?, *identity);
     provider_behavior::conformance(&reopened, identity.clone(), Duration::from_secs(30)).await?;
     // Cross-owner native CAS uses direct conditional publication, not listing.
-    let other = repository(target, identity, other_resources).await?;
+    let other = repository(target, identity, other_resources, simulation).await?;
     let slot = HeadSlot::from_checksum([202; 32]);
     let a = RegistryHeadChange::new(None, b"real AWS first opaque-frame fixture".to_vec())?;
     let b = RegistryHeadChange::new(None, b"real AWS second opaque-frame fixture".to_vec())?;
@@ -256,7 +232,7 @@ async fn native_cases(
             .ok_or("fixture byte")?;
         let object = ImmutableObject::new(vec![byte; 1024])?;
         let plan = UploadPlan::new(object.id(), 1024)?;
-        let interrupted = repository(target, identity, resources)
+        let interrupted = repository(target, identity, resources, simulation)
             .await?
             .with_faults(vec![AwsS3Fault::new(
                 point,
@@ -271,7 +247,7 @@ async fn native_cases(
             Err(RepositoryFailure::Interrupted)
         );
         drop(interrupted);
-        let cold = repository(target, identity, resources).await?;
+        let cold = repository(target, identity, resources, simulation).await?;
         let state = cold.begin_upload(plan).await?;
         if !state.complete() {
             cold.resume_upload(UploadPart::new(state, object.bytes().to_vec())?)
@@ -302,9 +278,15 @@ async fn real_aws_s3_passes_shared_and_native_recovery_cases() -> TestResult {
     {
         return Err("qualification prefixes must be distinct and nonoverlapping".into());
     }
-    let path = fs::canonicalize(std::env::temp_dir())?
-        .join(format!("positron-real-s3-{}", std::process::id()));
-    fs::create_dir(&path)?;
+    admitted_cases(target, foreign_history_target, None).await
+}
+async fn admitted_cases(
+    target: AwsS3Target,
+    foreign_history_target: AwsS3Target,
+    simulation: Option<std::net::SocketAddr>,
+) -> TestResult {
+    let directory = tempfile::tempdir()?;
+    let path = fs::canonicalize(directory.path())?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     let first_path = path.join("first");
     let second_path = path.join("second");
@@ -393,18 +375,33 @@ async fn real_aws_s3_passes_shared_and_native_recovery_cases() -> TestResult {
         .transfer_repository_resources(other_binding)
         .map_err(|_| "other handoff")?;
     let identity = RepositoryIdentity::aws_s3([211; 16], instance.to_bytes(), [212; 32], &target)?;
-    let result = tokio::time::timeout(
-        Duration::from_secs(300),
-        native_cases(
-            &target,
-            &foreign_history_target,
-            &identity,
-            &resources,
-            &other_resources,
-        ),
-    )
+    let result = tokio::time::timeout(Duration::from_secs(300), async {
+        if let Some(address) = simulation {
+            localstack_cases::conformance(
+                &target,
+                &foreign_history_target,
+                &identity,
+                &resources,
+                &other_resources,
+                address,
+            )
+            .await
+        } else {
+            native_cases(
+                &target,
+                &foreign_history_target,
+                &identity,
+                &resources,
+                &other_resources,
+                None,
+            )
+            .await
+        }
+    })
     .await
-    .map_err(|_| "real AWS case budget exhausted; inspect the same owned prefix before retrying")?;
+    .map_err(
+        |_| "native S3 case budget exhausted; inspect the same owned prefix before retrying",
+    )?;
     execution
         .complete_and_persist(&coordinator, &catalog, result.is_ok())
         .map_err(|_| "terminal publication")?;
@@ -419,7 +416,6 @@ async fn real_aws_s3_passes_shared_and_native_recovery_cases() -> TestResult {
     drop(execution);
     drop(catalog);
     drop(authority);
-    fs::remove_dir_all(path)?;
     result
 }
 
@@ -611,3 +607,6 @@ fn qualification_owner_admits_catalog_repair_publication_and_native_handoff() ->
     );
     Ok(())
 }
+
+#[path = "shared/aws_localstack_cases.rs"]
+mod localstack_cases;
