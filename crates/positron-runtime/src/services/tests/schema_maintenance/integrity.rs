@@ -875,8 +875,10 @@ fn runtime_integrity_scrub_revisits_an_unchanged_scope_and_quarantines_later_bit
 -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new()?;
     let (mut initialized, _, _) = fixture.initialized()?;
+    // First-epoch scrub jitter is at least one second for every instance identity.
+    // Start before that bound so the first wake cannot consume the queued descriptor.
     let (retention_time, elapsed) =
-        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(10_000_000_000));
+        RetentionTimeAuthority::establish_with_manual_elapsed(UnixNanoseconds::new(0));
     Arc::get_mut(&mut initialized)
         .ok_or("sole initialized instance")?
         .install_retention_time_for_test(retention_time)?;
@@ -964,7 +966,7 @@ fn runtime_integrity_scrub_revisits_an_unchanged_scope_and_quarantines_later_bit
         .task()
         .clone();
     let initial_due = initial_log_scrub.not_before();
-    let current_seconds = 10_u64;
+    let current_seconds = 0_u64;
     assert!(
         initial_due > current_seconds,
         "the initial logs scrub remains ineligible until its persisted lifecycle due instant"
