@@ -3,6 +3,65 @@ use crate::services::repository_administration::RepositoryAdmission;
 use positron_governance::{AdministrativeIdempotencyKey, DurableOperationStatus, RepositoryAction};
 use std::os::unix::fs::PermissionsExt;
 #[test]
+fn repository_status_recovers_after_catalog_writer_contention()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_api::repository::{
+        RepositoryRequest, RepositoryServiceClient, RepositoryServiceClientFailure,
+        RepositoryTransport,
+    };
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    drop(initialized);
+    let loopback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    let host = NativeHost::new(NativeBindings::new(
+        fixture.control_socket_path(),
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+    )?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let endpoint = process
+        .bound_endpoints()
+        .into_iter()
+        .find(|endpoint| endpoint.role() == crate::ListenerRole::Api)
+        .and_then(|endpoint| endpoint.socket_address())
+        .ok_or("API endpoint")?;
+    let client = RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })?;
+    let request = RepositoryRequest::decode(br#"{"action":"status"}"#)?;
+    assert_eq!(
+        client.manage(&ingest, &request),
+        Err(RepositoryServiceClientFailure::AuthenticationRejected),
+    );
+    let services = process.services().ok_or("serving services")?;
+    // Retain the actual sole-writer lease, without retaining the API gate.
+    // The diagnostic read must expose temporary unavailability, not replace
+    // that writer or misclassify the already valid credential.
+    let writer = {
+        let _gate = services.catalog_operation()?;
+        open_catalog(&services.instance)?
+    };
+    assert_eq!(
+        client.manage(&administrator, &request),
+        Err(RepositoryServiceClientFailure::AdministrationUnavailable),
+    );
+    drop(writer);
+    let recovered = client.manage(&administrator, &request)?;
+    assert!(recovered.operation.is_none());
+    drop(services);
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        crate::ExitOutcome::Graceful,
+    );
+    Ok(())
+}
+
+#[test]
 fn serving_repository_initialize_and_doctor_are_authenticated_durable_tasks()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new()?;

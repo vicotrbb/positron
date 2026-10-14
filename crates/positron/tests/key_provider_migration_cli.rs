@@ -73,8 +73,8 @@ fn status(
     client: &ProviderMigrationServiceClient,
     bearer: &str,
     operation: Option<String>,
+    deadline: Instant,
 ) -> TestResult<ProviderMigrationResponse> {
-    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let request = ProviderMigrationRequest {
             action: "status".into(),
@@ -91,6 +91,83 @@ fn status(
     }
 }
 
+// Startup/reopen can discover a finite scrub -> retention -> scrub cascade.
+// Wait for those existing owners before taking a command's CAS snapshot. A
+// future scheduled task stays queued; blocked safety work is never forced.
+fn wait_for_maintenance(
+    endpoint: SocketAddr,
+    client: &ProviderMigrationServiceClient,
+    bearer: &str,
+) -> TestResult<Vec<positron_api::maintenance::MaintenanceTaskStatus>> {
+    use positron_api::maintenance::{
+        MaintenanceServiceClient, MaintenanceStatusRequest, MaintenanceTransport,
+    };
+    let maintenance =
+        MaintenanceServiceClient::new(MaintenanceTransport::PlaintextOptOut { endpoint })?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last_generation = None;
+    let mut stable_since = Instant::now();
+    'inspection: loop {
+        let mut tasks = Vec::new();
+        let mut request = MaintenanceStatusRequest::default();
+        loop {
+            let page = match maintenance.status(bearer, &request) {
+                Ok(page) => page,
+                Err(positron_api::maintenance::MaintenanceServiceClientFailure::AdministrationUnavailable)
+                    if Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue 'inspection;
+                },
+                Err(error) => return Err(error.into()),
+            };
+            tasks.extend(page.tasks);
+            match page.next_cursor {
+                Some(cursor) => {
+                    request = MaintenanceStatusRequest::page_after(
+                        cursor,
+                        positron_api::maintenance::MAX_STATUS_PAGE_TASKS as u32,
+                    )
+                },
+                None => break,
+            }
+        }
+        if let Some(task) = tasks.iter().find(|task| {
+            matches!(task.phase.as_str(), "queued" | "running" | "deferred")
+                && task.blocked_precondition.as_deref().is_some_and(|blocker| {
+                    !matches!(blocker, "scheduled_start_time" | "conflict_owner_active")
+                })
+        }) {
+            return Err(format!(
+                "maintenance fixture blocked: class={} phase={} blocker={:?}",
+                task.class, task.phase, task.blocked_precondition,
+            )
+            .into());
+        }
+        let generation = status(client, bearer, None, deadline)?.catalog_generation;
+        let pending = tasks.iter().any(|task| {
+            matches!(task.phase.as_str(), "queued" | "running" | "deferred")
+                && task.blocked_precondition.as_deref() != Some("scheduled_start_time")
+        });
+        if pending || last_generation != Some(generation) {
+            stable_since = Instant::now();
+        } else if stable_since.elapsed() >= Duration::from_secs(1) {
+            // Cover one full 500..749ms idle-discovery cadence, including the
+            // gap between a terminal publication and its follow-up discovery.
+            return Ok(tasks);
+        }
+        last_generation = Some(generation);
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "maintenance fixture did not quiesce: {}",
+                maintenance_failure_context(endpoint, bearer),
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn phase(
     endpoint: SocketAddr,
     client: &ProviderMigrationServiceClient,
@@ -99,9 +176,10 @@ fn phase(
     action: &str,
     index: usize,
 ) -> TestResult<ProviderMigrationResponse> {
+    wait_for_maintenance(endpoint, client, bearer)?;
     let admission_deadline = Instant::now() + Duration::from_secs(10);
     let (rendered, completion_deadline) = loop {
-        let current = status(client, bearer, None)?;
+        let current = status(client, bearer, None, admission_deadline)?;
         let mut arguments = vec![
             "--expected-generation".into(),
             current.catalog_generation.to_string(),
@@ -145,7 +223,7 @@ fn phase(
         .ok_or("operation ID")?
         .to_owned();
     let terminal = loop {
-        let current = status(client, bearer, Some(operation.clone()))?;
+        let current = status(client, bearer, Some(operation.clone()), completion_deadline)?;
         if current
             .operation
             .as_ref()
@@ -199,6 +277,16 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
         ),
     )?;
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
+    // This is an actual canonical checkpoint with its normal durable owner,
+    // queued while offline so the stale snapshot is deterministic.
+    let initialized = InstanceBootstrap::reopen(&paths)?;
+    let stale_generation = initialized.catalog_generation();
+    let checkpoint = initialized.queue_governance_audit_checkpoint_for_test()?;
+    assert_eq!(
+        initialized.governance_audit_checkpoint_phase_for_test(checkpoint)?,
+        positron_kernel::MaintenanceTaskPhase::Queued,
+    );
+    drop(initialized);
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     let host = NativeHost::new(NativeBindings::new(
         std::env::temp_dir().join(format!("p-kpm-{}.sock", std::process::id())),
@@ -232,6 +320,32 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
         .status
         .success()
     );
+    let stale = command(
+        endpoint,
+        claim.secret(),
+        "prepare",
+        &[
+            "--expected-generation".into(),
+            stale_generation.to_string(),
+            "--idempotency-key".into(),
+            "21212121-2121-4121-8121-000000000001".into(),
+            "--target-config".into(),
+            config.to_string_lossy().into_owned(),
+        ],
+    )?;
+    assert!(!stale.status.success());
+    assert!(String::from_utf8(stale.stderr)?.contains("stale Catalog generation"));
+    let drained = wait_for_maintenance(endpoint, &client, claim.secret())?;
+    let checkpoint_id: String = checkpoint
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert!(
+        drained
+            .iter()
+            .any(|task| { task.identity == checkpoint_id && task.phase == "succeeded" })
+    );
     for (index, action) in [
         "prepare", "cancel", "resume", "activate", "verify", "retire",
     ]
@@ -256,7 +370,12 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
             assert_eq!(terminal.root_phase, "cancelled");
         }
     }
-    let final_status = status(&client, claim.secret(), None)?;
+    let final_status = status(
+        &client,
+        claim.secret(),
+        None,
+        Instant::now() + Duration::from_secs(10),
+    )?;
     assert_eq!(final_status.active_epoch, 2);
     assert_eq!(final_status.predecessor_epoch, Some(1));
     assert!(secrets.join("local-root-key.v1").exists());
@@ -316,7 +435,13 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
         );
     }
     assert_eq!(
-        status(&client, claim.secret(), None)?.predecessor_epoch,
+        status(
+            &client,
+            claim.secret(),
+            None,
+            Instant::now() + Duration::from_secs(10),
+        )?
+        .predecessor_epoch,
         None
     );
     assert_eq!(

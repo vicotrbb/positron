@@ -146,7 +146,7 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
     for (index, action) in ["init", "verify", "doctor"].into_iter().enumerate() {
         let admission_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let operation = loop {
-            let current = client.manage(
+            let current = match client.manage(
                 claim.secret(),
                 &RepositoryRequest {
                     action: "status".into(),
@@ -157,7 +157,16 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
                     repository_id: None,
                     operation_id: None,
                 },
-            )?;
+            ) {
+                Ok(current) => current,
+                Err(positron_api::repository::RepositoryServiceClientFailure::AdministrationUnavailable)
+                    if std::time::Instant::now() < admission_deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                },
+                Err(error) => return Err(error.into()),
+            };
             let output = command(
                 endpoint,
                 claim.secret(),
