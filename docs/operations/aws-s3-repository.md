@@ -19,7 +19,10 @@ operation parameters, Repository Identity fields, diagnostics or status output.
 Acceptance, idempotency, expected generation, cancellation, restart, wait and
 terminal lookup retain the existing Administration and Maintenance owners.
 
-Initialization refuses a nonempty or incompletely observed prefix. Identity is
+Initialization refuses a nonempty or incompletely observed prefix, including
+historical object versions and delete markers hidden from current-object
+listing. A bounded complete empty version inventory is required before Identity
+publication; denied or unavailable history inspection cannot authorize adoption. Identity is
 conditionally published and subsequently read directly. Missing observations
 cannot disprove an uncertain publication. Object identifiers are full SHA-256
 content identities; native ETags remain private conditional tokens. Range reads
@@ -103,3 +106,26 @@ The native API contracts are documented in the AWS [GetObject](https://docs.aws.
 and [Object Lock](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
 documentation. These contracts guide the implementation and do not replace
 measured qualification on the designated target.
+
+## Historical-prefix refusal fixture
+
+The prepared real case also requires `POSITRON_AWS_S3_FOREIGN_HISTORY_PREFIX`,
+a separately authorized, nonoverlapping prefix in the same bucket/region/owner.
+The operator must prepare this fixture independently: use an enabled-versioning
+bucket, put a small non-secret diagnostic object beneath that prefix, then
+perform an ordinary current-object delete without specifying a version ID.
+Verify bounded `ListObjectsV2` shows no current object and bounded
+`ListObjectVersions` shows the retained object version and delete marker; there
+must be no Repository Identity or multipart upload. Retain those exact version
+IDs for the before/after preservation check. The scoped workload identity needs
+read inspection on this second prefix, not permission to mutate it.
+
+The ignored native case invokes initialize and expects `ForeignPrefix`, then
+attach and expects `NotFound` for Identity. It performs no delete on the foreign
+fixture. After execution the operator must independently verify the same exact
+version/marker IDs remain and no Identity version was published. A missing or
+incomplete bounded inventory is not qualification evidence. This fixture and
+its preparation/verification require explicit authorization; no actions have
+been executed here. Ordinary current deletion is insufficient cleanup because
+versions remain; subsequent fixture disposal must name only the operator-owned
+versions and marker IDs under separately approved cleanup scope.

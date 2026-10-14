@@ -95,12 +95,81 @@ async fn repository(
     )
     .await?)
 }
+async fn complete_fixture(repository: &dyn Repository, object: &ImmutableObject) -> TestResult {
+    let plan = UploadPlan::new(object.id(), object.bytes().len() as u64)?;
+    let mut state = repository.begin_upload(plan).await?;
+    let part_limit = usize::try_from(MAX_RANGE_BYTES)?;
+    for _ in 0..object.bytes().len().div_ceil(part_limit) {
+        if state.complete() {
+            return Ok(());
+        }
+        let start = usize::try_from(state.uploaded_bytes())?;
+        let end = start
+            .checked_add(part_limit)
+            .ok_or("fixture part boundary")?
+            .min(object.bytes().len());
+        let bytes = object
+            .bytes()
+            .get(start..end)
+            .ok_or("fixture committed offset")?
+            .to_vec();
+        match repository
+            .resume_upload(UploadPart::new(state, bytes)?)
+            .await?
+        {
+            UploadOutcome::Complete(_) => return Ok(()),
+            UploadOutcome::Pending(next) => {
+                assert!(next.uploaded_bytes() > state.uploaded_bytes());
+                state = next;
+            },
+        }
+    }
+    Err("bounded fixture upload did not complete".into())
+}
+#[tokio::test]
+async fn six_mebibyte_fixture_uses_bounded_interface_parts() -> TestResult {
+    let directory = tempfile::tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let path = fs::canonicalize(directory.path())?;
+    let identity = RepositoryIdentity::local([221; 16], [222; 16], [223; 32], &path)?;
+    let local = LocalRepository::initialize(&path, identity).await?;
+    let object = ImmutableObject::new(vec![203; 6 * 1024 * 1024])?;
+    complete_fixture(&local, &object).await?;
+    assert_eq!(
+        local.head(object.id()).await?.checksum(),
+        object.id().checksum()
+    );
+    assert!(
+        local
+            .inspect_upload(UploadPlan::new(object.id(), object.bytes().len() as u64)?.id())
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
 async fn native_cases(
     target: &AwsS3Target,
+    foreign_history_target: &AwsS3Target,
     identity: &RepositoryIdentity,
     resources: &Arc<NativeAwsResources>,
     other_resources: &Arc<NativeAwsResources>,
 ) -> TestResult {
+    // The operator separately prepares/authorizes this prefix with only hidden
+    // historical versions/delete markers and independently checks preservation.
+    let foreign_identity =
+        RepositoryIdentity::aws_s3([224; 16], [225; 16], [226; 32], foreign_history_target)?;
+    let foreign = repository(foreign_history_target, &foreign_identity, resources).await?;
+    let before = foreign.qualification_hidden_history_snapshot().await?;
+    assert_eq!(
+        foreign.initialize().await,
+        Err(RepositoryFailure::ForeignPrefix)
+    );
+    assert_eq!(foreign.attach().await, Err(RepositoryFailure::NotFound));
+    assert_eq!(
+        foreign.qualification_hidden_history_snapshot().await?,
+        before
+    );
+    drop(foreign);
     let native = repository(target, identity, resources).await?;
     native.initialize().await?;
     provider_behavior::conformance(&native, identity.clone(), Duration::from_secs(30)).await?;
@@ -127,12 +196,7 @@ async fn native_cases(
     // More than 5 MiB forces the native minimum non-final part boundary.
     let object = ImmutableObject::new(vec![203; 6 * 1024 * 1024])?;
     let plan = UploadPlan::new(object.id(), object.bytes().len() as u64)?;
-    let state = reopened.begin_upload(plan).await?;
-    let part = UploadPart::new(state, object.bytes().to_vec())?;
-    assert!(matches!(
-        reopened.resume_upload(part).await?,
-        UploadOutcome::Complete(_)
-    ));
+    complete_fixture(&reopened, &object).await?;
     assert_eq!(
         other.head(object.id()).await?.checksum(),
         object.id().checksum()
@@ -197,6 +261,18 @@ async fn native_cases(
 #[ignore = "requires explicitly authorized disposable REAL AWS S3 target and native workload identity; never run against emulators"]
 async fn real_aws_s3_passes_shared_and_native_recovery_cases() -> TestResult {
     let target = target()?; // The opt-in is checked before any native credentials or service work.
+    let foreign_history_target = AwsS3Target::new(
+        target.bucket(),
+        target.region(),
+        target.endpoint(),
+        target.expected_owner(),
+        &input("POSITRON_AWS_S3_FOREIGN_HISTORY_PREFIX")?,
+    )?;
+    if target.prefix().starts_with(foreign_history_target.prefix())
+        || foreign_history_target.prefix().starts_with(target.prefix())
+    {
+        return Err("qualification prefixes must be distinct and nonoverlapping".into());
+    }
     let path = fs::canonicalize(std::env::temp_dir())?
         .join(format!("positron-real-s3-{}", std::process::id()));
     fs::create_dir(&path)?;
@@ -290,7 +366,13 @@ async fn real_aws_s3_passes_shared_and_native_recovery_cases() -> TestResult {
     let identity = RepositoryIdentity::aws_s3([211; 16], instance.to_bytes(), [212; 32], &target)?;
     let result = tokio::time::timeout(
         Duration::from_secs(300),
-        native_cases(&target, &identity, &resources, &other_resources),
+        native_cases(
+            &target,
+            &foreign_history_target,
+            &identity,
+            &resources,
+            &other_resources,
+        ),
     )
     .await
     .map_err(|_| "real AWS case budget exhausted; inspect the same owned prefix before retrying")?;

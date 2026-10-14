@@ -19,6 +19,9 @@ mod upload;
 use crate::{AwsS3Target, RepositoryFailure, RepositoryIdentity};
 #[cfg(fuzzing)]
 pub use fuzzing::fuzz_aws_s3_repository;
+#[cfg(feature = "test-support")]
+mod qualification;
+
 #[cfg(test)]
 use objects::{validate_object, validate_range_response};
 use positron_kernel::{

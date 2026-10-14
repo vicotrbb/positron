@@ -4,7 +4,7 @@ use tokio::io::AsyncReadExt;
 use tracing::instrument::WithSubscriber;
 
 impl AwsS3Repository {
-    async fn check_bucket(&self) -> Result<(), RepositoryFailure> {
+    pub(super) async fn check_bucket(&self) -> Result<(), RepositoryFailure> {
         let observed = self
             .client
             .head_bucket()
@@ -16,7 +16,7 @@ impl AwsS3Repository {
             .map_err(|error| failure::sdk(error, false))?;
         validate_bucket_region(&self.target, observed.bucket_region())
     }
-    fn identity_key(&self) -> String {
+    pub(super) fn identity_key(&self) -> String {
         format!("{}identity", self.target.prefix())
     }
     pub(super) async fn read_identity(&self) -> Result<RepositoryIdentity, RepositoryFailure> {
@@ -95,6 +95,20 @@ impl AwsS3Repository {
             uploads.uploads().len(),
             uploads.is_truncated(),
         )?;
+        // Current object listing cannot see versions hidden by delete markers.
+        // One complete empty page proves emptiness; any history refuses adoption.
+        let history = self
+            .client
+            .list_object_versions()
+            .bucket(self.target.bucket())
+            .prefix(self.target.prefix())
+            .max_keys(1)
+            .expected_bucket_owner(self.target.expected_owner())
+            .send()
+            .with_subscriber(tracing::subscriber::NoSubscriber::default())
+            .await
+            .map_err(|error| failure::sdk(error, false))?;
+        validate_empty_history(&history)?;
         let result = self
             .client
             .put_object()
@@ -147,7 +161,7 @@ fn reconcile_publication(
     }
 }
 
-fn validate_empty_prefix(
+pub(super) fn validate_empty_prefix(
     objects: usize,
     object_truncated: Option<bool>,
     uploads: usize,
@@ -157,6 +171,19 @@ fn validate_empty_prefix(
         (Some(false), Some(false)) if objects == 0 && uploads == 0 => Ok(()),
         (None, _) | (_, None) => Err(RepositoryFailure::CorruptState),
         _ => Err(RepositoryFailure::ForeignPrefix),
+    }
+}
+
+fn validate_empty_history(
+    history: &aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput,
+) -> Result<(), RepositoryFailure> {
+    if !history.versions().is_empty() || !history.delete_markers().is_empty() {
+        return Err(RepositoryFailure::ForeignPrefix);
+    }
+    match history.is_truncated() {
+        Some(false) => Ok(()),
+        Some(true) => Err(RepositoryFailure::ForeignPrefix),
+        None => Err(RepositoryFailure::CorruptState),
     }
 }
 
@@ -213,6 +240,64 @@ mod tests {
 #[cfg(test)]
 mod listing_tests {
     use super::*;
+    #[test]
+    fn hidden_foreign_versions_and_delete_markers_refuse_identity_publication() {
+        use aws_sdk_s3::{
+            operation::list_object_versions::ListObjectVersionsOutput,
+            types::{DeleteMarkerEntry, ObjectVersion},
+        };
+        // The old current-only preflight admits this snapshot.
+        assert_eq!(
+            validate_empty_prefix(0, Some(false), 0, Some(false)),
+            Ok(())
+        );
+        let hidden_version = ListObjectVersionsOutput::builder()
+            .is_truncated(false)
+            .versions(
+                ObjectVersion::builder()
+                    .key("owned/foreign")
+                    .version_id("historical")
+                    .build(),
+            )
+            .build();
+        assert_eq!(
+            validate_empty_history(&hidden_version),
+            Err(RepositoryFailure::ForeignPrefix)
+        );
+        let marker = ListObjectVersionsOutput::builder()
+            .is_truncated(false)
+            .delete_markers(
+                DeleteMarkerEntry::builder()
+                    .key("owned/foreign")
+                    .version_id("marker")
+                    .build(),
+            )
+            .build();
+        assert_eq!(
+            validate_empty_history(&marker),
+            Err(RepositoryFailure::ForeignPrefix)
+        );
+        assert_eq!(
+            validate_empty_history(&ListObjectVersionsOutput::builder().build()),
+            Err(RepositoryFailure::CorruptState)
+        );
+        assert_eq!(
+            validate_empty_history(
+                &ListObjectVersionsOutput::builder()
+                    .is_truncated(true)
+                    .build()
+            ),
+            Err(RepositoryFailure::ForeignPrefix)
+        );
+        assert_eq!(
+            validate_empty_history(
+                &ListObjectVersionsOutput::builder()
+                    .is_truncated(false)
+                    .build()
+            ),
+            Ok(())
+        );
+    }
     #[test]
     fn incomplete_prefix_observations_cannot_authorize_initialization() {
         assert_eq!(
