@@ -3,6 +3,7 @@ use crate::RepositoryFailure;
 pub enum LocalFaultPoint {
     BeforeObjectPublication,
     AfterObjectPublication,
+    BeforeUploadPublication,
     AfterUploadPublication,
     BeforeRegistryPublication,
     AfterRegistryPublication,

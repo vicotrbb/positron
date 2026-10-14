@@ -290,7 +290,8 @@ impl Repository for LocalRepository {
     ) -> Result<crate::UploadState, RepositoryFailure> {
         let root = Arc::clone(&self.root);
         let expected = self.identity.clone();
-        tokio::task::spawn_blocking(move || upload::begin(&root, &expected, plan))
+        let faults = self.faults.clone();
+        tokio::task::spawn_blocking(move || upload::begin(&root, &expected, plan, &faults))
             .await
             .map_err(|_| RepositoryFailure::Interrupted)?
     }
@@ -360,7 +361,7 @@ fn read_identity(root: &File) -> Result<RepositoryIdentity, RepositoryFailure> {
     let file = fs::openat(
         root,
         "identity",
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
@@ -419,7 +420,7 @@ fn open_object(root: &File, object: ObjectId) -> Result<File, RepositoryFailure>
     let file = fs::openat(
         root,
         object.name().as_str(),
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)

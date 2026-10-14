@@ -8,7 +8,7 @@ pub(super) fn read(
     let file = match fs::openat(
         root,
         slot.name().as_str(),
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
         Ok(fd) => File::from(fd),

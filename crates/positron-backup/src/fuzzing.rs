@@ -21,7 +21,7 @@ pub fn fuzz_repository_stateful(data: &[u8]) {
         let mut present = false;
         let mut upload = None;
         for action in data.iter().copied().take(12) {
-            match action % 9 {
+            match action % 11 {
                 0 => {
                     let outcome = repository
                         .put_if_absent(payload.clone())
@@ -125,6 +125,90 @@ pub fn fuzz_repository_stateful(data: &[u8]) {
                                 .await
                                 .is_err()
                         );
+                    }
+                },
+                8 => {
+                    if !present {
+                        let plan = UploadPlan::new(payload.id(), payload.bytes().len() as u64)
+                            .expect("plan");
+                        repository = repository
+                            .with_faults(vec![LocalFault::new(
+                                LocalFaultPoint::BeforeUploadPublication,
+                                LocalFaultEffect::Interrupted,
+                                0,
+                            )])
+                            .expect("fault");
+                        assert_eq!(
+                            repository.begin_upload(plan).await,
+                            Err(RepositoryFailure::Interrupted)
+                        );
+                        drop(repository);
+                        repository = LocalRepository::attach(directory.path(), &identity)
+                            .await
+                            .expect("reopen staging");
+                        repository
+                            .abort_upload(plan.id())
+                            .await
+                            .expect("abort staging");
+                        assert_eq!(
+                            repository.inspect_upload(plan.id()).await.expect("upload"),
+                            None
+                        );
+                        assert!(
+                            !std::fs::read_dir(directory.path())
+                                .expect("directory")
+                                .any(|entry| entry
+                                    .expect("entry")
+                                    .file_name()
+                                    .to_string_lossy()
+                                    .starts_with("p-u-"))
+                        );
+                    }
+                },
+                9 => {
+                    if !present {
+                        let plan = UploadPlan::new(payload.id(), payload.bytes().len() as u64)
+                            .expect("plan");
+                        let state = repository.begin_upload(plan).await.expect("begin");
+                        if action & 16 == 0 {
+                            repository
+                                .put_if_absent(payload.clone())
+                                .await
+                                .expect("same content publication");
+                        } else {
+                            repository = repository
+                                .with_faults(vec![LocalFault::new(
+                                    LocalFaultPoint::AfterObjectPublication,
+                                    LocalFaultEffect::OutcomeUnknown,
+                                    0,
+                                )])
+                                .expect("fault");
+                            assert_eq!(
+                                repository
+                                    .resume_upload(
+                                        UploadPart::new(state, payload.bytes().to_vec())
+                                            .expect("part")
+                                    )
+                                    .await,
+                                Err(RepositoryFailure::OutcomeUnknown)
+                            );
+                        }
+                        drop(repository);
+                        repository = LocalRepository::attach(directory.path(), &identity)
+                            .await
+                            .expect("reopen completed object");
+                        assert!(
+                            repository
+                                .begin_upload(plan)
+                                .await
+                                .expect("reconcile completed upload")
+                                .complete()
+                        );
+                        assert_eq!(
+                            repository.inspect_upload(plan.id()).await.expect("upload"),
+                            None
+                        );
+                        present = true;
                     }
                 },
                 _ => {

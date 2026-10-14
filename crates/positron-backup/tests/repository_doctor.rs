@@ -42,38 +42,46 @@ async fn doctor_proves_provider_behaviors_and_cleans_only_its_probes()
 async fn interrupted_doctor_resumes_the_same_owned_probe_without_foreign_cleanup()
 -> Result<(), Box<dyn std::error::Error>> {
     use positron_backup::{LocalFault, LocalFaultEffect, LocalFaultPoint, RepositoryFailure};
-    let path = std::env::temp_dir().join(format!("positron-doctor-resume-{}", std::process::id()));
-    fs::create_dir(&path)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-    let identity = RepositoryIdentity::local([31; 16], [32; 16], [33; 32], &path)?;
-    let repository = LocalRepository::initialize(&path, identity.clone())
-        .await?
-        .with_faults(vec![LocalFault::new(
-            LocalFaultPoint::AfterUploadPublication,
-            LocalFaultEffect::Interrupted,
-            0,
-        )])?;
-    let plan = DoctorPlan::new(
-        [34; 32],
-        identity.clone(),
-        Duration::from_secs(5),
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    assert_eq!(
-        doctor(&repository, plan).await,
-        Err(RepositoryFailure::Interrupted)
-    );
-    drop(repository);
-    let reopened = LocalRepository::attach(&path, &identity).await?;
-    let plan = DoctorPlan::new(
-        [34; 32],
-        identity,
-        Duration::from_secs(5),
-        Arc::new(AtomicBool::new(false)),
-    )?;
-    assert!(doctor(&reopened, plan).await?.probes_deleted());
-    assert_eq!(fs::read_dir(&path)?.count(), 1);
-    fs::remove_dir_all(path)?;
+    for (point, preceding, label) in [
+        (LocalFaultPoint::AfterUploadPublication, 0, "upload"),
+        (LocalFaultPoint::AfterObjectPublication, 1, "object"),
+    ] {
+        let path = std::env::temp_dir().join(format!(
+            "positron-doctor-resume-{}-{label}",
+            std::process::id()
+        ));
+        fs::create_dir(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        let identity = RepositoryIdentity::local([31; 16], [32; 16], [33; 32], &path)?;
+        let repository = LocalRepository::initialize(&path, identity.clone())
+            .await?
+            .with_faults(vec![LocalFault::new(
+                point,
+                LocalFaultEffect::Interrupted,
+                preceding,
+            )])?;
+        let plan = DoctorPlan::new(
+            [34; 32],
+            identity.clone(),
+            Duration::from_secs(5),
+            Arc::new(AtomicBool::new(false)),
+        )?;
+        assert_eq!(
+            doctor(&repository, plan).await,
+            Err(RepositoryFailure::Interrupted)
+        );
+        drop(repository);
+        let reopened = LocalRepository::attach(&path, &identity).await?;
+        let plan = DoctorPlan::new(
+            [34; 32],
+            identity,
+            Duration::from_secs(5),
+            Arc::new(AtomicBool::new(false)),
+        )?;
+        assert!(doctor(&reopened, plan).await?.probes_deleted());
+        assert_eq!(fs::read_dir(&path)?.count(), 1);
+        fs::remove_dir_all(path)?;
+    }
     Ok(())
 }
 

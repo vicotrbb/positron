@@ -28,10 +28,17 @@ pub(super) fn inspect(
     root: &File,
     id: UploadId,
 ) -> Result<Option<(File, UploadState)>, RepositoryFailure> {
+    inspect_named(root, id, &id.name())
+}
+fn inspect_named(
+    root: &File,
+    id: UploadId,
+    name: &str,
+) -> Result<Option<(File, UploadState)>, RepositoryFailure> {
     let mut file = match fs::openat(
         root,
-        id.name().as_str(),
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
         Ok(fd) => File::from(fd),
@@ -92,6 +99,7 @@ pub(super) fn begin(
     root: &File,
     expected: &RepositoryIdentity,
     plan: UploadPlan,
+    faults: &fault::Controller,
 ) -> Result<UploadState, RepositoryFailure> {
     let _lock = DirectoryLock::new(root)?;
     verify_identity(root, expected)?;
@@ -101,6 +109,7 @@ pub(super) fn begin(
             if meta.size != plan.size {
                 return Err(RepositoryFailure::InvalidInput);
             }
+            cleanup_upload(root, plan.id())?;
             return Ok(UploadState {
                 plan,
                 written: plan.size,
@@ -112,7 +121,7 @@ pub(super) fn begin(
     }
     if let Some((mut file, state)) = inspect(root, plan.id())? {
         if state.complete() {
-            publish_completed(root, &mut file, state)?;
+            publish_completed(root, &mut file, state, faults)?;
         }
         return Ok(state);
     }
@@ -125,6 +134,7 @@ pub(super) fn begin(
     let mut file = pending_file(root, &pending)?;
     file.write_all(&header(state)).map_err(io_failure)?;
     file.sync_all().map_err(io_failure)?;
+    faults.at(fault::LocalFaultPoint::BeforeUploadPublication)?;
     fs::renameat(root, pending.as_str(), root, plan.id().name().as_str()).map_err(storage)?;
     root.sync_all()
         .map_err(|_| RepositoryFailure::OutcomeUnknown)?;
@@ -140,7 +150,10 @@ pub(super) fn resume(
     verify_identity(root, expected)?;
     match open_object(root, part.state.plan.object) {
         Ok(mut file) => {
-            metadata(&mut file, part.state.plan.object)?;
+            if metadata(&mut file, part.state.plan.object)?.size != part.state.plan.size {
+                return Err(RepositoryFailure::InvalidInput);
+            }
+            cleanup_upload(root, part.state.id())?;
             return Ok(UploadOutcome::Complete(PutOutcome::AlreadyPresent));
         },
         Err(RepositoryFailure::NotFound) => {},
@@ -194,6 +207,7 @@ pub(super) fn resume(
     file.seek(SeekFrom::Start(0)).map_err(io_failure)?;
     file.write_all(&header(state)).map_err(io_failure)?;
     file.sync_all().map_err(io_failure)?;
+    faults.at(fault::LocalFaultPoint::BeforeUploadPublication)?;
     fs::renameat(root, pending.as_str(), root, current.id().name().as_str()).map_err(storage)?;
     root.sync_all()
         .map_err(|_| RepositoryFailure::OutcomeUnknown)?;
@@ -201,13 +215,14 @@ pub(super) fn resume(
     if !state.complete() {
         return Ok(UploadOutcome::Pending(state));
     }
-    publish_completed(root, &mut file, state)?;
+    publish_completed(root, &mut file, state, faults)?;
     Ok(UploadOutcome::Complete(PutOutcome::Created))
 }
 fn publish_completed(
     root: &File,
     file: &mut File,
     state: UploadState,
+    faults: &fault::Controller,
 ) -> Result<(), RepositoryFailure> {
     if !state.complete() || state.checksum != state.plan.object.checksum() {
         return Err(RepositoryFailure::ChecksumMismatch);
@@ -229,6 +244,7 @@ fn publish_completed(
     .map_err(storage)?;
     root.sync_all()
         .map_err(|_| RepositoryFailure::OutcomeUnknown)?;
+    faults.at(fault::LocalFaultPoint::AfterObjectPublication)?;
     fs::unlinkat(root, state.id().name().as_str(), fs::AtFlags::empty())
         .map_err(|_| RepositoryFailure::OutcomeUnknown)?;
     root.sync_all()
@@ -242,10 +258,26 @@ pub(super) fn abort(
 ) -> Result<DeleteOutcome, RepositoryFailure> {
     let _lock = DirectoryLock::new(root)?;
     verify_identity(root, expected)?;
-    if inspect(root, id)?.is_none() {
+    cleanup_upload(root, id)
+}
+fn cleanup_upload(root: &File, id: UploadId) -> Result<DeleteOutcome, RepositoryFailure> {
+    let current = id.name();
+    let pending = format!("p-{current}");
+    // Validate both exact owned records before removing either. A malformed
+    // or foreign staging file remains conservative evidence, not cleanup work.
+    let (current_present, pending_present) = (
+        inspect_named(root, id, &current)?.is_some(),
+        inspect_named(root, id, &pending)?.is_some(),
+    );
+    if !current_present && !pending_present {
         return Ok(DeleteOutcome::AlreadyAbsent);
     }
-    fs::unlinkat(root, id.name().as_str(), fs::AtFlags::empty()).map_err(storage)?;
+    for (name, exists) in [(current, current_present), (pending, pending_present)] {
+        if exists {
+            fs::unlinkat(root, name.as_str(), fs::AtFlags::empty())
+                .map_err(|_| RepositoryFailure::OutcomeUnknown)?;
+        }
+    }
     root.sync_all()
         .map_err(|_| RepositoryFailure::OutcomeUnknown)?;
     Ok(DeleteOutcome::Deleted)

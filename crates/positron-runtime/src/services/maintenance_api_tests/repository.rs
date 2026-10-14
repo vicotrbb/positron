@@ -479,3 +479,6 @@ fn accepted_repository_work_fails_closed_when_native_requesters_grant_is_revoked
     std::fs::remove_dir_all(path)?;
     Ok(())
 }
+
+#[path = "repository/fifo.rs"]
+mod fifo;

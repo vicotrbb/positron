@@ -131,59 +131,70 @@ pub(in crate::services) fn complete(
         .max_blocking_threads(1)
         .build()
         .map_err(|_| ServiceFailure::StorageUnavailable)?;
+    let budget = Duration::from_secs(30);
+    let started = std::time::Instant::now();
     let result = runtime.block_on(async {
-        let path = Path::new(
-            parameters
-                .locator()
-                .map_err(|_| RepositoryFailure::CorruptState)?,
-        );
-        let identity = RepositoryIdentity::local(
-            parameters.repository_id(),
-            services.instance.instance.to_bytes(),
-            parameters.integrity_fingerprint(),
-            path,
-        )?;
-        if identity.prefix_commitment() != parameters.prefix_commitment() {
-            return Err(RepositoryFailure::IdentityMismatch);
-        }
-        let repository = match parameters.action() {
-            RepositoryAction::Initialize => match LocalRepository::attach(path, &identity).await {
-                Ok(repository) => repository,
-                Err(RepositoryFailure::NotFound) => {
-                    LocalRepository::initialize(path, identity.clone()).await?
+        tokio::time::timeout(budget, async {
+            let path = Path::new(
+                parameters
+                    .locator()
+                    .map_err(|_| RepositoryFailure::CorruptState)?,
+            );
+            let identity = RepositoryIdentity::local(
+                parameters.repository_id(),
+                services.instance.instance.to_bytes(),
+                parameters.integrity_fingerprint(),
+                path,
+            )?;
+            if identity.prefix_commitment() != parameters.prefix_commitment() {
+                return Err(RepositoryFailure::IdentityMismatch);
+            }
+            let repository = match parameters.action() {
+                RepositoryAction::Initialize => {
+                    match LocalRepository::attach(path, &identity).await {
+                        Ok(repository) => repository,
+                        Err(RepositoryFailure::NotFound) => {
+                            LocalRepository::initialize(path, identity.clone()).await?
+                        },
+                        Err(failure) => return Err(failure),
+                    }
                 },
-                Err(failure) => return Err(failure),
-            },
-            RepositoryAction::Verify | RepositoryAction::Doctor => {
-                LocalRepository::attach(path, &identity).await?
-            },
-        };
-        if repository.identify().await? != identity {
-            return Err(RepositoryFailure::IdentityMismatch);
-        }
-        if parameters.action() == RepositoryAction::Doctor {
-            let mut probe = [0; 32];
-            let operation_id = operation.operation_id().to_bytes();
-            probe
-                .get_mut(..16)
-                .ok_or(RepositoryFailure::CorruptState)?
-                .copy_from_slice(&operation_id);
-            probe
-                .get_mut(16..)
-                .ok_or(RepositoryFailure::CorruptState)?
-                .copy_from_slice(&operation_id);
-            positron_backup::doctor(
-                &repository,
-                positron_backup::DoctorPlan::new(
-                    probe,
-                    identity,
-                    Duration::from_secs(30),
-                    Arc::new(AtomicBool::new(false)),
-                )?,
-            )
-            .await?;
-        }
-        Ok(())
+                RepositoryAction::Verify | RepositoryAction::Doctor => {
+                    LocalRepository::attach(path, &identity).await?
+                },
+            };
+            if repository.identify().await? != identity {
+                return Err(RepositoryFailure::IdentityMismatch);
+            }
+            if parameters.action() == RepositoryAction::Doctor {
+                let mut probe = [0; 32];
+                let operation_id = operation.operation_id().to_bytes();
+                probe
+                    .get_mut(..16)
+                    .ok_or(RepositoryFailure::CorruptState)?
+                    .copy_from_slice(&operation_id);
+                probe
+                    .get_mut(16..)
+                    .ok_or(RepositoryFailure::CorruptState)?
+                    .copy_from_slice(&operation_id);
+                positron_backup::doctor(
+                    &repository,
+                    positron_backup::DoctorPlan::new(
+                        probe,
+                        identity,
+                        budget
+                            .checked_sub(started.elapsed())
+                            .filter(|remaining| !remaining.is_zero())
+                            .ok_or(RepositoryFailure::OutcomeUnknown)?,
+                        Arc::new(AtomicBool::new(false)),
+                    )?,
+                )
+                .await?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| RepositoryFailure::OutcomeUnknown)?
     });
     let success = match result {
         Ok(()) => true,
