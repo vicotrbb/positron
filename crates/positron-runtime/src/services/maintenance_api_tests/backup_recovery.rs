@@ -420,16 +420,16 @@ fn cancellation_restart_at(
         .build()?;
     let repository = runtime.block_on(LocalRepository::attach(&repository_path, &identity))?;
     let resources = backup_read_resources(&services)?;
-    let publisher = positron_backup::BackupPublisher::new(&repository, &identity, &signer)
-        .with_control_resources(&resources, 0)?;
-    let proof = backup_inspection_proof(&runtime, &publisher, snapshot)?;
-    let publisher = publisher.with_registry_verification(&proof)?;
-    assert_eq!(
-        runtime.block_on(publisher.cleanup_for_owner(snapshot))?,
-        None
-    );
-    drop(publisher);
-    drop(proof);
+    {
+        let publisher = positron_backup::BackupPublisher::new(&repository, &identity, &signer)
+            .with_control_resources(&resources, 0)?;
+        let proof = backup_inspection_proof(&runtime, &publisher, snapshot)?;
+        let publisher = publisher.with_registry_verification(&proof)?;
+        assert_eq!(
+            runtime.block_on(publisher.cleanup_for_owner(snapshot))?,
+            None
+        );
+    }
     drop(resources);
     drop(repository);
     drop(runtime);
