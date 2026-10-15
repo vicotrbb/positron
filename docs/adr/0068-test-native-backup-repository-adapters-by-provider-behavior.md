@@ -91,7 +91,42 @@ qualification requires explicit designated target authorization; see
 [the operational scope](../operations/aws-s3-repository.md). Local and pure SDK
 boundary evidence does not qualify AWS behavior.
 
-## Adapter implementation acceptance
+## Google Cloud Storage adapter and private recovery custody
+
+The native GCS adapter targets JSON API v1 for flat-namespace buckets at the
+published Google endpoint. Bucket, numeric project owner, exact location and
+owned prefix bind `POSGCI01` Identity. Hierarchical namespaces and arbitrary
+endpoints are rejected. Renewable Application Default Credentials use the
+existing admitted Kernel Google runtime and pinned `google-cloud-auth` 1.17.0.
+The runtime owns credential files, DNS, native tasks, TLS and bounded bodies;
+the existing Maintenance reservation survives retries and terminal publication.
+
+Content reads bind both native generation and metageneration. Native CRC32C and
+full SHA-256 content identities remain separate checks. Registry publication
+uses generation preconditions while direct reconciliation preserves uncertain
+outcomes. Listing cursors reuse the bounded provider-owned cursor authority;
+advisory pages never become a registry head or object-absence claim.
+
+Private `POSGCU01` frames bind target, object, buffered input, staging selector
+and closed session-creation state. A Kernel-owned control MAC authenticates
+recovered session authority. `POSGCS01` wraps each session capability in the
+existing frame-v1 construction: fresh system-object DEK, immutable frame
+sequence, instance-bound wrapped-key context and Catalog custody. Session URI
+plaintext and unwrapped keys never enter provider persistence or operation
+records. No alternate cipher or nonce allocation scheme is introduced.
+Requested creation without a durably captured session remains unknown; retry
+does not create another session. Known sessions resume from native committed
+offsets and verified staging precedes conditional final publication.
+
+Provider kind 3 extends the existing four-field native locator dispatch without
+changing local/AWS codes or their bytes. Checked terminal policy adds optional
+`POSRSD01` soft-delete observations, seconds-based retention and event holds
+until release. A provider-enforced deadline does not invent an unobserved bypass
+mode. Historical soft-deleted generations remain relevant even after policy
+disablement; initialization and cleanup inspect them independently of current
+policy and fail closed when observation is unavailable. Current-head absence
+never skips historical cleanup. The canonical API and CLI expose observations
+through the same authenticated Administration operation.
 
 Implementation acceptance permits bounded loopback protocol simulation and
 local service simulators, alongside the existing engineering gates. This
@@ -99,4 +134,11 @@ supersedes the earlier requirement to qualify a real provider before accepting
 an adapter implementation. Simulation exercises the native adapter's public
 behavior and failure/recovery contracts; it does not prove provider IAM,
 credential renewal, TLS, service retention, or a particular deployed target.
+Test-only loopback construction uses anonymous credentials and retains admitted
+Kernel transport ownership. Production target and ADC construction stay native.
+
 Real-provider qualification is separate and remains unproven until measured.
+Complete signed backup and restore flows and managed tenant purge retain their
+existing workflow owners and acceptance. See
+[the GCS operational scope](../operations/google-cloud-storage-repository.md).
+Local format, admission, public-interface and fuzz results do not qualify GCS.

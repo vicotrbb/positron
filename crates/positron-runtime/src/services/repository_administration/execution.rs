@@ -127,22 +127,23 @@ pub(in crate::services) fn complete(
         }
         (operation, actor, parameters)
     };
-    let native_resources =
-        if parameters.provider_kind() == positron_governance::RepositoryProviderKind::AwsS3 {
-            Some(
-                match execution
-                    .retained_repository_resources(binding)
-                    .map_err(super::super::maintenance::map_failure)?
-                {
-                    Some(resources) => resources,
-                    None => execution
-                        .transfer_repository_resources(binding)
-                        .map_err(super::super::maintenance::map_failure)?,
-                },
-            )
-        } else {
-            None
-        };
+    let native_resources = if parameters.provider_kind()
+        != positron_governance::RepositoryProviderKind::LocalFilesystem
+    {
+        Some(
+            match execution
+                .retained_repository_resources(binding)
+                .map_err(super::super::maintenance::map_failure)?
+            {
+                Some(resources) => resources,
+                None => execution
+                    .transfer_repository_resources(binding)
+                    .map_err(super::super::maintenance::map_failure)?,
+            },
+        )
+    } else {
+        None
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
@@ -206,6 +207,46 @@ pub(in crate::services) fn complete(
                             native_resources.ok_or(RepositoryFailure::PermissionDenied)?,
                         )
                         .await?;
+                        match parameters.action() {
+                            RepositoryAction::Initialize => {
+                                repository.initialize().await?;
+                            },
+                            RepositoryAction::Verify | RepositoryAction::Doctor => {
+                                repository.attach().await?;
+                            },
+                        }
+                        (identity, Box::new(repository))
+                    },
+                    positron_governance::RepositoryProviderKind::GoogleCloudStorage => {
+                        let target = positron_backup::GoogleCloudStorageTarget::decode_locator(
+                            parameters
+                                .locator()
+                                .map_err(|_| RepositoryFailure::CorruptState)?,
+                        )?;
+                        let identity = RepositoryIdentity::google_cloud_storage(
+                            parameters.repository_id(),
+                            services.instance.instance.to_bytes(),
+                            parameters.integrity_fingerprint(),
+                            &target,
+                        )?;
+                        if identity.prefix_commitment() != parameters.prefix_commitment() {
+                            return Err(RepositoryFailure::IdentityMismatch);
+                        }
+                        let repository =
+                            positron_backup::GoogleCloudStorageRepository::from_admitted_resources(
+                                target,
+                                identity.clone(),
+                                native_resources.ok_or(RepositoryFailure::PermissionDenied)?,
+                                positron_kernel::RepositoryUploadAuthenticator::new(
+                                    services
+                                        .instance
+                                        .key
+                                        .catalog_secret(services.instance.instance)
+                                        .map_err(|_| RepositoryFailure::StorageUnavailable)?,
+                                    services.instance.instance,
+                                ),
+                            )
+                            .await?;
                         match parameters.action() {
                             RepositoryAction::Initialize => {
                                 repository.initialize().await?;

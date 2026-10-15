@@ -23,6 +23,7 @@ mod codec;
 mod credentials;
 mod google;
 pub use google::GoogleCloudKmsKeyProvider;
+pub use google::native::NativeRuntime as NativeGoogleRuntime;
 #[cfg(fuzzing)]
 mod fuzzing;
 mod kmip;

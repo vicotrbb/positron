@@ -422,3 +422,10 @@ path = "fuzz_targets/aws_s3_repository.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "google_cloud_storage_repository"
+path = "fuzz_targets/google_cloud_storage_repository.rs"
+test = false
+doc = false
+bench = false

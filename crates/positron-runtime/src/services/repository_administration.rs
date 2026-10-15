@@ -15,6 +15,7 @@ use std::path::Path;
 pub(crate) enum RepositoryLocation<'a> {
     Local(&'a Path),
     AwsS3(&'a positron_backup::AwsS3Target),
+    GoogleCloudStorage(&'a positron_backup::GoogleCloudStorageTarget),
 }
 #[derive(Clone, Copy)]
 pub(crate) struct RepositoryAdmission<'a> {
@@ -72,6 +73,22 @@ impl ServiceHandle {
                 )
                 .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
                 RepositoryOperationParameters::aws_s3(
+                    input.action,
+                    &target.encode_locator(),
+                    input.repository,
+                    fingerprint,
+                    identity.prefix_commitment(),
+                )
+            },
+            RepositoryLocation::GoogleCloudStorage(target) => {
+                let identity = positron_backup::RepositoryIdentity::google_cloud_storage(
+                    input.repository,
+                    self.instance.instance.to_bytes(),
+                    fingerprint,
+                    target,
+                )
+                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+                RepositoryOperationParameters::google_cloud_storage(
                     input.action,
                     &target.encode_locator(),
                     input.repository,
@@ -187,8 +204,13 @@ fn repository_resources(
     kind: positron_governance::RepositoryProviderKind,
 ) -> positron_kernel::ResourceAmounts {
     let mut amounts = [131_072, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384];
-    if kind == positron_governance::RepositoryProviderKind::AwsS3 {
-        let native = positron_backup::AwsS3Repository::required_resources();
+    if kind != positron_governance::RepositoryProviderKind::LocalFilesystem {
+        let native = match kind {
+            positron_governance::RepositoryProviderKind::GoogleCloudStorage => {
+                positron_backup::GoogleCloudStorageRepository::required_resources()
+            },
+            _ => positron_backup::AwsS3Repository::required_resources(),
+        };
         for (amount, dimension) in amounts
             .iter_mut()
             .zip(positron_kernel::ResourceDimension::ALL)

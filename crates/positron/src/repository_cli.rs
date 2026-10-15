@@ -1,7 +1,8 @@
 //! The running instance owns repository; this command is an authenticated client.
 use positron_api::repository::{
-    RepositoryAwsS3Target, RepositoryRequest, RepositoryResponse, RepositoryServiceClient,
-    RepositoryServiceClientFailure, RepositoryTransport,
+    RepositoryAwsS3Target, RepositoryGoogleCloudStorageTarget, RepositoryRequest,
+    RepositoryResponse, RepositoryServiceClient, RepositoryServiceClientFailure,
+    RepositoryTransport,
 };
 use std::{
     collections::BTreeMap,
@@ -9,7 +10,7 @@ use std::{
     process::ExitCode,
     time::{Duration, Instant},
 };
-const USAGE: &str = "usage: positron repository init|verify|doctor|status|lookup|wait|cancel --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--locator SERVER_PATH | --aws-bucket BUCKET --aws-region REGION --aws-endpoint HTTPS_ENDPOINT --aws-expected-owner ACCOUNT --aws-prefix PREFIX] [--repository-id UUID --expected-generation N --idempotency-key UUID --operation-id ID]";
+const USAGE: &str = "usage: positron repository init|verify|doctor|status|lookup|wait|cancel --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--locator SERVER_PATH | --aws-bucket BUCKET --aws-region REGION --aws-endpoint HTTPS_ENDPOINT --aws-expected-owner ACCOUNT --aws-prefix PREFIX | --gcs-bucket BUCKET --gcs-project-number PROJECT --gcs-location LOCATION --gcs-prefix PREFIX] [--repository-id UUID --expected-generation N --idempotency-key UUID --operation-id ID]";
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     crate::administrative_cli::exit(execute(arguments, &mut std::io::stdout().lock()))
@@ -73,6 +74,9 @@ fn write_response(
             ("object_lock", &policy.object_lock),
             ("lifecycle", &policy.lifecycle),
         ];
+        if let Some(value) = &policy.soft_delete {
+            observations.push(("soft_delete_retention_seconds", value));
+        }
         if let Some(probe) = &policy.doctor_probe {
             observations.extend([
                 ("doctor_probe_retention", &probe.retention),
@@ -159,6 +163,10 @@ fn parse(
             | "--aws-endpoint"
             | "--aws-expected-owner"
             | "--aws-prefix"
+            | "--gcs-bucket"
+            | "--gcs-project-number"
+            | "--gcs-location"
+            | "--gcs-prefix"
             | "--repository-id"
             | "--expected-generation"
             | "--idempotency-key"
@@ -226,6 +234,30 @@ fn parse(
     } else {
         None
     };
+    let native_google = [
+        "--gcs-bucket",
+        "--gcs-project-number",
+        "--gcs-location",
+        "--gcs-prefix",
+    ];
+    let google_cloud_storage = if native_google
+        .iter()
+        .any(|option| options.contains_key(*option))
+    {
+        let mut required = |option| {
+            options
+                .remove(option)
+                .ok_or("Google target requires bucket, project number, location and prefix")
+        };
+        Some(RepositoryGoogleCloudStorageTarget {
+            bucket: required("--gcs-bucket")?,
+            project_number: required("--gcs-project-number")?,
+            location: required("--gcs-location")?,
+            prefix: required("--gcs-prefix")?,
+        })
+    } else {
+        None
+    };
     let request = RepositoryRequest {
         action: match action.as_str() {
             "wait" => "status",
@@ -242,6 +274,7 @@ fn parse(
             .transpose()?,
         idempotency_key: options.remove("--idempotency-key"),
         aws_s3,
+        google_cloud_storage,
         locator: options.remove("--locator"),
         repository_id: options.remove("--repository-id"),
         operation_id: options.remove("--operation-id"),

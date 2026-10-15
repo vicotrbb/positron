@@ -7,6 +7,11 @@ pub(super) fn receipt(
 ) -> wire::RepositoryPolicyReceipt {
     wire::RepositoryPolicyReceipt {
         observed_at_unix_seconds,
+        soft_delete: policy.soft_delete.map(|value| {
+            observation(value, |output, seconds| {
+                output.value = Some(seconds.to_string())
+            })
+        }),
         doctor_probe: policy
             .doctor_probe
             .map(|probe| wire::RepositoryObjectProtection {
@@ -15,6 +20,7 @@ pub(super) fn receipt(
                         mode: match value.mode {
                             domain::RetentionMode::Governance => "governance",
                             domain::RetentionMode::Compliance => "compliance",
+                            domain::RetentionMode::ProviderEnforced => "provider_enforced",
                         }
                         .into(),
                         retain_until_unix_seconds: value.retain_until_unix_seconds,
@@ -31,6 +37,12 @@ pub(super) fn receipt(
                         },
                         Some(domain::RetentionPeriod::Years(period)) => {
                             (Some("years".into()), Some(period))
+                        },
+                        Some(domain::RetentionPeriod::Seconds(period)) => {
+                            (Some("seconds".into()), Some(period))
+                        },
+                        Some(domain::RetentionPeriod::UntilRelease) => {
+                            (Some("until_release".into()), None)
                         },
                     };
                     output.event_hold = Some(wire::RepositoryEventHold {
@@ -58,11 +70,14 @@ pub(super) fn receipt(
                     let (unit, period) = match retention.period {
                         domain::RetentionPeriod::Days(period) => ("days", period),
                         domain::RetentionPeriod::Years(period) => ("years", period),
+                        domain::RetentionPeriod::Seconds(period) => ("seconds", period),
+                        domain::RetentionPeriod::UntilRelease => ("until_release", 0),
                     };
                     wire::RepositoryDefaultRetention {
                         mode: match retention.mode {
                             domain::RetentionMode::Governance => "governance",
                             domain::RetentionMode::Compliance => "compliance",
+                            domain::RetentionMode::ProviderEnforced => "provider_enforced",
                         }
                         .into(),
                         period_unit: unit.into(),

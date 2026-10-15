@@ -727,6 +727,13 @@ message RepositoryRequest {
   optional string repository_id = 5;
   optional string operation_id = 6;
   optional RepositoryAwsS3Target aws_s3 = 7;
+  optional RepositoryGoogleCloudStorageTarget google_cloud_storage = 8;
+}
+message RepositoryGoogleCloudStorageTarget {
+  string bucket = 1;
+  string project_number = 2;
+  string location = 3;
+  string prefix = 4;
 }
 message RepositoryAwsS3Target {
   string bucket = 1;
@@ -799,6 +806,7 @@ message RepositoryPolicyReceipt {
   RepositoryPolicyObservation object_lock = 3;
   RepositoryPolicyObservation lifecycle = 4;
   optional RepositoryObjectProtection doctor_probe = 5;
+  optional RepositoryPolicyObservation soft_delete = 6;
 }
 message RepositoryResponse {
   uint64 catalog_generation = 1;

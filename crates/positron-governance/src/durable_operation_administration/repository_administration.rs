@@ -104,7 +104,7 @@ impl DurableOperationAdministration {
             return Err(DurableOperationFailure::InvalidState);
         }
         if operation.repository_parameters().is_some_and(|parameters| {
-            parameters.provider_kind() == super::RepositoryProviderKind::AwsS3
+            parameters.provider_kind() != super::RepositoryProviderKind::LocalFilesystem
         }) {
             return Err(DurableOperationFailure::InvalidState);
         }

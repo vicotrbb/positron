@@ -15,6 +15,8 @@ mod backend;
 mod codec;
 mod context;
 mod control_token;
+mod repository_upload;
+pub use repository_upload::RepositoryUploadAuthenticator;
 mod export_manifest_signature;
 mod frame;
 mod key_envelope;

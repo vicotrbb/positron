@@ -3,6 +3,8 @@ mod aws_s3;
 mod aws_s3_target;
 mod doctor;
 mod fault;
+mod google_cloud_storage;
+mod google_cloud_storage_target;
 mod identity;
 mod listing;
 mod local;
@@ -15,6 +17,12 @@ pub use aws_s3::AwsS3Repository;
 pub use aws_s3::{AwsS3Fault, AwsS3FaultEffect, AwsS3FaultPoint};
 pub use aws_s3_target::AwsS3Target;
 pub use doctor::{DoctorPlan, DoctorReport, doctor};
+pub use google_cloud_storage::GoogleCloudStorageRepository;
+#[cfg(feature = "test-support")]
+pub use google_cloud_storage::{
+    GoogleCloudStorageFault, GoogleCloudStorageFaultEffect, GoogleCloudStorageFaultPoint,
+};
+pub use google_cloud_storage_target::GoogleCloudStorageTarget;
 pub use identity::RepositoryIdentity;
 pub use listing::{ListCursor, ListEntry, ListKind, ListPage, ListRequest};
 pub use local::LocalRepository;
@@ -72,3 +80,5 @@ pub use fuzzing::fuzz_repository_stateful;
 
 #[cfg(fuzzing)]
 pub use aws_s3::fuzz_aws_s3_repository;
+#[cfg(fuzzing)]
+pub use google_cloud_storage::fuzz_google_cloud_storage_repository;

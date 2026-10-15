@@ -5,7 +5,7 @@ use super::{
 };
 use positron_domain::repository::*;
 const MAGIC: &[u8; 8] = b"POSRPL01";
-const MAX_LENGTH: usize = 70;
+const MAX_LENGTH: usize = 96;
 type Failure = DurableOperationFailure;
 fn invalid() -> Failure {
     Failure::PersistenceUnavailable
@@ -67,10 +67,13 @@ pub(super) fn encode(policy: RepositoryPolicy) -> Result<Vec<u8>, Failure> {
                 bytes.push(match retention.mode {
                     RetentionMode::Governance => 0,
                     RetentionMode::Compliance => 1,
+                    RetentionMode::ProviderEnforced => 2,
                 });
                 let (unit, amount) = match retention.period {
                     RetentionPeriod::Days(amount) => (0, amount),
                     RetentionPeriod::Years(amount) => (1, amount),
+                    RetentionPeriod::Seconds(amount) => (2, amount),
+                    RetentionPeriod::UntilRelease => return Err(invalid()),
                 };
                 if amount == 0 {
                     return Err(invalid());
@@ -99,6 +102,7 @@ pub(super) fn encode(policy: RepositoryPolicy) -> Result<Vec<u8>, Failure> {
             bytes.push(match value.mode {
                 RetentionMode::Governance => 0,
                 RetentionMode::Compliance => 1,
+                RetentionMode::ProviderEnforced => 2,
             });
             bytes.extend_from_slice(&value.retain_until_unix_seconds.to_be_bytes());
             Ok(())
@@ -114,14 +118,23 @@ pub(super) fn encode(policy: RepositoryPolicy) -> Result<Vec<u8>, Failure> {
                     let (unit, amount) = match period {
                         RetentionPeriod::Days(amount) => (1, amount),
                         RetentionPeriod::Years(amount) => (2, amount),
+                        RetentionPeriod::Seconds(amount) => (3, amount),
+                        RetentionPeriod::UntilRelease => (4, 0),
                     };
-                    if amount == 0 {
+                    if amount == 0 && unit != 4 {
                         return Err(invalid());
                     }
                     bytes.push(unit);
                     bytes.extend_from_slice(&amount.to_be_bytes());
                 },
             }
+            Ok(())
+        })?;
+    }
+    if let Some(soft_delete) = policy.soft_delete {
+        bytes.extend_from_slice(b"POSRSD01");
+        observation(&mut bytes, soft_delete, |bytes, seconds| {
+            bytes.extend_from_slice(&seconds.to_be_bytes());
             Ok(())
         })?;
     }
@@ -196,6 +209,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RepositoryPolicyReceipt, Failure> {
                 let mode = match take_byte(bytes, offset)? {
                     0 => RetentionMode::Governance,
                     1 => RetentionMode::Compliance,
+                    2 => RetentionMode::ProviderEnforced,
                     _ => return Err(invalid()),
                 };
                 let unit = take_byte(bytes, offset)?;
@@ -206,6 +220,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RepositoryPolicyReceipt, Failure> {
                 let period = match unit {
                     0 => RetentionPeriod::Days(amount),
                     1 => RetentionPeriod::Years(amount),
+                    2 => RetentionPeriod::Seconds(amount),
                     _ => return Err(invalid()),
                 };
                 Ok(ObjectLockPolicy::Enabled {
@@ -227,7 +242,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RepositoryPolicyReceipt, Failure> {
             abandoned_upload_expiration: flags & 8 != 0,
         })
     })?;
-    let doctor_probe = if offset == bytes.len() {
+    let doctor_probe = if bytes.get(offset..offset + 8) != Some(b"POSROP01") {
         None
     } else {
         if take_array::<8>(bytes, &mut offset)? != *b"POSROP01" {
@@ -237,6 +252,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RepositoryPolicyReceipt, Failure> {
             let mode = match take_byte(bytes, offset)? {
                 0 => RetentionMode::Governance,
                 1 => RetentionMode::Compliance,
+                2 => RetentionMode::ProviderEnforced,
                 _ => return Err(invalid()),
             };
             let retain_until_unix_seconds = u64::from_be_bytes(take_array(bytes, offset)?);
@@ -261,12 +277,14 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RepositoryPolicyReceipt, Failure> {
                 return Ok(None);
             }
             let amount = u32::from_be_bytes(take_array(bytes, offset)?);
-            if amount == 0 {
+            if amount == 0 && unit != 4 {
                 return Err(invalid());
             }
             match unit {
                 1 => Ok(Some(RetentionPeriod::Days(amount))),
                 2 => Ok(Some(RetentionPeriod::Years(amount))),
+                3 => Ok(Some(RetentionPeriod::Seconds(amount))),
+                4 if amount == 0 => Ok(Some(RetentionPeriod::UntilRelease)),
                 _ => Err(invalid()),
             }
         })?;
@@ -276,10 +294,21 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RepositoryPolicyReceipt, Failure> {
             event_hold,
         })
     };
+    let soft_delete = if offset == bytes.len() {
+        None
+    } else {
+        if take_array::<8>(bytes, &mut offset)? != *b"POSRSD01" {
+            return Err(invalid());
+        }
+        Some(read_observation(bytes, &mut offset, |bytes, offset| {
+            Ok(u64::from_be_bytes(take_array(bytes, offset)?))
+        })?)
+    };
     if offset != bytes.len() {
         return Err(invalid());
     }
     RepositoryPolicyReceipt::new(RepositoryPolicy {
+        soft_delete,
         versioning,
         object_lock,
         lifecycle,

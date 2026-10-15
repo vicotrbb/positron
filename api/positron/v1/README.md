@@ -271,3 +271,16 @@ fields. Terminal `policy` distinguishes observed, unavailable and unobservable
 bucket controls. Optional `doctor_probe` additionally reports only the owned
 probe's retention expiry/mode, legal hold and event-hold period; it is absent for
 initialization and verify. Unknown controls never imply absence or purge proof.
+
+Google Cloud Storage selects `google_cloud_storage` with bucket, numeric project
+number, exact location and prefix. CLI flags are `--gcs-bucket`,
+`--gcs-project-number`, `--gcs-location` and `--gcs-prefix`. A request selects
+exactly one local/AWS/GCS target. The server resolves native workload credentials;
+selectors, credentials and resumable session URIs never enter responses.
+
+Policy receipts may add a `soft_delete` observation whose observed `value` is
+retention seconds. Retention periods preserve `seconds`, and active GCS event
+holds use `until_release` without a fabricated period. `provider_enforced`
+reports an effective object deadline when bypass mode is not exposed. Legacy
+receipts retain their existing fields and absence semantics. Real GCS provider
+qualification remains independent of API schema and local test results.

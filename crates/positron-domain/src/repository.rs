@@ -44,11 +44,16 @@ pub enum VersioningPolicy {
 pub enum RetentionMode {
     Governance,
     Compliance,
+    /// Deadline exposed by the provider without an observable bypass mode.
+    ProviderEnforced,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetentionPeriod {
     Days(u32),
     Years(u32),
+    Seconds(u32),
+    /// Native event-based hold persists until an authorized release.
+    UntilRelease,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RetentionPolicy {
@@ -71,6 +76,8 @@ pub struct LifecyclePolicy {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepositoryPolicy {
+    /// Only providers with observable soft deletion; absence is a legacy value.
+    pub soft_delete: Option<PolicyObservation<u64>>,
     pub versioning: PolicyObservation<VersioningPolicy>,
     pub object_lock: PolicyObservation<ObjectLockPolicy>,
     pub lifecycle: PolicyObservation<LifecyclePolicy>,
@@ -82,6 +89,7 @@ impl RepositoryPolicy {
     /// through this adapter. Successful probe deletion cannot qualify them.
     pub const fn local() -> Self {
         Self {
+            soft_delete: None,
             versioning: PolicyObservation::Unobservable,
             object_lock: PolicyObservation::Unobservable,
             lifecycle: PolicyObservation::Unobservable,

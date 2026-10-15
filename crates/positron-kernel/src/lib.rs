@@ -94,6 +94,7 @@ pub mod key_provider {
     };
 }
 mod diagnostics;
+pub use data_protection::key_provider::NativeGoogleRuntime;
 mod export_output;
 mod instance_bootstrap_storage;
 mod lifecycle_clock;
@@ -153,8 +154,8 @@ pub use data_protection::{
     ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
     PreparedProviderMigration, QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure,
     RecoveryIdentity, RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients,
-    RecoverySession, RecoveryUnlock, RootAdmissionReceipt, RootPredecessorEnvelope,
-    RootRewrapSession, VerifiedRootActivation,
+    RecoverySession, RecoveryUnlock, RepositoryUploadAuthenticator, RootAdmissionReceipt,
+    RootPredecessorEnvelope, RootRewrapSession, VerifiedRootActivation,
 };
 pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{

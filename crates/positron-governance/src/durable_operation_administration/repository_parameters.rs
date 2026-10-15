@@ -38,12 +38,14 @@ pub struct RepositoryOperationParameters {
 pub enum RepositoryProviderKind {
     LocalFilesystem,
     AwsS3,
+    GoogleCloudStorage,
 }
 impl RepositoryProviderKind {
     fn code(self) -> u8 {
         match self {
             Self::LocalFilesystem => 1,
             Self::AwsS3 => 2,
+            Self::GoogleCloudStorage => 3,
         }
     }
 }
@@ -74,6 +76,31 @@ impl RepositoryOperationParameters {
         }
         Self::bounded(
             RepositoryProviderKind::AwsS3,
+            action,
+            locator,
+            repository,
+            fingerprint,
+            prefix,
+        )
+    }
+    pub fn google_cloud_storage(
+        action: RepositoryAction,
+        locator: &str,
+        repository: [u8; 16],
+        fingerprint: [u8; 32],
+        prefix: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        let mut fields = locator.split('\0');
+        for _ in 0..4 {
+            if fields.next().is_none_or(str::is_empty) {
+                return Err(DurableOperationFailure::InvalidInput);
+            }
+        }
+        if fields.next().is_some() {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        Self::bounded(
+            RepositoryProviderKind::GoogleCloudStorage,
             action,
             locator,
             repository,
@@ -180,6 +207,7 @@ impl RepositoryOperationParameters {
         let provider = match super::codec::take_byte(bytes, &mut offset)? {
             1 => RepositoryProviderKind::LocalFilesystem,
             2 => RepositoryProviderKind::AwsS3,
+            3 => RepositoryProviderKind::GoogleCloudStorage,
             _ => return Err(DurableOperationFailure::PersistenceUnavailable),
         };
         let action = RepositoryAction::from_code(super::codec::take_byte(bytes, &mut offset)?)?;
@@ -205,6 +233,9 @@ impl RepositoryOperationParameters {
         match provider {
             RepositoryProviderKind::LocalFilesystem => {
                 Self::local(action, locator, repository, fingerprint, prefix)
+            },
+            RepositoryProviderKind::GoogleCloudStorage => {
+                Self::google_cloud_storage(action, locator, repository, fingerprint, prefix)
             },
             RepositoryProviderKind::AwsS3 => {
                 Self::aws_s3(action, locator, repository, fingerprint, prefix)
