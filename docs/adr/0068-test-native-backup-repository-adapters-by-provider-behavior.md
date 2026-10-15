@@ -142,3 +142,38 @@ Complete signed backup and restore flows and managed tenant purge retain their
 existing workflow owners and acceptance. See
 [the GCS operational scope](../operations/google-cloud-storage-repository.md).
 Local format, admission, public-interface and fuzz results do not qualify GCS.
+
+## Azure Blob adapter and native block recovery
+
+The Azure adapter targets flat-namespace StorageV2 accounts through public-cloud
+Blob REST `2023-11-03` with the existing
+pinned Azure Identity `1.0.0` managed identity implementation. The exact
+account, container, and owned prefix bind `POSAZI01`, epoch 1, retaining the
+existing bounded 108-byte Identity layout. This binds native endpoint names
+and the Positron repository authorization, without claiming an immutable ARM
+account identity. Existing local, AWS, and GCS Identity encodings are unchanged.
+
+Provider kind 4 adds the bounded three-field native locator to the existing
+Administration record. The canonical API adds `azure_blob` as Protobuf field 9.
+Credentials remain outside operation parameters. Accepted operation,
+Maintenance admission, cancellation, retry, and terminal policy observations
+retain their existing authorities.
+
+`POSAZU01` binds the target, object checksum, total size, owned staging selector,
+and bounded encrypted input under the existing Kernel control authenticator.
+There is no Azure session bearer URI. Native block IDs bind block position and
+SHA-256 content. Get Block List reconciles interrupted Put Block operations;
+verified staging precedes conditional immutable publication. Cleanup validates
+owned historical recovery frames and native object bytes, and retained deleted
+versions keep cleanup pending. Registry publication and deletion bind native
+ETags and directly reconcile uncertain outcomes.
+
+The Azure-owned Kernel runtime requests the storage audience and keeps its
+exact account and container transport boundary. It shares the existing private
+bounded HTTP mechanism without broadening the Google endpoint allowlist.
+Container immutability, per-object protection, and service soft-delete
+observations retain observed, unavailable, and unobservable states. Account
+versioning and external lifecycle policy remain unobservable in the selected
+data-plane contract. Implementation acceptance uses bounded loopback protocol
+simulation under the existing simulation decision. Real Azure qualification
+remains separate. See [the Azure operational scope](../operations/azure-blob-repository.md).

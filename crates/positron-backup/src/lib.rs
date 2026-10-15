@@ -1,4 +1,8 @@
-//! Backup-only Repository boundary and native local filesystem adapter.
+//! Backup-only Repository boundary and native provider adapters.
+mod azure_blob;
+pub use azure_blob::AzureBlobRepository;
+mod azure_blob_target;
+pub use azure_blob_target::AzureBlobTarget;
 mod aws_s3;
 mod aws_s3_target;
 mod doctor;
@@ -82,3 +86,6 @@ pub use fuzzing::fuzz_repository_stateful;
 pub use aws_s3::fuzz_aws_s3_repository;
 #[cfg(fuzzing)]
 pub use google_cloud_storage::fuzz_google_cloud_storage_repository;
+
+#[cfg(fuzzing)]
+pub use azure_blob::fuzz_azure_blob_repository;

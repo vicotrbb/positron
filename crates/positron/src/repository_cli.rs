@@ -1,7 +1,7 @@
 //! The running instance owns repository; this command is an authenticated client.
 use positron_api::repository::{
-    RepositoryAwsS3Target, RepositoryGoogleCloudStorageTarget, RepositoryRequest,
-    RepositoryResponse, RepositoryServiceClient, RepositoryServiceClientFailure,
+    RepositoryAwsS3Target, RepositoryAzureBlobTarget, RepositoryGoogleCloudStorageTarget,
+    RepositoryRequest, RepositoryResponse, RepositoryServiceClient, RepositoryServiceClientFailure,
     RepositoryTransport,
 };
 use std::{
@@ -10,7 +10,7 @@ use std::{
     process::ExitCode,
     time::{Duration, Instant},
 };
-const USAGE: &str = "usage: positron repository init|verify|doctor|status|lookup|wait|cancel --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--locator SERVER_PATH | --aws-bucket BUCKET --aws-region REGION --aws-endpoint HTTPS_ENDPOINT --aws-expected-owner ACCOUNT --aws-prefix PREFIX | --gcs-bucket BUCKET --gcs-project-number PROJECT --gcs-location LOCATION --gcs-prefix PREFIX] [--repository-id UUID --expected-generation N --idempotency-key UUID --operation-id ID]";
+const USAGE: &str = "usage: positron repository init|verify|doctor|status|lookup|wait|cancel --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--locator SERVER_PATH | --aws-bucket BUCKET --aws-region REGION --aws-endpoint HTTPS_ENDPOINT --aws-expected-owner ACCOUNT --aws-prefix PREFIX | --gcs-bucket BUCKET --gcs-project-number PROJECT --gcs-location LOCATION --gcs-prefix PREFIX | --azure-account ACCOUNT --azure-container CONTAINER --azure-prefix PREFIX] [--repository-id UUID --expected-generation N --idempotency-key UUID --operation-id ID]";
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     crate::administrative_cli::exit(execute(arguments, &mut std::io::stdout().lock()))
@@ -167,6 +167,9 @@ fn parse(
             | "--gcs-project-number"
             | "--gcs-location"
             | "--gcs-prefix"
+            | "--azure-account"
+            | "--azure-container"
+            | "--azure-prefix"
             | "--repository-id"
             | "--expected-generation"
             | "--idempotency-key"
@@ -258,6 +261,23 @@ fn parse(
     } else {
         None
     };
+    let azure_blob = if ["--azure-account", "--azure-container", "--azure-prefix"]
+        .iter()
+        .any(|option| options.contains_key(*option))
+    {
+        let mut required = |option| {
+            options
+                .remove(option)
+                .ok_or("Azure target requires account, container and prefix")
+        };
+        Some(RepositoryAzureBlobTarget {
+            account: required("--azure-account")?,
+            container: required("--azure-container")?,
+            prefix: required("--azure-prefix")?,
+        })
+    } else {
+        None
+    };
     let request = RepositoryRequest {
         action: match action.as_str() {
             "wait" => "status",
@@ -275,6 +295,7 @@ fn parse(
         idempotency_key: options.remove("--idempotency-key"),
         aws_s3,
         google_cloud_storage,
+        azure_blob,
         locator: options.remove("--locator"),
         repository_id: options.remove("--repository-id"),
         operation_id: options.remove("--operation-id"),
@@ -286,4 +307,43 @@ fn parse(
         return Err("unsupported repository options");
     }
     Ok((transport, request, wait))
+}
+
+#[cfg(test)]
+#[test]
+fn azure_cli_requires_one_complete_native_target() {
+    let arguments = |extra: &[&str]| {
+        [
+            "doctor",
+            "--endpoint",
+            "127.0.0.1:4318",
+            "--allow-plaintext",
+            "--credential-stdin",
+            "--repository-id",
+            "11111111-1111-4111-8111-111111111111",
+            "--expected-generation",
+            "1",
+            "--idempotency-key",
+            "22222222-2222-4222-8222-222222222222",
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .into_iter()
+    };
+    let complete = [
+        "--azure-account",
+        "positronbackup",
+        "--azure-container",
+        "backups",
+        "--azure-prefix",
+        "owned/",
+    ];
+    let (_, request, _) = parse(arguments(&complete)).expect("azure request");
+    assert_eq!(request.azure_blob.expect("target").container, "backups");
+    assert!(parse(arguments(&complete[..4])).is_err());
+    let mut mixed = complete.to_vec();
+    mixed.extend(["--locator", "/local"]);
+    assert!(parse(arguments(&mixed)).is_err());
 }

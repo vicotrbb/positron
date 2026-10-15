@@ -74,3 +74,31 @@ fn policy_receipts_preserve_unknown_controls_and_reject_false_absence()
     }
     Ok(())
 }
+
+#[test]
+fn azure_selector_matches_canonical_additive_contract() -> Result<(), Box<dyn std::error::Error>> {
+    let request=RepositoryRequest::decode(br#"{"action":"verify","expected_catalog_generation":1,"idempotency_key":"00000000-0000-0000-0000-000000000001","repository_id":"00000000-0000-0000-0000-000000000002","azure_blob":{"account":"positronbackup","container":"backups","prefix":"owned/"}}"#)?;
+    assert_eq!(RepositoryRequest::decode(&request.encode()?)?, request);
+    let mut oversized = request.clone();
+    oversized.azure_blob.as_mut().ok_or("target")?.prefix = "x".repeat(513);
+    assert!(oversized.encode().is_err());
+    let with_secret = String::from_utf8(request.encode()?)?.replace(
+        "\"account\":",
+        "\"account_key\":\"credential-canary\",\"account\":",
+    );
+    assert!(RepositoryRequest::decode(with_secret.as_bytes()).is_err());
+    let mapping: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/http.json"))?;
+    assert!(mapping.to_string().contains("RepositoryAzureBlobTarget"));
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../api/positron/v1/openapi.json"))?;
+    assert_eq!(
+        schema["components"]["schemas"]["RepositoryRequest"]["properties"]["azure_blob"]["$ref"],
+        "#/components/schemas/RepositoryAzureBlobTarget"
+    );
+    assert!(
+        include_str!("../../../api/positron/v1/positron.proto")
+            .contains("optional RepositoryAzureBlobTarget azure_blob = 9;")
+    );
+    Ok(())
+}

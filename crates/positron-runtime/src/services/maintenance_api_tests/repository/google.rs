@@ -57,6 +57,7 @@ fn google_repository_admission_binds_native_target_without_provider_io()
         repository_id: Some("65656565-6565-4565-8565-656565656565".into()),
         operation_id: None,
         aws_s3: None,
+        azure_blob: None,
         google_cloud_storage: Some(
             positron_api::repository::RepositoryGoogleCloudStorageTarget {
                 bucket: target.bucket().into(),

@@ -41,6 +41,18 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
             })
             .transpose()?;
+        let azure = request
+            .azure_blob
+            .as_ref()
+            .map(|target| {
+                positron_backup::AzureBlobTarget::new(
+                    &target.account,
+                    &target.container,
+                    &target.prefix,
+                )
+                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
+            })
+            .transpose()?;
         let operation = match request.action.as_str() {
             "status" => request
                 .operation_id
@@ -91,18 +103,19 @@ impl ServiceHandle {
                             "verify" => RepositoryAction::Verify,
                             _ => RepositoryAction::Doctor,
                         },
-                        locator: match (&native, &google) {
-                            (Some(target), None) => RepositoryLocation::AwsS3(target),
-                            (None, Some(target)) => RepositoryLocation::GoogleCloudStorage(target),
-                            (Some(_), Some(_)) => {
-                                return Err(MaintenanceServiceFailure::InvalidRequest);
+                        locator: match (&native, &google, &azure) {
+                            (Some(target), None, None) => RepositoryLocation::AwsS3(target),
+                            (None, Some(target), None) => {
+                                RepositoryLocation::GoogleCloudStorage(target)
                             },
-                            (None, None) => RepositoryLocation::Local(Path::new(
+                            (None, None, Some(target)) => RepositoryLocation::AzureBlob(target),
+                            (None, None, None) => RepositoryLocation::Local(Path::new(
                                 request
                                     .locator
                                     .as_deref()
                                     .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
                             )),
+                            _ => return Err(MaintenanceServiceFailure::InvalidRequest),
                         },
                         repository: TenantId::parse_canonical(
                             request
@@ -150,6 +163,7 @@ impl ServiceHandle {
                         positron_governance::RepositoryProviderKind::GoogleCloudStorage => {
                             "google_cloud_storage"
                         },
+                        positron_governance::RepositoryProviderKind::AzureBlob => "azure_blob",
                     }
                     .into(),
                     format_epoch: 1,

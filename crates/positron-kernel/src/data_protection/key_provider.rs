@@ -22,6 +22,7 @@ pub use conformance::{
 mod codec;
 mod credentials;
 mod google;
+pub use azure::NativeAzureRepositoryRuntime;
 pub use google::GoogleCloudKmsKeyProvider;
 pub use google::native::NativeRuntime as NativeGoogleRuntime;
 #[cfg(fuzzing)]

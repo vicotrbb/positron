@@ -252,6 +252,22 @@ impl NativeRuntime {
         })
     }
 
+    pub(in crate::data_protection::key_provider) fn azure_repository_http(
+        &self,
+        request: native::Request,
+        maximum: usize,
+    ) -> native::BoxFuture<'_, native::Response> {
+        Box::pin(async move {
+            if !self.resources.authorizes_repository_transport()
+                || maximum > 64 * 1024 * 1024 + 65536
+            {
+                return Err(native::Error::PermissionDenied);
+            }
+            self.http_request(request, false, maximum, 64 * 1024 * 1024 + 65536)
+                .await
+        })
+    }
+
     /// Exercises admitted repository HTTP against a loopback protocol fixture.
     /// Available only to tests; native construction never enables this route.
     #[cfg(feature = "test-support")]

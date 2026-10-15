@@ -13,6 +13,8 @@ use std::{
 use tracing::instrument::WithSubscriber;
 use zeroize::Zeroizing;
 mod identity;
+mod repository;
+pub use repository::NativeAzureRepositoryRuntime;
 mod local_endpoint;
 mod protocol;
 mod request;

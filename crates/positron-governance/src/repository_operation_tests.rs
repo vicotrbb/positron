@@ -341,3 +341,31 @@ fn google_repository_parameters_bind_exact_native_locator_without_credentials() 
     );
     assert!(!format!("{value:?}").contains("positron-backup"));
 }
+
+#[test]
+fn azure_native_parameters_preserve_provider_and_reject_locator_expansion() {
+    use crate::{RepositoryAction, RepositoryOperationParameters, RepositoryProviderKind};
+    let value = RepositoryOperationParameters::azure_blob(
+        RepositoryAction::Verify,
+        "account\0container\0owned/",
+        [1; 16],
+        [2; 32],
+        [3; 32],
+    )
+    .expect("azure parameters");
+    assert_eq!(value.provider_kind(), RepositoryProviderKind::AzureBlob);
+    assert_eq!(
+        value.locator().expect("locator"),
+        "account\0container\0owned/"
+    );
+    assert!(
+        RepositoryOperationParameters::azure_blob(
+            RepositoryAction::Verify,
+            "account\0container\0owned/\0secret",
+            [1; 16],
+            [2; 32],
+            [3; 32]
+        )
+        .is_err()
+    );
+}

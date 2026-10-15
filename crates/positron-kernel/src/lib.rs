@@ -94,7 +94,7 @@ pub mod key_provider {
     };
 }
 mod diagnostics;
-pub use data_protection::key_provider::NativeGoogleRuntime;
+pub use data_protection::key_provider::{NativeAzureRepositoryRuntime, NativeGoogleRuntime};
 mod export_output;
 mod instance_bootstrap_storage;
 mod lifecycle_clock;

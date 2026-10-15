@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "4145b480c4b1c20ef28078bbd4a083dbeffd3e21e301ce3c46df39c56c5e5d78"
+    "x-positron-schema-digest": "cbf0178ce6afbf6750ed4d3f9e76462497a2aadefbc27a12cb028087bc1afbfa"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -3609,6 +3609,9 @@
           },
           "google_cloud_storage": {
             "$ref": "#/components/schemas/RepositoryGoogleCloudStorageTarget"
+          },
+          "azure_blob": {
+            "$ref": "#/components/schemas/RepositoryAzureBlobTarget"
           }
         }
       },
@@ -3948,6 +3951,26 @@
             "type": "string"
           }
         }
+      },
+      "RepositoryAzureBlobTarget": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "container": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "container",
+          "prefix"
+        ],
+        "additionalProperties": false
       }
     },
     "securitySchemes": {

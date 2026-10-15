@@ -429,3 +429,10 @@ path = "fuzz_targets/google_cloud_storage_repository.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "azure_blob_repository"
+path = "fuzz_targets/azure_blob_repository.rs"
+test = false
+doc = false
+bench = false

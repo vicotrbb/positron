@@ -39,6 +39,7 @@ pub enum RepositoryProviderKind {
     LocalFilesystem,
     AwsS3,
     GoogleCloudStorage,
+    AzureBlob,
 }
 impl RepositoryProviderKind {
     fn code(self) -> u8 {
@@ -46,6 +47,7 @@ impl RepositoryProviderKind {
             Self::LocalFilesystem => 1,
             Self::AwsS3 => 2,
             Self::GoogleCloudStorage => 3,
+            Self::AzureBlob => 4,
         }
     }
 }
@@ -101,6 +103,31 @@ impl RepositoryOperationParameters {
         }
         Self::bounded(
             RepositoryProviderKind::GoogleCloudStorage,
+            action,
+            locator,
+            repository,
+            fingerprint,
+            prefix,
+        )
+    }
+    pub fn azure_blob(
+        action: RepositoryAction,
+        locator: &str,
+        repository: [u8; 16],
+        fingerprint: [u8; 32],
+        prefix: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        let mut fields = locator.split('\0');
+        for _ in 0..3 {
+            if fields.next().is_none_or(str::is_empty) {
+                return Err(DurableOperationFailure::InvalidInput);
+            }
+        }
+        if fields.next().is_some() {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        Self::bounded(
+            RepositoryProviderKind::AzureBlob,
             action,
             locator,
             repository,
@@ -208,6 +235,7 @@ impl RepositoryOperationParameters {
             1 => RepositoryProviderKind::LocalFilesystem,
             2 => RepositoryProviderKind::AwsS3,
             3 => RepositoryProviderKind::GoogleCloudStorage,
+            4 => RepositoryProviderKind::AzureBlob,
             _ => return Err(DurableOperationFailure::PersistenceUnavailable),
         };
         let action = RepositoryAction::from_code(super::codec::take_byte(bytes, &mut offset)?)?;
@@ -236,6 +264,9 @@ impl RepositoryOperationParameters {
             },
             RepositoryProviderKind::GoogleCloudStorage => {
                 Self::google_cloud_storage(action, locator, repository, fingerprint, prefix)
+            },
+            RepositoryProviderKind::AzureBlob => {
+                Self::azure_blob(action, locator, repository, fingerprint, prefix)
             },
             RepositoryProviderKind::AwsS3 => {
                 Self::aws_s3(action, locator, repository, fingerprint, prefix)

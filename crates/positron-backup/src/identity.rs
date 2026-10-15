@@ -17,6 +17,7 @@ enum Provider {
     Local,
     AwsS3,
     GoogleCloudStorage,
+    AzureBlob,
 }
 impl RepositoryIdentity {
     pub fn local(
@@ -77,11 +78,29 @@ impl RepositoryIdentity {
             provider: Provider::GoogleCloudStorage,
         })
     }
+    pub fn azure_blob(
+        repository: [u8; 16],
+        instance: [u8; 16],
+        integrity_fingerprint: [u8; 32],
+        target: &crate::AzureBlobTarget,
+    ) -> Result<Self, RepositoryFailure> {
+        if repository == [0; 16] || instance == [0; 16] || integrity_fingerprint == [0; 32] {
+            return Err(RepositoryFailure::InvalidInput);
+        }
+        Ok(Self {
+            repository,
+            instance,
+            integrity_fingerprint,
+            prefix: target.commitment(),
+            provider: Provider::AzureBlob,
+        })
+    }
     pub const fn provider_kind(&self) -> &'static str {
         match self.provider {
             Provider::AwsS3 => "awsS3",
             Provider::Local => "localFilesystem",
             Provider::GoogleCloudStorage => "googleCloudStorage",
+            Provider::AzureBlob => "azureBlob",
         }
     }
     pub const fn repository_id(&self) -> [u8; 16] {
@@ -102,6 +121,7 @@ impl RepositoryIdentity {
             Provider::AwsS3 => b"POSS3I01",
             Provider::Local => b"POSREP01",
             Provider::GoogleCloudStorage => b"POSGCI01",
+            Provider::AzureBlob => b"POSAZI01",
         });
         bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.extend_from_slice(&self.repository);
@@ -114,7 +134,12 @@ impl RepositoryIdentity {
         if bytes.len() != 108
             || !matches!(
                 bytes.get(..12),
-                Some(b"POSREP01\0\0\0\x01" | b"POSS3I01\0\0\0\x01" | b"POSGCI01\0\0\0\x01")
+                Some(
+                    b"POSREP01\0\0\0\x01"
+                        | b"POSS3I01\0\0\0\x01"
+                        | b"POSGCI01\0\0\0\x01"
+                        | b"POSAZI01\0\0\0\x01"
+                )
             )
         {
             return Err(RepositoryFailure::CorruptState);
@@ -133,6 +158,7 @@ impl RepositoryIdentity {
             provider: match bytes.get(..8) {
                 Some(b"POSS3I01") => Provider::AwsS3,
                 Some(b"POSGCI01") => Provider::GoogleCloudStorage,
+                Some(b"POSAZI01") => Provider::AzureBlob,
                 _ => Provider::Local,
             },
         };

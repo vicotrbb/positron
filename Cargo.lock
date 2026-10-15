@@ -2789,6 +2789,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "md-5",
  "positron-domain",
  "positron-kernel",
  "rustix",
@@ -2798,6 +2799,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "xmlparser",
  "zeroize",
 ]
 

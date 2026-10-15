@@ -154,6 +154,7 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
                     idempotency_key: None,
                     aws_s3: None,
                     google_cloud_storage: None,
+        azure_blob: None,
                     locator: None,
                     repository_id: None,
                     operation_id: None,
