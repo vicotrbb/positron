@@ -284,3 +284,9 @@ holds use `until_release` without a fabricated period. `provider_enforced`
 reports an effective object deadline when bypass mode is not exposed. Legacy
 receipts retain their existing fields and absence semantics. Real GCS provider
 qualification remains independent of API schema and local test results.
+
+Azure Blob Storage selects `azure_blob` with the exact public-cloud account,
+container, and owned prefix. Protobuf field 9 is additive. The selector is
+exclusive with local, AWS, and GCS selectors. Server-owned managed identity uses
+the Azure Storage audience; credentials and arbitrary endpoints are rejected.
+See [the Azure Repository scope](../../../docs/operations/azure-blob-repository.md).

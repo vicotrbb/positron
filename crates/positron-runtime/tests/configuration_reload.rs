@@ -538,10 +538,14 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
         "p81-listener-catalog-drain-{}-{operations_port}.sock",
         std::process::id()
     ));
-    let initial = configuration(Some(&listener_configuration(
-        control_path.clone(),
-        operations_port,
-    )))?;
+    // This fixture intentionally holds the body through listener staging and
+    // publication: five seconds for the hook, two for the generation, and one
+    // for delivery. Keep both generations on the same explicit test budget.
+    let listener_document = format!(
+        "{}api_body_deadline_seconds = 8\n",
+        listener_configuration(control_path, operations_port)
+    );
+    let initial = configuration(Some(&listener_document))?;
     let paths = roots.bootstrap_paths()?;
     drop(InstanceBootstrap::initialize(
         &paths,
@@ -586,7 +590,7 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
     let body = br#"{"policy_json":"{\"generation\":2,\"rules\":[{\"id\":\"reload-drain\",\"predicates\":[{\"receiver\":\"otlp_http_json\"}],\"action\":\"reject\"}]}","expected_generation":1,"idempotency_key":"82828282-8282-8282-8282-828282828282"}"#;
     let candidate = configuration(Some(&format!(
         "{}\n[listener.operations]\ntrusted_proxy_cidrs = [\"127.0.0.1/32\"]\nforwarded_hops = 1\n",
-        listener_configuration(control_path, operations_port)
+        listener_document
     )))?;
     let request_head = format!(
         "POST /v1/policies:activate HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {administrator_secret}\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
@@ -598,6 +602,7 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
     old.set_read_timeout(Some(Duration::from_secs(2)))?;
     old.write_all(request_head.as_bytes())?;
     read_continue_response(&mut old)?;
+    let accepted_at = Instant::now();
     let (accepted, request) = mpsc::sync_channel::<()>(1);
     let observed = Arc::clone(&runtime);
     let released_request = std::thread::spawn(move || -> Result<(), String> {
@@ -612,9 +617,10 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
             == before
         {
             if Instant::now() >= deadline {
-                return Err(
-                    "reload did not publish before draining the accepted request".to_owned(),
-                );
+                return Err(format!(
+                    "reload did not publish before draining the accepted request after {:?}",
+                    accepted_at.elapsed()
+                ));
             }
             std::thread::yield_now();
         }
@@ -628,7 +634,8 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
             .map_err(|error| error.to_string())?;
         assert!(
             response_head.starts_with("HTTP/1.1 200 "),
-            "accepted policy activation did not complete successfully: {:?}",
+            "accepted policy activation did not complete successfully after {:?}: {:?}",
+            accepted_at.elapsed(),
             String::from_utf8_lossy(&response)
         );
         assert!(

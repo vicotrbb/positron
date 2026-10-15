@@ -48,6 +48,8 @@ pub struct RepositoryRequest {
     pub aws_s3: Option<RepositoryAwsS3Target>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub google_cloud_storage: Option<RepositoryGoogleCloudStorageTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_blob: Option<RepositoryAzureBlobTarget>,
 }
 /// Non-secret native selector. Credentials are resolved by the serving owner.
 #[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
@@ -77,6 +79,36 @@ impl RepositoryAwsS3Target {
         .iter()
         .any(|(text, bound)| {
             text.is_empty() || text.len() > *bound || text.chars().any(char::is_control)
+        }) {
+            return Err(MaintenanceWireFailure);
+        }
+        Ok(())
+    }
+}
+/// Native Azure account/container binding; the server resolves managed identity.
+#[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryAzureBlobTarget {
+    pub account: String,
+    pub container: String,
+    pub prefix: String,
+}
+impl std::fmt::Debug for RepositoryAzureBlobTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepositoryAzureBlobTarget")
+            .finish_non_exhaustive()
+    }
+}
+impl RepositoryAzureBlobTarget {
+    fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        if [
+            (&self.account, 24),
+            (&self.container, 63),
+            (&self.prefix, 512),
+        ]
+        .iter()
+        .any(|(value, bound)| {
+            value.is_empty() || value.len() > *bound || value.chars().any(char::is_control)
         }) {
             return Err(MaintenanceWireFailure);
         }
@@ -167,6 +199,9 @@ impl RepositoryRequest {
         if let Some(target) = &self.google_cloud_storage {
             target.validate()?;
         }
+        if let Some(target) = &self.azure_blob {
+            target.validate()?;
+        }
         let mutation = self
             .expected_catalog_generation
             .is_some_and(|generation| generation > 0)
@@ -174,6 +209,7 @@ impl RepositoryRequest {
         let no_locator = self.locator.is_none()
             && self.aws_s3.is_none()
             && self.google_cloud_storage.is_none()
+            && self.azure_blob.is_none()
             && self.repository_id.is_none();
         let valid = match self.action.as_str() {
             "init" | "verify" | "doctor" => {
@@ -182,6 +218,7 @@ impl RepositoryRequest {
                         self.locator.is_some(),
                         self.aws_s3.is_some(),
                         self.google_cloud_storage.is_some(),
+                        self.azure_blob.is_some(),
                     ]
                     .into_iter()
                     .filter(|selected| *selected)
@@ -309,4 +346,16 @@ impl RepositoryResponse {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn azure_native_selector_is_additive_exclusive_and_redacted() {
+    let value=br#"{"action":"init","expected_catalog_generation":1,"idempotency_key":"00000000-0000-0000-0000-000000000001","repository_id":"00000000-0000-0000-0000-000000000002","azure_blob":{"account":"positronbackup","container":"backups","prefix":"owned/"}}"#;
+    let request = RepositoryRequest::decode(value).expect("azure native request");
+    assert!(request.azure_blob.is_some());
+    assert!(!format!("{request:?}").contains("positronbackup"));
+    let mut ambiguous = request;
+    ambiguous.locator = Some("/local".into());
+    assert!(ambiguous.encode().is_err());
 }

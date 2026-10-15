@@ -16,6 +16,7 @@ pub(crate) enum RepositoryLocation<'a> {
     Local(&'a Path),
     AwsS3(&'a positron_backup::AwsS3Target),
     GoogleCloudStorage(&'a positron_backup::GoogleCloudStorageTarget),
+    AzureBlob(&'a positron_backup::AzureBlobTarget),
 }
 #[derive(Clone, Copy)]
 pub(crate) struct RepositoryAdmission<'a> {
@@ -89,6 +90,22 @@ impl ServiceHandle {
                 )
                 .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
                 RepositoryOperationParameters::google_cloud_storage(
+                    input.action,
+                    &target.encode_locator(),
+                    input.repository,
+                    fingerprint,
+                    identity.prefix_commitment(),
+                )
+            },
+            RepositoryLocation::AzureBlob(target) => {
+                let identity = positron_backup::RepositoryIdentity::azure_blob(
+                    input.repository,
+                    self.instance.instance.to_bytes(),
+                    fingerprint,
+                    target,
+                )
+                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+                RepositoryOperationParameters::azure_blob(
                     input.action,
                     &target.encode_locator(),
                     input.repository,
@@ -208,6 +225,9 @@ fn repository_resources(
         let native = match kind {
             positron_governance::RepositoryProviderKind::GoogleCloudStorage => {
                 positron_backup::GoogleCloudStorageRepository::required_resources()
+            },
+            positron_governance::RepositoryProviderKind::AzureBlob => {
+                positron_backup::AzureBlobRepository::required_resources()
             },
             _ => positron_backup::AwsS3Repository::required_resources(),
         };

@@ -267,3 +267,15 @@ references, pinned identity decoding and canonical re-encoding. Root fixture mat
 no plaintext fixture key is written by this harness. The public recovery tests
 exercise encrypted age containers, owner-only files, wrong keys/context,
 corruption, actual scrypt limits, independent verification and publication faults.
+
+Azure Blob REST and authenticated upload recovery boundaries:
+
+```console
+cargo +nightly-2026-07-20 fuzz run azure_blob_repository -- -runs=1000 -max_total_time=30 -max_len=131073
+```
+
+This target checks bounded XML responses, exact target locators, immutable
+Repository Identity frames, and raw or fixture-authenticated `POSAZU01` recovery
+frames. It performs no network requests and resolves no credentials. Native
+socket behavior and persisted Maintenance admission run in the ordinary Azure
+Repository integration tests.

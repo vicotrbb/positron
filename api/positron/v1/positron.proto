@@ -728,6 +728,12 @@ message RepositoryRequest {
   optional string operation_id = 6;
   optional RepositoryAwsS3Target aws_s3 = 7;
   optional RepositoryGoogleCloudStorageTarget google_cloud_storage = 8;
+  optional RepositoryAzureBlobTarget azure_blob = 9;
+}
+message RepositoryAzureBlobTarget {
+  string account = 1;
+  string container = 2;
+  string prefix = 3;
 }
 message RepositoryGoogleCloudStorageTarget {
   string bucket = 1;
