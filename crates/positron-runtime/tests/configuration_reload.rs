@@ -592,12 +592,18 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
         "POST /v1/policies:activate HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {administrator_secret}\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
-    let (accepted, request) = mpsc::sync_channel::<Result<std::net::TcpStream, String>>(1);
+    // Accept the predecessor request before entering the Catalog commit hook.
+    // The hook must not wait for a network handshake while holding publication.
+    let mut old = std::net::TcpStream::connect(api)?;
+    old.set_read_timeout(Some(Duration::from_secs(2)))?;
+    old.write_all(request_head.as_bytes())?;
+    read_continue_response(&mut old)?;
+    let (accepted, request) = mpsc::sync_channel::<()>(1);
     let observed = Arc::clone(&runtime);
     let released_request = std::thread::spawn(move || -> Result<(), String> {
-        let mut old = request
+        request
             .recv_timeout(Duration::from_secs(5))
-            .map_err(|error| error.to_string())??;
+            .map_err(|error| error.to_string())?;
         let deadline = Instant::now() + Duration::from_secs(2);
         while observed
             .observed()
@@ -643,19 +649,7 @@ fn listener_reload_releases_catalog_ownership_before_draining_an_accepted_reques
         CatalogPublicationFault::SynchronizeCommit,
         0,
         move || {
-            let predecessor_request = (|| -> Result<_, String> {
-                let mut old =
-                    std::net::TcpStream::connect(api).map_err(|error| error.to_string())?;
-                old.set_read_timeout(Some(Duration::from_secs(2)))
-                    .map_err(|error| error.to_string())?;
-                old.write_all(request_head.as_bytes())
-                    .map_err(|error| error.to_string())?;
-                read_continue_response(&mut old)?;
-                Ok(old)
-            })();
-            accepted
-                .send(predecessor_request)
-                .expect("request observer remains active");
+            accepted.send(()).expect("request observer remains active");
         },
         || process.reload_configuration(candidate),
     )?;
