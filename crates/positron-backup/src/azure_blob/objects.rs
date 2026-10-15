@@ -29,6 +29,14 @@ impl AzureBlobRepository {
             Err(e) => Err(e),
         }
     }
+    /// Metadata-only observation; content and version remain untrusted.
+    pub async fn object_size_hint(&self, id: ObjectId) -> Result<u64, RepositoryFailure> {
+        let _guard = self.enter()?;
+        self.read_identity().await?;
+        self.metadata(&self.key(&id.name()), "")
+            .await
+            .map(|metadata| metadata.size)
+    }
     pub async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
         let _guard = self.enter()?;
         self.read_identity().await?;
@@ -47,6 +55,12 @@ impl AzureBlobRepository {
         self.read_identity().await?;
         let key = self.key(&range.object.name());
         let meta = self.metadata(&key, "").await?;
+        if range
+            .expected_size
+            .is_some_and(|expected| expected != meta.size)
+        {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
         if meta.size > MAX_OBJECT_BYTES
             || range
                 .offset

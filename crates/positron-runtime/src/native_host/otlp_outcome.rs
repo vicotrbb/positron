@@ -201,7 +201,8 @@ impl OtlpSignal {
     pub(super) const fn service_failure(self, service_failure: ServiceFailure) -> OtlpFailure {
         match service_failure {
             ServiceFailure::Unauthorized => self.authentication_rejected(),
-            ServiceFailure::CapacityUnavailable => OtlpFailure {
+            ServiceFailure::CapacityUnavailable
+            | ServiceFailure::BackupControlMemoryRequired { .. } => OtlpFailure {
                 http_status: 429,
                 grpc_code: 8,
                 message: match self {
@@ -250,6 +251,7 @@ impl OtlpSignal {
             ServiceFailure::DurabilityFrontierAmbiguity
             | ServiceFailure::KeyEnvelopeMismatch
             | ServiceFailure::CorruptState
+            | ServiceFailure::BackupRepositoryRejected
             | ServiceFailure::Internal
             | ServiceFailure::Cancelled => OtlpFailure {
                 http_status: 500,

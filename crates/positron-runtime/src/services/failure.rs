@@ -11,6 +11,12 @@ use positron_query::{QueryEvent, QueryFailure, QueryFailureCode, QueryTerminal};
 pub enum ServiceFailure {
     Unauthorized,
     CapacityUnavailable,
+    /// Backup must persist this demand and relinquish its old grant before retry.
+    BackupControlMemoryRequired {
+        memory_bytes: u64,
+    },
+    /// A remote Repository rejected authenticated Backup work; the worker owns cleanup.
+    BackupRepositoryRejected,
     RequestTooLarge,
     InvalidRequest,
     InvalidRequestWithLimit(TraceLimitViolation),
@@ -302,7 +308,9 @@ impl ServiceFailure {
             },
             Self::LedgerUnavailable => crate::BootstrapFailureCode::LedgerUnavailable,
             Self::Cancelled => crate::BootstrapFailureCode::ResourceUnavailable,
-            Self::CapacityUnavailable => crate::BootstrapFailureCode::ResourceUnavailable,
+            Self::CapacityUnavailable
+            | Self::BackupControlMemoryRequired { .. }
+            | Self::BackupRepositoryRejected => crate::BootstrapFailureCode::ResourceUnavailable,
             Self::Unauthorized
             | Self::RequestTooLarge
             | Self::InvalidRequest

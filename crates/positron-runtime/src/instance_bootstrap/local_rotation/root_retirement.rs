@@ -223,8 +223,12 @@ impl InitializedInstance {
             self.recovery_predecessor_is_absent(&basis)
                 .map_err(|_| LocalKeyRotationFailure::Authentication)?
         };
-        BackupRepositoryInspection::from_authenticated_catalog(&basis)
-            .map_err(|_| LocalKeyRotationFailure::Authentication)?;
+        if BackupRepositoryInspection::from_authenticated_catalog(&basis)
+            .map_err(|_| LocalKeyRotationFailure::Authentication)?
+            != BackupRepositoryInspection::NotConfigured
+        {
+            return Err(LocalKeyRotationFailure::RetirementRefused);
+        }
         let Some(predecessor) = state.predecessor.clone() else {
             if !recovery_predecessor_absent {
                 self.publish_rotation_for_operation(

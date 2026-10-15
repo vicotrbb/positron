@@ -321,6 +321,14 @@ pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrati
             P::CatalogPublication => "catalog_publication",
             P::Published => "published",
             P::Cancelled => "cancelled",
+            P::BackupCapture => "backup_capture",
+            P::BackupTransfer => "backup_transfer",
+            P::BackupVerification => "backup_verification",
+            P::BackupPublication => "backup_publication",
+            P::BackupCancellation => "backup_cancellation",
+            P::BackupRetentionScan => "backup_retention_scan",
+            P::BackupRetentionPublication => "backup_retention_publication",
+            P::BackupRetentionCleanup => "backup_retention_cleanup",
         }
         .into(),
         progress_percent: u32::from(operation.progress_percent()),
@@ -331,15 +339,36 @@ pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrati
         }
         .into(),
         cancellation: match operation.cancellation() {
+            C::AllowedBeforeDrain
+                if matches!(
+                    operation.kind(),
+                    positron_governance::DurableOperationKind::BackupSnapshot
+                        | positron_governance::DurableOperationKind::BackupRetention
+                ) =>
+            {
+                "allowed_before_publication"
+            },
+            C::NotAllowedAfterDrain
+                if matches!(
+                    operation.kind(),
+                    positron_governance::DurableOperationKind::BackupSnapshot
+                        | positron_governance::DurableOperationKind::BackupRetention
+                ) =>
+            {
+                "not_allowed_during_publication"
+            },
             C::AllowedBeforeDrain => "allowed_before_drain",
             C::NotAllowedAfterDrain => "not_allowed_after_drain",
             C::Cancelled => "cancelled",
+            C::Requested => "cancel_requested_cleanup_pending",
         }
         .into(),
         irreversible_boundary: match operation.irreversible_boundary() {
             B::NotCrossed => "not_crossed",
             B::CatalogGenerationPublished => "catalog_generation_published",
             B::ExportManifestPublished => "export_manifest_published",
+            B::BackupRegistryPublished => "backup_registry_published",
+            B::BackupRegistryExpired => "backup_registry_expired",
         }
         .into(),
         lookup_expires_at_unix_seconds: operation.earliest_lookup_expiry_unix_seconds(),

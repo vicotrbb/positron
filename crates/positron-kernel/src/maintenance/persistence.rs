@@ -318,7 +318,9 @@ impl MaintenanceCoordinator {
             if selection.root_migration_handler
                 && matches!(
                     task.class(),
-                    MaintenanceTaskClass::Migration | MaintenanceTaskClass::RepositoryVerification
+                    MaintenanceTaskClass::Migration
+                        | MaintenanceTaskClass::RepositoryVerification
+                        | MaintenanceTaskClass::BackupSnapshot
                 )
             {
                 let stored = prospective
@@ -331,7 +333,8 @@ impl MaintenanceCoordinator {
                         stored.checkpoint.as_ref(),
                     )
                     .is_ok(),
-                    MaintenanceTaskClass::RepositoryVerification => {
+                    MaintenanceTaskClass::RepositoryVerification
+                    | MaintenanceTaskClass::BackupSnapshot => {
                         RepositoryOperationBinding::from_task(
                             &stored.task,
                             stored.checkpoint.as_ref(),

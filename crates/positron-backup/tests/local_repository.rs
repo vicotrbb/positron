@@ -523,3 +523,62 @@ async fn active_listing_streams_are_bounded_without_capping_repository_objects()
     fs::remove_dir_all(path)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn bounded_ranges_do_not_scrub_bytes_outside_the_requested_range()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_backup::{ImmutableObject, MAX_OBJECT_BYTES, ObjectRange};
+    use sha2::{Digest, Sha256};
+    let path = std::env::temp_dir().join(format!(
+        "positron-repository-range-only-{}",
+        std::process::id()
+    ));
+    fs::create_dir(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    let identity = RepositoryIdentity::local([1; 16], [2; 16], [3; 32], &path)?;
+    let repository = LocalRepository::initialize(&path, identity).await?;
+    let object = ImmutableObject::new(b"verified encrypted bytes".to_vec())?;
+    let id = object.id();
+    repository.put_if_absent(object).await?;
+    let name = id
+        .checksum()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let object_path = path.join(format!("o-{name}"));
+    let mut damaged = fs::read(&object_path)?;
+    *damaged.last_mut().ok_or("object suffix")? ^= 1;
+    fs::write(&object_path, damaged)?;
+    assert_eq!(
+        repository.head(id).await,
+        Err(RepositoryFailure::ChecksumMismatch)
+    );
+    let part = repository
+        .read_range(ObjectRange::new(id, 0, 8)?.with_expected_size(24)?)
+        .await?;
+    assert_eq!(part.bytes(), b"verified");
+    assert_eq!(
+        part.checksum(),
+        <[u8; 32]>::from(Sha256::digest(b"verified"))
+    );
+    assert_eq!(
+        repository
+            .read_range(ObjectRange::new(id, 0, 8)?.with_expected_size(25)?)
+            .await,
+        Err(RepositoryFailure::PreconditionFailed)
+    );
+    assert_eq!(
+        repository.read_range(ObjectRange::new(id, 23, 2)?).await,
+        Err(RepositoryFailure::InvalidInput)
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(object_path)?
+        .set_len(MAX_OBJECT_BYTES + 1)?;
+    assert_eq!(
+        repository.read_range(ObjectRange::new(id, 0, 8)?).await,
+        Err(RepositoryFailure::LimitExceeded)
+    );
+    fs::remove_dir_all(path)?;
+    Ok(())
+}

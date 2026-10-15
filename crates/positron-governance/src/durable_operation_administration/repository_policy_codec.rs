@@ -160,6 +160,8 @@ fn observation<T>(
 }
 fn encode_failure(bytes: &mut Vec<u8>, failure: RepositoryFailure) -> Result<(), Failure> {
     let code = match failure {
+        RepositoryFailure::ControlMemoryRequired { .. }
+        | RepositoryFailure::SourceIntegrityCorruption => return Err(invalid()),
         RepositoryFailure::InvalidInput => 0,
         RepositoryFailure::IdentityMismatch => 1,
         RepositoryFailure::ForeignPrefix => 2,

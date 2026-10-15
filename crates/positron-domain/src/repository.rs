@@ -13,11 +13,19 @@ pub enum RepositoryFailure {
     Busy,
     ChecksumMismatch,
     CorruptState,
+    /// Integrity failure in the owned local capture, rather than the remote Repository.
+    SourceIntegrityCorruption,
     StorageUnavailable,
     OutcomeUnknown,
     LimitExceeded,
+    /// Full simultaneous admitted memory required by Backup control work.
+    ControlMemoryRequired {
+        memory_bytes: u64,
+    },
     Interrupted,
-    Throttled { retry_after_millis: u32 },
+    Throttled {
+        retry_after_millis: u32,
+    },
 }
 impl std::fmt::Display for RepositoryFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

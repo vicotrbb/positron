@@ -93,7 +93,10 @@ pub(super) fn scan(
             .map_err(|_| BootstrapStorageFailure::Unavailable)?;
         let expected_directory = matches!(
             kind,
-            BootstrapEntry::Catalog | BootstrapEntry::Segments | BootstrapEntry::Diagnostics
+            BootstrapEntry::Catalog
+                | BootstrapEntry::Segments
+                | BootstrapEntry::Diagnostics
+                | BootstrapEntry::BackupCaptures
         );
         let file_type = unix_fs::FileType::from_raw_mode(metadata.st_mode);
         if (expected_directory && !file_type.is_dir())
@@ -160,6 +163,7 @@ fn recognized_entry(root: BootstrapRoot, name: &[u8]) -> Option<BootstrapEntry> 
         (BootstrapRoot::Data, b"catalog") => Some(BootstrapEntry::Catalog),
         (BootstrapRoot::Data, b"segments") => Some(BootstrapEntry::Segments),
         (BootstrapRoot::Data, b"diagnostics") => Some(BootstrapEntry::Diagnostics),
+        (BootstrapRoot::Data, b"backup-captures") => Some(BootstrapEntry::BackupCaptures),
         (BootstrapRoot::Secrets, b"local-root-key.v1") => Some(BootstrapEntry::LocalKey),
         (BootstrapRoot::Secrets, b"local-root-key.v1.new") => Some(BootstrapEntry::LocalKeyStaging),
         (BootstrapRoot::Secrets, b"bootstrap-claim.v1") => Some(BootstrapEntry::Claim),

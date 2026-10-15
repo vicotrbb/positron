@@ -831,3 +831,9 @@ fn provider_migration_acceptance_replays_and_rejects_conflicting_or_stale_intent
 
 #[path = "repository_operation_tests.rs"]
 mod repository_operation_tests;
+
+#[path = "backup_operation_tests.rs"]
+mod backup_operation_tests;
+
+#[path = "backup_failure_tests.rs"]
+mod backup_failure_tests;

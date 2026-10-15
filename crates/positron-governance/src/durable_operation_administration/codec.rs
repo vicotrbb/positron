@@ -14,6 +14,11 @@ const OPERATION_MAGIC_V2: [u8; 8] = *b"POSOPR02";
 const OPERATION_MAGIC_V3: [u8; 8] = *b"POSOPR03";
 const OPERATION_MAGIC: [u8; 8] = *b"POSOPR04";
 const REPOSITORY_PARAMETERS_MAGIC: [u8; 8] = *b"POSREP02";
+const BACKUP_PARAMETERS_MAGIC: [u8; 8] = *b"POSBKP01";
+const RETENTION_PARAMETERS_MAGIC: [u8; 8] = *b"POSBRP01";
+const RETENTION_CLAIM_MAGIC: [u8; 8] = *b"POSBRC01";
+const BACKUP_CLEANUP_MAGIC: [u8; 8] = *b"POSBCE01";
+const BACKUP_RECEIPT_MAGIC: [u8; 8] = *b"POSBKR02";
 const ROOT_PARAMETERS_MAGIC: [u8; 8] = *b"POSKPM01";
 const EXPIRED_OPERATION_BINDING_MAGIC_V1: [u8; 8] = *b"POSOPX01";
 const EXPIRED_OPERATION_BINDING_MAGIC_V2: [u8; 8] = *b"POSOPX02";
@@ -71,6 +76,33 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
             encoded.push(0);
             encoded.extend_from_slice(&[0; 16]);
         },
+    }
+    if let Some(parameters) = operation.backup_parameters {
+        match parameters {
+            super::BackupOperationParameters::Snapshot(value) => {
+                encoded.extend_from_slice(&BACKUP_PARAMETERS_MAGIC);
+                value.encode(&mut encoded);
+            },
+            super::BackupOperationParameters::Retention(value) => {
+                encoded.extend_from_slice(&RETENTION_PARAMETERS_MAGIC);
+                value.encode(&mut encoded);
+            },
+        }
+        match operation.backup_evidence {
+            Some(super::backup_parameters::BackupOperationEvidence::Snapshot(value)) => {
+                encoded.extend_from_slice(&BACKUP_RECEIPT_MAGIC);
+                value.encode(&mut encoded);
+            },
+            Some(super::backup_parameters::BackupOperationEvidence::Cleanup(value)) => {
+                encoded.extend_from_slice(&BACKUP_CLEANUP_MAGIC);
+                value.encode(&mut encoded);
+            },
+            Some(super::backup_parameters::BackupOperationEvidence::RetentionClaim(value)) => {
+                encoded.extend_from_slice(&RETENTION_CLAIM_MAGIC);
+                encoded.extend_from_slice(&value.registry_generation());
+            },
+            None => {},
+        }
     }
     if let Some(parameters) = operation.key_provider_migration_parameters {
         encoded.extend_from_slice(&ROOT_PARAMETERS_MAGIC);
@@ -183,15 +215,18 @@ pub(super) fn decode_operation(
     // root-kind layout by their exact-length check, rather than ignore it.
     let root_parameters = v4 && encoded.get(56) == Some(&4);
     let repository_parameters_present = v4 && encoded.get(56) == Some(&5);
+    let backup_parameters_present = v4 && matches!(encoded.get(56), Some(6 | 7));
     let v3 = encoded.starts_with(&OPERATION_MAGIC_V3);
     let v2 = encoded.starts_with(&OPERATION_MAGIC_V2);
     if !v4 && !v3 && !v2 && !encoded.starts_with(&OPERATION_MAGIC_V1) {
         return Ok(None);
     }
-    if (repository_parameters_present && !(310..=2428).contains(&encoded.len()))
+    if (backup_parameters_present && !(351..=2688).contains(&encoded.len()))
+        || (repository_parameters_present && !(310..=2428).contains(&encoded.len()))
         || (root_parameters && !(261..=2309).contains(&encoded.len()))
         || (!root_parameters
             && !repository_parameters_present
+            && !backup_parameters_present
             && encoded.len()
                 != if v4 {
                     218
@@ -344,6 +379,80 @@ pub(super) fn decode_operation(
     } else {
         None
     };
+    let (backup_parameters, backup_evidence) = if backup_parameters_present {
+        let magic = take_array::<8>(encoded, &mut offset)?;
+        let retention = request.kind() == DurableOperationKind::BackupRetention;
+        if magic
+            != if retention {
+                RETENTION_PARAMETERS_MAGIC
+            } else {
+                BACKUP_PARAMETERS_MAGIC
+            }
+        {
+            return Err(DurableOperationFailure::PersistenceUnavailable);
+        }
+        let length_offset = offset
+            .checked_add(if retention { 162 } else { 122 })
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        let length_end = length_offset
+            .checked_add(2)
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        let locator = usize::from(u16::from_be_bytes(
+            encoded
+                .get(length_offset..length_end)
+                .and_then(|value| value.try_into().ok())
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
+        ));
+        let end = length_end
+            .checked_add(locator)
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        let bytes = encoded
+            .get(offset..end)
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        let parameters = if retention {
+            super::BackupOperationParameters::Retention(super::BackupRetentionParameters::decode(
+                bytes,
+            )?)
+        } else {
+            super::BackupOperationParameters::Snapshot(super::BackupSnapshotParameters::decode(
+                bytes,
+            )?)
+        };
+        offset = end;
+        let evidence = if offset < encoded.len() {
+            let magic = take_array::<8>(encoded, &mut offset)?;
+            let bytes = encoded
+                .get(offset..)
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+            let value = if magic == BACKUP_RECEIPT_MAGIC {
+                super::backup_parameters::BackupOperationEvidence::Snapshot(
+                    super::BackupOperationReceipt::decode(bytes)?,
+                )
+            } else if magic == BACKUP_CLEANUP_MAGIC {
+                super::backup_parameters::BackupOperationEvidence::Cleanup(
+                    super::BackupCleanupReceipt::decode(bytes)?,
+                )
+            } else if magic == RETENTION_CLAIM_MAGIC {
+                super::backup_parameters::BackupOperationEvidence::RetentionClaim(
+                    super::BackupRetentionClaimReceipt::new(
+                        bytes
+                            .try_into()
+                            .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?,
+                    )
+                    .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?,
+                )
+            } else {
+                return Err(DurableOperationFailure::PersistenceUnavailable);
+            };
+            offset = encoded.len();
+            Some(value)
+        } else {
+            None
+        };
+        (Some(parameters), evidence)
+    } else {
+        (None, None)
+    };
     if offset != encoded.len() {
         return Err(DurableOperationFailure::PersistenceUnavailable);
     }
@@ -354,6 +463,8 @@ pub(super) fn decode_operation(
     };
     let operation = DurableOperation {
         request,
+        backup_parameters,
+        backup_evidence,
         key_provider_migration_parameters,
         repository_parameters,
         repository_policy,
@@ -398,9 +509,20 @@ pub(super) fn take_u64(encoded: &[u8], offset: &mut usize) -> Result<u64, Durabl
     Ok(u64::from_be_bytes(take_array(encoded, offset)?))
 }
 
-pub(super) fn encode_audit(operation: DurableOperation) -> Vec<u8> {
+pub(super) fn encode_audit(
+    operation: DurableOperation,
+) -> Result<Vec<u8>, DurableOperationFailure> {
     let mut encoded = Vec::with_capacity(142);
-    encoded.extend_from_slice(&OPERATION_AUDIT_MAGIC);
+    encoded.extend_from_slice(
+        if matches!(
+            operation.kind(),
+            DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+        ) {
+            b"POSOPA06"
+        } else {
+            &OPERATION_AUDIT_MAGIC
+        },
+    );
     encoded.extend_from_slice(&operation.operation_id().to_bytes());
     encoded.extend_from_slice(&operation.request.principal.to_bytes());
     encoded.extend_from_slice(&operation.request.target_identity.unwrap_or([0; 16]));
@@ -434,7 +556,40 @@ pub(super) fn encode_audit(operation: DurableOperation) -> Vec<u8> {
             encoded.extend_from_slice(&[0; 16]);
         },
     }
-    encoded
+    if matches!(
+        operation.kind(),
+        DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+    ) {
+        let parameters = operation
+            .backup_binding()
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        let instance = operation
+            .request
+            .target_identity
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        crate::BackupRepositoryAuditIdentity::new(instance, parameters.repository())
+            .encode(&mut encoded);
+        match operation.backup_receipt() {
+            Some(receipt) => {
+                encoded.push(1);
+                receipt.encode(&mut encoded);
+            },
+            None => match operation.backup_cleanup_receipt() {
+                Some(receipt) => {
+                    encoded.push(2);
+                    receipt.encode(&mut encoded);
+                },
+                None => match operation.backup_retention_claim() {
+                    Some(receipt) => {
+                        encoded.push(3);
+                        encoded.extend_from_slice(&receipt.registry_generation());
+                    },
+                    None => encoded.push(0),
+                },
+            },
+        }
+    }
+    Ok(encoded)
 }
 
 /// Exercises the bounded persisted-record decoder with hostile bytes.

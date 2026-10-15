@@ -910,3 +910,31 @@ fn tenant_key_capability_keeps_transferred_capacity_after_operation_and_releases
     );
     Ok(())
 }
+
+#[test]
+fn backup_tenant_key_identity_is_authenticated_and_independent_of_envelope_bytes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = SecurityRoot::create()?;
+    let key = BootstrapKeyCustody::initialize(&root.path)?;
+    let instance = InstanceId::new([0x81; 16])?;
+    let tenant = TenantId::from_bytes([0x82; 16])?;
+    let envelope = key.provision_tenant_key_envelope(instance, tenant, [0x83; 16], 7)?;
+    let (epoch, fingerprint) = key.backup_tenant_key_identity(instance, tenant, &envelope)?;
+    assert_eq!(epoch, 7);
+    assert_ne!(fingerprint, [0; 32]);
+    assert_eq!(
+        key.backup_tenant_key_identity(instance, tenant, &envelope)?,
+        (epoch, fingerprint)
+    );
+    assert!(
+        key.backup_tenant_key_identity(instance, TenantId::from_bytes([0x84; 16])?, &envelope)
+            .is_err()
+    );
+    let mut modified = envelope;
+    *modified.last_mut().ok_or("envelope")? ^= 1;
+    assert!(
+        key.backup_tenant_key_identity(instance, tenant, &modified)
+            .is_err()
+    );
+    Ok(())
+}

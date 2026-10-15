@@ -101,3 +101,6 @@ mod live_key_fencing;
 
 #[path = "maintenance_api_tests/repository.rs"]
 mod repository;
+
+#[path = "maintenance_api_tests/backup.rs"]
+mod backup;

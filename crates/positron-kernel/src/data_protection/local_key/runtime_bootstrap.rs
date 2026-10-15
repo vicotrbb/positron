@@ -471,6 +471,32 @@ impl BootstrapKeyCustody {
         Ok(encoded)
     }
 
+    /// Authenticates one tenant envelope and returns a stable non-secret key
+    /// identity. Rewrapping the same key leaves this fingerprint unchanged.
+    pub fn backup_tenant_key_identity(
+        &self,
+        instance: InstanceId,
+        tenant: TenantId,
+        envelope: &[u8],
+    ) -> Result<(u64, [u8; 32]), BootstrapKeyFailure> {
+        let key = self.resolve_tenant_key_envelope(instance, tenant, envelope)?;
+        let epoch = if envelope.get(..8) == Some(TENANT_KEK_ENVELOPE_MAGIC.as_slice()) {
+            u64::from_be_bytes(
+                envelope
+                    .get(24..32)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(BootstrapKeyFailure::Authentication)?,
+            )
+        } else {
+            1
+        };
+        let mut context = b"positron-backup-tenant-key-identity-v1\0".to_vec();
+        context.extend_from_slice(&instance.to_bytes());
+        context.extend_from_slice(&tenant.to_bytes());
+        let fingerprint = DataProtection::authenticate(&key, &context).map_err(map_frame)?;
+        Ok((epoch, fingerprint))
+    }
+
     pub(super) fn resolve_tenant_key_envelope(
         &self,
         instance: InstanceId,
@@ -711,6 +737,26 @@ impl BootstrapKeyCustody {
             .map_err(|_| BootstrapKeyFailure::Authentication)?;
         plaintext.zeroize();
         ExportManifestSigner::from_seed(Box::new(seed))
+            .map_err(|_| BootstrapKeyFailure::Authentication)
+    }
+
+    /// Opens the protected Instance Integrity Key into Backup-only signing custody.
+    pub fn backup_control_signer(
+        &self,
+        instance: InstanceId,
+        protected_integrity_key: &[u8],
+    ) -> Result<crate::BackupControlSigner, BootstrapKeyFailure> {
+        let mut plaintext = self.open_object(
+            instance,
+            BootstrapObjectPurpose::Initialized,
+            protected_integrity_key,
+        )?;
+        let seed: [u8; 32] = plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| BootstrapKeyFailure::Authentication)?;
+        plaintext.zeroize();
+        crate::BackupControlSigner::from_seed(Box::new(seed))
             .map_err(|_| BootstrapKeyFailure::Authentication)
     }
 

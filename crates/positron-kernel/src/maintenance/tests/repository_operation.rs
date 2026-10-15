@@ -398,3 +398,377 @@ fn repository_transport_peak_is_admitted_before_dispatch() -> Result<(), Box<dyn
     );
     Ok(())
 }
+
+#[test]
+fn backup_task_restores_exact_binding_and_bounded_transfer_checkpoint()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = CatalogRoot::new()?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+        PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+        70_000_001,
+        30_000_000,
+    )?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new(nonzero_id(1))?,
+        CatalogSecret::from_owned(Box::new([0x61; 32]), Box::new([0x62; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(2))?,
+            FormatEpoch::CATALOG_V2,
+            vec![CatalogObject::new(b"backup task basis".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let binding = RepositoryOperationBinding::new([91; 16], [92; 32]).expect("binding");
+    let task = coordinator
+        .submit_backup_operation_with_resources_and_persist(
+            &catalog,
+            binding,
+            MaintenancePreconditions::new(1, 1).expect("preconditions"),
+            ResourceAmounts::new([25_000_000, 1, 1, 0, 1, 0, 1, 1, 1, 8, 16_384]),
+            7,
+        )
+        .expect("submit");
+    assert_eq!(task.class(), MaintenanceTaskClass::BackupSnapshot);
+    let restored = MaintenanceCoordinator::restore_from_catalog(&catalog).expect("restore");
+    let execution = restored
+        .start_next_with_reservation_and_persist_for_class(
+            &catalog,
+            &authority,
+            8,
+            false,
+            Some(MaintenanceTaskClass::BackupSnapshot),
+        )
+        .expect("admit")
+        .ok_or("execution")?;
+    assert_eq!(
+        RepositoryOperationBinding::from_execution(&execution).expect("binding"),
+        binding
+    );
+    execution
+        .checkpoint_and_persist(
+            &restored,
+            &catalog,
+            binding
+                .backup_checkpoint(2, b"transfer-cursor")
+                .expect("checkpoint"),
+        )
+        .expect("persist");
+    drop(execution);
+    let recovered = MaintenanceCoordinator::restore_from_catalog(&catalog).expect("cold restore");
+    let execution = recovered
+        .start_next_with_reservation_and_persist_for_class(
+            &catalog,
+            &authority,
+            9,
+            false,
+            Some(MaintenanceTaskClass::BackupSnapshot),
+        )
+        .expect("resume")
+        .ok_or("resumed execution")?;
+    assert_eq!(
+        RepositoryOperationBinding::from_execution(&execution).expect("resumed binding"),
+        binding
+    );
+    assert_eq!(
+        binding.backup_progress(&execution).expect("progress"),
+        b"transfer-cursor"
+    );
+    assert!(binding.backup_checkpoint(1, b"invalid").is_err());
+    assert!(binding.backup_checkpoint(3, &vec![0; 65_536]).is_err());
+    Ok(())
+}
+
+#[test]
+fn backup_readmission_preserves_failed_owner_and_cold_checkpoint()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (native, class) in [
+        (false, MaintenanceTaskClass::BackupSnapshot),
+        (true, MaintenanceTaskClass::BackupSnapshot),
+        (false, MaintenanceTaskClass::RepositoryCleanup),
+        (true, MaintenanceTaskClass::RepositoryCleanup),
+    ] {
+        let root = CatalogRoot::new()?;
+        let authority =
+            crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+                PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+                70_000_001,
+                30_000_000,
+            )?;
+        let catalog = Catalog::open(
+            &authority,
+            InstanceId::new(nonzero_id(1))?,
+            CatalogSecret::from_owned(Box::new([0x61; 32]), Box::new([0x62; 32])),
+        )?;
+        catalog.commit(
+            catalog.pin()?.identity(),
+            CatalogProposal::new(
+                TransactionId::new(nonzero_id(2))?,
+                FormatEpoch::CATALOG_V2,
+                vec![CatalogObject::new(b"readmission basis".to_vec())?],
+            )?,
+            None,
+        )?;
+        let coordinator = MaintenanceCoordinator::new();
+        let binding = RepositoryOperationBinding::new([101; 16], [102; 32]).expect("binding");
+        let old = ResourceAmounts::new([25_000_000, 1, 1, 0, 1, 0, 1, 1, 1, 8, 16_384]);
+        let larger = ResourceAmounts::new([26_000_000, 1, 1, 0, 1, 0, 1, 1, 1, 9, 32_768]);
+        let preconditions = MaintenancePreconditions::new(1, 1).expect("preconditions");
+        let task = if class == MaintenanceTaskClass::RepositoryCleanup {
+            coordinator.submit_backup_retention_operation_with_resources_and_persist(
+                &catalog,
+                binding,
+                preconditions,
+                old,
+                7,
+            )
+        } else {
+            coordinator.submit_backup_operation_with_resources_and_persist(
+                &catalog,
+                binding,
+                preconditions,
+                old,
+                7,
+            )
+        }
+        .expect("submit");
+        let mut execution = coordinator
+            .start_next_with_reservation_and_persist_for_class(
+                &catalog,
+                &authority,
+                8,
+                false,
+                Some(class),
+            )
+            .expect("dispatch")
+            .ok_or("dispatch")?;
+        let checkpoint = binding
+            .backup_checkpoint(2, b"cold exact cursor")
+            .expect("checkpoint");
+        execution
+            .checkpoint_and_persist(&coordinator, &catalog, checkpoint.clone())
+            .expect("persist");
+        assert_eq!(
+            binding
+                .backup_progress(&execution)
+                .expect("cached progress"),
+            b""
+        );
+        assert_eq!(
+            binding
+                .current_backup_progress(&coordinator, &execution)
+                .expect("current progress"),
+            (2, b"cold exact cursor".to_vec())
+        );
+        assert!(
+            RepositoryOperationBinding::new([103; 16], [102; 32])
+                .expect("wrong binding")
+                .current_backup_progress(&coordinator, &execution)
+                .is_err()
+        );
+        coordinator
+            .cancel_and_persist(&catalog, task.identity())
+            .expect("request cancellation");
+        let charged = authority
+            .governor()
+            .inspect()
+            .expect("usage before handoff")
+            .usage(ResourceDimension::MemoryBytes);
+        assert!(charged >= old.get(ResourceDimension::MemoryBytes));
+        let native_owner = if native {
+            Some(
+                execution
+                    .transfer_repository_resources(binding)
+                    .expect("transfer"),
+            )
+        } else {
+            None
+        };
+        if native {
+            assert!(
+                execution
+                    .requeue_backup_with_resources_and_persist(
+                        &coordinator,
+                        &catalog,
+                        binding,
+                        larger,
+                        9
+                    )
+                    .is_err()
+            );
+        }
+        drop(native_owner);
+        let wrong = RepositoryOperationBinding::new([101; 16], [103; 32]).expect("wrong binding");
+        assert!(
+            execution
+                .requeue_backup_with_resources_and_persist(&coordinator, &catalog, wrong, larger, 9)
+                .is_err()
+        );
+        assert!(
+            execution
+                .requeue_backup_with_resources_and_persist(
+                    &coordinator,
+                    &catalog,
+                    binding,
+                    ResourceAmounts::new([24_000_000, 1, 1, 0, 1, 0, 1, 1, 1, 8, 16_384]),
+                    9
+                )
+                .is_err()
+        );
+        let usage = authority
+            .governor()
+            .inspect()
+            .expect("publication headroom");
+        let memory = ResourceDimension::MemoryBytes;
+        let kind = crate::RecoveryWorkKind::DurabilityCompletion;
+        let headroom = usage.recovery_pool_capacity(kind, memory)
+            + usage.recovery_shared_capacity(memory)
+            - usage.recovery_pool_usage(kind, memory)
+            - usage.recovery_shared_usage(memory)
+            - usage.usage(memory);
+        // The system scope owns a protected slice of the global recovery
+        // capacity. Its typed refusal reports the exact remaining ceiling.
+        let refusal = authority
+            .recovery()
+            .reserve(
+                crate::RecoveryWorkClaim::system(
+                    kind,
+                    ResourceAmounts::new([headroom, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                )
+                .expect("scope probe"),
+            )
+            .expect_err("global headroom exceeds system slice");
+        let available = refusal.allowed() - refusal.in_use();
+        let blocker = authority
+            .recovery()
+            .reserve(
+                crate::RecoveryWorkClaim::system(
+                    kind,
+                    ResourceAmounts::new([available - 65_536, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                )
+                .expect("blocking claim"),
+            )
+            .expect("occupy publication headroom");
+        assert!(
+            execution
+                .requeue_backup_with_resources_and_persist(
+                    &coordinator,
+                    &catalog,
+                    binding,
+                    larger,
+                    9
+                )
+                .is_err()
+        );
+        assert_eq!(
+            coordinator
+                .status(task.identity())
+                .expect("denied status")
+                .phase(),
+            MaintenanceTaskPhase::Running
+        );
+        assert_eq!(execution.reservation().granted(), old);
+        assert_eq!(
+            RepositoryOperationBinding::from_execution(&execution).expect("denied owner"),
+            binding
+        );
+        drop(blocker);
+        let failed = crate::catalog::with_catalog_fault(
+            crate::catalog::CatalogFileEvent::WriteMarker,
+            || {
+                execution.requeue_backup_with_resources_and_persist(
+                    &coordinator,
+                    &catalog,
+                    binding,
+                    larger,
+                    9,
+                )
+            },
+        );
+        assert!(failed.is_err());
+        assert_eq!(
+            coordinator.status(task.identity()).expect("status").phase(),
+            MaintenanceTaskPhase::Running
+        );
+        assert_eq!(execution.reservation().granted(), old);
+        assert_eq!(
+            RepositoryOperationBinding::from_execution(&execution).expect("binding remains live"),
+            binding
+        );
+        execution
+            .requeue_backup_with_resources_and_persist(&coordinator, &catalog, binding, larger, 10)
+            .expect("requeue");
+        assert_eq!(
+            coordinator.status(task.identity()).expect("status").phase(),
+            MaintenanceTaskPhase::Queued
+        );
+        assert!(
+            ResourceDimension::ALL.iter().all(|dimension| execution
+                .reservation()
+                .granted()
+                .get(*dimension)
+                == 0)
+        );
+        assert!(RepositoryOperationBinding::from_execution(&execution).is_err());
+        assert_eq!(
+            authority
+                .governor()
+                .inspect()
+                .expect("usage after handoff")
+                .usage(ResourceDimension::MemoryBytes),
+            charged
+        );
+        assert!(
+            coordinator
+                .status(task.identity())
+                .expect("queued status")
+                .cancellation_requested()
+        );
+        assert!(
+            execution
+                .checkpoint_and_persist(
+                    &coordinator,
+                    &catalog,
+                    binding
+                        .backup_checkpoint(3, b"stale owner")
+                        .expect("stale checkpoint")
+                )
+                .is_err()
+        );
+        assert!(
+            execution
+                .complete_and_persist(&coordinator, &catalog, true)
+                .is_err()
+        );
+        drop(execution);
+        let recovered = MaintenanceCoordinator::restore_from_catalog(&catalog).expect("restore");
+        let resumed = recovered
+            .start_next_with_reservation_and_persist_for_class(
+                &catalog,
+                &authority,
+                11,
+                false,
+                Some(class),
+            )
+            .expect("readmission")
+            .ok_or("readmission")?;
+        assert!(
+            recovered
+                .status(task.identity())
+                .expect("readmitted status")
+                .cancellation_requested()
+        );
+        assert_eq!(resumed.task().reservations(), larger);
+        assert_eq!(resumed.reservation().granted(), larger);
+        assert_eq!(resumed.task_checkpoint(), Some(&checkpoint));
+        assert_eq!(
+            RepositoryOperationBinding::from_execution(&resumed).expect("resumed binding"),
+            binding
+        );
+    }
+    Ok(())
+}

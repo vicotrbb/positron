@@ -1,4 +1,8 @@
 //! Direct encrypted active-segment append and authenticated durability frontiers.
+mod backup_capture;
+pub(crate) use backup_capture::{
+    BackupSegmentVerification, backup_segment_sources, backup_source_estimate,
+};
 mod abandonment;
 pub use abandonment::{SegmentAbandonmentPlan, integrity_abandonment_findings};
 

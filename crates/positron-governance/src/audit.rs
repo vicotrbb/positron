@@ -1,6 +1,8 @@
 mod recovery;
 pub use recovery::{RecoveryBundleAction, RecoveryBundleAuditEntry, recovery_bundle_audit_intent};
+mod backup;
 mod codec;
+pub use backup::BackupRepositoryAuditIdentity;
 mod rotation;
 mod tenant_rotation;
 pub use tenant_rotation::{
@@ -65,6 +67,7 @@ const MAINTENANCE_WINDOW_AUDIT_MAGIC: [u8; 8] = *b"POSMTW01";
 const DURABLE_OPERATION_AUDIT_MAGIC: [u8; 8] = *b"POSOPA02";
 const DURABLE_OPERATION_AUDIT_MAGIC_V3: [u8; 8] = *b"POSOPA03";
 const DURABLE_OPERATION_AUDIT_MAGIC_V4: [u8; 8] = *b"POSOPA04";
+const DURABLE_OPERATION_AUDIT_MAGIC_V6: [u8; 8] = *b"POSOPA06";
 const DURABLE_OPERATION_AUDIT_MAGIC_V5: [u8; 8] = *b"POSOPA05";
 const DURABLE_OPERATION_AUDIT_MAGIC_V1: [u8; 8] = *b"POSOPA01";
 const CONFIGURATION_AUDIT_MAGIC: [u8; 8] = *b"POSCFG01";
@@ -1042,9 +1045,18 @@ impl ConfigurationAuditEntry {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BackupAuditEvidence {
+    repository: BackupRepositoryAuditIdentity,
+    receipt: Option<crate::BackupOperationReceipt>,
+    cleanup: Option<crate::BackupCleanupReceipt>,
+    retention_claim: Option<crate::BackupRetentionClaimReceipt>,
+}
+
 /// Redacted jointly committed evidence for one durable-operation state transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableOperationAuditEntry {
+    backup: Option<Box<BackupAuditEvidence>>,
     abandonment_loss: Option<positron_kernel::IntegrityQuarantineFinding>,
     position: u64,
     operation_id: OperationId,
@@ -1061,6 +1073,30 @@ pub struct DurableOperationAuditEntry {
 }
 
 impl DurableOperationAuditEntry {
+    pub const fn backup_repository(&self) -> Option<BackupRepositoryAuditIdentity> {
+        match &self.backup {
+            Some(evidence) => Some(evidence.repository),
+            None => None,
+        }
+    }
+    pub const fn backup_retention_claim(&self) -> Option<crate::BackupRetentionClaimReceipt> {
+        match &self.backup {
+            Some(evidence) => evidence.retention_claim,
+            None => None,
+        }
+    }
+    pub const fn backup_cleanup_receipt(&self) -> Option<crate::BackupCleanupReceipt> {
+        match &self.backup {
+            Some(evidence) => evidence.cleanup,
+            None => None,
+        }
+    }
+    pub const fn backup_receipt(&self) -> Option<crate::BackupOperationReceipt> {
+        match &self.backup {
+            Some(evidence) => evidence.receipt,
+            None => None,
+        }
+    }
     #[must_use]
     pub const fn abandonment_loss(&self) -> Option<positron_kernel::IntegrityQuarantineFinding> {
         self.abandonment_loss

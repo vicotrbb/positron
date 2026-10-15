@@ -105,6 +105,14 @@ impl GoogleCloudStorageRepository {
             Err(e) => Err(e),
         }
     }
+    /// Metadata-only observation; content and version remain untrusted.
+    pub async fn object_size_hint(&self, id: ObjectId) -> Result<u64, RepositoryFailure> {
+        let _guard = self.enter()?;
+        self.read_identity().await?;
+        self.metadata(&self.key(&id.name()), None)
+            .await
+            .map(|metadata| metadata.size)
+    }
     pub async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
         let _guard = self.enter()?;
         self.read_identity().await?;
@@ -123,6 +131,12 @@ impl GoogleCloudStorageRepository {
         self.read_identity().await?;
         let key = self.key(&range.object.name());
         let metadata = self.metadata(&key, None).await?;
+        if range
+            .expected_size
+            .is_some_and(|expected| expected != metadata.size)
+        {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
         if metadata.size > MAX_OBJECT_BYTES
             || range
                 .offset

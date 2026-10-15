@@ -5,12 +5,20 @@
 
 use positron_domain::identity::{PrincipalId, Scope};
 use positron_kernel::{
-    AuditIntent, Catalog, CatalogFailureCode, CatalogObject, CatalogProposal, CatalogSnapshot,
-    FormatEpoch, PreparedTransactionResolution, TransactionId,
+    AuditIntent, Catalog, CatalogFailureCode, CatalogObject, CatalogObjectId, CatalogProposal,
+    CatalogSnapshot, FormatEpoch, PreparedTransactionResolution, TransactionId,
 };
 use sha2::{Digest, Sha256};
 
 mod abandonment;
+mod backup_administration;
+mod backup_parameters;
+mod backup_retention_administration;
+pub use backup_parameters::{
+    BackupCleanupReceipt, BackupOperationParameters, BackupOperationReceipt, BackupOperationStage,
+    BackupRetentionClaimReceipt, BackupRetentionParameters, BackupRetentionStage,
+    BackupSnapshotParameters,
+};
 mod codec;
 mod provider_migration_parameters;
 pub use provider_migration_parameters::{
@@ -586,6 +594,9 @@ impl DurableOperationAdministration {
         let operation = find_by_id(&snapshot, operation_id)?
             .ok_or(DurableOperationFailure::UnknownOperation)?;
         validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() == DurableOperationKind::BackupSnapshot {
+            return Err(DurableOperationFailure::InvalidState);
+        }
         let cancelled = operation.cancelled(now, idempotency)?;
         if cancelled == operation {
             return Ok(operation);
@@ -704,8 +715,38 @@ fn publish(
     snapshot: &CatalogSnapshot,
     operation: DurableOperation,
 ) -> Result<DurableOperation, DurableOperationFailure> {
+    publish_with_additions(catalog, snapshot, operation, Vec::new())
+}
+fn publish_with_additions(
+    catalog: &Catalog<'_>,
+    snapshot: &CatalogSnapshot,
+    operation: DurableOperation,
+    additional: Vec<CatalogObject>,
+) -> Result<DurableOperation, DurableOperationFailure> {
+    publish_with_objects(catalog, snapshot, operation, additional, None)
+}
+fn publish_with_objects(
+    catalog: &Catalog<'_>,
+    snapshot: &CatalogSnapshot,
+    operation: DurableOperation,
+    additional: Vec<CatalogObject>,
+    replacement: Option<CatalogObjectId>,
+) -> Result<DurableOperation, DurableOperationFailure> {
     let transaction = transition_transaction(operation)?;
-    let request_digest = transition_request_digest(operation);
+    let mut request_digest = transition_request_digest(operation);
+    if let Some(previous) = replacement {
+        if additional.len() != 1 || snapshot.object(previous).map_err(map_catalog)?.is_none() {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"positron.backup.registration-publication.v1\0");
+        hash.update(request_digest);
+        hash.update(previous.to_bytes());
+        for object in &additional {
+            hash.update(object.identity().to_bytes());
+        }
+        request_digest = hash.finalize().into();
+    }
     if let Some(resumed) = resume_prepared_operation(
         catalog,
         transaction,
@@ -719,11 +760,23 @@ fn publish(
         operation.operation_id(),
         operation.updated_at_unix_seconds,
     )?;
+    if let Some(previous) = replacement {
+        objects.retain(|object| object.identity() != previous);
+    }
     objects
         .try_reserve(1)
         .map_err(|_| DurableOperationFailure::CapacityExceeded)?;
+    for object in additional {
+        if snapshot
+            .object(object.identity())
+            .map_err(map_catalog)?
+            .is_none()
+        {
+            objects.push(object);
+        }
+    }
     objects.push(CatalogObject::new(encode_operation(operation)).map_err(map_catalog)?);
-    let audit = AuditIntent::new(encode_audit(operation)).map_err(map_catalog)?;
+    let audit = AuditIntent::new(encode_audit(operation)?).map_err(map_catalog)?;
     let proposal = CatalogProposal::new(
         transaction,
         snapshot
@@ -783,6 +836,21 @@ fn transition_request_digest(operation: DurableOperation) -> [u8; 32] {
     hasher.update(operation.operation_id().to_bytes());
     hasher.update(operation.revision.to_be_bytes());
     hasher.update(operation.request.canonical_digest());
+    if let Some(receipt) = operation.backup_receipt() {
+        let mut bytes = Vec::new();
+        receipt.encode(&mut bytes);
+        hasher.update(bytes);
+    }
+    if let Some(receipt) = operation.backup_cleanup_receipt() {
+        let mut bytes = Vec::new();
+        receipt.encode(&mut bytes);
+        hasher.update([2]);
+        hasher.update(bytes);
+    }
+    if let Some(receipt) = operation.backup_retention_claim() {
+        hasher.update([3]);
+        hasher.update(receipt.registry_generation());
+    }
     hasher.update([operation.status.code()]);
     hasher.update([operation.phase.code()]);
     hasher.update([operation.progress_percent]);
@@ -826,11 +894,22 @@ fn retained_objects(
                 .earliest_lookup_expiry_unix_seconds()
                 .is_some_and(|expiry| expiry <= now)
             {
-                objects.push(
-                    CatalogObject::new(encode_expired_binding(operation.request))
-                        .map_err(map_catalog)?,
-                );
-                continue;
+                let live_backup_owner = match operation.backup_binding() {
+                    Some(parameters) => positron_kernel::RepositoryOperationBinding::new(
+                        operation.operation_id().to_bytes(),
+                        parameters.intent_digest(),
+                    )
+                    .and_then(|binding| binding.has_live_backup_owner(snapshot))
+                    .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?,
+                    None => false,
+                };
+                if !live_backup_owner {
+                    objects.push(
+                        CatalogObject::new(encode_expired_binding(operation.request))
+                            .map_err(map_catalog)?,
+                    );
+                    continue;
+                }
             }
             operation_count = operation_count
                 .checked_add(1)

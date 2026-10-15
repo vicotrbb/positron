@@ -290,3 +290,94 @@ container, and owned prefix. Protobuf field 9 is additive. The selector is
 exclusive with local, AWS, and GCS selectors. Server-owned managed identity uses
 the Azure Storage audience; credentials and arbitrary endpoints are rejected.
 See [the Azure Repository scope](../../../docs/operations/azure-blob-repository.md).
+
+`BackupService.Manage` is the authenticated HTTP/JSON projection at
+`POST /v1/backups:manage`, with 4096-byte request and response limits. Creation
+requires an exact existing Repository selector and UUID, expected Catalog
+generation, principal-bound idempotency key, and `retention_seconds` in
+60..315360000. Selectors use the same local, AWS, GCS, and Azure fields as
+Repository administration. The server resolves credentials.
+
+The CLI is `positron backup create|status|lookup|wait|cancel`. For example:
+
+```console
+positron backup create --endpoint 127.0.0.1:4318 --server-name localhost --trust-file ca.pem --credential-stdin --locator /srv/backups --repository-id UUID --expected-generation N --idempotency-key UUID --retention-seconds 86400
+positron backup status --endpoint 127.0.0.1:4318 --server-name localhost --trust-file ca.pem --credential-stdin --operation-id HEX
+```
+
+`lookup` supplies the original idempotency key. `cancel` supplies the operation
+ID, its current `expected_operation_revision`, and a new idempotency key. `wait` polls the same
+operation for 1..60 seconds (`--wait-seconds`, default 30); expiry preserves an
+unknown caller outcome. Status and lookup reject Repository selectors and
+retention. Responses expose the operation, optional exact Repository Identity,
+and a verified terminal receipt containing manifest checksum, captured Catalog
+generation and identity, uploaded/reused bytes, and retention deadline. They
+never expose native selectors or credentials. `backup_publication` disables
+cancellation; `backup_registry_published` records the irreversible boundary.
+
+Successful backup receipts also require `registry_generation_checksum`, the
+nonzero SHA-256 checksum of their signed publication generation.
+
+`BackupService.List` is a separate authenticated read at
+`POST /v1/backups:list`. `positron backup list --repository-id UUID` uses the
+same endpoint, credential-stdin, and TLS options. `--limit N` accepts 1..128
+(default 128), and `--cursor HEX` resumes a page. Requests contain only the
+registered repository UUID, limit, and optional opaque cursor; listing creates
+no Durable Operation. The 176-character lowercase hexadecimal cursor binds the
+exact Repository Identity, signed Registry Generation, and final snapshot of
+the preceding page. A changed registry head requires starting the listing over.
+
+The response contains exact Repository Identity, optional signed registry
+checksum, ordered unique snapshot entries, and an optional next cursor.
+Each entry reports its 32-character snapshot ID, manifest checksum, creation
+time, and retention deadline. A missing registry checksum means no registry
+head exists; a signed head containing only reservations still returns its
+checksum with an empty published-entry list. Listing returns at most 128
+entries in a 65536-byte response; its request remains limited to 4096 bytes.
+
+Backup management also accepts `expire` for an elapsed snapshot retention
+period. It requires the registered `repository_id`, exact 32-character
+`snapshot_id`, nonzero 64-character `expected_manifest_checksum`, expected
+Catalog generation, and idempotency key. It rejects native selectors,
+retention duration, and operation ID. The CLI uses `positron backup expire`
+with `--repository-id`, `--snapshot-id`, `--expected-manifest-checksum`,
+`--expected-generation`, and `--idempotency-key`, alongside normal protected
+credentials and transport options.
+
+Management responses require `kind` (`snapshot` or `retention`) and
+`cleanup_pending`. Successful retention operations carry `retention_receipt`
+with snapshot ID, manifest checksum, signed registry generation checksum, and
+counts of deleted, already absent, and retained shared objects. Snapshot and
+retention receipts are mutually exclusive. Registry expiry publication crosses
+`backup_registry_expired`; cleanup then completes before retention succeeds.
+
+An accepted cancellation remains Running in `backup_cancellation` with
+`cancel_requested_cleanup_pending` until owned cleanup completes. A Cancelled
+operation reports `cleanup_pending: false`. Snapshot success can still report
+pending local capture cleanup, and failures can report unresolved cleanup;
+these fields describe the authoritative state rather than claiming rollback.
+
+Backup management responses require a nonzero `operation_revision`, beginning
+at 1 when accepted. Status, lookup, and wait expose that exact operation's
+revision. Cancellation requires `expected_operation_revision` alongside the
+operation ID and idempotency key and rejects `expected_catalog_generation`.
+Use `positron backup cancel --operation-id HEX --expected-operation-revision N
+--idempotency-key UUID` with the normal transport and credential options.
+A changed operation revision requires inspection before retrying. Foreground
+Catalog changes do not invalidate an unchanged operation's cancellation
+precondition. Create and expiry retain their Catalog-generation preconditions;
+all actions except cancellation reject an operation revision precondition.
+
+Failed backup operations require `terminal_error_code`; other states omit it.
+The closed codes are `handler_rejected`, `legacy_unknown` for legacy records,
+and `backup_retention_not_due`. A known trusted clock before the snapshot's
+retention deadline produces a durable Failed expiry operation with the latter
+code and an uncrossed irreversible boundary. Replaying its idempotency key
+returns that same failure; a new request can succeed after the deadline.
+An uncertain clock keeps expiry pending with retry guidance. CLI status, lookup,
+wait, and expiry output display the persisted terminal reason.
+
+Backup management and listing report explicit admission refusal as HTTP 503
+with `code: capacity_unavailable`. The generated client preserves this as
+`BackupServiceClientFailure::CapacityUnavailable`; callers can retry the same
+idempotent request. Unknown or malformed responses remain transport failures.

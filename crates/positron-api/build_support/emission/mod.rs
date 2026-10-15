@@ -1,4 +1,5 @@
 mod api_key;
+mod backup;
 mod maintenance;
 mod policy_activate;
 mod policy_diff;
@@ -22,6 +23,7 @@ pub(super) fn generate_all(operations: &ValidatedOperations) -> Result<(), Box<d
     maintenance::generate_maintenance_client(operations)?;
     provider_migration::generate(operations)?;
     repository::generate(operations)?;
+    backup::generate(operations)?;
     tenant_quota::generate_tenant_quota_client(operations)?;
     tenant_lifecycle::generate_tenant_lifecycle_client(operations)?;
     tenant_retention::generate_tenant_retention_client(operations)?;

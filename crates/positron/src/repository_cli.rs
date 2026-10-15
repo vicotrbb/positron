@@ -132,6 +132,7 @@ fn client_failure(failure: RepositoryServiceClientFailure) -> &'static str {
         F::AdministrationUnavailable => {
             "administration unavailable; inspect or retry the same operation"
         },
+        F::CapacityUnavailable => "capacity unavailable; retry the same idempotent request",
         F::Transport => {
             "transport outcome unknown; inspect the same operation or idempotency key before retrying"
         },

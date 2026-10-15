@@ -139,6 +139,19 @@ impl Repository for LocalRepository {
         .await
         .map_err(|_| RepositoryFailure::Interrupted)?
     }
+    async fn object_size_hint(&self, object: ObjectId) -> Result<u64, RepositoryFailure> {
+        let root = Arc::clone(&self.root);
+        let expected = self.identity.clone();
+        tokio::task::spawn_blocking(move || {
+            verify_identity(&root, &expected)?;
+            open_object(&root, object)?
+                .metadata()
+                .map(|metadata| metadata.len())
+                .map_err(io_failure)
+        })
+        .await
+        .map_err(|_| RepositoryFailure::Interrupted)?
+    }
     async fn head(&self, object: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
         let root = Arc::clone(&self.root);
         let expected = self.identity.clone();
@@ -156,11 +169,17 @@ impl Repository for LocalRepository {
         tokio::task::spawn_blocking(move || {
             verify_identity(&root, &expected)?;
             let mut file = open_object(&root, range.object)?;
-            let meta = metadata(&mut file, range.object)?;
+            let size = file.metadata().map_err(io_failure)?.len();
+            if range.expected_size.is_some_and(|expected| expected != size) {
+                return Err(RepositoryFailure::PreconditionFailed);
+            }
+            if size > MAX_OBJECT_BYTES {
+                return Err(RepositoryFailure::LimitExceeded);
+            }
             if range
                 .offset
                 .checked_add(range.length)
-                .is_none_or(|end| end > meta.size)
+                .is_none_or(|end| end > size)
             {
                 return Err(RepositoryFailure::InvalidInput);
             }
@@ -170,6 +189,9 @@ impl Repository for LocalRepository {
                 usize::try_from(range.length).map_err(|_| RepositoryFailure::LimitExceeded)?;
             let mut bytes = vec![0; length];
             file.read_exact(&mut bytes).map_err(io_failure)?;
+            if file.metadata().map_err(io_failure)?.len() != size {
+                return Err(RepositoryFailure::PreconditionFailed);
+            }
             Ok(ChecksummedBytes {
                 checksum: Sha256::digest(&bytes).into(),
                 bytes,

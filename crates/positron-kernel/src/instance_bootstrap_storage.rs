@@ -77,6 +77,7 @@ pub enum BootstrapEntry {
     Catalog,
     Segments,
     Diagnostics,
+    BackupCaptures,
     LocalKey,
     LocalKeyStaging,
     LocalKeyEpoch,

@@ -68,7 +68,7 @@ impl std::fmt::Debug for RepositoryAwsS3Target {
     }
 }
 impl RepositoryAwsS3Target {
-    fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+    pub(crate) fn validate(&self) -> Result<(), MaintenanceWireFailure> {
         if [
             (&self.bucket, 63),
             (&self.region, 32),
@@ -100,7 +100,7 @@ impl std::fmt::Debug for RepositoryAzureBlobTarget {
     }
 }
 impl RepositoryAzureBlobTarget {
-    fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+    pub(crate) fn validate(&self) -> Result<(), MaintenanceWireFailure> {
         if [
             (&self.account, 24),
             (&self.container, 63),
@@ -131,7 +131,7 @@ impl std::fmt::Debug for RepositoryGoogleCloudStorageTarget {
     }
 }
 impl RepositoryGoogleCloudStorageTarget {
-    fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+    pub(crate) fn validate(&self) -> Result<(), MaintenanceWireFailure> {
         if [
             (&self.bucket, 222),
             (&self.project_number, 20),
@@ -295,7 +295,7 @@ impl RepositoryResponse {
         value.validate()?;
         Ok(value)
     }
-    fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+    pub(crate) fn validate(&self) -> Result<(), MaintenanceWireFailure> {
         if self.catalog_generation == 0 {
             return Err(MaintenanceWireFailure);
         }
@@ -314,7 +314,7 @@ impl RepositoryResponse {
                 || !crate::validation::identifier(&identity.instance_id)
                 || !matches!(
                     identity.provider_kind.as_str(),
-                    "local_filesystem" | "aws_s3" | "google_cloud_storage"
+                    "local_filesystem" | "aws_s3" | "google_cloud_storage" | "azure_blob"
                 )
                 || identity.format_epoch != 1
                 || !hash(&identity.integrity_fingerprint)

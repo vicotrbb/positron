@@ -102,7 +102,7 @@ pub(super) fn audit_hash(
     hash(&encoded)
 }
 
-fn encode_audit(record: &GovernanceAuditRecord) -> Vec<u8> {
+pub(super) fn encode_audit(record: &GovernanceAuditRecord) -> Vec<u8> {
     let intent_bytes = record.intent.len() as u32;
     let mut encoded = Vec::with_capacity(AUDIT_FIXED_BYTES + record.intent.len());
     encoded.extend_from_slice(&AUDIT_MAGIC);

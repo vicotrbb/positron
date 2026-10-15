@@ -31,6 +31,7 @@ pub(crate) enum MaintenanceServiceFailure {
     IdempotencyConflict,
     PreconditionFailed,
     AdministrationUnavailable,
+    CapacityUnavailable,
 }
 
 impl ServiceHandle {

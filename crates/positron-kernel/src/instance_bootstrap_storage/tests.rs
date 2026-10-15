@@ -10,6 +10,32 @@ use super::{
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn backup_capture_root_is_a_recognized_directory_and_never_a_symlink() {
+    let roots = Roots::new();
+    let storage = roots.storage();
+    fs::create_dir(roots.data().join("backup-captures")).expect("capture directory");
+    assert!(
+        !storage
+            .inspect()
+            .expect("inspect")
+            .layout()
+            .expect("layout")
+            .unknown_or_unsafe()
+    );
+    fs::remove_dir(roots.data().join("backup-captures")).expect("remove capture directory");
+    std::os::unix::fs::symlink(roots.secrets(), roots.data().join("backup-captures"))
+        .expect("foreign capture link");
+    assert!(
+        storage
+            .inspect()
+            .expect("inspect")
+            .layout()
+            .expect("layout")
+            .unknown_or_unsafe()
+    );
+}
+
 struct Roots {
     parent: PathBuf,
 }
