@@ -5,28 +5,37 @@ mod resolver;
 use std::sync::Arc;
 
 #[derive(Debug)]
-pub(in crate::data_protection::key_provider) struct Resources {
+pub struct Resources {
     _grant: TransferredResourceReservation,
     dns_busy: AtomicBool,
     process_busy: AtomicBool,
 }
 impl Resources {
-    pub(in crate::data_protection::key_provider) fn new(
-        grant: TransferredResourceReservation,
-    ) -> Arc<Self> {
+    pub fn granted(&self) -> crate::ResourceAmounts {
+        self._grant.granted()
+    }
+    pub fn authorizes_repository_transport(&self) -> bool {
+        self._grant.authorizes_repository_transport()
+    }
+    pub fn new(grant: TransferredResourceReservation) -> Arc<Self> {
         Arc::new(Self {
             _grant: grant,
             dns_busy: AtomicBool::new(false),
             process_busy: AtomicBool::new(false),
         })
     }
-    pub(in crate::data_protection::key_provider) fn busy(&self) -> bool {
+    pub fn busy(&self) -> bool {
         self.dns_busy.load(Ordering::Acquire) || self.process_busy.load(Ordering::Acquire)
     }
 }
 
 #[derive(Debug)]
-pub(super) struct ProcessAdmission(pub(super) Arc<Resources>);
+pub struct ProcessAdmission(pub(crate) Arc<Resources>);
+impl ProcessAdmission {
+    pub fn new(resources: Arc<Resources>) -> Self {
+        Self(resources)
+    }
+}
 struct ProcessLease(Arc<Resources>);
 impl Drop for ProcessLease {
     fn drop(&mut self) {
@@ -45,9 +54,7 @@ impl aws_config::credential_process::CredentialProcessAdmission for ProcessAdmis
     }
 }
 #[derive(Clone, Debug)]
-pub(in crate::data_protection::key_provider) struct NativeDns(
-    pub(in crate::data_protection::key_provider) Arc<Resources>,
-);
+pub struct NativeDns(pub(crate) Arc<Resources>);
 struct Worker(Arc<Resources>);
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -55,6 +62,9 @@ impl Drop for Worker {
     }
 }
 impl NativeDns {
+    pub fn new(resources: Arc<Resources>) -> Self {
+        Self(resources)
+    }
     pub(in crate::data_protection::key_provider) async fn addresses(
         &self,
         name: &str,

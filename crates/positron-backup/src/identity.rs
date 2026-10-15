@@ -10,6 +10,7 @@ pub struct RepositoryIdentity {
     instance: [u8; 16],
     integrity_fingerprint: [u8; 32],
     prefix: [u8; 32],
+    aws_s3: bool,
 }
 impl RepositoryIdentity {
     pub fn local(
@@ -33,7 +34,32 @@ impl RepositoryIdentity {
             instance,
             integrity_fingerprint,
             prefix: Sha256::digest(bytes).into(),
+            aws_s3: false,
         })
+    }
+    pub fn aws_s3(
+        repository: [u8; 16],
+        instance: [u8; 16],
+        integrity_fingerprint: [u8; 32],
+        target: &crate::AwsS3Target,
+    ) -> Result<Self, RepositoryFailure> {
+        if repository == [0; 16] || instance == [0; 16] || integrity_fingerprint == [0; 32] {
+            return Err(RepositoryFailure::InvalidInput);
+        }
+        Ok(Self {
+            repository,
+            instance,
+            integrity_fingerprint,
+            prefix: target.commitment(),
+            aws_s3: true,
+        })
+    }
+    pub const fn provider_kind(&self) -> &'static str {
+        if self.aws_s3 {
+            "awsS3"
+        } else {
+            "localFilesystem"
+        }
     }
     pub const fn repository_id(&self) -> [u8; 16] {
         self.repository
@@ -49,7 +75,11 @@ impl RepositoryIdentity {
     }
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(108);
-        bytes.extend_from_slice(b"POSREP01");
+        bytes.extend_from_slice(if self.aws_s3 {
+            b"POSS3I01"
+        } else {
+            b"POSREP01"
+        });
         bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.extend_from_slice(&self.repository);
         bytes.extend_from_slice(&self.instance);
@@ -58,7 +88,12 @@ impl RepositoryIdentity {
         bytes
     }
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, RepositoryFailure> {
-        if bytes.len() != 108 || bytes.get(..12) != Some(&b"POSREP01\0\0\0\x01"[..]) {
+        if bytes.len() != 108
+            || !matches!(
+                bytes.get(..12),
+                Some(b"POSREP01\0\0\0\x01" | b"POSS3I01\0\0\0\x01")
+            )
+        {
             return Err(RepositoryFailure::CorruptState);
         }
         fn field<const N: usize>(bytes: &[u8], start: usize) -> Result<[u8; N], RepositoryFailure> {
@@ -72,6 +107,7 @@ impl RepositoryIdentity {
             instance: field(bytes, 28)?,
             integrity_fingerprint: field(bytes, 44)?,
             prefix: field(bytes, 76)?,
+            aws_s3: bytes.get(..8) == Some(b"POSS3I01"),
         };
         if result.repository == [0; 16]
             || result.instance == [0; 16]

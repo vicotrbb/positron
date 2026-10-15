@@ -45,6 +45,7 @@ fn managed_hsm_native_app_service_uses_hsm_audience_and_releases_custody()
                     Err(error) => return Err(error),
                 }
             };
+            socket.set_nonblocking(false)?;
             socket.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
             let mut head = Vec::new();
             while !head.ends_with(b"\r\n\r\n") {

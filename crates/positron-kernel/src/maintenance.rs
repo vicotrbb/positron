@@ -403,6 +403,22 @@ struct TaskState {
     active_dispatch: Option<MaintenanceDispatch>,
 }
 
+fn canonical_digest_only_integrity_scrub(state: &TaskState) -> bool {
+    state.task.class == MaintenanceTaskClass::IntegrityScrub
+        && state.checkpoint.is_none()
+        && state.task.integrity_scrub_source.is_some_and(|source| {
+            MaintenanceTask::integrity_scrub(
+                state.task.identity,
+                state.task.scope,
+                state.task.trigger,
+                state.task.preconditions,
+                source.to_bytes(),
+                state.task.not_before,
+            )
+            .is_ok_and(|expected| expected == state.task)
+        })
+}
+
 fn validate_retention_publication_state(state: &TaskState) -> Result<(), MaintenanceFailure> {
     if state.task.class == MaintenanceTaskClass::RetentionPublication {
         let _ = retention_publication_frontier(state.checkpoint.as_ref())?;
@@ -541,6 +557,8 @@ pub struct MaintenanceTaskStatus {
 pub enum MaintenanceReservation<'authority> {
     Ordinary(ResourceReservation<'authority>),
     Recovery(ResourceReservation<'authority>),
+    /// Same admitted task grant, retained across native transport cancellation.
+    NativeRepository(Arc<crate::NativeAwsResources>),
 }
 
 /// The sole authority from which a task's declared reservation is admitted.
@@ -567,6 +585,7 @@ impl MaintenanceReservation<'_> {
     pub fn granted(&self) -> ResourceAmounts {
         match self {
             Self::Ordinary(reservation) | Self::Recovery(reservation) => reservation.granted(),
+            Self::NativeRepository(resources) => resources.granted(),
         }
     }
 
@@ -580,7 +599,7 @@ impl MaintenanceReservation<'_> {
                 reservation.belongs_to(governor)
                     && reservation.authorizes_ordinary_compaction(tenant)
             },
-            Self::Recovery(_) => false,
+            Self::Recovery(_) | Self::NativeRepository(_) => false,
         }
     }
 }

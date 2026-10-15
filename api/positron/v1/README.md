@@ -263,3 +263,11 @@ its exact probes. External retention is reported as `not_observable` by the
 local adapter. These provider checks do not establish signed backup-registry,
 restore, permanent-erasure, or remote-provider conformance. This service does
 not advertise a gRPC administration listener.
+
+Repository management accepts either the local `path` or the complete `aws_s3`
+selector (bucket, region, regional HTTPS endpoint, expected owner and prefix).
+Native credentials are server-side standard-chain inputs and are never wire
+fields. Terminal `policy` distinguishes observed, unavailable and unobservable
+bucket controls. Optional `doctor_probe` additionally reports only the owned
+probe's retention expiry/mode, legal hold and event-hold period; it is absent for
+initialization and verify. Unknown controls never imply absence or purge proof.

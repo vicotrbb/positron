@@ -816,6 +816,178 @@ fn root_terminal_reclamation_retries_ambiguous_publication_without_losing_its_fe
 }
 
 #[test]
+fn root_retirement_preserves_only_canonical_queued_digest_scrubs_without_blocking()
+-> Result<(), Box<dyn std::error::Error>> {
+    for variant in [
+        "queued",
+        "input",
+        "output",
+        "claim",
+        "source",
+        "paused",
+        "running",
+        "checkpoint",
+    ] {
+        let root = CatalogRoot::new()?;
+        let authority =
+            crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+                PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+                70_000_001,
+                1_048_576 + 16_384,
+            )?;
+        let catalog = Catalog::open(
+            &authority,
+            InstanceId::new(nonzero_id(81))?,
+            CatalogSecret::from_owned(Box::new([0xa1; 32]), Box::new([0xa2; 32])),
+        )?;
+        catalog.commit(
+            catalog.pin()?.identity(),
+            CatalogProposal::new(
+                TransactionId::new(nonzero_id(82))?,
+                FormatEpoch::CATALOG_V1,
+                vec![CatalogObject::new(
+                    b"queued scrub retirement basis".to_vec(),
+                )?],
+            )?,
+            None,
+        )?;
+        let coordinator = MaintenanceCoordinator::new();
+        let mut task = MaintenanceTask::integrity_scrub(
+            MaintenanceTaskId::new([83; 16]).expect("identity"),
+            MaintenanceScope::segment(
+                positron_domain::identity::TenantId::from_bytes([0x43; 16])?,
+                positron_domain::routing::SignalKind::Logs,
+                positron_domain::routing::VirtualShardId::new(1)?,
+            ),
+            MaintenanceTrigger::Scheduled,
+            MaintenancePreconditions::new(catalog.pin()?.number(), 1).expect("basis"),
+            [85; 32],
+            2,
+        )
+        .expect("canonical digest descriptor");
+        match variant {
+            "input" => task
+                .inputs
+                .push(MaintenanceObjectId::new([86; 32]).expect("input")),
+            "output" => task
+                .outputs
+                .push(MaintenanceObjectId::new([87; 32]).expect("output")),
+            "claim" => task.reservations = ResourceAmounts::new([1; 11]),
+            "source" => task.integrity_scrub_source = None,
+            _ => {},
+        }
+        let identity = task.identity();
+        let submitted = coordinator.submit_and_persist(&catalog, task, 1);
+        if variant == "source" {
+            assert!(matches!(submitted, Err(MaintenanceFailure::InvalidInput)));
+            continue;
+        }
+        submitted.unwrap_or_else(|failure| panic!("persist {variant} scrub: {failure:?}"));
+        if matches!(variant, "running" | "checkpoint") {
+            coordinator
+                .start_next(3, false)
+                .expect("dispatch")
+                .ok_or("scrub dispatch")?;
+        }
+        if variant == "checkpoint" {
+            coordinator
+                .checkpoint(
+                    identity,
+                    MaintenanceCheckpoint::new(1, 0, vec![9, 8]).expect("opaque checkpoint"),
+                )
+                .expect("checkpoint");
+        }
+        if variant == "paused" {
+            // Restore a previously persisted deferred descriptor. The current
+            // pause API itself rejects deferring this safety task class.
+            assert!(matches!(
+                coordinator.pause_and_persist(&catalog, identity, 1, 12, 3),
+                Err(MaintenanceFailure::PreconditionFailed)
+            ));
+        }
+        if matches!(variant, "running" | "checkpoint" | "paused") {
+            let records = coordinator.durable_records().expect("task record");
+            let record = records.first().ok_or("scrub record")?;
+            let mut retained = decode_record(record.as_bytes()).expect("decode scrub");
+            if variant == "paused" {
+                retained.phase = MaintenanceTaskPhase::Deferred;
+                retained.pause_until = Some(12);
+            } else if variant == "checkpoint" {
+                retained.phase = MaintenanceTaskPhase::Queued;
+                retained.active_dispatch = None;
+                retained.last_progress_at = None;
+            }
+            let replacement = encode_record(&retained).expect("retained record");
+            let basis = catalog.pin()?;
+            let objects = basis
+                .plaintext_objects()
+                .map(|bytes| {
+                    CatalogObject::new(
+                        if record::record_identity(bytes).expect("record identity")
+                            == Some(identity)
+                        {
+                            replacement.as_bytes().to_vec()
+                        } else {
+                            bytes.to_vec()
+                        },
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            catalog.commit(
+                basis.identity(),
+                CatalogProposal::new(
+                    TransactionId::new(nonzero_id(84))?,
+                    FormatEpoch::CATALOG_V1,
+                    objects,
+                )?,
+                None,
+            )?;
+            if variant != "running" {
+                coordinator
+                    .replace_from_catalog(&catalog)
+                    .expect("restore retained scrub");
+            }
+        }
+        let session = crate::RootRewrapSession::admit(&authority)?;
+        let basis = catalog.pin()?;
+        let proof = coordinator.guard_root_retirement_references(&session, &catalog, &basis);
+        if variant == "queued" {
+            let proof = proof.expect("canonical queued digest must not fence root retirement");
+            assert!(
+                crate::ActiveSegmentLedger::guard_local_root_retirement(&authority, &catalog)
+                    .is_err()
+            );
+            let reader = authority.snapshot_barrier().read().expect("reader barrier");
+            assert!(
+                crate::ActiveSegmentLedger::guard_local_root_retirement_with_references(
+                    &authority, &catalog, &proof,
+                )
+                .is_err()
+            );
+            drop(reader);
+            drop(
+                crate::ActiveSegmentLedger::guard_local_root_retirement_with_references(
+                    &authority, &catalog, &proof,
+                )
+                .expect("ledger accepts the coordinator's exact queued proof"),
+            );
+            drop(proof);
+            assert_eq!(
+                coordinator
+                    .status(identity)
+                    .expect("descriptor retained")
+                    .phase(),
+                MaintenanceTaskPhase::Queued
+            );
+            assert_eq!(catalog.pin()?.identity(), basis.identity());
+        } else {
+            assert!(proof.is_err(), "{variant} must retain its reference fence");
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn root_reclamation_preserves_opaque_scrub_references_and_expires_digest_only_descriptors()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = CatalogRoot::new()?;

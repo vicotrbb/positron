@@ -60,8 +60,12 @@ impl DoctorPlan {
 pub struct DoctorReport {
     verified: bool,
     probes_deleted: bool,
+    policy: crate::RepositoryPolicy,
 }
 impl DoctorReport {
+    pub const fn policy(self) -> crate::RepositoryPolicy {
+        self.policy
+    }
     pub const fn verified(self) -> bool {
         self.verified
     }
@@ -95,6 +99,7 @@ pub async fn doctor(
     plan: DoctorPlan,
 ) -> Result<DoctorReport, RepositoryFailure> {
     require(plan.step(repository.identify()).await? == plan.identity)?;
+    let mut policy = plan.step(repository.storage_policy()).await?;
     let object = ImmutableObject::new(payload(&plan.probe, b"repository doctor immutable v1"))?;
     match plan.step(repository.put_if_absent(object.clone())).await? {
         PutOutcome::Created | PutOutcome::AlreadyPresent => {},
@@ -103,6 +108,7 @@ pub async fn doctor(
         plan.step(repository.put_if_absent(object.clone())).await? == PutOutcome::AlreadyPresent,
     )?;
     let metadata = plan.step(repository.head(object.id())).await?;
+    policy.doctor_probe = Some(metadata.protection());
     require(
         metadata.size() == object.bytes().len() as u64
             && metadata.checksum() == object.id().checksum(),
@@ -202,5 +208,6 @@ pub async fn doctor(
     Ok(DoctorReport {
         verified: true,
         probes_deleted: true,
+        policy,
     })
 }

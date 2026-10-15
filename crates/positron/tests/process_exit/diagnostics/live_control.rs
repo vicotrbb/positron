@@ -183,11 +183,7 @@ fn live_control_support_bundle_does_not_authenticate_an_arbitrary_control_respon
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|error| error.to_string())?;
-        let mut request = [0_u8; 4_096];
-        let read = stream
-            .read(&mut request)
-            .map_err(|error| error.to_string())?;
-        let request = &request[..read];
+        let request = read_control_fixture_request(&mut stream)?;
         if !request.starts_with(b"POST /control/support-bundle HTTP/1.1\r\n") {
             return Err("support bundle did not issue the control request".to_owned());
         }
@@ -353,5 +349,105 @@ fn live_control_support_bundle_withholds_credentials_from_a_world_accessible_soc
     );
     fs::remove_file(control)?;
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_control_fixture_request(
+    stream: &mut std::os::unix::net::UnixStream,
+) -> Result<Vec<u8>, String> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(stream.take(4096));
+    let mut request = Vec::new();
+    let mut length = None;
+    loop {
+        let mut line = Vec::new();
+        if reader
+            .read_until(b'\n', &mut line)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Err("incomplete fixture request headers".into());
+        }
+        request.extend_from_slice(&line);
+        if line == b"\r\n" {
+            break;
+        }
+        let line = std::str::from_utf8(&line).map_err(|_| "invalid fixture request header")?;
+        if let Some(value) = line.strip_prefix("Content-Length: ") {
+            if length.is_some() {
+                return Err("duplicate fixture content length".into());
+            }
+            length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "invalid fixture content length")?,
+            );
+        }
+    }
+    let length = length.ok_or("missing fixture content length")?;
+    let total = request
+        .len()
+        .checked_add(length)
+        .filter(|total| *total <= 4096)
+        .ok_or("fixture request exceeds bound")?;
+    let body_start = request.len();
+    request.resize(total, 0);
+    reader
+        .read_exact(&mut request[body_start..])
+        .map_err(|error| error.to_string())?;
+    Ok(request)
+}
+
+#[cfg(unix)]
+#[test]
+fn control_fixture_consumes_the_declared_body_before_responding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair()?;
+    reader.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let result = read_control_fixture_request(&mut reader);
+        sender.send(result)
+    });
+    let headers = b"POST /control/support-bundle HTTP/1.1\r\nContent-Length: 4\r\n\r\n";
+    writer.write_all(headers)?;
+    let premature = receiver.recv_timeout(Duration::from_millis(100));
+    let body_write = writer.write_all(b"body");
+    let request = match premature {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            receiver.recv_timeout(Duration::from_secs(5))?
+        },
+        Err(error) => return Err(error.into()),
+    }
+    .map_err(|error| format!("fixture request: {error}"))?;
+    server.join().map_err(|_| "fixture reader panicked")??;
+    assert_eq!(
+        request,
+        [headers.as_slice(), b"body"].concat(),
+        "fixture must consume the body before closing its response"
+    );
+    body_write?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn control_fixture_refuses_incomplete_or_unbounded_requests()
+-> Result<(), Box<dyn std::error::Error>> {
+    for request in [
+        b"POST / HTTP/1.1\r\n\r\n".as_slice(),
+        b"POST / HTTP/1.1\r\nContent-Length: invalid\r\n\r\n",
+        b"POST / HTTP/1.1\r\nContent-Length: 4097\r\n\r\n",
+        b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nx",
+    ] {
+        let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair()?;
+        reader.set_read_timeout(Some(Duration::from_secs(5)))?;
+        writer.write_all(request)?;
+        writer.shutdown(std::net::Shutdown::Write)?;
+        assert!(read_control_fixture_request(&mut reader).is_err());
+    }
     Ok(())
 }

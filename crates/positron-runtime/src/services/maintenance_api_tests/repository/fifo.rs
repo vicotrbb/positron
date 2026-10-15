@@ -68,7 +68,9 @@ fn doctor_fifo_child_fixture() -> Result<(), Box<dyn std::error::Error>> {
                 &administrator,
                 RepositoryAdmission {
                     action,
-                    locator: &path,
+                    locator: crate::services::repository_administration::RepositoryLocation::Local(
+                        &path,
+                    ),
                     repository: [81; 16],
                     expected_generation: generation,
                     idempotency: AdministrativeIdempotencyKey::new([key; 16])?,

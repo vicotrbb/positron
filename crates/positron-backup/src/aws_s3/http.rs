@@ -1,0 +1,391 @@
+use crate::{MAX_OBJECT_BYTES, RepositoryFailure};
+use aws_smithy_runtime_api::client::{
+    http::{
+        HttpClient, HttpConnector, HttpConnectorFuture, HttpConnectorSettings, SharedHttpClient,
+        SharedHttpConnector,
+    },
+    orchestrator::HttpRequest,
+    result::ConnectorError,
+    runtime_components::RuntimeComponents,
+};
+use aws_smithy_types::body::SdkBody;
+use http_body_util::{BodyExt, Limited};
+use positron_kernel::NativeAwsResources;
+use std::sync::Arc;
+use tokio::io::AsyncReadExt;
+use tracing::instrument::WithSubscriber;
+
+/// Reserve one bounded native extent before reading, avoiding geometric payload
+/// growth while another admitted object is still resident.
+pub(super) async fn read_bytes(
+    body: aws_sdk_s3::primitives::ByteStream,
+    length: Option<i64>,
+    maximum: u64,
+) -> Result<Vec<u8>, RepositoryFailure> {
+    let length = length
+        .map(|length| u64::try_from(length).map_err(|_| RepositoryFailure::CorruptState))
+        .transpose()?;
+    let limit = length.unwrap_or(maximum);
+    if limit > maximum {
+        return Err(RepositoryFailure::LimitExceeded);
+    }
+    let capacity = usize::try_from(limit)
+        .map_err(|_| RepositoryFailure::LimitExceeded)?
+        .checked_add(4096)
+        .ok_or(RepositoryFailure::LimitExceeded)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    body.into_async_read()
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .with_subscriber(tracing::subscriber::NoSubscriber::default())
+        .await
+        .map_err(|_| RepositoryFailure::StorageUnavailable)?;
+    if bytes.len() as u64 > limit {
+        return Err(RepositoryFailure::LimitExceeded);
+    }
+    if length.is_some_and(|length| bytes.len() as u64 != length) {
+        return Err(RepositoryFailure::CorruptState);
+    }
+    Ok(bytes)
+}
+
+#[derive(Clone)]
+pub(super) struct BoundedClient {
+    inner: SharedHttpClient,
+    owner: Arc<NativeAwsResources>,
+    endpoint: String,
+    data_prefixes: [String; 5],
+}
+impl BoundedClient {
+    pub(super) fn new(
+        inner: SharedHttpClient,
+        owner: Arc<NativeAwsResources>,
+        target: &crate::AwsS3Target,
+    ) -> Self {
+        Self {
+            inner,
+            owner,
+            endpoint: format!("{}/", target.endpoint()),
+            data_prefixes: data_prefixes(target),
+        }
+    }
+    #[cfg(feature = "test-support")]
+    pub(super) fn with_simulation_endpoint(
+        mut self,
+        target: &crate::AwsS3Target,
+        endpoint: &str,
+    ) -> Self {
+        self.endpoint = format!("{endpoint}/");
+        self.data_prefixes = ["identity", "o-", "h-", "u-", "m-"]
+            .map(|kind| format!("{endpoint}/{}/{}{kind}", target.bucket(), target.prefix()));
+        self
+    }
+}
+struct BoundedConnector {
+    inner: SharedHttpConnector,
+    owner: Arc<NativeAwsResources>,
+    endpoint: String,
+    data_prefixes: [String; 5],
+}
+impl std::fmt::Debug for BoundedClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundedClient").finish_non_exhaustive()
+    }
+}
+impl std::fmt::Debug for BoundedConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundedConnector").finish_non_exhaustive()
+    }
+}
+fn data_prefixes(target: &crate::AwsS3Target) -> [String; 5] {
+    ["identity", "o-", "h-", "u-", "m-"].map(|kind| {
+        format!(
+            "{}/{}/{}{kind}",
+            target.endpoint(),
+            target.bucket(),
+            target.prefix()
+        )
+    })
+}
+fn response_limit(
+    method: &str,
+    uri: &str,
+    endpoint: &str,
+    prefixes: &[String],
+    success: bool,
+) -> usize {
+    if !uri.starts_with(endpoint) {
+        return 32768;
+    }
+    let (path, query) = uri.split_once('?').unwrap_or((uri, ""));
+    let object_query = query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .all(|part| {
+            part.split_once('=').is_some_and(|(name, value)| {
+                name == "versionId" || (name == "x-id" && value == "GetObject")
+            })
+        });
+    if success
+        && method == "GET"
+        && object_query
+        && prefixes.iter().any(|prefix| path.starts_with(prefix))
+    {
+        MAX_OBJECT_BYTES as usize + 65536
+    } else {
+        1_048_576
+    }
+}
+fn declared_body_exceeds_limit(method: &str, length: Option<&str>, limit: usize) -> bool {
+    // HEAD advertises the selected object's extent, never a response body.
+    method != "HEAD"
+        && length
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|length| length > limit as u64)
+}
+impl HttpClient for BoundedClient {
+    fn http_connector(
+        &self,
+        settings: &HttpConnectorSettings,
+        runtime: &RuntimeComponents,
+    ) -> SharedHttpConnector {
+        SharedHttpConnector::new(BoundedConnector {
+            inner: self.inner.http_connector(settings, runtime),
+            owner: self.owner.clone(),
+            endpoint: self.endpoint.clone(),
+            data_prefixes: self.data_prefixes.clone(),
+        })
+    }
+}
+impl HttpConnector for BoundedConnector {
+    fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+        let method = request.method().to_owned();
+        let uri = request.uri().to_owned();
+        let endpoint = self.endpoint.clone();
+        let prefixes = self.data_prefixes.clone();
+        let future = self.inner.call(request);
+        let owner = self.owner.clone();
+        HttpConnectorFuture::new(async move {
+            let mut response = future
+                .with_subscriber(tracing::subscriber::NoSubscriber::default())
+                .await?;
+            let limit = response_limit(
+                &method,
+                &uri,
+                &endpoint,
+                &prefixes,
+                response.status().is_success(),
+            );
+            if declared_body_exceeds_limit(&method, response.headers().get("content-length"), limit)
+            {
+                return Err(ConnectorError::other(
+                    Box::new(RepositoryFailure::LimitExceeded),
+                    None,
+                ));
+            }
+            let body = std::mem::replace(response.body_mut(), SdkBody::empty());
+            let body = SdkBody::from_body_1_x(body.map_frame(move |frame| {
+                let _owner = &owner;
+                frame
+            }));
+            *response.body_mut() = bounded(body, limit);
+            Ok(response)
+        })
+    }
+}
+fn bounded(body: SdkBody, limit: usize) -> SdkBody {
+    SdkBody::from_body_1_x(Limited::new(body, limit))
+}
+
+#[cfg(test)]
+mod tests {
+    use aws_smithy_types::body::SdkBody;
+    use http_body_util::BodyExt;
+    #[tokio::test]
+    async fn head_content_length_describes_the_object_while_actual_bodies_remain_bounded() {
+        assert!(!super::declared_body_exceeds_limit(
+            "HEAD",
+            Some("6291456"),
+            1_048_576
+        ));
+        assert!(super::declared_body_exceeds_limit(
+            "GET",
+            Some("6291456"),
+            1_048_576
+        ));
+        assert_eq!(
+            super::bounded(SdkBody::empty(), 1_048_576)
+                .collect()
+                .await
+                .expect("HEAD body")
+                .to_bytes()
+                .len(),
+            0
+        );
+        assert!(
+            super::bounded(unknown_body(1_048_577), 1_048_576)
+                .collect()
+                .await
+                .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn native_payload_extent_is_bounded_and_truncation_fails_closed() {
+        use crate::RepositoryFailure;
+        use aws_sdk_s3::primitives::ByteStream;
+        let bytes = || ByteStream::from(vec![37; 8]);
+        assert_eq!(
+            super::read_bytes(bytes(), Some(8), 8)
+                .await
+                .expect("exact extent"),
+            vec![37; 8]
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), None, 8)
+                .await
+                .expect("bounded unknown extent"),
+            vec![37; 8]
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), Some(7), 8).await,
+            Err(RepositoryFailure::LimitExceeded)
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), Some(9), 16).await,
+            Err(RepositoryFailure::CorruptState)
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), Some(9), 8).await,
+            Err(RepositoryFailure::LimitExceeded)
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), Some(-1), 8).await,
+            Err(RepositoryFailure::CorruptState)
+        );
+        assert_eq!(
+            super::read_bytes(bytes(), None, 7).await,
+            Err(RepositoryFailure::LimitExceeded)
+        );
+    }
+    fn unknown_body(length: usize) -> SdkBody {
+        SdkBody::from_body_1_x(http_body_util::StreamBody::new(futures_util::stream::once(
+            async move {
+                Ok::<_, std::io::Error>(http_body::Frame::data(bytes::Bytes::from(vec![0; length])))
+            },
+        )))
+    }
+    #[test]
+    fn control_and_credential_responses_cannot_consume_the_object_body_budget() {
+        let target = crate::AwsS3Target::new(
+            "positron-example",
+            "us-east-1",
+            "https://s3.us-east-1.amazonaws.com",
+            "123456789012",
+            "owned/",
+        )
+        .expect("target");
+        let prefixes = super::data_prefixes(&target);
+        let endpoint = format!("{}/", target.endpoint());
+        assert_eq!(
+            super::response_limit(
+                "GET",
+                "https://s3.us-east-1.amazonaws.com/positron-example?versions",
+                &endpoint,
+                &prefixes,
+                true
+            ),
+            1_048_576
+        );
+        assert_eq!(
+            super::response_limit(
+                "GET",
+                "https://s3.us-east-1.amazonaws.com/positron-example/owned/m-123?uploadId=opaque",
+                &endpoint,
+                &prefixes,
+                true
+            ),
+            1_048_576
+        );
+        assert_eq!(
+            super::response_limit(
+                "GET",
+                "https://s3.us-east-1.amazonaws.com/positron-example/owned/o-123?x-id=GetObject",
+                &endpoint,
+                &prefixes,
+                true
+            ),
+            crate::MAX_OBJECT_BYTES as usize + 65536
+        );
+        assert_eq!(
+            super::response_limit(
+                "GET",
+                "https://s3.us-east-1.amazonaws.com/positron-example/owned/o-123",
+                &endpoint,
+                &prefixes,
+                false
+            ),
+            1_048_576
+        );
+        assert_eq!(
+            super::response_limit(
+                "POST",
+                "https://sts.us-east-1.amazonaws.com/",
+                &endpoint,
+                &prefixes,
+                true
+            ),
+            32768
+        );
+    }
+    #[tokio::test]
+    async fn body_limit_errors_remain_typed_and_mutation_acknowledgements_unknown() {
+        use aws_sdk_s3::error::SdkError;
+        use aws_smithy_runtime_api::http::{Response, StatusCode};
+        let error = super::bounded(unknown_body(257), 256)
+            .collect()
+            .await
+            .expect_err("oversized read");
+        let response = Response::new(StatusCode::try_from(200).expect("status"), SdkBody::empty());
+        assert_eq!(
+            super::super::failure::sdk(
+                SdkError::<aws_sdk_s3::operation::get_object::GetObjectError>::response_error(
+                    error, response
+                ),
+                false
+            ),
+            crate::RepositoryFailure::LimitExceeded
+        );
+        let error = super::bounded(unknown_body(257), 256)
+            .collect()
+            .await
+            .expect_err("oversized mutation response");
+        let response = Response::new(StatusCode::try_from(200).expect("status"), SdkBody::empty());
+        assert_eq!(
+            super::super::failure::sdk(
+                SdkError::<aws_sdk_s3::operation::put_object::PutObjectError>::response_error(
+                    error, response
+                ),
+                true
+            ),
+            crate::RepositoryFailure::OutcomeUnknown
+        );
+    }
+    #[tokio::test]
+    async fn unknown_length_bodies_are_bounded_before_deserialization() {
+        assert!(
+            super::bounded(unknown_body(257), 256)
+                .collect()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            super::bounded(unknown_body(256), 256)
+                .collect()
+                .await
+                .expect("bounded body")
+                .to_bytes()
+                .len(),
+            256
+        );
+    }
+}

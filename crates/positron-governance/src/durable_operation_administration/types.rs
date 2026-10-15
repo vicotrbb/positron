@@ -947,6 +947,7 @@ pub struct DurableOperation {
     pub(super) request: DurableOperationRequest,
     pub(super) key_provider_migration_parameters: Option<super::KeyProviderMigrationParameters>,
     pub(super) repository_parameters: Option<super::RepositoryOperationParameters>,
+    pub(super) repository_policy: Option<super::repository_policy_codec::RepositoryPolicyReceipt>,
     pub(super) status: DurableOperationStatus,
     pub(super) phase: DurableOperationPhase,
     pub(super) progress_percent: u8,
@@ -961,6 +962,12 @@ pub struct DurableOperation {
 }
 
 impl DurableOperation {
+    pub const fn repository_policy(self) -> Option<positron_domain::repository::RepositoryPolicy> {
+        match self.repository_policy {
+            Some(receipt) => Some(receipt.policy()),
+            None => None,
+        }
+    }
     pub const fn repository_parameters(self) -> Option<super::RepositoryOperationParameters> {
         self.repository_parameters
     }
@@ -1058,6 +1065,7 @@ impl DurableOperation {
             request,
             key_provider_migration_parameters: None,
             repository_parameters: None,
+            repository_policy: None,
             status: DurableOperationStatus::Pending,
             phase: DurableOperationPhase::Accepted,
             progress_percent: 0,
@@ -1258,6 +1266,20 @@ impl DurableOperation {
             },
             None => self.request.kind == DurableOperationKind::RepositoryInspection,
         } {
+            return false;
+        }
+        if self.status == DurableOperationStatus::Succeeded
+            && self.repository_policy.is_none()
+            && self.repository_parameters.is_some_and(|parameters| {
+                parameters.provider_kind() == super::RepositoryProviderKind::AwsS3
+            })
+        {
+            return false;
+        }
+        if self.repository_policy.is_some()
+            && (self.request.kind != DurableOperationKind::RepositoryInspection
+                || self.status != DurableOperationStatus::Succeeded)
+        {
             return false;
         }
         if !self.request.is_valid_persisted_request()

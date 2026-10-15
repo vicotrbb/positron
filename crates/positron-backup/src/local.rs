@@ -122,6 +122,10 @@ impl LocalRepository {
 }
 #[async_trait::async_trait]
 impl Repository for LocalRepository {
+    async fn storage_policy(&self) -> Result<crate::RepositoryPolicy, RepositoryFailure> {
+        self.identify().await?;
+        Ok(crate::RepositoryPolicy::local())
+    }
     async fn identify(&self) -> Result<RepositoryIdentity, RepositoryFailure> {
         let root = Arc::clone(&self.root);
         let expected = self.identity.clone();
@@ -456,5 +460,9 @@ fn metadata(file: &mut File, object: ObjectId) -> Result<ObjectMetadata, Reposit
     if observed != size || checksum != object.checksum() {
         return Err(RepositoryFailure::ChecksumMismatch);
     }
-    Ok(ObjectMetadata { size, checksum })
+    Ok(ObjectMetadata {
+        size,
+        checksum,
+        protection: crate::ObjectProtection::unobservable(),
+    })
 }

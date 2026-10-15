@@ -26,7 +26,15 @@ async fn doctor_proves_provider_behaviors_and_cleans_only_its_probes()
     )?;
     let report = doctor(&repository, plan).await?;
     assert!(report.verified());
+    assert_eq!(
+        report.policy().versioning,
+        positron_backup::PolicyObservation::Unobservable
+    );
     assert!(report.probes_deleted());
+    assert_eq!(
+        report.policy().doctor_probe,
+        Some(positron_backup::ObjectProtection::unobservable())
+    );
     assert_eq!(
         repository.head(retained.id()).await?.checksum(),
         retained.id().checksum()

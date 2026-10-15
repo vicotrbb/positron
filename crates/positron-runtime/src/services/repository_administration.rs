@@ -1,5 +1,6 @@
 //! Authenticated admission; Administration owns parameters and lifecycle.
 mod execution;
+mod policy_projection;
 mod wire;
 use super::{ServiceHandle, maintenance_api::MaintenanceServiceFailure};
 pub(super) use execution::{complete, recover_accepted_task};
@@ -11,9 +12,14 @@ use positron_governance::{
 use positron_kernel::{MaintenancePreconditions, RepositoryOperationBinding};
 use std::path::Path;
 #[derive(Clone, Copy)]
+pub(crate) enum RepositoryLocation<'a> {
+    Local(&'a Path),
+    AwsS3(&'a positron_backup::AwsS3Target),
+}
+#[derive(Clone, Copy)]
 pub(crate) struct RepositoryAdmission<'a> {
     pub action: RepositoryAction,
-    pub locator: &'a Path,
+    pub locator: RepositoryLocation<'a>,
     pub repository: [u8; 16],
     pub expected_generation: u64,
     pub idempotency: AdministrativeIdempotencyKey,
@@ -38,26 +44,42 @@ impl ServiceHandle {
                 .1
                 .integrity_key_fingerprint()
         };
-        // Native path resolution follows authorization and precedes admission.
-        // Provider work never runs while owning the primary Catalog writer gate.
-        let identity = positron_backup::RepositoryIdentity::local(
-            input.repository,
-            self.instance.instance.to_bytes(),
-            fingerprint,
-            input.locator,
-        )
-        .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
-        let locator = input
-            .locator
-            .to_str()
-            .ok_or(MaintenanceServiceFailure::InvalidRequest)?;
-        let parameters = RepositoryOperationParameters::local(
-            input.action,
-            locator,
-            input.repository,
-            fingerprint,
-            identity.prefix_commitment(),
-        )
+        // Resolve only the selected native locator after authorization.
+        let parameters = match input.locator {
+            RepositoryLocation::Local(path) => {
+                let identity = positron_backup::RepositoryIdentity::local(
+                    input.repository,
+                    self.instance.instance.to_bytes(),
+                    fingerprint,
+                    path,
+                )
+                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+                RepositoryOperationParameters::local(
+                    input.action,
+                    path.to_str()
+                        .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                    input.repository,
+                    fingerprint,
+                    identity.prefix_commitment(),
+                )
+            },
+            RepositoryLocation::AwsS3(target) => {
+                let identity = positron_backup::RepositoryIdentity::aws_s3(
+                    input.repository,
+                    self.instance.instance.to_bytes(),
+                    fingerprint,
+                    target,
+                )
+                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+                RepositoryOperationParameters::aws_s3(
+                    input.action,
+                    &target.encode_locator(),
+                    input.repository,
+                    fingerprint,
+                    identity.prefix_commitment(),
+                )
+            },
+        }
         .map_err(super::provider_migration::operation_failure)?;
         let operation = {
             let _gate = self
@@ -86,7 +108,7 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
                 self.instance
                     .maintenance_coordinator()
-                    .submit_repository_operation_and_persist(
+                    .submit_repository_operation_with_resources_and_persist(
                         &catalog,
                         binding,
                         MaintenancePreconditions::new(
@@ -98,6 +120,7 @@ impl ServiceHandle {
                             1,
                         )
                         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?,
+                        repository_resources(parameters.provider_kind()),
                         now,
                     )
                     .map_err(|_| MaintenanceServiceFailure::TaskUnavailable)?;
@@ -158,4 +181,20 @@ fn require_operation(
         return Err(crate::ServiceFailure::CorruptState);
     }
     Ok(())
+}
+
+fn repository_resources(
+    kind: positron_governance::RepositoryProviderKind,
+) -> positron_kernel::ResourceAmounts {
+    let mut amounts = [131_072, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384];
+    if kind == positron_governance::RepositoryProviderKind::AwsS3 {
+        let native = positron_backup::AwsS3Repository::required_resources();
+        for (amount, dimension) in amounts
+            .iter_mut()
+            .zip(positron_kernel::ResourceDimension::ALL)
+        {
+            *amount = (*amount).max(native.get(dimension));
+        }
+    }
+    positron_kernel::ResourceAmounts::new(amounts)
 }

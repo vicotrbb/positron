@@ -1,7 +1,7 @@
 //! The running instance owns repository; this command is an authenticated client.
 use positron_api::repository::{
-    RepositoryRequest, RepositoryResponse, RepositoryServiceClient, RepositoryServiceClientFailure,
-    RepositoryTransport,
+    RepositoryAwsS3Target, RepositoryRequest, RepositoryResponse, RepositoryServiceClient,
+    RepositoryServiceClientFailure, RepositoryTransport,
 };
 use std::{
     collections::BTreeMap,
@@ -9,7 +9,7 @@ use std::{
     process::ExitCode,
     time::{Duration, Instant},
 };
-const USAGE: &str = "usage: positron repository init|verify|doctor|status|lookup|wait|cancel --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--locator SERVER_PATH --repository-id UUID --expected-generation N --idempotency-key UUID --operation-id ID]";
+const USAGE: &str = "usage: positron repository init|verify|doctor|status|lookup|wait|cancel --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--locator SERVER_PATH | --aws-bucket BUCKET --aws-region REGION --aws-endpoint HTTPS_ENDPOINT --aws-expected-owner ACCOUNT --aws-prefix PREFIX] [--repository-id UUID --expected-generation N --idempotency-key UUID --operation-id ID]";
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     crate::administrative_cli::exit(execute(arguments, &mut std::io::stdout().lock()))
@@ -61,6 +61,57 @@ fn write_response(
         )
         .map_err(|_| "repository output unavailable")?;
     }
+    if let Some(policy) = &response.policy {
+        writeln!(
+            output,
+            "policy_observed_at_unix_seconds={}",
+            policy.observed_at_unix_seconds
+        )
+        .map_err(|_| "repository output unavailable")?;
+        let mut observations = vec![
+            ("versioning", &policy.versioning),
+            ("object_lock", &policy.object_lock),
+            ("lifecycle", &policy.lifecycle),
+        ];
+        if let Some(probe) = &policy.doctor_probe {
+            observations.extend([
+                ("doctor_probe_retention", &probe.retention),
+                ("doctor_probe_legal_hold", &probe.legal_hold),
+                ("doctor_probe_event_hold", &probe.event_hold),
+            ]);
+        }
+        for (name, observation) in observations {
+            writeln!(output, "{name}_state={} {name}_value={:?} {name}_failure={:?} {name}_retry_after_millis={:?}",
+                observation.state, observation.value, observation.failure, observation.retry_after_millis)
+                .map_err(|_| "repository output unavailable")?;
+            if let Some(retention) = &observation.object_retention {
+                writeln!(
+                    output,
+                    "object_retention_mode={} retain_until_unix_seconds={}",
+                    retention.mode, retention.retain_until_unix_seconds
+                )
+                .map_err(|_| "repository output unavailable")?;
+            }
+            if let Some(hold) = &observation.event_hold {
+                writeln!(
+                    output,
+                    "event_hold_enabled={} event_hold_period_unit={:?} event_hold_period={:?}",
+                    hold.enabled, hold.period_unit, hold.period
+                )
+                .map_err(|_| "repository output unavailable")?;
+            }
+            if let Some(retention) = &observation.default_retention {
+                writeln!(output, "default_retention_mode={} default_retention_period_unit={} default_retention_period={}",
+                    retention.mode, retention.period_unit, retention.period)
+                    .map_err(|_| "repository output unavailable")?;
+            }
+            if let Some(lifecycle) = &observation.lifecycle {
+                writeln!(output, "current_expiration={} noncurrent_expiration={} transition={} abandoned_upload_expiration={}",
+                    lifecycle.current_expiration, lifecycle.noncurrent_expiration, lifecycle.transition, lifecycle.abandoned_upload_expiration)
+                    .map_err(|_| "repository output unavailable")?;
+            }
+        }
+    }
     if let Some(operation) = &response.operation {
         writeln!(output, "operation_id={} status={} phase={} progress_percent={} cancellation={} irreversible_boundary={} retry={} lookup_expires_at_unix_seconds={:?}", operation.id, operation.status, operation.phase, operation.progress_percent, operation.cancellation, operation.irreversible_boundary, operation.retry, operation.lookup_expires_at_unix_seconds).map_err(|_| "repository output unavailable")?;
     }
@@ -103,6 +154,11 @@ fn parse(
             | "--server-name"
             | "--trust-file"
             | "--locator"
+            | "--aws-bucket"
+            | "--aws-region"
+            | "--aws-endpoint"
+            | "--aws-expected-owner"
+            | "--aws-prefix"
             | "--repository-id"
             | "--expected-generation"
             | "--idempotency-key"
@@ -147,6 +203,29 @@ fn parse(
         }
         None
     };
+    let native = [
+        "--aws-bucket",
+        "--aws-region",
+        "--aws-endpoint",
+        "--aws-expected-owner",
+        "--aws-prefix",
+    ];
+    let aws_s3 = if native.iter().any(|option| options.contains_key(*option)) {
+        let mut required = |option| {
+            options
+                .remove(option)
+                .ok_or("AWS target requires bucket, region, endpoint, expected owner and prefix")
+        };
+        Some(RepositoryAwsS3Target {
+            bucket: required("--aws-bucket")?,
+            region: required("--aws-region")?,
+            endpoint: required("--aws-endpoint")?,
+            expected_owner: required("--aws-expected-owner")?,
+            prefix: required("--aws-prefix")?,
+        })
+    } else {
+        None
+    };
     let request = RepositoryRequest {
         action: match action.as_str() {
             "wait" => "status",
@@ -162,6 +241,7 @@ fn parse(
             })
             .transpose()?,
         idempotency_key: options.remove("--idempotency-key"),
+        aws_s3,
         locator: options.remove("--locator"),
         repository_id: options.remove("--repository-id"),
         operation_id: options.remove("--operation-id"),

@@ -8,18 +8,26 @@ use std::{
 pub async fn conformance(
     repository: &dyn Repository,
     identity: RepositoryIdentity,
+    doctor_budget: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = doctor(
         repository,
         DoctorPlan::new(
             [101; 32],
             identity.clone(),
-            Duration::from_secs(5),
+            doctor_budget,
             Arc::new(AtomicBool::new(false)),
         )?,
     )
     .await?;
     assert!(report.verified() && report.probes_deleted());
+    object_conformance(repository, identity).await
+}
+
+pub async fn object_conformance(
+    repository: &dyn Repository,
+    identity: RepositoryIdentity,
+) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(repository.identify().await?, identity);
     let absent = ImmutableObject::new(b"conformance absent encrypted frame".to_vec())?;
     assert_eq!(

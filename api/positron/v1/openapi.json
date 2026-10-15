@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "4603a4044be826bfd12efc126cfa2b14aa0f6c2d25d1461cd1b6893a420ae6d5"
+    "x-positron-schema-digest": "fa7d38e907d4caf094dd1f1b4e35386000deb7ee74796d34d56c734f4f400c81"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -3603,6 +3603,9 @@
           },
           "operation_id": {
             "type": "string"
+          },
+          "aws_s3": {
+            "$ref": "#/components/schemas/RepositoryAwsS3Target"
           }
         }
       },
@@ -3719,6 +3722,200 @@
           },
           "doctor": {
             "$ref": "#/components/schemas/RepositoryDoctorResult"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/RepositoryPolicyReceipt"
+          }
+        }
+      },
+      "RepositoryAwsS3Target": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "bucket",
+          "region",
+          "endpoint",
+          "expected_owner",
+          "prefix"
+        ],
+        "properties": {
+          "bucket": {
+            "type": "string"
+          },
+          "region": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "expected_owner": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          }
+        }
+      },
+      "RepositoryDefaultRetention": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "period_unit",
+          "period"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "period_unit": {
+            "type": "string"
+          },
+          "period": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RepositoryLifecyclePolicy": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "current_expiration",
+          "noncurrent_expiration",
+          "transition",
+          "abandoned_upload_expiration"
+        ],
+        "properties": {
+          "current_expiration": {
+            "type": "boolean"
+          },
+          "noncurrent_expiration": {
+            "type": "boolean"
+          },
+          "transition": {
+            "type": "boolean"
+          },
+          "abandoned_upload_expiration": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RepositoryPolicyObservation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "failure": {
+            "type": "string"
+          },
+          "retry_after_millis": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "default_retention": {
+            "$ref": "#/components/schemas/RepositoryDefaultRetention"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/RepositoryLifecyclePolicy"
+          },
+          "object_retention": {
+            "$ref": "#/components/schemas/RepositoryObjectRetention"
+          },
+          "event_hold": {
+            "$ref": "#/components/schemas/RepositoryEventHold"
+          }
+        }
+      },
+      "RepositoryPolicyReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "observed_at_unix_seconds",
+          "versioning",
+          "object_lock",
+          "lifecycle"
+        ],
+        "properties": {
+          "observed_at_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "versioning": {
+            "$ref": "#/components/schemas/RepositoryPolicyObservation"
+          },
+          "object_lock": {
+            "$ref": "#/components/schemas/RepositoryPolicyObservation"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/RepositoryPolicyObservation"
+          },
+          "doctor_probe": {
+            "$ref": "#/components/schemas/RepositoryObjectProtection"
+          }
+        }
+      },
+      "RepositoryObjectRetention": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "retain_until_unix_seconds"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "retain_until_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RepositoryEventHold": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "period_unit": {
+            "type": "string"
+          },
+          "period": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RepositoryObjectProtection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "retention",
+          "legal_hold",
+          "event_hold"
+        ],
+        "properties": {
+          "retention": {
+            "$ref": "#/components/schemas/RepositoryPolicyObservation"
+          },
+          "legal_hold": {
+            "$ref": "#/components/schemas/RepositoryPolicyObservation"
+          },
+          "event_hold": {
+            "$ref": "#/components/schemas/RepositoryPolicyObservation"
           }
         }
       }

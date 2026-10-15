@@ -89,6 +89,26 @@ pub fn fuzz_maintenance_catalog_stateful(data: &[u8]) {
             crate::ResourceAmounts::new([1; 11]),
         )
         .expect("bounded opaque task")
+    } else if data.first().is_some_and(|selector| selector & 0x30 == 0x20) {
+        let mut scrub = MaintenanceTask::integrity_scrub(
+            identity,
+            super::MaintenanceScope::segment(
+                positron_domain::identity::TenantId::from_bytes([0x43; 16]).expect("fixed tenant"),
+                positron_domain::routing::SignalKind::Logs,
+                positron_domain::routing::VirtualShardId::new(1).expect("fixed shard"),
+            ),
+            super::MaintenanceTrigger::Scheduled,
+            super::MaintenancePreconditions::new(1, 1).expect("fixed preconditions"),
+            [0x42; 32],
+            1,
+        )
+        .expect("canonical digest scrub");
+        if data.first().is_some_and(|selector| selector & 8 != 0) {
+            scrub
+                .inputs
+                .push(super::MaintenanceObjectId::new([0x41; 32]).expect("opaque reference"));
+        }
+        scrub
     } else {
         MaintenanceTask::new(identity, MaintenanceTaskClass::SchemaPromotion)
     };
@@ -191,6 +211,26 @@ pub fn fuzz_maintenance_catalog_stateful(data: &[u8]) {
                     // no unrelated submission or record deletion is synthesized.
                     let _ = coordinator
                         .reclaim_terminal_records_for_root_retirement(&session, &catalog);
+                    if let Ok(basis) = catalog.pin() {
+                        let proof = coordinator
+                            .guard_root_retirement_references(&session, &catalog, &basis);
+                        #[cfg(test)]
+                        match data {
+                            [32, 0, 6] => assert!(
+                                proof.is_ok(),
+                                "canonical queued scrub has no root reference"
+                            ),
+                            [40, 0, 6] => {
+                                assert!(proof.is_err(), "opaque queued scrub retains its reference")
+                            },
+                            _ => {},
+                        }
+                        if let Ok(proof) = proof {
+                            drop(crate::ActiveSegmentLedger::guard_local_root_retirement_with_references(
+                                &authority, &catalog, &proof,
+                            ).expect("the ledger honors the exact locked coordinator proof"));
+                        }
+                    }
                 }
             },
         }
@@ -320,6 +360,8 @@ mod tests {
             vec![64, 0, 4, 6],
             vec![64, 0, 3, 4, 6],
             vec![0, 3, 4, 6],
+            vec![32, 0, 6],
+            vec![40, 0, 6],
         ] {
             super::fuzz_maintenance_catalog_stateful(&input);
         }

@@ -102,12 +102,63 @@ fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
         DurableOperationAdministration::begin(&reopened, actor, accepted.operation_id(), 19)?;
     assert_eq!(running.status(), DurableOperationStatus::Running);
     DurableOperationAdministration::mark_draining(&reopened, actor, accepted.operation_id(), 19)?;
-    let completed = DurableOperationAdministration::succeed_repository(
+    let policy = positron_domain::repository::RepositoryPolicy {
+        doctor_probe: Some(positron_domain::repository::ObjectProtection {
+            retention: positron_domain::repository::PolicyObservation::Observed(
+                positron_domain::repository::ObjectRetention {
+                    mode: positron_domain::repository::RetentionMode::Compliance,
+                    retain_until_unix_seconds: 1_900_000_000,
+                },
+            ),
+            legal_hold: positron_domain::repository::PolicyObservation::Unavailable(
+                positron_domain::repository::RepositoryFailure::PermissionDenied,
+            ),
+            event_hold: positron_domain::repository::PolicyObservation::Observed(Some(
+                positron_domain::repository::RetentionPeriod::Days(7),
+            )),
+        }),
+        ..positron_domain::repository::RepositoryPolicy::local()
+    };
+    let invalid_policy = positron_domain::repository::RepositoryPolicy {
+        object_lock: positron_domain::repository::PolicyObservation::Observed(
+            positron_domain::repository::ObjectLockPolicy::Enabled {
+                default_retention: Some(positron_domain::repository::RetentionPolicy {
+                    mode: positron_domain::repository::RetentionMode::Compliance,
+                    period: positron_domain::repository::RetentionPeriod::Days(0),
+                }),
+            },
+        ),
+        ..policy
+    };
+    assert_eq!(
+        DurableOperationAdministration::succeed_repository_with_policy(
+            &reopened,
+            actor,
+            accepted.operation_id(),
+            20,
+            invalid_policy
+        ),
+        Err(DurableOperationFailure::PersistenceUnavailable)
+    );
+    assert_eq!(
+        DurableOperationAdministration::inspect_authorized(
+            &reopened,
+            actor,
+            accepted.operation_id()
+        )?
+        .ok_or("running operation")?
+        .status(),
+        DurableOperationStatus::Running
+    );
+
+    let completed = DurableOperationAdministration::succeed_repository_with_policy(
         &reopened,
         actor,
         accepted.operation_id(),
         20,
+        policy,
     )?;
+    assert_eq!(completed.repository_policy(), Some(policy));
     assert_eq!(completed.status(), DurableOperationStatus::Succeeded);
     assert_eq!(
         DurableOperationAdministration::inspect_authorized(
@@ -141,5 +192,119 @@ fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
         ),
         Err(DurableOperationFailure::IdempotencyConflict)
     );
+    let native = crate::RepositoryOperationParameters::aws_s3(
+        crate::RepositoryAction::Doctor,
+        "positron-backup\0us-east-1\0https://s3.us-east-1.amazonaws.com\x00123456789012\0owned/",
+        [0xa1; 16],
+        [0xa2; 32],
+        [0xa3; 32],
+    )?;
+    let native_key = AdministrativeIdempotencyKey::new([0xa4; 16])?;
+    let native_request = DurableOperationRequest::repository(
+        actor.principal_id(),
+        native_key,
+        instance.to_bytes(),
+        reopened.pin()?.number(),
+        21,
+        native.intent_digest(),
+    )?;
+    let native_accepted = DurableOperationAdministration::accept_repository(
+        &reopened,
+        actor,
+        native_request,
+        native,
+    )?;
+    assert_eq!(
+        DurableOperationAdministration::accept_repository(
+            &reopened,
+            actor,
+            native_request,
+            native
+        )?,
+        native_accepted
+    );
+    drop(reopened);
+    let reopened = Catalog::open(&authority, instance, keys.catalog_secret(instance)?)?;
+    let native_restored = DurableOperationAdministration::inspect_authorized(
+        &reopened,
+        actor,
+        native_accepted.operation_id(),
+    )?
+    .ok_or("lost native operation")?;
+    assert_eq!(native_restored.repository_parameters(), Some(native));
+    assert_eq!(
+        native_restored
+            .repository_parameters()
+            .ok_or("parameters")?
+            .provider_kind(),
+        crate::RepositoryProviderKind::AwsS3
+    );
+    let changed = crate::RepositoryOperationParameters::aws_s3(
+        crate::RepositoryAction::Doctor,
+        "another-backup\0us-east-1\0https://s3.us-east-1.amazonaws.com\x00123456789012\0owned/",
+        [0xa1; 16],
+        [0xa2; 32],
+        [0xa3; 32],
+    )?;
+    assert_eq!(
+        DurableOperationAdministration::accept_repository(
+            &reopened,
+            actor,
+            DurableOperationRequest::repository(
+                actor.principal_id(),
+                native_key,
+                instance.to_bytes(),
+                native_request.accepted_generation(),
+                21,
+                changed.intent_digest()
+            )?,
+            changed
+        ),
+        Err(DurableOperationFailure::IdempotencyConflict)
+    );
+    DurableOperationAdministration::begin(&reopened, actor, native_accepted.operation_id(), 22)?;
+    DurableOperationAdministration::mark_draining(
+        &reopened,
+        actor,
+        native_accepted.operation_id(),
+        22,
+    )?;
+    assert_eq!(
+        DurableOperationAdministration::succeed_repository(
+            &reopened,
+            actor,
+            native_accepted.operation_id(),
+            23
+        ),
+        Err(DurableOperationFailure::InvalidState)
+    );
+    assert_eq!(
+        DurableOperationAdministration::inspect_authorized(
+            &reopened,
+            actor,
+            native_accepted.operation_id()
+        )?
+        .ok_or("native operation")?
+        .status(),
+        DurableOperationStatus::Running
+    );
+    DurableOperationAdministration::succeed_repository_with_policy(
+        &reopened,
+        actor,
+        native_accepted.operation_id(),
+        23,
+        policy,
+    )?;
+    drop(reopened);
+    let reopened = Catalog::open(&authority, instance, keys.catalog_secret(instance)?)?;
+    let receipt = DurableOperationAdministration::inspect_authorized(
+        &reopened,
+        actor,
+        accepted.operation_id(),
+    )?
+    .ok_or("lost terminal policy receipt")?;
+    assert_eq!(receipt.status(), DurableOperationStatus::Succeeded);
+    assert_eq!(receipt.repository_policy(), Some(policy));
+    assert_eq!(receipt.repository_parameters(), Some(parameters));
     Ok(())
 }

@@ -81,12 +81,24 @@ impl ServiceHandle {
         &self,
         bearer: &str,
     ) -> Result<AuthorizedContext, MaintenanceServiceFailure> {
-        self.instance
-            .attribute(
-                PresentedCredential::parse(bearer)
-                    .map_err(|_| MaintenanceServiceFailure::AuthenticationRejected)?,
+        let credential = PresentedCredential::parse(bearer)
+            .map_err(|_| MaintenanceServiceFailure::AuthenticationRejected)?;
+        let identity = self
+            .instance
+            .durable_identity()
+            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        identity
+            .attribute_with_expiry_time(
+                &self.instance.key,
+                credential,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
+                || {
+                    self.instance
+                        .retention_time
+                        .security_time_seconds()
+                        .map_err(|_| positron_governance::AttributionFailure)
+                },
             )
             .map_err(|_| MaintenanceServiceFailure::AuthenticationRejected)
     }

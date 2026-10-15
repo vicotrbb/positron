@@ -134,3 +134,6 @@ pub mod routing;
 pub mod time;
 /// Bounded native dynamic attribute values.
 pub mod value;
+
+/// Provider-independent Repository outcomes and policy observations.
+pub mod repository;

@@ -726,6 +726,14 @@ message RepositoryRequest {
   optional string locator = 4;
   optional string repository_id = 5;
   optional string operation_id = 6;
+  optional RepositoryAwsS3Target aws_s3 = 7;
+}
+message RepositoryAwsS3Target {
+  string bucket = 1;
+  string region = 2;
+  string endpoint = 3;
+  string expected_owner = 4;
+  string prefix = 5;
 }
 message RepositoryOperation {
   string id = 1;
@@ -750,9 +758,52 @@ message RepositoryDoctorResult {
   bool probes_deleted = 2;
   string external_retention = 3;
 }
+message RepositoryDefaultRetention {
+  string mode = 1;
+  string period_unit = 2;
+  uint32 period = 3;
+}
+message RepositoryLifecyclePolicy {
+  bool current_expiration = 1;
+  bool noncurrent_expiration = 2;
+  bool transition = 3;
+  bool abandoned_upload_expiration = 4;
+}
+message RepositoryPolicyObservation {
+  string state = 1;
+  optional string value = 2;
+  optional string failure = 3;
+  optional uint32 retry_after_millis = 4;
+  optional RepositoryDefaultRetention default_retention = 5;
+  optional RepositoryLifecyclePolicy lifecycle = 6;
+  optional RepositoryObjectRetention object_retention = 7;
+  optional RepositoryEventHold event_hold = 8;
+}
+message RepositoryObjectRetention {
+  string mode = 1;
+  uint64 retain_until_unix_seconds = 2;
+}
+message RepositoryEventHold {
+  bool enabled = 1;
+  optional string period_unit = 2;
+  optional uint32 period = 3;
+}
+message RepositoryObjectProtection {
+  RepositoryPolicyObservation retention = 1;
+  RepositoryPolicyObservation legal_hold = 2;
+  RepositoryPolicyObservation event_hold = 3;
+}
+message RepositoryPolicyReceipt {
+  uint64 observed_at_unix_seconds = 1;
+  RepositoryPolicyObservation versioning = 2;
+  RepositoryPolicyObservation object_lock = 3;
+  RepositoryPolicyObservation lifecycle = 4;
+  optional RepositoryObjectProtection doctor_probe = 5;
+}
 message RepositoryResponse {
   uint64 catalog_generation = 1;
   optional RepositoryOperation operation = 2;
   optional RepositoryIdentity identity = 3;
   optional RepositoryDoctorResult doctor = 4;
+  optional RepositoryPolicyReceipt policy = 5;
 }
