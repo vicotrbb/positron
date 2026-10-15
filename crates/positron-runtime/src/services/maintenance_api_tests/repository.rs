@@ -163,6 +163,7 @@ fn serving_repository_initialize_and_doctor_are_authenticated_durable_tasks()
             .expect("doctor policy receipt")
             .repository_policy(),
         Some(positron_backup::RepositoryPolicy {
+            soft_delete: None,
             doctor_probe: Some(positron_backup::ObjectProtection::unobservable()),
             ..positron_backup::RepositoryPolicy::local()
         })
@@ -307,6 +308,7 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         expected_catalog_generation: None,
         idempotency_key: None,
         aws_s3: None,
+        google_cloud_storage: None,
         locator: None,
         repository_id: None,
         operation_id: None,
@@ -318,6 +320,7 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         expected_catalog_generation: Some(current.catalog_generation),
         idempotency_key: Some("61616161-6161-4161-8161-616161616161".into()),
         aws_s3: None,
+        google_cloud_storage: None,
         locator: Some(path.to_string_lossy().into_owned()),
         repository_id: Some("62626262-6262-4262-8262-626262626262".into()),
         operation_id: None,
@@ -415,6 +418,7 @@ fn repository_pending_cancellation_replay_and_creator_lookup_survive_restart()
         idempotency_key: Some("81818181-8181-4181-8181-818181818181".into()),
         repository_id: Some("82828282-8282-4282-8282-828282828282".into()),
         aws_s3: None,
+        google_cloud_storage: None,
         locator: Some(path.to_string_lossy().into_owned()),
         operation_id: None,
     };
@@ -439,6 +443,7 @@ fn repository_pending_cancellation_replay_and_creator_lookup_survive_restart()
         idempotency_key: Some("84848484-8484-4484-8484-848484848484".into()),
         operation_id: Some(id.clone()),
         aws_s3: None,
+        google_cloud_storage: None,
         locator: None,
         repository_id: None,
     };
@@ -464,6 +469,7 @@ fn repository_pending_cancellation_replay_and_creator_lookup_survive_restart()
         expected_catalog_generation: None,
         idempotency_key: None,
         aws_s3: None,
+        google_cloud_storage: None,
         locator: None,
         repository_id: None,
         operation_id: Some(id),
@@ -630,6 +636,7 @@ fn aws_repository_admission_binds_native_target_without_provider_io()
         locator: None,
         repository_id: Some("65656565-6565-4565-8565-656565656565".into()),
         operation_id: None,
+        google_cloud_storage: None,
         aws_s3: Some(positron_api::repository::RepositoryAwsS3Target {
             bucket: target.bucket().into(),
             region: target.region().into(),
@@ -680,3 +687,6 @@ fn aws_repository_admission_binds_native_target_without_provider_io()
     );
     Ok(())
 }
+
+#[path = "repository/google.rs"]
+mod google;

@@ -10,7 +10,13 @@ pub struct RepositoryIdentity {
     instance: [u8; 16],
     integrity_fingerprint: [u8; 32],
     prefix: [u8; 32],
-    aws_s3: bool,
+    provider: Provider,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Provider {
+    Local,
+    AwsS3,
+    GoogleCloudStorage,
 }
 impl RepositoryIdentity {
     pub fn local(
@@ -34,7 +40,7 @@ impl RepositoryIdentity {
             instance,
             integrity_fingerprint,
             prefix: Sha256::digest(bytes).into(),
-            aws_s3: false,
+            provider: Provider::Local,
         })
     }
     pub fn aws_s3(
@@ -51,14 +57,31 @@ impl RepositoryIdentity {
             instance,
             integrity_fingerprint,
             prefix: target.commitment(),
-            aws_s3: true,
+            provider: Provider::AwsS3,
+        })
+    }
+    pub fn google_cloud_storage(
+        repository: [u8; 16],
+        instance: [u8; 16],
+        integrity_fingerprint: [u8; 32],
+        target: &crate::GoogleCloudStorageTarget,
+    ) -> Result<Self, RepositoryFailure> {
+        if repository == [0; 16] || instance == [0; 16] || integrity_fingerprint == [0; 32] {
+            return Err(RepositoryFailure::InvalidInput);
+        }
+        Ok(Self {
+            repository,
+            instance,
+            integrity_fingerprint,
+            prefix: target.commitment(),
+            provider: Provider::GoogleCloudStorage,
         })
     }
     pub const fn provider_kind(&self) -> &'static str {
-        if self.aws_s3 {
-            "awsS3"
-        } else {
-            "localFilesystem"
+        match self.provider {
+            Provider::AwsS3 => "awsS3",
+            Provider::Local => "localFilesystem",
+            Provider::GoogleCloudStorage => "googleCloudStorage",
         }
     }
     pub const fn repository_id(&self) -> [u8; 16] {
@@ -75,10 +98,10 @@ impl RepositoryIdentity {
     }
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(108);
-        bytes.extend_from_slice(if self.aws_s3 {
-            b"POSS3I01"
-        } else {
-            b"POSREP01"
+        bytes.extend_from_slice(match self.provider {
+            Provider::AwsS3 => b"POSS3I01",
+            Provider::Local => b"POSREP01",
+            Provider::GoogleCloudStorage => b"POSGCI01",
         });
         bytes.extend_from_slice(&1u32.to_be_bytes());
         bytes.extend_from_slice(&self.repository);
@@ -91,7 +114,7 @@ impl RepositoryIdentity {
         if bytes.len() != 108
             || !matches!(
                 bytes.get(..12),
-                Some(b"POSREP01\0\0\0\x01" | b"POSS3I01\0\0\0\x01")
+                Some(b"POSREP01\0\0\0\x01" | b"POSS3I01\0\0\0\x01" | b"POSGCI01\0\0\0\x01")
             )
         {
             return Err(RepositoryFailure::CorruptState);
@@ -107,7 +130,11 @@ impl RepositoryIdentity {
             instance: field(bytes, 28)?,
             integrity_fingerprint: field(bytes, 44)?,
             prefix: field(bytes, 76)?,
-            aws_s3: bytes.get(..8) == Some(b"POSS3I01"),
+            provider: match bytes.get(..8) {
+                Some(b"POSS3I01") => Provider::AwsS3,
+                Some(b"POSGCI01") => Provider::GoogleCloudStorage,
+                _ => Provider::Local,
+            },
         };
         if result.repository == [0; 16]
             || result.instance == [0; 16]

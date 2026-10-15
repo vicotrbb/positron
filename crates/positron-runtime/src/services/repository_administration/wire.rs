@@ -28,6 +28,19 @@ impl ServiceHandle {
                 .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
             })
             .transpose()?;
+        let google = request
+            .google_cloud_storage
+            .as_ref()
+            .map(|target| {
+                positron_backup::GoogleCloudStorageTarget::new(
+                    &target.bucket,
+                    &target.project_number,
+                    &target.location,
+                    &target.prefix,
+                )
+                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)
+            })
+            .transpose()?;
         let operation = match request.action.as_str() {
             "status" => request
                 .operation_id
@@ -78,9 +91,13 @@ impl ServiceHandle {
                             "verify" => RepositoryAction::Verify,
                             _ => RepositoryAction::Doctor,
                         },
-                        locator: match &native {
-                            Some(target) => RepositoryLocation::AwsS3(target),
-                            None => RepositoryLocation::Local(Path::new(
+                        locator: match (&native, &google) {
+                            (Some(target), None) => RepositoryLocation::AwsS3(target),
+                            (None, Some(target)) => RepositoryLocation::GoogleCloudStorage(target),
+                            (Some(_), Some(_)) => {
+                                return Err(MaintenanceServiceFailure::InvalidRequest);
+                            },
+                            (None, None) => RepositoryLocation::Local(Path::new(
                                 request
                                     .locator
                                     .as_deref()
@@ -130,6 +147,9 @@ impl ServiceHandle {
                             "local_filesystem"
                         },
                         positron_governance::RepositoryProviderKind::AwsS3 => "aws_s3",
+                        positron_governance::RepositoryProviderKind::GoogleCloudStorage => {
+                            "google_cloud_storage"
+                        },
                     }
                     .into(),
                     format_epoch: 1,

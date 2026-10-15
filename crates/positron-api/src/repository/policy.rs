@@ -10,6 +10,8 @@ pub struct RepositoryPolicyReceipt {
     pub lifecycle: RepositoryPolicyObservation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doctor_probe: Option<RepositoryObjectProtection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_delete: Option<RepositoryPolicyObservation>,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +77,7 @@ enum Field {
     Retention,
     LegalHold,
     EventHold,
+    SoftDelete,
 }
 impl RepositoryPolicyReceipt {
     pub(super) fn validate(&self) -> Result<(), MaintenanceWireFailure> {
@@ -84,6 +87,9 @@ impl RepositoryPolicyReceipt {
         self.versioning.validate(Field::Versioning)?;
         self.object_lock.validate(Field::ObjectLock)?;
         self.lifecycle.validate(Field::Lifecycle)?;
+        if let Some(value) = &self.soft_delete {
+            value.validate(Field::SoftDelete)?;
+        }
         if let Some(probe) = &self.doctor_probe {
             probe.retention.validate(Field::Retention)?;
             probe.legal_hold.validate(Field::LegalHold)?;
@@ -140,6 +146,16 @@ impl RepositoryPolicyObservation {
             },
             "observed" if self.failure.is_none() && self.retry_after_millis.is_none() => {
                 match field {
+                    Field::SoftDelete => {
+                        common
+                            && self.object_retention.is_none()
+                            && self.event_hold.is_none()
+                            && self.value.as_deref().is_some_and(|v| {
+                                !v.is_empty()
+                                    && v.bytes().all(|b| b.is_ascii_digit())
+                                    && v.parse::<u64>().is_ok()
+                            })
+                    },
                     Field::Versioning => {
                         matches!(
                             self.value.as_deref(),
@@ -155,10 +171,10 @@ impl RepositoryPolicyObservation {
                                     self.default_retention.as_ref().is_none_or(|retention| {
                                         matches!(
                                             retention.mode.as_str(),
-                                            "governance" | "compliance"
+                                            "governance" | "compliance" | "provider_enforced"
                                         ) && matches!(
                                             retention.period_unit.as_str(),
-                                            "days" | "years"
+                                            "days" | "years" | "seconds"
                                         ) && retention.period > 0
                                     })
                                 },
@@ -174,8 +190,10 @@ impl RepositoryPolicyObservation {
                         common
                             && self.value.is_none()
                             && self.object_retention.as_ref().is_some_and(|value| {
-                                matches!(value.mode.as_str(), "governance" | "compliance")
-                                    && value.retain_until_unix_seconds > 0
+                                matches!(
+                                    value.mode.as_str(),
+                                    "governance" | "compliance" | "provider_enforced"
+                                ) && value.retain_until_unix_seconds > 0
                             })
                     },
                     Field::LegalHold => {
@@ -186,8 +204,12 @@ impl RepositoryPolicyObservation {
                             && self.value.is_none()
                             && self.event_hold.as_ref().is_some_and(|value| {
                                 if value.enabled {
-                                    matches!(value.period_unit.as_deref(), Some("days" | "years"))
-                                        && value.period.is_some_and(|period| period > 0)
+                                    (matches!(
+                                        value.period_unit.as_deref(),
+                                        Some("days" | "years" | "seconds")
+                                    ) && value.period.is_some_and(|period| period > 0))
+                                        || (value.period_unit.as_deref() == Some("until_release")
+                                            && value.period.is_none())
                                 } else {
                                     value.period.is_none() && value.period_unit.is_none()
                                 }

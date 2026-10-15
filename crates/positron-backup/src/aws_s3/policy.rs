@@ -163,6 +163,7 @@ impl AwsS3Repository {
             Err(error) => Err(failure::sdk(error, false)),
         };
         Ok(RepositoryPolicy {
+            soft_delete: None,
             versioning: observation(versioning),
             object_lock: observation(object_lock),
             lifecycle: observation(lifecycle),

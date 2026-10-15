@@ -101,7 +101,7 @@ impl reqwest::ConnectionTaskExecutor for ConnectionExecutor {
     }
 }
 
-pub(in crate::data_protection::key_provider) struct NativeRuntime {
+pub struct NativeRuntime {
     resources: Arc<dns::Resources>,
     counts: Arc<Counts>,
     dns: dns::NativeDns,
@@ -117,6 +117,9 @@ impl NativeRuntime {
         grant: TransferredResourceReservation,
     ) -> Result<Arc<Self>, KeyProviderFailure> {
         let resources = dns::Resources::new(grant);
+        Self::from_resources(resources)
+    }
+    pub fn from_resources(resources: Arc<dns::Resources>) -> Result<Arc<Self>, KeyProviderFailure> {
         let dns = dns::NativeDns(resources.clone());
         Ok(Arc::new(Self {
             resources,
@@ -219,16 +222,76 @@ impl NativeRuntime {
         &self,
         request: native::Request,
     ) -> native::BoxFuture<'_, native::Response> {
-        Box::pin(async move { self.http_request(request, true).await })
+        Box::pin(async move { self.http_request(request, true, MAXIMUM, MAXIMUM).await })
+    }
+
+    /// GCS data transport shares the credential/DNS/task owner and its grant.
+    /// Only the native verified-TLS endpoint accepts the larger data bound.
+    pub fn repository_http(
+        &self,
+        request: native::Request,
+        maximum: usize,
+    ) -> native::BoxFuture<'_, native::Response> {
+        Box::pin(async move {
+            if !self.resources.authorizes_repository_transport()
+                || maximum > 64 * 1024 * 1024 + 65536
+            {
+                return Err(native::Error::PermissionDenied);
+            }
+            if !(request
+                .url
+                .starts_with("https://storage.googleapis.com/storage/v1/")
+                || request
+                    .url
+                    .starts_with("https://storage.googleapis.com/upload/storage/v1/"))
+            {
+                return Err(native::Error::InvalidConfiguration);
+            }
+            self.http_request(request, false, maximum, 64 * 1024 * 1024 + 65536)
+                .await
+        })
+    }
+
+    /// Exercises admitted repository HTTP against a loopback protocol fixture.
+    /// Available only to tests; native construction never enables this route.
+    #[cfg(feature = "test-support")]
+    pub fn repository_simulation_http(
+        &self,
+        mut request: native::Request,
+        address: std::net::SocketAddr,
+        maximum: usize,
+    ) -> native::BoxFuture<'_, native::Response> {
+        Box::pin(async move {
+            if !address.ip().is_loopback()
+                || address.port() == 0
+                || !self.resources.authorizes_repository_transport()
+                || maximum > 64 * 1024 * 1024 + 65536
+                || request.headers.contains_key(http::header::AUTHORIZATION)
+            {
+                return Err(native::Error::PermissionDenied);
+            }
+            let path = request
+                .url
+                .strip_prefix("https://storage.googleapis.com")
+                .filter(|path| {
+                    path.starts_with("/storage/v1/") || path.starts_with("/upload/storage/v1/")
+                })
+                .ok_or(native::Error::InvalidConfiguration)?;
+            request.url = format!("http://{address}{path}");
+            self.http_request(request, false, maximum, 64 * 1024 * 1024 + 65536)
+                .await
+        })
     }
 
     async fn http_request(
         &self,
         mut request: native::Request,
         app_service: bool,
+        maximum: usize,
+        request_maximum: usize,
     ) -> native::Result<native::Response> {
         let _lease = self.acquire(Kind::Http, 2)?;
-        if request.url.len() > 4096 || request.body.len() > MAXIMUM {
+        if request.url.len() > 4096 || request.body.len() > request_maximum {
             return Err(native::Error::LimitExceeded);
         }
         let uri =
@@ -322,7 +385,7 @@ impl NativeRuntime {
         for value in headers.values_mut() {
             value.set_sensitive(true);
         }
-        let body = credentials_http::collect(response, MAXIMUM)
+        let body = credentials_http::collect(response, maximum)
             .await
             .map_err(map_failure)?;
         Ok(native::Response {
@@ -463,7 +526,7 @@ impl Runtime for NativeRuntime {
         Ok(body)
     }
     fn http(&self, request: native::Request) -> native::BoxFuture<'_, native::Response> {
-        Box::pin(async move { self.http_request(request, false).await })
+        Box::pin(async move { self.http_request(request, false, MAXIMUM, MAXIMUM).await })
     }
     fn execute<'a>(
         &'a self,

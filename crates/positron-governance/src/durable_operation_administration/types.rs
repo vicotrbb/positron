@@ -1271,7 +1271,7 @@ impl DurableOperation {
         if self.status == DurableOperationStatus::Succeeded
             && self.repository_policy.is_none()
             && self.repository_parameters.is_some_and(|parameters| {
-                parameters.provider_kind() == super::RepositoryProviderKind::AwsS3
+                parameters.provider_kind() != super::RepositoryProviderKind::LocalFilesystem
             })
         {
             return false;

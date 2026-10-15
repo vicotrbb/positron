@@ -103,6 +103,9 @@ fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
     assert_eq!(running.status(), DurableOperationStatus::Running);
     DurableOperationAdministration::mark_draining(&reopened, actor, accepted.operation_id(), 19)?;
     let policy = positron_domain::repository::RepositoryPolicy {
+        soft_delete: Some(positron_domain::repository::PolicyObservation::Observed(
+            604800,
+        )),
         doctor_probe: Some(positron_domain::repository::ObjectProtection {
             retention: positron_domain::repository::PolicyObservation::Observed(
                 positron_domain::repository::ObjectRetention {
@@ -114,7 +117,7 @@ fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
                 positron_domain::repository::RepositoryFailure::PermissionDenied,
             ),
             event_hold: positron_domain::repository::PolicyObservation::Observed(Some(
-                positron_domain::repository::RetentionPeriod::Days(7),
+                positron_domain::repository::RetentionPeriod::UntilRelease,
             )),
         }),
         ..positron_domain::repository::RepositoryPolicy::local()
@@ -307,4 +310,34 @@ fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
     assert_eq!(receipt.repository_policy(), Some(policy));
     assert_eq!(receipt.repository_parameters(), Some(parameters));
     Ok(())
+}
+
+#[test]
+fn google_repository_parameters_bind_exact_native_locator_without_credentials() {
+    use crate::{RepositoryAction, RepositoryOperationParameters, RepositoryProviderKind};
+    let locator = "positron-backup\0".to_owned() + "123456789012\0US-CENTRAL1\0owned/";
+    let value = RepositoryOperationParameters::google_cloud_storage(
+        RepositoryAction::Doctor,
+        &locator,
+        [1; 16],
+        [2; 32],
+        [3; 32],
+    )
+    .expect("native parameters");
+    assert_eq!(
+        value.provider_kind(),
+        RepositoryProviderKind::GoogleCloudStorage
+    );
+    assert_eq!(value.locator().expect("locator"), locator);
+    assert!(
+        RepositoryOperationParameters::google_cloud_storage(
+            RepositoryAction::Doctor,
+            &(locator.clone() + "\0extra"),
+            [1; 16],
+            [2; 32],
+            [3; 32]
+        )
+        .is_err()
+    );
+    assert!(!format!("{value:?}").contains("positron-backup"));
 }

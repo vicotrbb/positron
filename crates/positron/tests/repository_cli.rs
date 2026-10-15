@@ -153,6 +153,7 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
                     expected_catalog_generation: None,
                     idempotency_key: None,
                     aws_s3: None,
+                    google_cloud_storage: None,
                     locator: None,
                     repository_id: None,
                     operation_id: None,
