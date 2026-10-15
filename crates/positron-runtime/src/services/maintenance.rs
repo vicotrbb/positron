@@ -249,6 +249,8 @@ pub(super) fn restore(instance: &crate::InitializedInstance) -> Result<(), Servi
 }
 
 const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
+    MaintenanceTaskClass::BackupSnapshot,
+    MaintenanceTaskClass::RepositoryCleanup,
     MaintenanceTaskClass::RepositoryVerification,
     MaintenanceTaskClass::Migration,
     MaintenanceTaskClass::Compaction,
@@ -315,6 +317,10 @@ fn discover_after_completed_maintenance(
 }
 
 enum InstalledMaintenanceExecution<'authority> {
+    BackupSnapshot {
+        execution: MaintenanceExecution<'authority>,
+        work: Option<super::backup_administration::BackupWork>,
+    },
     RepositoryOperation {
         execution: MaintenanceExecution<'authority>,
     },
@@ -355,7 +361,8 @@ enum InstalledMaintenanceExecution<'authority> {
 
 fn installed_task_class(execution: &InstalledMaintenanceExecution<'_>) -> MaintenanceTaskClass {
     match execution {
-        InstalledMaintenanceExecution::RepositoryOperation { execution }
+        InstalledMaintenanceExecution::BackupSnapshot { execution, .. }
+        | InstalledMaintenanceExecution::RepositoryOperation { execution }
         | InstalledMaintenanceExecution::RootProviderMigration { execution }
         | InstalledMaintenanceExecution::EnvelopeVerification { execution }
         | InstalledMaintenanceExecution::Compaction { execution, .. }
@@ -379,6 +386,7 @@ fn start_installed_maintenance<'authority>(
     }
     super::provider_migration::recover_accepted_task(services)?;
     super::repository_administration::recover_accepted_task(services)?;
+    super::backup_administration::recover_accepted_task(services)?;
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
         return Err(ServiceFailure::CatalogBusy);
     };
@@ -461,6 +469,12 @@ fn start_installed_maintenance<'authority>(
         return Err(ServiceFailure::Cancelled);
     }
     let execution = match execution.task().class() {
+        MaintenanceTaskClass::BackupSnapshot | MaintenanceTaskClass::RepositoryCleanup => {
+            InstalledMaintenanceExecution::BackupSnapshot {
+                execution,
+                work: None,
+            }
+        },
         MaintenanceTaskClass::RepositoryVerification => {
             InstalledMaintenanceExecution::RepositoryOperation { execution }
         },
@@ -543,6 +557,74 @@ fn complete_installed_maintenance(
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
         return Err(ServiceFailure::Cancelled);
     }
+    if let InstalledMaintenanceExecution::BackupSnapshot { execution, work } = execution {
+        let result =
+            super::backup_administration::complete(services, execution, work, cancellation)
+                .and_then(|completed| {
+                    if !completed && let Some(work) = work {
+                        work.persist_registry(services, execution)?;
+                    }
+                    Ok(completed)
+                });
+        let result = match result {
+            Err(ServiceFailure::BackupRepositoryRejected) => {
+                super::backup_administration::reject_repository(services, execution)
+            },
+            result => result,
+        };
+        let required_memory = match result {
+            Err(ServiceFailure::BackupControlMemoryRequired { memory_bytes }) => Some(memory_bytes),
+            // A blocked backup retains its durable checkpoint, rather than a
+            // provider client and a large grant throughout a long outage.
+            Err(ServiceFailure::StorageUnavailable | ServiceFailure::CapacityUnavailable) => Some(
+                execution
+                    .task()
+                    .reservations()
+                    .get(positron_kernel::ResourceDimension::MemoryBytes),
+            ),
+            _ => None,
+        };
+        if let Some(memory_bytes) = required_memory {
+            // All provider workers are joined by their owning calls. Dropping
+            // volatile work relinquishes every transferred capability clone;
+            // the old execution keeps the grant until requeue is durable.
+            *work = None;
+            let binding = positron_kernel::RepositoryOperationBinding::from_execution(execution)
+                .map_err(map_failure)?;
+            let previous = execution.task().reservations();
+            let resources = positron_kernel::ResourceAmounts::new(
+                positron_kernel::ResourceDimension::ALL.map(|dimension| {
+                    if dimension == positron_kernel::ResourceDimension::MemoryBytes {
+                        previous.get(dimension).max(memory_bytes)
+                    } else {
+                        previous.get(dimension)
+                    }
+                }),
+            );
+            let _gate = services.catalog_operation()?;
+            let catalog = services
+                .open_maintenance_catalog()
+                .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+            execution
+                .requeue_backup_with_resources_and_persist(
+                    services.instance.maintenance_coordinator(),
+                    &catalog,
+                    binding,
+                    resources,
+                    services
+                        .maintenance_status_now()
+                        .map_err(|_| ServiceFailure::StorageUnavailable)?,
+                )
+                .map_err(map_failure)?;
+            #[cfg(test)]
+            super::backup_administration::hit_stop(
+                super::backup_administration::StopPoint::ResourcesRequeued,
+                cancellation,
+            )?;
+            return Ok(false);
+        }
+        return result;
+    }
     if let InstalledMaintenanceExecution::RepositoryOperation { execution } = execution {
         return super::repository_administration::complete(services, execution);
     }
@@ -596,7 +678,8 @@ fn complete_installed_maintenance(
         | InstalledMaintenanceExecution::SnapshotLeaseExpiry { scope, .. }
         | InstalledMaintenanceExecution::RetentionPublication { scope, .. }
         | InstalledMaintenanceExecution::RetentionReclamation { scope, .. } => *scope,
-        InstalledMaintenanceExecution::RepositoryOperation { .. }
+        InstalledMaintenanceExecution::BackupSnapshot { .. }
+        | InstalledMaintenanceExecution::RepositoryOperation { .. }
         | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. }
@@ -632,7 +715,8 @@ fn complete_installed_maintenance(
                 key,
             )
         },
-        InstalledMaintenanceExecution::RepositoryOperation { .. }
+        InstalledMaintenanceExecution::BackupSnapshot { .. }
+        | InstalledMaintenanceExecution::RepositoryOperation { .. }
         | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. } => {
@@ -691,7 +775,8 @@ fn complete_installed_maintenance(
         return Ok(true);
     }
     let completed = match execution {
-        InstalledMaintenanceExecution::RepositoryOperation { .. }
+        InstalledMaintenanceExecution::BackupSnapshot { .. }
+        | InstalledMaintenanceExecution::RepositoryOperation { .. }
         | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. } => {
             return Err(ServiceFailure::Internal);
@@ -1356,8 +1441,9 @@ pub(super) fn run_runtime_maintenance_worker(
                                 .phase()
                                 == positron_kernel::MaintenanceTaskPhase::Succeeded;
                         }
-                        let continues_integrity_scrub = match &execution {
-                            InstalledMaintenanceExecution::IntegrityScrub { execution, .. } => {
+                        let continues_owned_work = match &execution {
+                            InstalledMaintenanceExecution::IntegrityScrub { execution, .. }
+                            | InstalledMaintenanceExecution::BackupSnapshot { execution, .. } => {
                                 match services
                                     .instance
                                     .maintenance_coordinator()
@@ -1376,7 +1462,7 @@ pub(super) fn run_runtime_maintenance_worker(
                             },
                             _ => false,
                         };
-                        if continues_integrity_scrub {
+                        if continues_owned_work {
                             in_flight = Some(execution);
                             (completion_context, Ok(completed))
                         } else {
@@ -1461,6 +1547,16 @@ pub(super) fn run_runtime_maintenance_worker(
                 } else {
                     WORK_YIELD
                 }
+            },
+            Ok(false)
+                if in_flight.as_ref().is_some_and(|execution| {
+                    matches!(
+                        execution,
+                        InstalledMaintenanceExecution::BackupSnapshot { .. }
+                    )
+                }) =>
+            {
+                WORK_YIELD
             },
             Ok(false) | Err(ServiceFailure::Cancelled) => {
                 retry_delay = INITIAL_TRANSIENT_BACKOFF;

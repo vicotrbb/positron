@@ -48,7 +48,8 @@ pub use control_token::{
     QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest,
 };
 pub use export_manifest_signature::{
-    ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
+    BackupControlSignature, BackupControlSigner, ExportManifestSignature,
+    ExportManifestSignatureFailure, ExportManifestSigner,
 };
 pub(crate) use frame::{EncryptedFrame, FrameFailure, FrameFailureCode, VerifiedFrame};
 pub(crate) use key_envelope::{SegmentEnvelopeRoute, WrappedKeyContext};

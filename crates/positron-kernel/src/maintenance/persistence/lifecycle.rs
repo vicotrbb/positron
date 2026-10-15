@@ -581,3 +581,48 @@ impl MaintenanceCoordinator {
         Ok(())
     }
 }
+
+impl MaintenanceCoordinator {
+    pub(in super::super) fn requeue_backup_with_resources_dispatch(
+        &self,
+        catalog: &Catalog<'_>,
+        execution: &MaintenanceExecution<'_>,
+        binding: RepositoryOperationBinding,
+        resources: ResourceAmounts,
+        now: u64,
+    ) -> Result<(), MaintenanceFailure> {
+        let dispatch = execution.dispatch;
+        if dispatch.coordinator_id != self.coordinator_id {
+            return Err(MaintenanceFailure::InvalidTransition);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+        let mut next = state.clone();
+        let task = next
+            .tasks
+            .get_mut(&dispatch.identity)
+            .ok_or(MaintenanceFailure::UnknownTask)?;
+        if task.phase != MaintenanceTaskPhase::Running
+            || task.active_dispatch != Some(dispatch)
+            || task.task != execution.task
+            || RepositoryOperationBinding::from_task(&task.task, task.checkpoint.as_ref())?
+                != binding
+            || now < task.submitted_at
+            || task.last_progress_at.is_some_and(|progress| now < progress)
+        {
+            return Err(MaintenanceFailure::PreconditionFailed);
+        }
+        task.task.reservations = resources;
+        task.phase = MaintenanceTaskPhase::Queued;
+        task.last_progress_at = None;
+        task.active_dispatch = None;
+        // The Catalog Writer admits its publication peak separately, just as
+        // for handler checkpoints. A capture/transport grant does not imply
+        // Catalog request-byte or artifact-write capacity.
+        persist_task_state(catalog, task, None)?;
+        *state = next;
+        Ok(())
+    }
+}

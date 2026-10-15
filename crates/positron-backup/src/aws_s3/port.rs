@@ -24,6 +24,9 @@ impl Repository for AwsS3Repository {
     async fn abort_upload(&self, id: UploadId) -> Result<DeleteOutcome, RepositoryFailure> {
         Self::abort_upload(self, id).await
     }
+    async fn object_size_hint(&self, id: ObjectId) -> Result<u64, RepositoryFailure> {
+        Self::object_size_hint(self, id).await
+    }
     async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
         Self::head(self, id).await
     }

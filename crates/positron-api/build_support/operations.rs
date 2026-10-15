@@ -135,6 +135,21 @@ const POLICY_METHODS: &[MethodSpec] = &[
 
 pub(crate) const SERVICES: &[ServiceSpec] = &[
     ServiceSpec {
+        name: "BackupService",
+        methods: &[
+            MethodSpec {
+                name: "List",
+                input: ".positron.v1.BackupListRequest",
+                output: ".positron.v1.BackupListResponse",
+            },
+            MethodSpec {
+                name: "Manage",
+                input: ".positron.v1.BackupRequest",
+                output: ".positron.v1.BackupResponse",
+            },
+        ],
+    },
+    ServiceSpec {
         name: "RepositoryService",
         methods: &[MethodSpec {
             name: "Manage",

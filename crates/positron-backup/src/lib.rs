@@ -56,6 +56,10 @@ pub trait Repository: Send + Sync {
     async fn resume_upload(&self, part: UploadPart) -> Result<UploadOutcome, RepositoryFailure>;
     async fn abort_upload(&self, id: UploadId) -> Result<DeleteOutcome, RepositoryFailure>;
     async fn identify(&self) -> Result<RepositoryIdentity, RepositoryFailure>;
+    /// Untrusted size observation without reading object contents. It proves
+    /// neither checksum nor immutable version; callers must bound and verify
+    /// the actual ranged body before trusting signed control data.
+    async fn object_size_hint(&self, object: ObjectId) -> Result<u64, RepositoryFailure>;
     async fn head(&self, object: ObjectId) -> Result<ObjectMetadata, RepositoryFailure>;
     async fn read_range(&self, range: ObjectRange) -> Result<ChecksummedBytes, RepositoryFailure>;
     async fn put_if_absent(&self, object: ImmutableObject)
@@ -89,3 +93,13 @@ pub use google_cloud_storage::fuzz_google_cloud_storage_repository;
 
 #[cfg(fuzzing)]
 pub use azure_blob::fuzz_azure_blob_repository;
+
+mod snapshot;
+pub use snapshot::{
+    BackupCaptureContext, BackupCatalogIdentity, BackupCleanupPlan, BackupCleanupProgress,
+    BackupCleanupReason, BackupKeyEnvelope, BackupListCursor, BackupManifest,
+    BackupManifestBuilder, BackupObject, BackupObjectVerification, BackupPublication,
+    BackupPublicationCheck, BackupPublisher, BackupReceipt, BackupRegistryVerification,
+    BackupRepositoryRegistration, BackupRetention, BackupSnapshotPage, BackupSource,
+    BackupTransfer,
+};

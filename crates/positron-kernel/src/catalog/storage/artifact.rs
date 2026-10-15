@@ -26,6 +26,7 @@ pub(super) enum ArtifactKind {
     Prepared,
     AuditCheckpoint,
     ExportOutput,
+    BackupCapture,
     /// Artifacts written while `AuditCheckpoint` occupied tag 3. These
     /// variants are decode-only: the tag is part of the authenticated
     /// envelope context and therefore cannot be silently reinterpreted.
@@ -45,6 +46,7 @@ impl ArtifactKind {
             Self::Prepared => 4,
             Self::AuditCheckpoint => 5,
             Self::ExportOutput => 6,
+            Self::BackupCapture => 7,
             Self::TransitionalCommit => 4,
             Self::TransitionalPrepared => 5,
             Self::TransitionalAuditCheckpoint => 3,
@@ -62,8 +64,43 @@ impl ArtifactKind {
                 SystemObjectKind::GovernanceAudit
             },
             Self::ExportOutput => SystemObjectKind::ExportOutput,
+            Self::BackupCapture => SystemObjectKind::BackupMetadata,
         }
     }
+}
+
+pub(crate) fn protect_backup_capture(
+    secret: &CatalogSecret,
+    instance: InstanceId,
+    content_identity: [u8; 32],
+    format_epoch: FormatEpoch,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CatalogFailure> {
+    protect_artifact(
+        secret,
+        instance,
+        ArtifactKind::BackupCapture,
+        content_identity,
+        format_epoch,
+        plaintext,
+    )
+}
+
+pub(crate) fn open_backup_capture(
+    secret: &CatalogSecret,
+    instance: InstanceId,
+    content_identity: [u8; 32],
+    format_epoch: FormatEpoch,
+    encoded: &[u8],
+) -> Result<Vec<u8>, CatalogFailure> {
+    open_artifact(
+        secret,
+        instance,
+        ArtifactKind::BackupCapture,
+        content_identity,
+        format_epoch,
+        encoded,
+    )
 }
 
 pub(crate) fn protect_export_output(

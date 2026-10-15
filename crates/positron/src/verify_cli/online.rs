@@ -75,6 +75,7 @@ fn online_failure(failure: MaintenanceServiceClientFailure) -> VerifyFailure {
         | MaintenanceServiceClientFailure::PreconditionFailed
         | MaintenanceServiceClientFailure::IdempotencyConflict
         | MaintenanceServiceClientFailure::AdministrationUnavailable
+        | MaintenanceServiceClientFailure::CapacityUnavailable
         | MaintenanceServiceClientFailure::Transport => VerifyFailure::Configuration,
     }
 }

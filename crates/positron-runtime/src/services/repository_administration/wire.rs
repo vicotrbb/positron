@@ -180,11 +180,16 @@ impl ServiceHandle {
             catalog_generation: generation,
             operation: operation.map(super::super::provider_migration::operation_response),
             identity,
-            policy: operation.and_then(|operation| {
-                operation.repository_policy().map(|policy| {
-                    super::policy_projection::receipt(policy, operation.updated_at_unix_seconds())
+            policy: operation
+                .and_then(|operation| {
+                    operation.repository_policy().map(|policy| {
+                        super::policy_projection::receipt(
+                            policy,
+                            operation.updated_at_unix_seconds(),
+                        )
+                    })
                 })
-            }),
+                .transpose()?,
             doctor: parameters
                 .filter(|parameters| parameters.action() == RepositoryAction::Doctor)
                 .map(|_| RepositoryDoctorResult {

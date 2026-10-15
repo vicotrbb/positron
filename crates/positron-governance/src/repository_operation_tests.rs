@@ -49,6 +49,36 @@ fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
         )?,
         Some(AuditIntent::new(audit)?),
     )?;
+    let backup_basis = catalog.pin()?;
+    let original_envelope = backup_basis
+        .governance_object()?
+        .1
+        .tenant_key_envelope()
+        .to_vec();
+    let (epoch, fingerprint) =
+        keys.backup_tenant_key_identity(instance, default_tenant, &original_envelope)?;
+    let sanitized = TenantAdministration::backup_catalog_objects(
+        &backup_basis,
+        &[(default_tenant, epoch, fingerprint)],
+    )?;
+    assert_eq!(sanitized.len(), backup_basis.object_count());
+    assert!(sanitized.iter().all(|object| {
+        !object
+            .canonical_bytes()
+            .windows(original_envelope.len())
+            .any(|part| part == original_envelope)
+    }));
+    assert!(TenantAdministration::backup_catalog_objects(&backup_basis, &[]).is_err());
+    assert!(
+        TenantAdministration::backup_catalog_objects(
+            &backup_basis,
+            &[
+                (default_tenant, epoch, fingerprint),
+                (default_tenant, epoch, fingerprint)
+            ]
+        )
+        .is_err()
+    );
     let actor = crate::Identity::open(&catalog.pin()?)?.attribute(
         &keys,
         crate::PresentedCredential::parse(&format!("pos_{}", "e3".repeat(32)))?,

@@ -4,3 +4,5 @@ mod codec;
 mod faults;
 mod limits;
 pub(crate) mod support;
+
+mod backup_capture;

@@ -120,7 +120,8 @@ fn ingest_response(
 fn service_response(service_failure: ServiceFailure) -> Response {
     match service_failure {
         ServiceFailure::Unauthorized => failure(401, "Loki Push authentication was rejected"),
-        ServiceFailure::CapacityUnavailable => {
+        ServiceFailure::CapacityUnavailable
+        | ServiceFailure::BackupControlMemoryRequired { .. } => {
             failure(429, "Loki Push ingest capacity is unavailable").with_retry_after(1)
         },
         ServiceFailure::RequestTooLarge => {
@@ -140,6 +141,7 @@ fn service_response(service_failure: ServiceFailure) -> Response {
         ServiceFailure::DurabilityFrontierAmbiguity
         | ServiceFailure::KeyEnvelopeMismatch
         | ServiceFailure::CorruptState
+        | ServiceFailure::BackupRepositoryRejected
         | ServiceFailure::Internal
         | ServiceFailure::Cancelled => failure(500, "Loki Push ingest failed"),
     }

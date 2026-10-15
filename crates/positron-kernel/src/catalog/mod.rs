@@ -1,6 +1,11 @@
 //! Immutable encrypted Catalog Generations and their single publication authority.
 
 mod audit_checkpoint;
+mod backup_capture;
+pub use backup_capture::{
+    BackupCapture, BackupCaptureCustody, BackupCaptureFile, BackupCaptureFileKind,
+    BackupCapturePreparation, BackupCaptureResourceEstimate, BackupCatalogObject,
+};
 mod budget;
 mod codec;
 #[cfg(feature = "test-support")]

@@ -149,13 +149,14 @@ pub use catalog::integrity_scrub_resource_claim;
 #[cfg(feature = "test-support")]
 pub use data_protection::RootCustodyPublicationFault;
 pub use data_protection::{
-    BootstrapIntegrityIdentity, BootstrapKeyCustody, BootstrapKeyFailure, BootstrapKeyIdentity,
-    BootstrapObjectPurpose, ControlTokenAuthentication, ControlTokenFailure, ControlTokenProtector,
-    ExportManifestSignature, ExportManifestSignatureFailure, ExportManifestSigner,
-    PreparedProviderMigration, QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure,
-    RecoveryIdentity, RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients,
-    RecoverySession, RecoveryUnlock, RepositoryUploadAuthenticator, RootAdmissionReceipt,
-    RootPredecessorEnvelope, RootRewrapSession, VerifiedRootActivation,
+    BackupControlSignature, BackupControlSigner, BootstrapIntegrityIdentity, BootstrapKeyCustody,
+    BootstrapKeyFailure, BootstrapKeyIdentity, BootstrapObjectPurpose, ControlTokenAuthentication,
+    ControlTokenFailure, ControlTokenProtector, ExportManifestSignature,
+    ExportManifestSignatureFailure, ExportManifestSigner, PreparedProviderMigration,
+    QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure, RecoveryIdentity,
+    RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession,
+    RecoveryUnlock, RepositoryUploadAuthenticator, RootAdmissionReceipt, RootPredecessorEnvelope,
+    RootRewrapSession, VerifiedRootActivation,
 };
 pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{
@@ -1539,6 +1540,11 @@ fn root_identity(_metadata: &fs::Metadata) -> Result<VolumeRootIdentity, VolumeF
 /// Admitted native AWS networking and credential-process leases shared by adapters.
 pub use data_protection::key_provider::{
     NativeAwsCredentialProcessAdmission, NativeAwsDns, NativeAwsResources,
+};
+
+pub use catalog::{
+    BackupCapture, BackupCaptureCustody, BackupCaptureFile, BackupCaptureFileKind,
+    BackupCapturePreparation, BackupCaptureResourceEstimate, BackupCatalogObject,
 };
 
 #[cfg(test)]

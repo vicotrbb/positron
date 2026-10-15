@@ -73,6 +73,7 @@ pub struct ObjectRange {
     pub(crate) object: ObjectId,
     pub(crate) offset: u64,
     pub(crate) length: u64,
+    pub(crate) expected_size: Option<u64>,
 }
 impl ObjectRange {
     pub fn new(object: ObjectId, offset: u64, length: u64) -> Result<Self, RepositoryFailure> {
@@ -87,7 +88,22 @@ impl ObjectRange {
             object,
             offset,
             length,
+            expected_size: None,
         })
+    }
+    /// Requires the full native object size under the range's existing version
+    /// fence. This does not promote an earlier untrusted size hint to authority.
+    pub fn with_expected_size(mut self, total: u64) -> Result<Self, RepositoryFailure> {
+        if total > MAX_OBJECT_BYTES
+            || self
+                .offset
+                .checked_add(self.length)
+                .is_none_or(|end| end > total)
+        {
+            return Err(RepositoryFailure::InvalidInput);
+        }
+        self.expected_size = Some(total);
+        Ok(self)
     }
 }
 #[derive(Clone, Eq, PartialEq)]

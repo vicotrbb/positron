@@ -118,6 +118,12 @@ impl WorkClaim {
         })
     }
 
+    /// Admits an authenticated read of a registered Backup Repository without
+    /// creating a durable maintenance operation or borrowing diagnostics quota.
+    pub fn backup_repository_read(amounts: ResourceAmounts) -> Result<Self, GovernorFailure> {
+        Self::system_maintenance(amounts)
+    }
+
     /// Creates a bounded system-scoped diagnostics claim. Diagnostics shares
     /// the ordinary maintenance pool but retains a distinct durable work kind
     /// for inspection and accounting.

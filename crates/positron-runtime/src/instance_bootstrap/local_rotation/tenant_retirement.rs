@@ -39,8 +39,12 @@ impl InitializedInstance {
         let _copy = catalog
             .reserve_catalog_proposal_copy(&basis)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        BackupRepositoryInspection::from_authenticated_catalog(&basis)
-            .map_err(|_| LocalKeyRotationFailure::Authentication)?;
+        if BackupRepositoryInspection::from_authenticated_catalog(&basis)
+            .map_err(|_| LocalKeyRotationFailure::Authentication)?
+            != BackupRepositoryInspection::NotConfigured
+        {
+            return Err(LocalKeyRotationFailure::RetirementRefused);
+        }
         let identity =
             Identity::open(&basis).map_err(|_| LocalKeyRotationFailure::Authentication)?;
         let original = identity

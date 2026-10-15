@@ -312,6 +312,9 @@ fn client_failure(failure: MaintenanceServiceClientFailure) -> &'static str {
         MaintenanceServiceClientFailure::AdministrationUnavailable => {
             "maintenance administration unavailable; retry with the same idempotency key"
         },
+        MaintenanceServiceClientFailure::CapacityUnavailable => {
+            "maintenance capacity unavailable; retry the same idempotent request"
+        },
         MaintenanceServiceClientFailure::Transport => "maintenance API transport failed",
     }
 }

@@ -207,14 +207,18 @@ impl GovernanceAuditEntry {
             || intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V3)
             || intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V4)
             || intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V5)
+            || intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V6)
         {
-            let is_v5 = intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V5);
+            let is_v6 = intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V6);
+            let is_v5 = is_v6 || intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V5);
             let is_v4 = intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V4);
             let is_current =
                 is_v5 || is_v4 || intent.starts_with(&DURABLE_OPERATION_AUDIT_MAGIC_V3);
             let mut cursor = Cursor::new(intent);
             if cursor.take_array::<8>()?
-                != if is_v5 {
+                != if is_v6 {
+                    DURABLE_OPERATION_AUDIT_MAGIC_V6
+                } else if is_v5 {
                     DURABLE_OPERATION_AUDIT_MAGIC_V5
                 } else if is_v4 {
                     DURABLE_OPERATION_AUDIT_MAGIC_V4
@@ -272,6 +276,26 @@ impl GovernanceAuditEntry {
             } else {
                 None
             };
+            let (backup_repository, backup_receipt, backup_cleanup_receipt, backup_retention_claim) =
+                if is_v6 {
+                    let (repository, receipt, cleanup, claim) =
+                        super::backup::decode_backup_evidence(
+                            &mut cursor,
+                            action,
+                            outcome,
+                            target_identity,
+                        )?;
+                    (Some(repository), receipt, cleanup, claim)
+                } else {
+                    if matches!(
+                        action,
+                        DurableOperationKind::BackupSnapshot
+                            | DurableOperationKind::BackupRetention
+                    ) {
+                        return Err(IdentityFailure);
+                    }
+                    (None, None, None, None)
+                };
             let canonical_operation_id = DurableOperationRequest::operation_id_for_audit(
                 actor,
                 request_id,
@@ -294,15 +318,37 @@ impl GovernanceAuditEntry {
                 || !cursor.is_empty()
                 || transaction_id.iter().all(|byte| *byte == 0)
                 || operation_id != canonical_operation_id
+                || (action == DurableOperationKind::BackupSnapshot
+                    && backup_cleanup_receipt.is_some_and(|receipt| {
+                        receipt.snapshot_id() != canonical_operation_id.to_bytes()
+                    }))
+                || (action == DurableOperationKind::BackupRetention
+                    && (backup_retention_claim.is_some()
+                        != (outcome == DurableOperationStatus::Running
+                            && phase == DurableOperationPhase::BackupRetentionCleanup)))
                 || transaction_id != canonical_transaction
                 || (is_current
-                    && (outcome == DurableOperationStatus::Cancelled)
-                        != cancellation_request_id.is_some())
+                    && ((outcome == DurableOperationStatus::Cancelled
+                        || (matches!(
+                            action,
+                            DurableOperationKind::BackupSnapshot
+                                | DurableOperationKind::BackupRetention
+                        ) && outcome == DurableOperationStatus::Running
+                            && phase == DurableOperationPhase::BackupCancellation))
+                        != cancellation_request_id.is_some()))
             {
                 return Err(IdentityFailure);
             }
             return Ok(Self::DurableOperation(DurableOperationAuditEntry {
                 abandonment_loss: None,
+                backup: backup_repository.map(|repository| {
+                    Box::new(BackupAuditEvidence {
+                        repository,
+                        receipt: backup_receipt,
+                        cleanup: backup_cleanup_receipt,
+                        retention_claim: backup_retention_claim,
+                    })
+                }),
                 position,
                 operation_id,
                 actor: Some(actor),
@@ -333,6 +379,7 @@ impl GovernanceAuditEntry {
             }
             return Ok(Self::DurableOperation(DurableOperationAuditEntry {
                 abandonment_loss: None,
+                backup: None,
                 position,
                 operation_id,
                 actor: None,

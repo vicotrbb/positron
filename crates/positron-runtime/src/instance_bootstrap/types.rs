@@ -44,6 +44,8 @@ pub enum BackupRepositoryInspection {
     /// The current persisted Catalog has no Backup Repository binding owner.
     /// This is an explicit Release 1 state, never a guessed repository.
     NotConfigured,
+    /// Authenticated managed inventory retains external envelope references.
+    Configured,
 }
 
 impl BackupRepositoryInspection {
@@ -55,12 +57,22 @@ impl BackupRepositoryInspection {
         snapshot: &positron_kernel::CatalogSnapshot,
     ) -> Result<Self, ()> {
         snapshot.governance_object().map_err(|_| ())?;
+        for id in snapshot.object_identities() {
+            let bytes = snapshot.object(id).map_err(|_| ())?.ok_or(())?;
+            if positron_backup::BackupRepositoryRegistration::decode(bytes)
+                .map_err(|_| ())?
+                .is_some()
+            {
+                return Ok(Self::Configured);
+            }
+        }
         Ok(Self::NotConfigured)
     }
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::NotConfigured => "not_configured",
+            Self::Configured => "configured",
         }
     }
 }

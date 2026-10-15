@@ -1,57 +1,64 @@
 //! Projects authenticated terminal observations, never native error strings.
+use super::super::MaintenanceServiceFailure;
 use positron_api::repository as wire;
 use positron_domain::repository as domain;
 pub(super) fn receipt(
     policy: domain::RepositoryPolicy,
     observed_at_unix_seconds: u64,
-) -> wire::RepositoryPolicyReceipt {
-    wire::RepositoryPolicyReceipt {
+) -> Result<wire::RepositoryPolicyReceipt, MaintenanceServiceFailure> {
+    Ok(wire::RepositoryPolicyReceipt {
         observed_at_unix_seconds,
-        soft_delete: policy.soft_delete.map(|value| {
-            observation(value, |output, seconds| {
-                output.value = Some(seconds.to_string())
+        soft_delete: policy
+            .soft_delete
+            .map(|value| {
+                observation(value, |output, seconds| {
+                    output.value = Some(seconds.to_string())
+                })
             })
-        }),
+            .transpose()?,
         doctor_probe: policy
             .doctor_probe
-            .map(|probe| wire::RepositoryObjectProtection {
-                retention: observation(probe.retention, |output, value| {
-                    output.object_retention = Some(wire::RepositoryObjectRetention {
-                        mode: match value.mode {
-                            domain::RetentionMode::Governance => "governance",
-                            domain::RetentionMode::Compliance => "compliance",
-                            domain::RetentionMode::ProviderEnforced => "provider_enforced",
-                        }
-                        .into(),
-                        retain_until_unix_seconds: value.retain_until_unix_seconds,
-                    });
-                }),
-                legal_hold: observation(probe.legal_hold, |output, value| {
-                    output.value = Some(if value { "on" } else { "off" }.into())
-                }),
-                event_hold: observation(probe.event_hold, |output, value| {
-                    let (period_unit, period) = match value {
-                        None => (None, None),
-                        Some(domain::RetentionPeriod::Days(period)) => {
-                            (Some("days".into()), Some(period))
-                        },
-                        Some(domain::RetentionPeriod::Years(period)) => {
-                            (Some("years".into()), Some(period))
-                        },
-                        Some(domain::RetentionPeriod::Seconds(period)) => {
-                            (Some("seconds".into()), Some(period))
-                        },
-                        Some(domain::RetentionPeriod::UntilRelease) => {
-                            (Some("until_release".into()), None)
-                        },
-                    };
-                    output.event_hold = Some(wire::RepositoryEventHold {
-                        enabled: value.is_some(),
-                        period_unit,
-                        period,
-                    });
-                }),
-            }),
+            .map(|probe| {
+                Ok(wire::RepositoryObjectProtection {
+                    retention: observation(probe.retention, |output, value| {
+                        output.object_retention = Some(wire::RepositoryObjectRetention {
+                            mode: match value.mode {
+                                domain::RetentionMode::Governance => "governance",
+                                domain::RetentionMode::Compliance => "compliance",
+                                domain::RetentionMode::ProviderEnforced => "provider_enforced",
+                            }
+                            .into(),
+                            retain_until_unix_seconds: value.retain_until_unix_seconds,
+                        });
+                    })?,
+                    legal_hold: observation(probe.legal_hold, |output, value| {
+                        output.value = Some(if value { "on" } else { "off" }.into())
+                    })?,
+                    event_hold: observation(probe.event_hold, |output, value| {
+                        let (period_unit, period) = match value {
+                            None => (None, None),
+                            Some(domain::RetentionPeriod::Days(period)) => {
+                                (Some("days".into()), Some(period))
+                            },
+                            Some(domain::RetentionPeriod::Years(period)) => {
+                                (Some("years".into()), Some(period))
+                            },
+                            Some(domain::RetentionPeriod::Seconds(period)) => {
+                                (Some("seconds".into()), Some(period))
+                            },
+                            Some(domain::RetentionPeriod::UntilRelease) => {
+                                (Some("until_release".into()), None)
+                            },
+                        };
+                        output.event_hold = Some(wire::RepositoryEventHold {
+                            enabled: value.is_some(),
+                            period_unit,
+                            period,
+                        });
+                    })?,
+                })
+            })
+            .transpose()?,
         versioning: observation(policy.versioning, |output, value| {
             output.value = Some(
                 match value {
@@ -61,7 +68,7 @@ pub(super) fn receipt(
                 }
                 .into(),
             );
-        }),
+        })?,
         object_lock: observation(policy.object_lock, |output, value| match value {
             domain::ObjectLockPolicy::Disabled => output.value = Some("disabled".into()),
             domain::ObjectLockPolicy::Enabled { default_retention } => {
@@ -85,7 +92,7 @@ pub(super) fn receipt(
                     }
                 });
             },
-        }),
+        })?,
         lifecycle: observation(policy.lifecycle, |output, value| {
             output.lifecycle = Some(wire::RepositoryLifecyclePolicy {
                 current_expiration: value.current_expiration,
@@ -93,13 +100,13 @@ pub(super) fn receipt(
                 transition: value.transition,
                 abandoned_upload_expiration: value.abandoned_upload_expiration,
             });
-        }),
-    }
+        })?,
+    })
 }
 fn observation<T>(
     value: domain::PolicyObservation<T>,
     project: impl FnOnce(&mut wire::RepositoryPolicyObservation, T),
-) -> wire::RepositoryPolicyObservation {
+) -> Result<wire::RepositoryPolicyObservation, MaintenanceServiceFailure> {
     let mut output = wire::RepositoryPolicyObservation::default();
     match value {
         domain::PolicyObservation::Observed(value) => {
@@ -111,6 +118,12 @@ fn observation<T>(
             output.state = "unavailable".into();
             output.failure = Some(
                 match failure {
+                    domain::RepositoryFailure::ControlMemoryRequired { .. } => {
+                        return Err(MaintenanceServiceFailure::CapacityUnavailable);
+                    },
+                    domain::RepositoryFailure::SourceIntegrityCorruption => {
+                        return Err(MaintenanceServiceFailure::AdministrationUnavailable);
+                    },
                     domain::RepositoryFailure::InvalidInput => "invalid_input",
                     domain::RepositoryFailure::IdentityMismatch => "identity_mismatch",
                     domain::RepositoryFailure::ForeignPrefix => "foreign_prefix",
@@ -134,5 +147,5 @@ fn observation<T>(
             );
         },
     }
-    output
+    Ok(output)
 }

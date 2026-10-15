@@ -52,6 +52,25 @@ impl AwsS3Repository {
         validate_object(id, &bytes)?;
         Ok((bytes, protection))
     }
+    /// Metadata-only observation; content and version remain untrusted.
+    pub async fn object_size_hint(&self, id: ObjectId) -> Result<u64, RepositoryFailure> {
+        let _operation = self.enter()?;
+        self.read_identity().await?;
+        let metadata = self
+            .client
+            .head_object()
+            .bucket(self.target.bucket())
+            .key(self.object_key(id))
+            .expected_bucket_owner(self.target.expected_owner())
+            .send()
+            .with_subscriber(tracing::subscriber::NoSubscriber::default())
+            .await
+            .map_err(|error| failure::sdk(error, false))?;
+        metadata
+            .content_length()
+            .and_then(|size| u64::try_from(size).ok())
+            .ok_or(RepositoryFailure::CorruptState)
+    }
     /// Reads and verifies the full content checksum, including native multipart
     /// objects whose S3 SHA-256 checksum is composite rather than a full digest.
     pub async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
@@ -85,6 +104,9 @@ impl AwsS3Repository {
             .and_then(|size| u64::try_from(size).ok())
             .filter(|size| *size <= MAX_OBJECT_BYTES)
             .ok_or(RepositoryFailure::CorruptState)?;
+        if range.expected_size.is_some_and(|expected| expected != size) {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
         let end = range
             .offset
             .checked_add(range.length)

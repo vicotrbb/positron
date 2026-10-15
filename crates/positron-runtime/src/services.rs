@@ -14,6 +14,7 @@ use positron_query::QueryBudget;
 use crate::InitializedInstance;
 
 mod api_keys;
+mod backup_administration;
 mod export_destinations;
 mod failure;
 mod ingest;
@@ -96,7 +97,9 @@ mod tests;
 pub(crate) const fn maintenance_failure_category(failure: ServiceFailure) -> Option<&'static str> {
     match failure {
         ServiceFailure::Unauthorized => Some("unauthorized"),
-        ServiceFailure::CapacityUnavailable => Some("capacity_unavailable"),
+        ServiceFailure::CapacityUnavailable
+        | ServiceFailure::BackupControlMemoryRequired { .. } => Some("capacity_unavailable"),
+        ServiceFailure::BackupRepositoryRejected => Some("backup_repository_rejected"),
         ServiceFailure::RequestTooLarge => Some("request_too_large"),
         ServiceFailure::InvalidRequest => Some("invalid_request"),
         ServiceFailure::InvalidRequestWithLimit(_) => Some("invalid_request_with_limit"),

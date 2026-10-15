@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "cbf0178ce6afbf6750ed4d3f9e76462497a2aadefbc27a12cb028087bc1afbfa"
+    "x-positron-schema-digest": "69354c0375d5f132e87c5b2e84e4d710f7dc1acf36817808a9703f6d2609c527"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1187,6 +1187,116 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RepositoryResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/backups:manage": {
+      "post": {
+        "operationId": "ManageBackup",
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated repository provider inspection or durable operation receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Explicit admission refusal or unavailable administration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "administration_unavailable",
+                        "capacity_unavailable"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/backups:list": {
+      "post": {
+        "operationId": "ListBackups",
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupListRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated read of one signed Registry Generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupListResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Explicit admission refusal or unavailable administration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "administration_unavailable",
+                        "capacity_unavailable"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -3971,6 +4081,270 @@
           "prefix"
         ],
         "additionalProperties": false
+      },
+      "BackupRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "expected_catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "locator": {
+            "type": "string"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "aws_s3": {
+            "$ref": "#/components/schemas/RepositoryAwsS3Target"
+          },
+          "google_cloud_storage": {
+            "$ref": "#/components/schemas/RepositoryGoogleCloudStorageTarget"
+          },
+          "azure_blob": {
+            "$ref": "#/components/schemas/RepositoryAzureBlobTarget"
+          },
+          "retention_seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 315360000
+          },
+          "snapshot_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "expected_manifest_checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expected_operation_revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "BackupResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation",
+          "kind",
+          "cleanup_pending",
+          "operation_revision"
+        ],
+        "properties": {
+          "operation": {
+            "$ref": "#/components/schemas/RepositoryOperation"
+          },
+          "repository": {
+            "$ref": "#/components/schemas/RepositoryIdentity"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/BackupSnapshotReceipt"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "snapshot",
+              "retention"
+            ]
+          },
+          "cleanup_pending": {
+            "type": "boolean"
+          },
+          "retention_receipt": {
+            "$ref": "#/components/schemas/BackupRetentionReceipt"
+          },
+          "operation_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "terminal_error_code": {
+            "type": "string",
+            "enum": [
+              "handler_rejected",
+              "legacy_unknown",
+              "backup_retention_not_due"
+            ]
+          }
+        }
+      },
+      "BackupSnapshotReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "manifest_checksum",
+          "catalog_generation",
+          "catalog_identity",
+          "uploaded_bytes",
+          "reused_bytes",
+          "retain_until_unix_seconds",
+          "registry_generation_checksum"
+        ],
+        "properties": {
+          "manifest_checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "catalog_identity": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "uploaded_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reused_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retain_until_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "registry_generation_checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      },
+      "BackupListRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repository_id",
+          "limit"
+        ],
+        "properties": {
+          "repository_id": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 128
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 176,
+            "maxLength": 176
+          }
+        }
+      },
+      "BackupListEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_id",
+          "manifest_checksum",
+          "created_unix_seconds",
+          "retain_until_unix_seconds"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "manifest_checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "created_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retain_until_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "BackupListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repository",
+          "entries"
+        ],
+        "properties": {
+          "repository": {
+            "$ref": "#/components/schemas/RepositoryIdentity"
+          },
+          "registry_generation_checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "entries": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "$ref": "#/components/schemas/BackupListEntry"
+            }
+          },
+          "next_cursor": {
+            "type": "string",
+            "minLength": 176,
+            "maxLength": 176
+          }
+        }
+      },
+      "BackupRetentionReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_id",
+          "manifest_checksum",
+          "registry_generation_checksum",
+          "deleted_objects",
+          "already_absent_objects",
+          "retained_shared_objects"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "manifest_checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "registry_generation_checksum": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "deleted_objects": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "already_absent_objects": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "retained_shared_objects": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        }
       }
     },
     "securitySchemes": {

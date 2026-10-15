@@ -47,7 +47,7 @@ impl ExportManifestSigner {
         &self,
         payload: &[u8],
     ) -> Result<ExportManifestSignature, ExportManifestSignatureFailure> {
-        let message = signing_message(self.identity, payload)?;
+        let message = signing_message(DOMAIN, self.identity, payload)?;
         let pair = Ed25519KeyPair::from_seed_unchecked(self.seed.as_ref())
             .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)?;
         let signature: [u8; SIGNATURE_BYTES] = pair
@@ -109,7 +109,7 @@ impl ExportManifestSignature {
         if self.identity != expected {
             return Err(ExportManifestSignatureFailure::AuthenticationFailed);
         }
-        let message = signing_message(expected, payload)?;
+        let message = signing_message(DOMAIN, expected, payload)?;
         UnparsedPublicKey::new(&ED25519, expected.public_key())
             .verify(&message, &self.signature)
             .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)
@@ -145,6 +145,7 @@ fn integrity_identity(
     ))
 }
 fn signing_message(
+    domain: &[u8],
     identity: BootstrapIntegrityIdentity,
     payload: &[u8],
 ) -> Result<Vec<u8>, ExportManifestSignatureFailure> {
@@ -153,9 +154,9 @@ fn signing_message(
     }
     let mut message = Vec::new();
     message
-        .try_reserve_exact(DOMAIN.len() + 32 + 32 + 4 + payload.len())
+        .try_reserve_exact(domain.len() + 32 + 32 + 4 + payload.len())
         .map_err(|_| ExportManifestSignatureFailure::LimitExceeded)?;
-    message.extend_from_slice(DOMAIN);
+    message.extend_from_slice(domain);
     message.extend_from_slice(&identity.public_key());
     message.extend_from_slice(&identity.fingerprint());
     message.extend_from_slice(
@@ -204,5 +205,86 @@ mod tests {
                 .expect_err("manifest size remains bounded"),
             ExportManifestSignatureFailure::LimitExceeded
         );
+    }
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+    #[test]
+    fn backup_control_signatures_do_not_accept_query_export_signatures() {
+        let backup = BackupControlSigner::from_seed(Box::new([0x51; 32])).expect("signer");
+        let query = ExportManifestSigner::from_seed(Box::new([0x51; 32])).expect("signer");
+        let payload = b"POSBKM01 canonical manifest";
+        let signature = backup.sign(payload).expect("signature");
+        signature
+            .verify(backup.identity(), payload)
+            .expect("verify");
+        assert!(signature.verify(backup.identity(), b"changed").is_err());
+        let forged = BackupControlSignature::new(
+            backup.identity(),
+            query.sign(payload).expect("query signature").bytes(),
+        )
+        .expect("received signature");
+        assert!(forged.verify(backup.identity(), payload).is_err());
+    }
+}
+
+const BACKUP_DOMAIN: &[u8] = b"positron-backup-control-signature-v1\0";
+/// Instance Integrity Key custody restricted to signed Backup control records.
+pub struct BackupControlSigner(ExportManifestSigner);
+impl BackupControlSigner {
+    pub(crate) fn from_seed(seed: Box<[u8; 32]>) -> Result<Self, ExportManifestSignatureFailure> {
+        ExportManifestSigner::from_seed(seed).map(Self)
+    }
+    pub const fn identity(&self) -> BootstrapIntegrityIdentity {
+        self.0.identity()
+    }
+    pub fn sign(
+        &self,
+        payload: &[u8],
+    ) -> Result<BackupControlSignature, ExportManifestSignatureFailure> {
+        let message = signing_message(BACKUP_DOMAIN, self.identity(), payload)?;
+        let pair = Ed25519KeyPair::from_seed_unchecked(self.0.seed.as_ref())
+            .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)?;
+        BackupControlSignature::new(
+            self.identity(),
+            pair.sign(&message)
+                .as_ref()
+                .try_into()
+                .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)?,
+        )
+    }
+}
+impl std::fmt::Debug for BackupControlSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BackupControlSigner { <redacted> }")
+    }
+}
+/// Received backup control signature. Trust comes from the independently pinned identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupControlSignature(ExportManifestSignature);
+impl BackupControlSignature {
+    pub fn new(
+        identity: BootstrapIntegrityIdentity,
+        signature: [u8; 64],
+    ) -> Result<Self, ExportManifestSignatureFailure> {
+        ExportManifestSignature::new(identity, signature).map(Self)
+    }
+    pub const fn bytes(self) -> [u8; 64] {
+        self.0.bytes()
+    }
+    pub fn verify(
+        self,
+        expected: BootstrapIntegrityIdentity,
+        payload: &[u8],
+    ) -> Result<(), ExportManifestSignatureFailure> {
+        if self.0.identity != expected {
+            return Err(ExportManifestSignatureFailure::AuthenticationFailed);
+        }
+        let message = signing_message(BACKUP_DOMAIN, expected, payload)?;
+        UnparsedPublicKey::new(&ED25519, expected.public_key())
+            .verify(&message, &self.bytes())
+            .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)
     }
 }

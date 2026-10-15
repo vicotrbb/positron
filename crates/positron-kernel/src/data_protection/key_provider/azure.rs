@@ -262,10 +262,10 @@ pub(super) fn fuzz_wire(data: &[u8]) {
                 if let Ok(capability) =
                     local_endpoint::LocalEndpoint::new(&endpoint, None, "https://vault.azure.net")
                 {
-                    drop(capability.validate(&azure_core::http::Request::new(
+                    let _ = capability.validate(&azure_core::http::Request::new(
                         endpoint,
                         azure_core::http::Method::Get,
-                    )));
+                    ));
                 }
             }
         }

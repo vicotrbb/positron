@@ -34,12 +34,12 @@ pub use api_key_administration::{
     ApiKeyDescriptor, ApiKeyRotationRequest,
 };
 pub use audit::{
-    ApiKeyLifecycleAction, CatalogRootRotationAuditEntry, CatalogRootRotationStage,
-    ConfigurationAuditContext, ConfigurationAuditEntry, ConfigurationAuditOutcome,
-    ConfigurationAuditRequest, ConfigurationWithPlaintextAuditRequest, DurableOperationAuditEntry,
-    GovernanceAuditEntry, IngestPolicyActivationAuditEntry, InitialAuditMetadata,
-    InitializationAuditEntry, IntegrityQuarantineAuditEntry, IntegrityQuarantineAuditRequest,
-    ListenerTransportAuditEntry, ListenerTransportAuditRequest,
+    ApiKeyLifecycleAction, BackupRepositoryAuditIdentity, CatalogRootRotationAuditEntry,
+    CatalogRootRotationStage, ConfigurationAuditContext, ConfigurationAuditEntry,
+    ConfigurationAuditOutcome, ConfigurationAuditRequest, ConfigurationWithPlaintextAuditRequest,
+    DurableOperationAuditEntry, GovernanceAuditEntry, IngestPolicyActivationAuditEntry,
+    InitialAuditMetadata, InitializationAuditEntry, IntegrityQuarantineAuditEntry,
+    IntegrityQuarantineAuditRequest, ListenerTransportAuditEntry, ListenerTransportAuditRequest,
     ListenerTransportConfigurationProvenance, ListenerTransportRole, MaintenanceControlAuditEntry,
     MaintenanceRunAuditEntry, MaintenanceRunAuditRequest, MaintenanceWindowAuditEntry,
     RecoveryBundleAction, RecoveryBundleAuditEntry, SchemaCheckpointAuditEntry,
@@ -56,13 +56,15 @@ pub use audit::{
 #[cfg(fuzzing)]
 pub use durable_operation_administration::fuzz_durable_operation_record;
 pub use durable_operation_administration::{
-    DurableOperation, DurableOperationAdministration, DurableOperationBoundary,
-    DurableOperationCancellation, DurableOperationFailure, DurableOperationKind,
-    DurableOperationLookupRetention, DurableOperationPhase, DurableOperationRequest,
-    DurableOperationRetry, DurableOperationStatus, DurableOperationTerminalError,
-    DurableQueryBudgetDimension, DurableQueryExportFailure, DurableQueryExportFailureCode,
-    KeyProviderMigrationAction, KeyProviderMigrationParameters, OperationId, RepositoryAction,
-    RepositoryOperationParameters, RepositoryProviderKind,
+    BackupCleanupReceipt, BackupOperationParameters, BackupOperationReceipt, BackupOperationStage,
+    BackupRetentionClaimReceipt, BackupRetentionParameters, BackupRetentionStage,
+    BackupSnapshotParameters, DurableOperation, DurableOperationAdministration,
+    DurableOperationBoundary, DurableOperationCancellation, DurableOperationFailure,
+    DurableOperationKind, DurableOperationLookupRetention, DurableOperationPhase,
+    DurableOperationRequest, DurableOperationRetry, DurableOperationStatus,
+    DurableOperationTerminalError, DurableQueryBudgetDimension, DurableQueryExportFailure,
+    DurableQueryExportFailureCode, KeyProviderMigrationAction, KeyProviderMigrationParameters,
+    OperationId, RepositoryAction, RepositoryOperationParameters, RepositoryProviderKind,
 };
 pub use format_migration_administration::{
     CatalogFormatMigration, CatalogFormatMigrationAdministration, CatalogFormatMigrationFailure,

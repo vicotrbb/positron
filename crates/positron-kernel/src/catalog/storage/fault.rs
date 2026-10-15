@@ -9,6 +9,7 @@ use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CatalogFileEvent {
+    RemoveBackupCaptureRegistry,
     WritePrepared,
     SynchronizePrepared,
     SynchronizePreparedDirectory,
@@ -222,6 +223,7 @@ pub(crate) fn before_current_publication_confirmation(
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogPublicationFault {
+    RemoveBackupCaptureRegistry,
     RenameMarker,
     ReclaimAudit,
     SynchronizeReclaimedAuditDirectory,
@@ -234,6 +236,7 @@ pub enum CatalogPublicationFault {
 impl CatalogPublicationFault {
     const fn storage_event(self) -> CatalogFileEvent {
         match self {
+            Self::RemoveBackupCaptureRegistry => CatalogFileEvent::RemoveBackupCaptureRegistry,
             Self::RenameMarker => CatalogFileEvent::RenameMarker,
             Self::ReclaimAudit => CatalogFileEvent::ReclaimAudit,
             Self::SynchronizeReclaimedAuditDirectory => {

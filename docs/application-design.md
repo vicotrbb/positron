@@ -1270,14 +1270,73 @@ Backup:
 
 1. Administration durably creates the operation.
 2. The coordinator reserves work and rolls active segments.
-3. Backup pins one complete Catalog Generation.
+3. Backup captures one complete Catalog Generation and opens immutable segment
+   handles under the Catalog barrier. Bounded copying, encryption, and file
+   synchronization run after releasing that barrier. The authenticated capture
+   index binds logical destinations, file lengths, and complete file digests.
 4. The Repository Adapter transfers immutable checksum-addressed encrypted
    objects and resumes interrupted uploads.
-5. The module publishes the signed snapshot manifest and Registry Generation
-   through compare-and-swap.
-6. Verification proves object, catalog, signature, registry-head, key-provider,
-   and independent recovery readiness.
+5. Verification proves captured ciphertext integrity, complete object digests,
+   the Catalog identity, signatures, exact Repository Identity, the pinned
+   registry head, and independent recovery readiness before publication.
+6. The module publishes the signed snapshot manifest and Registry Generation
+   through compare-and-swap. The receipt, exact Registry Generation anchor,
+   and governance evidence commit together in the Catalog.
 7. Only then does the operation become `Succeeded`.
+
+Backup cancellation compares the operation's persisted revision, which starts
+at one. Maintenance progress checkpoints do not change that revision. Phase
+transitions and cancellation do, so unrelated Catalog activity cannot starve
+an otherwise valid cancellation request. The original accepted cancellation
+key still resolves the current outcome after its revision advances.
+
+The signed Registry protects unpublished upload reservations and published
+snapshots through the same head CAS. A pending reservation commits its manifest
+and protected-key references before any key preparation or data transfer. It is
+not a restorable snapshot. Key preparation uploads one protected envelope per
+native Maintenance turn; its next-key index shares the existing manifest-bound
+phase checkpoint. Cancellation can therefore reconcile partially prepared keys
+through the same deletion claim, including objects that are already absent. Cancellation and retention remove an
+exact reservation or snapshot only after checking all other live references.
+An authenticated deletion claim protects each object until native deletion is
+reconciled. Unknown deletion outcomes remain pending. Durable local Cleaning
+progress precedes capture removal; a completed signed claim remains provable
+through local cleanup and terminal receipt publication. The Maintenance task
+retains acknowledgement work across restart even after its administrative
+operation becomes terminal.
+
+Registry ancestry verification advances by at most one signed, bounded Registry
+Generation per Maintenance turn. Its signed cursor and the original phase
+checkpoint share the existing operation-bound Maintenance record. Restart
+preserves both fields; a newer Catalog trust anchor rebases verification rather
+than accepting an older cursor as authority. Successful exact Registry CAS
+advances the cursor only after authoritative reconciliation. Unknown outcomes
+retain the prior proof and require reconciliation.
+
+Repository control work requires the existing Maintenance resource grant before
+reading or decoding large objects. Control admission includes native provider
+resources, retained capture state, encoded controls, and decoded inventories.
+The initial snapshot demand combines the provider peak with the larger of the
+capture-copy peak and the control baseline plus bounded retained capture state
+and phase checkpoint capacity. The authenticated index supplies candidate sizing;
+Registry verification and candidate resource preflight run before source hashing.
+Unknown larger remote controls can still require a revised demand.
+Insufficient memory persists the same task and checkpoint with its revised
+demand, releases the old execution, and uses normal admission again. Native
+metadata-only size hints do not prove integrity: range reads enforce the expected
+complete size under their provider version fence, and complete object digests
+remain mandatory before publication.
+
+Explicit expiry before a trusted retention deadline fails without crossing the
+Registry boundary; a later expiry uses a new request. Clock uncertainty pauses
+destructive work. A rejected remote repository fails the backup while preserving
+its managed cleanup owner and references. Corruption of the owned local capture
+retains the Kernel's integrity failure semantics. Read-only snapshot listing
+uses the signed Registry and a generation-bound cursor. Its read-only ancestry
+proof permits three cursor steps, enough for the normal acknowledgement gap
+and its separate head recheck, before the final signed page read. This bounds
+the request to three Registry Generation bodies in total. A longer or changing
+ancestry gap returns an explicit refusal rather than partial results.
 
 Restore:
 

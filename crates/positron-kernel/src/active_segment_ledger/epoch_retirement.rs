@@ -40,6 +40,9 @@ impl ActiveSegmentLedger<'_, '_> {
             .try_write()
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ConcurrentWriter))?;
         let basis = catalog.pin()?;
+        if catalog.has_backup_capture_references()? {
+            return Err(LedgerFailure::new(LedgerFailureCode::ConcurrentWriter));
+        }
         let _inspection = catalog.reserve_catalog_proposal_copy(&basis)?;
         for bytes in basis.plaintext_objects() {
             if references
@@ -75,6 +78,9 @@ impl ActiveSegmentLedger<'_, '_> {
             .try_write()
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ConcurrentWriter))?;
         let basis = catalog.pin()?;
+        if catalog.has_backup_capture_references()? {
+            return Err(LedgerFailure::new(LedgerFailureCode::ConcurrentWriter));
+        }
         let _inspection = catalog.reserve_catalog_proposal_copy(&basis)?;
         // Durable leases retain their original authenticated Catalog basis even
         // after the in-process reader is dropped. Expiry alone is not release.

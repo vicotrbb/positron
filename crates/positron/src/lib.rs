@@ -19,6 +19,7 @@ use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
 mod administrative_cli;
+mod backup_cli;
 mod config_cli;
 #[cfg(unix)]
 mod control_socket;
@@ -69,6 +70,13 @@ pub fn run_native(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
     let mut arguments = arguments.into_iter().peekable();
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "backup")
+    {
+        arguments.next();
+        return backup_cli::run(arguments);
+    }
     if arguments
         .peek()
         .is_some_and(|argument| argument == "repository")

@@ -75,6 +75,14 @@ pub(super) struct LedgerStorage {
 }
 
 impl LedgerStorage {
+    pub(super) fn captured_for_backup(directory: &File) -> Result<Self, LedgerFailure> {
+        Ok(Self {
+            active: open_or_create_directory(directory, "active")?,
+            sealed: directory.try_clone().map_err(map_io_error)?,
+            current: None,
+        })
+    }
+
     pub(super) fn open(volume: &OwnedPrimaryDataVolume) -> Result<Self, LedgerFailure> {
         let segments = open_or_create_directory(&volume._root, "segments")?;
         let active = open_or_create_directory(&segments, "active")?;

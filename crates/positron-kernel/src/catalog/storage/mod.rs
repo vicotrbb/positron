@@ -27,6 +27,10 @@ mod tests;
 
 use artifact::{ArtifactKind, open_artifact, protect_artifact, rewrap_artifact_envelope};
 use fault::{CatalogFileEvent, emit_event};
+pub(in crate::catalog) fn after_backup_capture_registry_removal()
+-> Result<(), super::CatalogFailure> {
+    emit_event(CatalogFileEvent::RemoveBackupCaptureRegistry)
+}
 use io::{
     entry_exists, open_existing_directory, open_or_create_directory, read_exact_file, synchronize,
     synchronize_named_file, write_new_file, write_transaction_file,

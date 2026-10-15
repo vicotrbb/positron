@@ -559,6 +559,12 @@ pub enum MaintenanceReservation<'authority> {
     Recovery(ResourceReservation<'authority>),
     /// Same admitted task grant, retained across native transport cancellation.
     NativeRepository(Arc<crate::NativeAwsResources>),
+    /// Retains accounting after a durable readmission handoff, without I/O authority.
+    RequeuedOrdinary(ResourceReservation<'authority>),
+    /// Native workers must release their clones before this handoff.
+    RequeuedNative(Arc<crate::NativeAwsResources>),
+    /// Used only during the immediate, infallible move into requeued backing.
+    Inactive,
 }
 
 /// The sole authority from which a task's declared reservation is admitted.
@@ -586,6 +592,9 @@ impl MaintenanceReservation<'_> {
         match self {
             Self::Ordinary(reservation) | Self::Recovery(reservation) => reservation.granted(),
             Self::NativeRepository(resources) => resources.granted(),
+            Self::RequeuedOrdinary(_) | Self::RequeuedNative(_) | Self::Inactive => {
+                ResourceAmounts::new([0; 11])
+            },
         }
     }
 
@@ -599,7 +608,11 @@ impl MaintenanceReservation<'_> {
                 reservation.belongs_to(governor)
                     && reservation.authorizes_ordinary_compaction(tenant)
             },
-            Self::Recovery(_) | Self::NativeRepository(_) => false,
+            Self::Recovery(_)
+            | Self::NativeRepository(_)
+            | Self::RequeuedOrdinary(_)
+            | Self::RequeuedNative(_)
+            | Self::Inactive => false,
         }
     }
 }

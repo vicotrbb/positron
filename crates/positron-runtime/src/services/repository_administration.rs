@@ -1,5 +1,7 @@
 //! Authenticated admission; Administration owns parameters and lifecycle.
 mod execution;
+mod open;
+pub(in crate::services) use open::open as open_repository;
 mod policy_projection;
 mod wire;
 use super::{ServiceHandle, maintenance_api::MaintenanceServiceFailure};
@@ -47,74 +49,8 @@ impl ServiceHandle {
                 .integrity_key_fingerprint()
         };
         // Resolve only the selected native locator after authorization.
-        let parameters = match input.locator {
-            RepositoryLocation::Local(path) => {
-                let identity = positron_backup::RepositoryIdentity::local(
-                    input.repository,
-                    self.instance.instance.to_bytes(),
-                    fingerprint,
-                    path,
-                )
-                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
-                RepositoryOperationParameters::local(
-                    input.action,
-                    path.to_str()
-                        .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
-                    input.repository,
-                    fingerprint,
-                    identity.prefix_commitment(),
-                )
-            },
-            RepositoryLocation::AwsS3(target) => {
-                let identity = positron_backup::RepositoryIdentity::aws_s3(
-                    input.repository,
-                    self.instance.instance.to_bytes(),
-                    fingerprint,
-                    target,
-                )
-                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
-                RepositoryOperationParameters::aws_s3(
-                    input.action,
-                    &target.encode_locator(),
-                    input.repository,
-                    fingerprint,
-                    identity.prefix_commitment(),
-                )
-            },
-            RepositoryLocation::GoogleCloudStorage(target) => {
-                let identity = positron_backup::RepositoryIdentity::google_cloud_storage(
-                    input.repository,
-                    self.instance.instance.to_bytes(),
-                    fingerprint,
-                    target,
-                )
-                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
-                RepositoryOperationParameters::google_cloud_storage(
-                    input.action,
-                    &target.encode_locator(),
-                    input.repository,
-                    fingerprint,
-                    identity.prefix_commitment(),
-                )
-            },
-            RepositoryLocation::AzureBlob(target) => {
-                let identity = positron_backup::RepositoryIdentity::azure_blob(
-                    input.repository,
-                    self.instance.instance.to_bytes(),
-                    fingerprint,
-                    target,
-                )
-                .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
-                RepositoryOperationParameters::azure_blob(
-                    input.action,
-                    &target.encode_locator(),
-                    input.repository,
-                    fingerprint,
-                    identity.prefix_commitment(),
-                )
-            },
-        }
-        .map_err(super::provider_migration::operation_failure)?;
+        let parameters =
+            parameters_for_location(input, self.instance.instance.to_bytes(), fingerprint)?;
         let operation = {
             let _gate = self
                 .catalog_operation()
@@ -217,7 +153,7 @@ fn require_operation(
     Ok(())
 }
 
-fn repository_resources(
+pub(super) fn repository_resources(
     kind: positron_governance::RepositoryProviderKind,
 ) -> positron_kernel::ResourceAmounts {
     let mut amounts = [131_072, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384];
@@ -239,4 +175,79 @@ fn repository_resources(
         }
     }
     positron_kernel::ResourceAmounts::new(amounts)
+}
+
+pub(super) fn parameters_for_location(
+    input: RepositoryAdmission<'_>,
+    instance: [u8; 16],
+    fingerprint: [u8; 32],
+) -> Result<RepositoryOperationParameters, MaintenanceServiceFailure> {
+    match input.locator {
+        RepositoryLocation::Local(path) => {
+            let identity = positron_backup::RepositoryIdentity::local(
+                input.repository,
+                instance,
+                fingerprint,
+                path,
+            )
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+            RepositoryOperationParameters::local(
+                input.action,
+                path.to_str()
+                    .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                input.repository,
+                fingerprint,
+                identity.prefix_commitment(),
+            )
+        },
+        RepositoryLocation::AwsS3(target) => {
+            let identity = positron_backup::RepositoryIdentity::aws_s3(
+                input.repository,
+                instance,
+                fingerprint,
+                target,
+            )
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+            RepositoryOperationParameters::aws_s3(
+                input.action,
+                &target.encode_locator(),
+                input.repository,
+                fingerprint,
+                identity.prefix_commitment(),
+            )
+        },
+        RepositoryLocation::GoogleCloudStorage(target) => {
+            let identity = positron_backup::RepositoryIdentity::google_cloud_storage(
+                input.repository,
+                instance,
+                fingerprint,
+                target,
+            )
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+            RepositoryOperationParameters::google_cloud_storage(
+                input.action,
+                &target.encode_locator(),
+                input.repository,
+                fingerprint,
+                identity.prefix_commitment(),
+            )
+        },
+        RepositoryLocation::AzureBlob(target) => {
+            let identity = positron_backup::RepositoryIdentity::azure_blob(
+                input.repository,
+                instance,
+                fingerprint,
+                target,
+            )
+            .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+            RepositoryOperationParameters::azure_blob(
+                input.action,
+                &target.encode_locator(),
+                input.repository,
+                fingerprint,
+                identity.prefix_commitment(),
+            )
+        },
+    }
+    .map_err(super::provider_migration::operation_failure)
 }

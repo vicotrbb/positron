@@ -812,6 +812,15 @@ impl RetentionTimeAuthority {
         self.inspect_clock_seconds().map(|(_, security)| security)
     }
 
+    /// Authorizes age-derived external Backup expiry using this same trusted
+    /// lifecycle authority. Replay-only clocks never authorize destruction.
+    pub fn destructive_governance_now_seconds(&self) -> Result<u64, LifecycleClockFailure> {
+        if !self.destructive_retention {
+            return Err(LifecycleClockFailure::ClockUncertain);
+        }
+        self.inspect_clock_seconds().map(|(lifecycle, _)| lifecycle)
+    }
+
     /// Reads process-monotonic lifecycle time without advancing its anchor.
     pub fn inspect_governance_now_seconds(&self) -> Result<u64, LifecycleClockFailure> {
         self.inspect_clock_seconds().map(|(lifecycle, _)| lifecycle)

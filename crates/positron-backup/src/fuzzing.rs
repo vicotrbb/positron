@@ -8,6 +8,8 @@ pub fn fuzz_repository_stateful(data: &[u8]) {
         .build()
         .expect("fuzz runtime");
     runtime.block_on(async {
+        // Parser seeds run even if the real lifecycle grant is unavailable.
+        let _lifecycle_admitted = crate::snapshot::fuzz_control_frames(data).await;
         let directory = tempfile::tempdir().expect("native fuzz directory");
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
             .expect("protected prefix");

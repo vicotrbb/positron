@@ -91,7 +91,7 @@ impl DurableOperationAdministration {
             .try_reserve(1)
             .map_err(|_| DurableOperationFailure::CapacityExceeded)?;
         objects.push(CatalogObject::new(encode_operation(operation)).map_err(map_catalog)?);
-        let encoded = encode_audit(operation);
+        let encoded = encode_audit(operation)?;
         let length =
             u16::try_from(encoded.len()).map_err(|_| DurableOperationFailure::CapacityExceeded)?;
         let evidence = finding

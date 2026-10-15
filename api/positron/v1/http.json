@@ -1,5 +1,5 @@
 {
-  "schema_digest": "cbf0178ce6afbf6750ed4d3f9e76462497a2aadefbc27a12cb028087bc1afbfa",
+  "schema_digest": "69354c0375d5f132e87c5b2e84e4d710f7dc1acf36817808a9703f6d2609c527",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -2607,6 +2607,268 @@
         "404": "source_unavailable",
         "409": "precondition_failed or idempotency_conflict",
         "503": "administration_unavailable"
+      }
+    },
+    {
+      "rpc": "positron.v1.BackupService/Manage",
+      "method": "POST",
+      "path": "/v1/backups:manage",
+      "request": "BackupRequest",
+      "response": "BackupResponse",
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "unknown_fields": "reject",
+      "request_fields": [
+        {
+          "proto": "action",
+          "json": "action",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "expected_catalog_generation",
+          "json": "expected_catalog_generation",
+          "type": "uint64",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "locator",
+          "json": "locator",
+          "type": "string",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "repository_id",
+          "json": "repository_id",
+          "type": "string",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "operation_id",
+          "json": "operation_id",
+          "type": "string",
+          "number": 6,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "aws_s3",
+          "json": "aws_s3",
+          "type": "RepositoryAwsS3Target",
+          "number": 7,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "google_cloud_storage",
+          "json": "google_cloud_storage",
+          "type": "RepositoryGoogleCloudStorageTarget",
+          "number": 8,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "azure_blob",
+          "json": "azure_blob",
+          "type": "RepositoryAzureBlobTarget",
+          "number": 9,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "retention_seconds",
+          "json": "retention_seconds",
+          "type": "uint64",
+          "number": 10,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "snapshot_id",
+          "json": "snapshot_id",
+          "type": "string",
+          "number": 11,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "expected_manifest_checksum",
+          "json": "expected_manifest_checksum",
+          "type": "string",
+          "number": 12,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "expected_operation_revision",
+          "json": "expected_operation_revision",
+          "type": "uint64",
+          "number": 13,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "response_fields": [
+        {
+          "proto": "operation",
+          "json": "operation",
+          "type": "RepositoryOperation",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "repository",
+          "json": "repository",
+          "type": "RepositoryIdentity",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "receipt",
+          "json": "receipt",
+          "type": "BackupSnapshotReceipt",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "kind",
+          "json": "kind",
+          "type": "string",
+          "number": 4,
+          "deprecated": false
+        },
+        {
+          "proto": "cleanup_pending",
+          "json": "cleanup_pending",
+          "type": "bool",
+          "number": 5,
+          "deprecated": false
+        },
+        {
+          "proto": "retention_receipt",
+          "json": "retention_receipt",
+          "type": "BackupRetentionReceipt",
+          "number": 6,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "operation_revision",
+          "json": "operation_revision",
+          "type": "uint64",
+          "number": 7,
+          "deprecated": false
+        },
+        {
+          "proto": "terminal_error_code",
+          "json": "terminal_error_code",
+          "type": "string",
+          "number": 8,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "responses": {
+        "200": "BackupResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable or capacity_unavailable"
+      }
+    },
+    {
+      "rpc": "positron.v1.BackupService/List",
+      "method": "POST",
+      "path": "/v1/backups:list",
+      "request": "BackupListRequest",
+      "response": "BackupListResponse",
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 65536,
+      "unknown_fields": "reject",
+      "request_fields": [
+        {
+          "proto": "repository_id",
+          "json": "repository_id",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "limit",
+          "json": "limit",
+          "type": "uint32",
+          "number": 2,
+          "deprecated": false
+        },
+        {
+          "proto": "cursor",
+          "json": "cursor",
+          "type": "string",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "response_fields": [
+        {
+          "proto": "repository",
+          "json": "repository",
+          "type": "RepositoryIdentity",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "registry_generation_checksum",
+          "json": "registry_generation_checksum",
+          "type": "string",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "entries",
+          "json": "entries",
+          "type": "BackupListEntry",
+          "number": 3,
+          "deprecated": false,
+          "repeated": true
+        },
+        {
+          "proto": "next_cursor",
+          "json": "next_cursor",
+          "type": "string",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "responses": {
+        "200": "BackupListResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed",
+        "503": "administration_unavailable or capacity_unavailable"
       }
     }
   ]
