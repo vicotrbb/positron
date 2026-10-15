@@ -20,7 +20,14 @@ async fn pruned_recovery_creation_audit_never_proves_retained_bundle_absent()
         InitializationPlan::non_interactive(),
     )?);
     let claim = InstanceBootstrap::claim(&paths)?;
-    let instance = Arc::new(InstanceBootstrap::reopen(&paths)?);
+    let mut instance = InstanceBootstrap::reopen(&paths)?;
+    // Begin at midnight, when a discovered scrub may be scheduled for later.
+    let (retention_time, elapsed) =
+        positron_kernel::RetentionTimeAuthority::establish_with_manual_elapsed(
+            positron_domain::time::UnixNanoseconds::new(86_400_000_000_000),
+        );
+    instance.install_retention_time_for_test(retention_time)?;
+    let instance = Arc::new(instance);
     let parent = roots.data.parent().ok_or("fixture parent")?;
     let recovery = parent.join("recovery");
     let credentials = parent.join("credentials");
@@ -132,6 +139,9 @@ async fn pruned_recovery_creation_audit_never_proves_retained_bundle_absent()
     instance.begin_key_provider_migration(config()?)?;
     instance.activate_key_provider_migration(config()?)?;
     let services = crate::ServiceHandle::new(Arc::clone(&instance))?;
+    // Make every scrub in this daily scheduling window due before draining.
+    // A false wake alone does not mean a future scheduled task is terminal.
+    elapsed.advance(900_000_000_000)?;
     let mut quiescent = false;
     for _ in 0..32 {
         if !services.wake_maintenance_worker()? {
