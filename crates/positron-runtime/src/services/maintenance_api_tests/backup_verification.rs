@@ -1,0 +1,361 @@
+use super::*;
+use crate::services::backup_administration::{StopPoint, stop_after};
+
+#[test]
+fn independent_verification_rebuilds_native_metadata_after_cold_stop()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationMetadataVerified, false, 0)
+}
+#[test]
+fn independent_verification_rechecks_remote_keys_after_cold_stop()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationKeyRecovered, false, 0)
+}
+#[test]
+fn independent_verification_cancellation_drops_reads_without_deleting_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationMetadataVerified, true, 0)
+}
+#[test]
+fn independent_verification_report_survives_stop_before_maintenance_completion()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationReportPublished, false, 0)
+}
+#[test]
+fn independent_verification_rejects_a_checksum_valid_remote_key_that_cannot_unwrap()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationMetadataVerified, false, 1)
+}
+
+#[test]
+fn independent_verification_rejects_a_remote_envelope_with_the_wrong_native_epoch()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationMetadataVerified, false, 2)
+}
+#[test]
+fn independent_verification_rejects_a_remote_envelope_with_the_wrong_native_fingerprint()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationMetadataVerified, false, 3)
+}
+
+fn restart_at(
+    point: StopPoint,
+    cancel: bool,
+    key_failure: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let repository_path = std::env::temp_dir().join(format!(
+        "positron-independent-verification-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    fs::create_dir(&repository_path)?;
+    fs::set_permissions(&repository_path, fs::Permissions::from_mode(0o700))?;
+    let identity = RepositoryIdentity::local(
+        [91; 16],
+        initialized.instance.to_bytes(),
+        initialized.integrity_key_fingerprint(),
+        &repository_path,
+    )?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    drop(runtime.block_on(LocalRepository::initialize(
+        &repository_path,
+        identity.clone(),
+    ))?);
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    services.ingest_otlp_logs(
+        &ingest,
+        request("independently verified telemetry").encode_to_vec(),
+    )?;
+    let unlock = age::x25519::Identity::generate();
+    let bundle = fixture
+        .recovery_export_directory()?
+        .join("verification.age");
+    initialized.create_recovery_bundle(
+        &bundle,
+        &positron_kernel::RecoveryRecipients::parse(&[unlock.to_public().to_string()])?,
+    )?;
+    initialized
+        .verify_recovery_bundle(&bundle, positron_kernel::RecoveryUnlock::Identity(&unlock))?;
+    let created = services
+        .manage_backup(
+            &administrator,
+            &create(
+                &services,
+                &repository_path,
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            )?
+            .encode()?,
+        )
+        .map_err(|failure| format!("create: {failure:?}"))?;
+    let cancellation = crate::TaskCancellation::new();
+    let worker_services = services.clone();
+    let worker_cancel = cancellation.clone();
+    let worker = std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancel));
+    let published = retention::finish_direct(&services, &administrator, &created.operation.id);
+    cancellation.cancel();
+    let worker_result = worker.join().map_err(|_| "backup worker panic")?;
+    let published =
+        published.map_err(|failure| format!("backup: {failure}; worker={worker_result:?}"))?;
+    let manifest = published.receipt.ok_or("backup receipt")?.manifest_checksum;
+    if key_failure != 0 {
+        replace_remote_key(
+            &services,
+            &runtime,
+            &repository_path,
+            &identity,
+            &created.operation.id,
+            key_failure,
+        )?;
+    }
+    let generation = {
+        let _gate = services.catalog_operation()?;
+        open_catalog(&initialized)?.pin()?.number()
+    };
+    let request = BackupRequest::decode(&serde_json::to_vec(
+        &serde_json::json!({"action":"verify", "repository_id":"5b5b5b5b-5b5b-5b5b-5b5b-5b5b5b5b5b5b", "snapshot_id":created.operation.id, "expected_manifest_checksum":manifest,"expected_catalog_generation":generation,"idempotency_key":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}),
+    )?)?;
+    let accepted = services
+        .manage_backup(&administrator, &request.encode()?)
+        .map_err(|failure| format!("verify: {failure:?}"))?;
+    let stop = stop_after(point)?;
+    let cancellation = crate::TaskCancellation::new();
+    let worker_services = services.clone();
+    let worker_cancel = cancellation.clone();
+    let capacity_blocker =
+        if point == StopPoint::VerificationMetadataVerified && !cancel && key_failure == 0 {
+            let amounts = |memory| {
+                positron_kernel::ResourceAmounts::new([memory, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            };
+            let mut requested = u64::MAX;
+            let mut blocker = None;
+            for _ in 0..4 {
+                match initialized.resource_governor().reserve(
+                    positron_kernel::WorkClaim::backup_repository_read(amounts(requested))?,
+                ) {
+                    Ok(reservation) => {
+                        blocker = Some(reservation);
+                        break;
+                    },
+                    Err(refusal) => {
+                        let next = refusal
+                            .allowed()
+                            .checked_sub(refusal.in_use())
+                            .and_then(|bytes| bytes.checked_sub(1_048_576))
+                            .ok_or("verification admission headroom")?;
+                        if next >= requested {
+                            return Err("verification admission did not narrow".into());
+                        }
+                        requested = next;
+                    },
+                }
+            }
+            Some(blocker.ok_or("verification capacity blocker")?)
+        } else {
+            None
+        };
+    let worker = std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancel));
+    if capacity_blocker.is_some() {
+        std::thread::sleep(Duration::from_millis(100));
+        let status = BackupRequest::decode(&serde_json::to_vec(
+            &serde_json::json!({"action":"status","operation_id":accepted.operation.id}),
+        )?)?;
+        let pending = services
+            .manage_backup(&administrator, &status.encode()?)
+            .map_err(|failure| format!("capacity status: {failure:?}"))?;
+        assert_eq!(pending.operation.status, "pending");
+        assert!(pending.verification_report.is_none());
+        assert!(pending.verification_report_checksum.is_none());
+    }
+    drop(capacity_blocker);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !stop.observed() && !worker.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            cancellation.cancel();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = worker.join().map_err(|_| "verification worker panic")?;
+    let diagnostic_request = BackupRequest::decode(&serde_json::to_vec(
+        &serde_json::json!({"action":"status","operation_id":accepted.operation.id}),
+    )?)?;
+    let diagnostic = services.manage_backup(&administrator, &diagnostic_request.encode()?);
+    assert!(
+        stop.observed(),
+        "verification stop not reached: worker={result:?}, operation={diagnostic:?}"
+    );
+    assert_eq!(result, Ok(()));
+    drop(stop);
+    let status = BackupRequest::decode(&serde_json::to_vec(
+        &serde_json::json!({"action":"status","operation_id":accepted.operation.id}),
+    )?)?;
+    let before_restart = services
+        .manage_backup(&administrator, &status.encode()?)
+        .map_err(|failure| format!("status: {failure:?}"))?;
+    if cancel {
+        let cancellation = BackupRequest::decode(&serde_json::to_vec(
+            &serde_json::json!({"action":"cancel","operation_id":accepted.operation.id,"expected_operation_revision":before_restart.operation_revision,"idempotency_key":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}),
+        )?)?;
+        let cancelled = services
+            .manage_backup(&administrator, &cancellation.encode()?)
+            .map_err(|failure| format!("cancel: {failure:?}"))?;
+        assert_eq!(cancelled.operation.status, "cancelled");
+        assert!(!cancelled.cleanup_pending);
+    }
+    drop(runtime);
+    drop(services);
+    drop(initialized);
+    let loopback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    let host = NativeHost::new(NativeBindings::new(
+        fixture.control_socket_path(),
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+        loopback,
+    )?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let services = process.services().ok_or("cold services")?;
+    let endpoint = process
+        .bound_endpoints()
+        .into_iter()
+        .find(|endpoint| endpoint.role() == crate::ListenerRole::Api)
+        .and_then(|endpoint| endpoint.socket_address())
+        .ok_or("API endpoint")?;
+    let client = BackupServiceClient::new(BackupTransport::PlaintextOptOut { endpoint })?;
+    let completed = finish(&client, &services, &administrator, &accepted.operation.id)?;
+    assert_eq!(
+        completed.operation.status,
+        if cancel {
+            "cancelled"
+        } else if key_failure != 0 {
+            "failed"
+        } else {
+            "succeeded"
+        }
+    );
+    if key_failure != 0 {
+        assert!(completed.verification_report.is_none());
+        assert!(completed.verification_report_checksum.is_none());
+        assert_eq!(process.health().phase(), crate::ProcessPhase::Serving);
+        let outcome = services.ingest_otlp_logs(
+            &ingest,
+            super::super::request("healthy after wrong backup key").encode_to_vec(),
+        )?;
+        assert_eq!(outcome.accepted_records(), 1);
+    }
+    if !cancel && key_failure == 0 {
+        assert!(completed.verification_report.is_some());
+        assert!(completed.verification_report_checksum.is_some());
+        if point == StopPoint::VerificationReportPublished {
+            assert_eq!(
+                completed.verification_report_checksum,
+                before_restart.verification_report_checksum
+            );
+        }
+        assert_eq!(client.manage(&administrator, &request)?, completed);
+    }
+    let inventory = client.list(
+        &administrator,
+        &positron_api::backup::BackupListRequest {
+            repository_id: "5b5b5b5b-5b5b-5b5b-5b5b-5b5b5b5b5b5b".into(),
+            limit: 128,
+            cursor: None,
+        },
+    )?;
+    assert_eq!(inventory.entries.len(), 1);
+    assert_eq!(
+        inventory
+            .entries
+            .first()
+            .ok_or("retained snapshot")?
+            .snapshot_id,
+        created.operation.id
+    );
+    drop(services);
+    assert_eq!(
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        crate::ExitOutcome::Graceful
+    );
+    fs::remove_dir_all(repository_path)?;
+    Ok(())
+}
+
+fn replace_remote_key(
+    services: &ServiceHandle,
+    runtime: &tokio::runtime::Runtime,
+    path: &std::path::Path,
+    identity: &RepositoryIdentity,
+    snapshot: &str,
+    failure: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use positron_backup::{
+        BackupCatalogIdentity, BackupKeyEnvelope, BackupManifest, BackupObject, BackupPublisher,
+        BackupRetention,
+    };
+    let snapshot =
+        crate::services::maintenance_verification::decode_fixed_hex(snapshot).ok_or("snapshot")?;
+    let signer = {
+        let _gate = services.catalog_operation()?;
+        let catalog = open_catalog(&services.instance)?;
+        let basis = catalog.pin()?;
+        services.instance.key.backup_control_signer(
+            services.instance.instance,
+            basis.governance_object()?.1.protected_integrity_key(),
+        )?
+    };
+    let repository = runtime.block_on(LocalRepository::attach(path, identity))?;
+    let resources = backup_read_resources(services)?;
+    let publisher = BackupPublisher::new(&repository, identity, &signer)
+        .with_control_resources(&resources, 0)?;
+    let proof = backup_inspection_proof(runtime, &publisher, snapshot)?;
+    let publisher = publisher.with_registry_verification(&proof)?;
+    runtime.block_on(async {
+        let state = publisher
+            .begin_snapshot_verification(snapshot, [0x91; 16], [0x92; 32])
+            .await?;
+        let key = publisher.read_verification_key(&state, 0).await?;
+        let mut protected = if failure == 1 {
+            key.protected().to_vec()
+        } else {
+            services.instance.key.provision_tenant_key_envelope(
+                services.instance.instance,
+                positron_domain::identity::TenantId::from_bytes(key.tenant())?,
+                [0x97; 16],
+                if failure == 2 {
+                    key.epoch().checked_add(1).ok_or("key epoch")?
+                } else {
+                    key.epoch()
+                },
+            )?
+        };
+        if failure == 1 {
+            *protected.last_mut().ok_or("protected key")? ^= 1;
+        }
+        let bad = BackupKeyEnvelope::new(key.tenant(), key.epoch(), key.fingerprint(), protected)?;
+        // A separately signed pending reservation replaces the same context's
+        // protected object reference. All checksums/signatures remain valid;
+        // only native authentication of the remote envelope detects the fault.
+        let keys = [bad];
+        let pending = BackupManifest::new(
+            [0x93; 16],
+            identity.clone(),
+            BackupCatalogIdentity::new(1, [0x94; 32], 2, 0, [0x95; 32])?,
+            BackupRetention::new(1, 2)?,
+            BackupPublisher::key_context(&keys)?,
+            vec![BackupObject::new([0x95; 32], 1, 0, [0x96; 32], 1)?],
+        )?;
+        publisher.reserve(&pending, &keys).await?;
+        publisher.prepare_key_step(&pending, &keys, 0).await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
+}

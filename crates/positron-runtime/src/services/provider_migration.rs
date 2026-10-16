@@ -344,6 +344,7 @@ pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrati
                     operation.kind(),
                     positron_governance::DurableOperationKind::BackupSnapshot
                         | positron_governance::DurableOperationKind::BackupRetention
+                        | positron_governance::DurableOperationKind::BackupVerification
                 ) =>
             {
                 "allowed_before_publication"
@@ -353,6 +354,7 @@ pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrati
                     operation.kind(),
                     positron_governance::DurableOperationKind::BackupSnapshot
                         | positron_governance::DurableOperationKind::BackupRetention
+                        | positron_governance::DurableOperationKind::BackupVerification
                 ) =>
             {
                 "not_allowed_during_publication"
@@ -369,6 +371,7 @@ pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrati
             B::ExportManifestPublished => "export_manifest_published",
             B::BackupRegistryPublished => "backup_registry_published",
             B::BackupRegistryExpired => "backup_registry_expired",
+            B::VerificationReportPublished => "verification_report_published",
         }
         .into(),
         lookup_expires_at_unix_seconds: operation.earliest_lookup_expiry_unix_seconds(),

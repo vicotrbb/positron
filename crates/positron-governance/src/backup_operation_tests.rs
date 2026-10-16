@@ -1,6 +1,33 @@
 use super::*;
 use crate::*;
 #[test]
+fn independent_backup_verification_has_distinct_durable_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let repository = RepositoryOperationParameters::local(
+        RepositoryAction::Verify,
+        "/backup",
+        [1; 16],
+        [2; 32],
+        [3; 32],
+    )?;
+    let parameters = BackupVerificationParameters::new(repository, [4; 32], [5; 16], [6; 32])?;
+    let request = DurableOperationRequest::backup_verification(
+        PrincipalId::from_bytes([7; 16])?,
+        AdministrativeIdempotencyKey::new([8; 16])?,
+        [9; 16],
+        1,
+        10,
+        parameters.intent_digest(),
+    )?;
+    assert_eq!(request.kind(), DurableOperationKind::BackupVerification);
+    assert_ne!(
+        parameters.intent_digest(),
+        BackupRetentionParameters::new(repository, [4; 32], [5; 16], [6; 32])?.intent_digest()
+    );
+    assert!(BackupVerificationParameters::new(repository, [4; 32], [0; 16], [6; 32]).is_err());
+    Ok(())
+}
+#[test]
 fn backup_acceptance_progress_cancellation_and_publication_are_durable()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = PagedCatalogRoot::new()?;
@@ -424,6 +451,104 @@ fn backup_acceptance_progress_cancellation_and_publication_are_durable()
         DurableOperationAdministration::inspect(&reopened, id3)?,
         Some(cancelled)
     );
+    let verification_parameters = BackupVerificationParameters::new(
+        parameters.repository(),
+        parameters.registration_identity(),
+        id2.to_bytes(),
+        receipt.manifest(),
+    )?;
+    let verification_request = DurableOperationRequest::backup_verification(
+        actor.principal_id(),
+        AdministrativeIdempotencyKey::new([0x71; 16])?,
+        instance.to_bytes(),
+        reopened.pin()?.number(),
+        31,
+        verification_parameters.intent_digest(),
+    )?;
+    let verification = DurableOperationAdministration::accept_backup_verification_registered(
+        &reopened,
+        actor,
+        verification_request,
+        verification_parameters,
+        cleanup_registration,
+    )?;
+    let verification_id = verification.operation_id();
+    DurableOperationAdministration::begin(&reopened, actor, verification_id, 32)?;
+    DurableOperationAdministration::advance_backup_verification(
+        &reopened,
+        actor,
+        verification_id,
+        false,
+        33,
+    )?;
+    DurableOperationAdministration::advance_backup_verification(
+        &reopened,
+        actor,
+        verification_id,
+        true,
+        34,
+    )?;
+    let report = CatalogObject::new(b"authenticated signed report fixture".to_vec())?;
+    let report_identity = report.identity();
+    let before_report = reopened.pin()?.number();
+    let failed = positron_kernel::with_catalog_publication_fault_after(
+        positron_kernel::CatalogPublicationFault::SynchronizeCommit,
+        0,
+        || {
+            DurableOperationAdministration::succeed_backup_verification(
+                &reopened,
+                actor,
+                verification_id,
+                CatalogObject::new(b"authenticated signed report fixture".to_vec())
+                    .expect("report"),
+                35,
+            )
+        },
+    );
+    assert_eq!(failed, Err(DurableOperationFailure::PersistenceUnavailable));
+    assert_eq!(reopened.pin()?.number(), before_report);
+    assert!(reopened.pin()?.object(report_identity)?.is_none());
+    drop(reopened);
+    let reopened = Catalog::open(&authority, instance, keys.catalog_secret(instance)?)?;
+    let verified = DurableOperationAdministration::succeed_backup_verification(
+        &reopened,
+        actor,
+        verification_id,
+        report,
+        36,
+    )?;
+    assert_eq!(
+        verified.backup_verification_report(),
+        Some(report_identity.to_bytes())
+    );
+    assert_eq!(verified.status(), DurableOperationStatus::Succeeded);
+    assert!(reopened.pin()?.object(report_identity)?.is_some());
+    let report_audit = reopened
+        .governance_audit_records()?
+        .into_iter()
+        .last()
+        .ok_or("report audit")?;
+    let GovernanceAuditEntry::DurableOperation(report_audit) =
+        GovernanceAuditEntry::decode(&report_audit)?
+    else {
+        return Err("report audit owner".into());
+    };
+    assert_eq!(
+        report_audit.backup_verification_report(),
+        Some(report_identity.to_bytes())
+    );
+    let final_generation = reopened.pin()?.number();
+    assert_eq!(
+        DurableOperationAdministration::accept_backup_verification_registered(
+            &reopened,
+            actor,
+            verification_request,
+            verification_parameters,
+            cleanup_registration
+        )?,
+        verified
+    );
+    assert_eq!(reopened.pin()?.number(), final_generation);
     Ok(())
 }
 

@@ -444,7 +444,9 @@ fn finish(
             )
             .into());
         }
-        std::thread::sleep(Duration::from_secs(1));
+        // HTTP status authentication shares the Catalog gate with each bounded
+        // worker turn. Poll less frequently to reduce contention with worker turns.
+        std::thread::sleep(Duration::from_secs(2));
     }
 }
 
@@ -459,6 +461,8 @@ mod readmission;
 
 #[path = "backup_retention.rs"]
 mod retention;
+#[path = "backup_verification.rs"]
+mod verification;
 
 fn backup_read_resources(
     services: &ServiceHandle,
@@ -532,3 +536,6 @@ fn backup_inspection_proof(
     }
     Ok(proof)
 }
+
+#[path = "backup_verification_http.rs"]
+mod verification_http;

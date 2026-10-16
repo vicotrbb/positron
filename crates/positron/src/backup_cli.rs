@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod list;
-const USAGE: &str = "usage: positron backup create|expire|status|lookup|wait|cancel|list --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--locator SERVER_PATH | --aws-bucket BUCKET --aws-region REGION --aws-endpoint HTTPS_ENDPOINT --aws-expected-owner ACCOUNT --aws-prefix PREFIX | --gcs-bucket BUCKET --gcs-project-number PROJECT --gcs-location LOCATION --gcs-prefix PREFIX | --azure-account ACCOUNT --azure-container CONTAINER --azure-prefix PREFIX] [--snapshot-id HEX --expected-manifest-checksum HEX --retention-seconds N --repository-id UUID --expected-generation N --expected-operation-revision N --idempotency-key UUID --operation-id ID]";
+const USAGE: &str = "usage: positron backup create|verify|expire|status|lookup|wait|cancel|list --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--locator SERVER_PATH | --aws-bucket BUCKET --aws-region REGION --aws-endpoint HTTPS_ENDPOINT --aws-expected-owner ACCOUNT --aws-prefix PREFIX | --gcs-bucket BUCKET --gcs-project-number PROJECT --gcs-location LOCATION --gcs-prefix PREFIX | --azure-account ACCOUNT --azure-container CONTAINER --azure-prefix PREFIX] [--snapshot-id HEX --expected-manifest-checksum HEX --retention-seconds N --repository-id UUID --expected-generation N --expected-operation-revision N --idempotency-key UUID --operation-id ID]";
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     let mut arguments = arguments.peekable();
@@ -60,6 +60,16 @@ fn write_response(output: &mut impl Write, response: &BackupResponse) -> Result<
     if let Some(code) = &response.terminal_error_code {
         writeln!(output, "terminal_error_code={code}").map_err(|_| "backup output unavailable")?;
     }
+    if let (Some(report), Some(checksum)) = (
+        &response.verification_report,
+        &response.verification_report_checksum,
+    ) {
+        writeln!(
+            output,
+            "verification_report_checksum={checksum} verification_report={report}"
+        )
+        .map_err(|_| "backup output unavailable")?;
+    }
     let operation = &response.operation;
     writeln!(output, "operation_id={} status={} phase={} progress_percent={} cancellation={} irreversible_boundary={} retry={} lookup_expires_at_unix_seconds={:?}", operation.id, operation.status, operation.phase, operation.progress_percent, operation.cancellation, operation.irreversible_boundary, operation.retry, operation.lookup_expires_at_unix_seconds).map_err(|_| "backup output unavailable")?;
     if let Some(identity) = &response.repository {
@@ -96,7 +106,7 @@ fn parse(
     let action = arguments.next().ok_or(USAGE)?;
     if !matches!(
         action.as_str(),
-        "create" | "expire" | "status" | "lookup" | "wait" | "cancel"
+        "create" | "verify" | "expire" | "status" | "lookup" | "wait" | "cancel"
     ) {
         return Err(USAGE);
     }

@@ -34,7 +34,8 @@ impl BackupManifestBuilder {
             capture.format_epoch().value(),
             capture.audit_frontier(),
             index.identity(),
-        )?;
+        )?
+        .with_capture_binding(capture.operation_id(), capture.request_digest())?;
         let mut files = Vec::new();
         files
             .try_reserve_exact(capture.files().len())

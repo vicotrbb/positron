@@ -8,6 +8,9 @@ struct Observed<'a> {
     inner: &'a LocalRepository,
     key_puts: AtomicUsize,
     unknown: AtomicBool,
+    absent_countdown: AtomicUsize,
+    absent_failure: AtomicUsize,
+    unknown_head: AtomicBool,
 }
 #[async_trait::async_trait]
 impl Repository for Observed<'_> {
@@ -56,7 +59,18 @@ impl Repository for Observed<'_> {
         Ok(result)
     }
     async fn delete(&self, object: ObjectId) -> Result<DeleteOutcome, RepositoryFailure> {
-        self.inner.delete(object).await
+        let outcome = self.inner.delete(object).await?;
+        if outcome == DeleteOutcome::AlreadyAbsent
+            && self.absent_countdown.load(Ordering::Relaxed) != 0
+            && self.absent_countdown.fetch_sub(1, Ordering::Relaxed) == 1
+        {
+            return Err(if self.absent_failure.load(Ordering::Relaxed) == 1 {
+                RepositoryFailure::OutcomeUnknown
+            } else {
+                RepositoryFailure::PermissionDenied
+            });
+        }
+        Ok(outcome)
     }
     async fn registry_head_at(
         &self,
@@ -76,7 +90,11 @@ impl Repository for Observed<'_> {
         slot: HeadSlot,
         change: RegistryHeadChange,
     ) -> Result<CasOutcome, RepositoryFailure> {
-        self.inner.compare_and_swap_head_at(slot, change).await
+        let outcome = self.inner.compare_and_swap_head_at(slot, change).await?;
+        if self.unknown_head.swap(false, Ordering::Relaxed) {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        Ok(outcome)
     }
 }
 #[tokio::test]
@@ -106,6 +124,9 @@ async fn signed_reservation_precedes_bounded_key_preparation()
             inner: &repository,
             key_puts: AtomicUsize::new(0),
             unknown: AtomicBool::new(false),
+            absent_countdown: AtomicUsize::new(0),
+            absent_failure: AtomicUsize::new(0),
+            unknown_head: AtomicBool::new(false),
         };
         let keys = (1u128..=64)
             .map(|tenant| BackupKeyEnvelope::new(tenant.to_be_bytes(), 1, [3; 32], vec![4; 64]))
@@ -154,6 +175,9 @@ async fn signed_reservation_precedes_bounded_key_preparation()
             inner: &reopened,
             key_puts: AtomicUsize::new(0),
             unknown: AtomicBool::new(false),
+            absent_countdown: AtomicUsize::new(0),
+            absent_failure: AtomicUsize::new(0),
+            unknown_head: AtomicBool::new(false),
         };
         let publisher = BackupPublisher::new(&observed, &identity, &signer)
             .with_control_resources(&resources, 64 * 1024)?;
@@ -179,6 +203,75 @@ async fn signed_reservation_precedes_bounded_key_preparation()
             .await?;
         while !publisher.scan_cancellation_step(&mut plan).await? {}
         let mut progress = publisher.claim_cancellation(&plan).await?;
+        // Freeze only the cooperative timer, not filesystem state: this proves
+        // batching without a minimum real-time throughput assumption.
+        tokio::time::pause();
+        let mut coalesced = false;
+        for _ in 0..4 {
+            let before = progress;
+            progress = publisher
+                .delete_expired_step([5; 16], receipt.manifest().checksum())
+                .await?;
+            let advanced = progress.deleted_objects() + progress.already_absent_objects()
+                - before.deleted_objects()
+                - before.already_absent_objects();
+            assert!(advanced <= 8);
+            assert!(progress.deleted_objects() - before.deleted_objects() <= 1);
+            if advanced > 1 {
+                coalesced = true;
+                break;
+            }
+        }
+        tokio::time::resume();
+        assert!(
+            coalesced,
+            "confirmed absence should share a bounded Registry publication"
+        );
+        // An unacknowledged prefix must never advance the signed receipt,
+        // including when earlier objects in the same local batch were absent.
+        for (mode, expected) in [
+            (1, RepositoryFailure::OutcomeUnknown),
+            (2, RepositoryFailure::PermissionDenied),
+        ] {
+            observed.absent_countdown.store(2, Ordering::Relaxed);
+            observed.absent_failure.store(mode, Ordering::Relaxed);
+            let mut refused = false;
+            for _ in 0..4 {
+                let before = progress;
+                match publisher
+                    .delete_expired_step([5; 16], receipt.manifest().checksum())
+                    .await
+                {
+                    Ok(next) => progress = next,
+                    Err(failure) => {
+                        assert_eq!(failure, expected);
+                        let unchanged = publisher
+                            .expiry_progress([5; 16], receipt.manifest().checksum())
+                            .await?;
+                        assert_eq!(unchanged, before);
+                        refused = true;
+                        break;
+                    },
+                }
+            }
+            assert!(refused);
+        }
+        observed.unknown_head.store(true, Ordering::Relaxed);
+        progress = publisher
+            .delete_expired_step([5; 16], receipt.manifest().checksum())
+            .await?;
+        // The head CAS committed without its acknowledgement; a fresh reader
+        // recovers precisely the published batch rather than counting it twice.
+        let cold = BackupPublisher::new(&observed, &identity, &signer)
+            .with_control_resources(&resources, 64 * 1024)?;
+        let mut cold_proof = cold.begin_registry_verification([5; 16], [10; 32]).await?;
+        while !cold.registry_verification_step(&mut cold_proof).await? {}
+        let cold = cold.with_registry_verification(&cold_proof)?;
+        assert_eq!(
+            cold.expiry_progress([5; 16], receipt.manifest().checksum())
+                .await?,
+            progress
+        );
         for _ in 0..67 {
             if progress.complete() {
                 break;

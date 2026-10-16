@@ -100,6 +100,6 @@ pub use snapshot::{
     BackupCleanupReason, BackupKeyEnvelope, BackupListCursor, BackupManifest,
     BackupManifestBuilder, BackupObject, BackupObjectVerification, BackupPublication,
     BackupPublicationCheck, BackupPublisher, BackupReceipt, BackupRegistryVerification,
-    BackupRepositoryRegistration, BackupRetention, BackupSnapshotPage, BackupSource,
-    BackupTransfer,
+    BackupRepositoryRegistration, BackupRetention, BackupSnapshotPage, BackupSnapshotVerification,
+    BackupSource, BackupTransfer, BackupVerificationReport,
 };

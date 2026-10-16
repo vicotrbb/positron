@@ -28,13 +28,17 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
     let manifest = BackupManifest::new(
         [5; 16],
         identity.clone(),
-        BackupCatalogIdentity::new(17, [6; 32], 2, 9, [3; 32]).expect("catalog"),
+        BackupCatalogIdentity::new(17, [6; 32], 2, 9, [3; 32])
+            .expect("catalog")
+            .with_capture_binding([0x81; 16], [0x82; 32])
+            .expect("capture binding"),
         BackupRetention::new(1000, 2000).expect("retention"),
         [8; 32],
         vec![BackupObject::new([3; 32], 64, 0, [4; 32], 64).expect("object")],
     )
     .expect("manifest");
     let manifest_bytes = manifest.signed_bytes(&signer).expect("signed manifest");
+    let _ = BackupVerificationReport::verify(data, &identity, signer.identity());
     assert_eq!(
         BackupManifest::verify(&manifest_bytes, &identity, signer.identity())
             .expect("valid manifest"),
@@ -353,7 +357,10 @@ async fn fuzz_cleanup(
         BackupManifest::new(
             snapshot,
             identity.clone(),
-            BackupCatalogIdentity::new(17, [6; 32], 2, 9, [3; 32]).expect("catalog"),
+            BackupCatalogIdentity::new(17, [6; 32], 2, 9, [3; 32])
+                .expect("catalog")
+                .with_capture_binding([0x81; 16], [0x82; 32])
+                .expect("capture binding"),
             BackupRetention::new(1000, 2000).expect("retention"),
             context,
             vec![BackupObject::new([3; 32], 16, 0, object.id().checksum(), 16).expect("extent")],

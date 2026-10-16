@@ -2,11 +2,11 @@
 use super::*;
 #[derive(Debug)]
 pub struct BackupPublicationCheck {
-    manifest: [u8; 32],
-    head: ObjectVersion,
+    pub(super) manifest: [u8; 32],
+    pub(super) head: ObjectVersion,
     objects: u32,
     next_object: u32,
-    keys: Vec<KeyReference>,
+    pub(super) keys: Vec<KeyReference>,
     next_key: u32,
     offset: u64,
     digest: Sha256,

@@ -81,6 +81,7 @@ type BackupAuditFields = (
     Option<BackupOperationReceipt>,
     Option<crate::BackupCleanupReceipt>,
     Option<crate::BackupRetentionClaimReceipt>,
+    Option<[u8; 32]>,
 );
 
 pub(super) fn decode_backup_evidence(
@@ -91,7 +92,9 @@ pub(super) fn decode_backup_evidence(
 ) -> Result<BackupAuditFields, IdentityFailure> {
     if !matches!(
         action,
-        DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+        DurableOperationKind::BackupSnapshot
+            | DurableOperationKind::BackupRetention
+            | DurableOperationKind::BackupVerification
     ) {
         return Err(IdentityFailure);
     }
@@ -99,7 +102,21 @@ pub(super) fn decode_backup_evidence(
     if target != Some(repository.instance_id()) {
         return Err(IdentityFailure);
     }
-    let (receipt, cleanup, claim) = match cursor.take_u8()? {
+    let tag = cursor.take_u8()?;
+    if action == DurableOperationKind::BackupVerification {
+        let report = match tag {
+            0 => None,
+            4 => Some(cursor.take_array::<32>()?),
+            _ => return Err(IdentityFailure),
+        };
+        if (outcome == DurableOperationStatus::Succeeded) != report.is_some()
+            || report == Some([0; 32])
+        {
+            return Err(IdentityFailure);
+        }
+        return Ok((repository, None, None, None, report));
+    }
+    let (receipt, cleanup, claim) = match tag {
         0 => (None, None, None),
         1 => (
             Some(
@@ -148,5 +165,5 @@ pub(super) fn decode_backup_evidence(
     {
         return Err(IdentityFailure);
     }
-    Ok((repository, receipt, cleanup, claim))
+    Ok((repository, receipt, cleanup, claim, None))
 }

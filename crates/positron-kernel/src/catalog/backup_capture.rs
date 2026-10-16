@@ -3,11 +3,13 @@ mod codec;
 mod io;
 mod preparation;
 mod resources;
+mod verification;
 use super::*;
 pub use preparation::{BackupCaptureCustody, BackupCapturePreparation};
 pub use resources::BackupCaptureResourceEstimate;
 use rustix::fs::{self as unix_fs, Mode, OFlags};
 use std::io::{Read, Seek, SeekFrom};
+pub use verification::BackupCaptureVerification;
 const MAX_CAPTURE_FILES: usize = 65_536;
 const MAX_CAPTURE_INDEX_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,6 +132,12 @@ impl std::fmt::Debug for BackupCapture {
     }
 }
 impl BackupCapture {
+    pub const fn operation_id(&self) -> [u8; 16] {
+        self.operation
+    }
+    pub const fn request_digest(&self) -> [u8; 32] {
+        self.request
+    }
     /// Heap retained by the authenticated file inventory while Repository I/O runs.
     pub fn retained_memory_bytes(&self) -> Result<u64, CatalogFailure> {
         self.files
@@ -525,4 +533,85 @@ impl Catalog<'_> {
 }
 fn fail(code: CatalogFailureCode) -> CatalogFailure {
     CatalogFailure::new(code)
+}
+
+#[cfg(fuzzing)]
+pub(super) fn fuzz_capture_verification(catalog: &Catalog<'_>, data: &[u8]) {
+    let operation = [0x91; 16];
+    let request = [0x92; 32];
+    let epoch = FormatEpoch::CATALOG_V2;
+    let Ok(directory) = catalog.export_output_root() else {
+        return;
+    };
+    let Ok(secret) = catalog.secret.lock() else {
+        return;
+    };
+    let payload = if data.is_empty() {
+        b"metadata".as_slice()
+    } else {
+        data
+    };
+    let Ok(object) = CatalogObject::new(payload.to_vec()) else {
+        return;
+    };
+    let address = object.identity().to_bytes();
+    let Ok(encoded) = storage::artifact::protect_backup_capture(
+        &secret,
+        catalog.instance,
+        address,
+        epoch,
+        payload,
+    ) else {
+        return;
+    };
+    let Ok(mut file) = BackupCaptureFile::new(
+        BackupCaptureFileKind::CatalogObject,
+        address,
+        encoded.len() as u64,
+    ) else {
+        return;
+    };
+    file.checksum = Sha256::digest(&encoded).into();
+    let capture = BackupCapture {
+        directory,
+        operation,
+        request,
+        generation: 1,
+        catalog: [0x93; 32],
+        epoch,
+        audit: 0,
+        files: vec![file],
+    };
+    let Ok(mut plaintext) = capture.encode() else {
+        return;
+    };
+    if let Some(selector) = data.first().filter(|byte| **byte & 1 == 1) {
+        let position = usize::from(*selector).saturating_mul(17) % plaintext.len();
+        if let Some(destination) = plaintext.get_mut(position) {
+            *destination ^= data.get(1).copied().unwrap_or(1).max(1);
+        }
+    }
+    let Ok(protected) = storage::artifact::protect_backup_capture(
+        &secret,
+        catalog.instance,
+        codec::index_identity(operation, request),
+        epoch,
+        &plaintext,
+    ) else {
+        return;
+    };
+    drop(secret);
+    let mut index = b"POSBCI01".to_vec();
+    index.extend_from_slice(&epoch.value().to_be_bytes());
+    index.extend_from_slice(&protected);
+    if let Ok(mut verification) =
+        catalog.begin_backup_capture_verification(operation, request, &index)
+    {
+        if verification
+            .verify_file(catalog, file.identity(), &encoded)
+            .is_ok()
+        {
+            let _outcome = verification.finish();
+        }
+    }
 }

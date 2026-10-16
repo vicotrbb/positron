@@ -8,6 +8,8 @@ use expiry::DeletionClaim;
 pub use expiry::{BackupCleanupPlan, BackupCleanupProgress, BackupCleanupReason};
 mod listing;
 mod publication;
+mod snapshot_verification;
+pub use snapshot_verification::{BackupSnapshotVerification, BackupVerificationReport};
 mod verification;
 pub use verification::BackupRegistryVerification;
 use verification::{CachedGeneration, VerifiedHead};
@@ -59,6 +61,18 @@ impl BackupKeyEnvelope {
             fingerprint,
             protected,
         })
+    }
+    pub const fn tenant(&self) -> [u8; 16] {
+        self.tenant
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub const fn fingerprint(&self) -> [u8; 32] {
+        self.fingerprint
+    }
+    pub fn protected(&self) -> &[u8] {
+        &self.protected
     }
     pub fn retained_memory_bytes(&self) -> u64 {
         self.protected.capacity() as u64
@@ -250,7 +264,7 @@ impl<'a> BackupPublisher<'a> {
         manifest: &BackupManifest,
         additional: u64,
     ) -> Result<(), RepositoryFailure> {
-        let extent = 332u64
+        let extent = 380u64
             .checked_add(
                 (manifest.objects.len() as u64)
                     .checked_mul(88)

@@ -94,6 +94,68 @@ fn backup_capture_is_encrypted_bound_to_one_generation_and_survives_reopen()
             .windows(24)
             .any(|bytes| bytes == b"metadata without secrets")
     );
+    let index = capture.index_file()?;
+    let index_bytes = capture.read(index.identity(), 0, index.size())?;
+    let mut verification =
+        catalog.begin_backup_capture_verification([6; 16], [7; 32], &index_bytes)?;
+    let prospective = verification.prospective_memory_bytes()?;
+    assert!(prospective < BackupCaptureVerification::required_memory_bytes()?);
+    let initial_retained = verification.retained_memory_bytes()?;
+    assert!(initial_retained > 0);
+    assert!(initial_retained <= prospective);
+    assert!(initial_retained <= BackupCaptureVerification::required_memory_bytes()?);
+    let metadata = verification
+        .files()
+        .iter()
+        .filter(|file| {
+            matches!(
+                file.kind(),
+                BackupCaptureFileKind::CatalogObject
+                    | BackupCaptureFileKind::GovernanceAudit
+                    | BackupCaptureFileKind::AuditCheckpoint
+            )
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        catalog
+            .begin_backup_capture_verification([6; 16], [8; 32], &index_bytes)
+            .is_err()
+    );
+    let incomplete = catalog.begin_backup_capture_verification([6; 16], [7; 32], &index_bytes)?;
+    assert!(incomplete.finish().is_err());
+    for file in metadata {
+        let bytes = capture.read(file.identity(), 0, file.size())?;
+        let mut corrupted = bytes.clone();
+        if let Some(byte) = corrupted.last_mut() {
+            *byte ^= 1;
+        }
+        assert!(
+            verification
+                .verify_file(&catalog, file.identity(), &corrupted)
+                .is_err()
+        );
+        verification.verify_file(&catalog, file.identity(), &bytes)?;
+        assert!(
+            verification
+                .verify_file(&catalog, file.identity(), &bytes)
+                .is_err()
+        );
+    }
+    assert!(verification.retained_memory_bytes()? > initial_retained);
+    assert!(verification.retained_memory_bytes()? <= prospective);
+    assert_eq!(verification.prospective_memory_bytes()?, prospective);
+    assert!(
+        verification.retained_memory_bytes()?
+            <= BackupCaptureVerification::required_memory_bytes()?
+    );
+    let verified = verification.finish()?;
+    assert_eq!(verified.identity(), basis.identity());
+    assert_eq!(verified.object_count(), basis.object_count());
+    assert_eq!(
+        verified.governance_audit_frontier(),
+        basis.governance_audit_frontier()
+    );
     drop(capture);
     let reopened = catalog.open_backup_capture([6; 16], [7; 32])?;
     assert_eq!(reopened.catalog_identity(), basis.identity().to_bytes());
@@ -199,6 +261,59 @@ fn backup_capture_rejects_active_files_and_retains_sealed_ciphertext_after_live_
     );
     ledger.seal()?;
     let sealed = catalog.pin()?;
+    // Authenticated ciphertext and a complete inventory are insufficient when
+    // the captured metadata is malformed or leaves segment files unreachable.
+    for (operation, replacement) in [
+        ([0x71; 16], b"PSEGMET1".as_slice()),
+        ([0x72; 16], b"ordinary opaque metadata".as_slice()),
+    ] {
+        let sanitized = sealed
+            .object_identities()
+            .map(|identity| {
+                Ok(BackupCatalogObject::new(
+                    identity,
+                    CatalogObject::new(replacement.to_vec())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, CatalogFailure>>()?;
+        let invalid = finish(catalog.prepare_backup_capture(
+            &execution,
+            operation,
+            [8; 32],
+            &sealed,
+            &sanitized,
+            custody(InstanceId::new([1; 16])?, Some(scope))?,
+        )?)?;
+        let index = invalid.index_file()?;
+        let mut verification = catalog.begin_backup_capture_verification(
+            operation,
+            [8; 32],
+            &invalid.read(index.identity(), 0, index.size())?,
+        )?;
+        let metadata = verification
+            .files()
+            .iter()
+            .filter(|file| {
+                matches!(
+                    file.kind(),
+                    BackupCaptureFileKind::CatalogObject
+                        | BackupCaptureFileKind::GovernanceAudit
+                        | BackupCaptureFileKind::AuditCheckpoint
+                )
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for file in metadata {
+            verification.verify_file(
+                &catalog,
+                file.identity(),
+                &invalid.read(file.identity(), 0, file.size())?,
+            )?;
+        }
+        assert!(verification.finish().is_err());
+        drop(invalid);
+        while !catalog.release_backup_capture(operation, [8; 32])? {}
+    }
     let mut preparation = catalog.prepare_backup_capture(
         &execution,
         [7; 16],
@@ -228,6 +343,33 @@ fn backup_capture_rejects_active_files_and_retains_sealed_ciphertext_after_live_
     }
     let capture = finish(preparation)?;
     assert_eq!(capture.catalog_identity(), sealed.identity().to_bytes());
+    let index = capture.index_file()?;
+    let mut verification = catalog.begin_backup_capture_verification(
+        [7; 16],
+        [8; 32],
+        &capture.read(index.identity(), 0, index.size())?,
+    )?;
+    let metadata = verification
+        .files()
+        .iter()
+        .filter(|file| {
+            matches!(
+                file.kind(),
+                BackupCaptureFileKind::CatalogObject
+                    | BackupCaptureFileKind::GovernanceAudit
+                    | BackupCaptureFileKind::AuditCheckpoint
+            )
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    for file in metadata {
+        verification.verify_file(
+            &catalog,
+            file.identity(),
+            &capture.read(file.identity(), 0, file.size())?,
+        )?;
+    }
+    assert_eq!(verification.finish()?.identity(), sealed.identity());
     let file = *capture
         .files()
         .iter()

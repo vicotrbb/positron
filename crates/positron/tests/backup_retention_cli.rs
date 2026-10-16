@@ -7,13 +7,17 @@ use std::{
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 #[test]
 fn backup_expiry_uses_exact_snapshot_manifest_preconditions() -> TestResult {
-    expiry_command(false)
+    expiry_command(false, false)
 }
 #[test]
 fn backup_expiry_prints_known_not_due_terminal_reason() -> TestResult {
-    expiry_command(true)
+    expiry_command(true, false)
 }
-fn expiry_command(terminal_failure: bool) -> TestResult {
+#[test]
+fn backup_verification_submits_exact_target_and_prints_immutable_report() -> TestResult {
+    expiry_command(false, true)
+}
+fn expiry_command(terminal_failure: bool, verification: bool) -> TestResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let endpoint = listener.local_addr()?;
     let server = std::thread::spawn(move || -> Result<String, std::io::Error> {
@@ -42,7 +46,23 @@ fn expiry_command(terminal_failure: bool) -> TestResult {
                 }
             }
         }
-        let body = if terminal_failure {
+        let report_body;
+        let body = if verification {
+            use sha2::{Digest, Sha256};
+            let report = b"signed report fixture";
+            let checksum = Sha256::digest(report)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let report = report
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            report_body = serde_json::json!({"operation_revision":4,"kind":"verification","cleanup_pending":false,"verification_report":report,"verification_report_checksum":checksum,
+                "operation":{"id":"11111111111111111111111111111111","status":"succeeded","phase":"published","progress_percent":100,"retry":"never","cancellation":"not_allowed_during_publication","irreversible_boundary":"verification_report_published"},
+                "repository":{"repository_id":"11111111-1111-4111-8111-111111111111","instance_id":"22222222-2222-4222-8222-222222222222","provider_kind":"local_filesystem","format_epoch":1,"integrity_fingerprint":"1".repeat(64),"prefix_commitment":"2".repeat(64)}}).to_string();
+            report_body.as_str()
+        } else if terminal_failure {
             r#"{"operation_revision":2,"kind":"retention","cleanup_pending":false,"terminal_error_code":"backup_retention_not_due","operation":{"id":"11111111111111111111111111111111","status":"failed","phase":"backup_retention_scan","progress_percent":20,"retry":"never","cancellation":"allowed_before_publication","irreversible_boundary":"not_crossed"}}"#
         } else {
             r#"{"operation_revision":1,"kind":"retention","cleanup_pending":false,"operation":{"id":"11111111111111111111111111111111","status":"succeeded","phase":"published","progress_percent":100,"retry":"never","cancellation":"not_allowed_during_publication","irreversible_boundary":"backup_registry_expired"},"repository":{"repository_id":"11111111-1111-4111-8111-111111111111","instance_id":"22222222-2222-4222-8222-222222222222","provider_kind":"local_filesystem","format_epoch":1,"integrity_fingerprint":"1111111111111111111111111111111111111111111111111111111111111111","prefix_commitment":"2222222222222222222222222222222222222222222222222222222222222222"},"retention_receipt":{"snapshot_id":"22222222222222222222222222222222","manifest_checksum":"3333333333333333333333333333333333333333333333333333333333333333","registry_generation_checksum":"5555555555555555555555555555555555555555555555555555555555555555","deleted_objects":3,"already_absent_objects":2,"retained_shared_objects":1}}"#
@@ -57,7 +77,7 @@ fn expiry_command(terminal_failure: bool) -> TestResult {
     let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
         .args([
             "backup",
-            "expire",
+            if verification { "verify" } else { "expire" },
             "--endpoint",
             &endpoint.to_string(),
             "--allow-plaintext",
@@ -87,8 +107,12 @@ fn expiry_command(terminal_failure: bool) -> TestResult {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    assert!(text.contains("kind=retention cleanup_pending=false"));
-    if terminal_failure {
+    if verification {
+        assert!(text.contains("kind=verification cleanup_pending=false"));
+        assert!(text.contains("verification_report_checksum="));
+        assert!(text.contains("verification_report="));
+        assert!(text.contains("irreversible_boundary=verification_report_published"));
+    } else if terminal_failure {
         assert!(text.contains("terminal_error_code=backup_retention_not_due"));
         assert!(text.contains("status=failed"));
         assert!(text.contains("irreversible_boundary=not_crossed"));
@@ -101,7 +125,11 @@ fn expiry_command(terminal_failure: bool) -> TestResult {
     assert!(!text.contains("operator-test-credential"));
     let request = server.join().map_err(|_| "server thread failed")??;
     assert!(request.starts_with("POST /v1/backups:manage HTTP/1.1"));
-    assert!(request.contains("\"action\":\"expire\""));
+    assert!(request.contains(if verification {
+        "\"action\":\"verify\""
+    } else {
+        "\"action\":\"expire\""
+    }));
     assert!(request.contains("22222222222222222222222222222222"));
     Ok(())
 }

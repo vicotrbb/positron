@@ -16,6 +16,10 @@ pub struct BackupSnapshotReceipt {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_report: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_report_checksum: Option<String>,
     pub operation_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_error_code: Option<String>,
@@ -50,6 +54,7 @@ impl BackupResponse {
         let op = &self.operation;
         let snapshot = self.kind == "snapshot";
         let retention = self.kind == "retention";
+        let verification = self.kind == "verification";
         let phase = op.phase.as_str();
         let boundary = op.irreversible_boundary.as_str();
         if (op.status == "failed") != self.terminal_error_code.is_some()
@@ -60,7 +65,7 @@ impl BackupResponse {
                 )
             })
             || self.operation_revision == 0
-            || (!snapshot && !retention)
+            || (!snapshot && !retention && !verification)
             || !crate::provider_migration::operation_id(&op.id)
             || op.progress_percent > 100
             || !matches!(
@@ -78,6 +83,7 @@ impl BackupResponse {
                         | "backup_verification"
                         | "backup_publication"
                 )
+                || verification && matches!(phase, "backup_verification" | "backup_publication")
                 || retention
                     && matches!(
                         phase,
@@ -98,7 +104,8 @@ impl BackupResponse {
             )
             || !(boundary == "not_crossed"
                 || snapshot && boundary == "backup_registry_published"
-                || retention && boundary == "backup_registry_expired")
+                || retention && boundary == "backup_registry_expired"
+                || verification && boundary == "verification_report_published")
             || matches!(op.status.as_str(), "pending" | "running")
                 && op.lookup_expires_at_unix_seconds.is_some()
             || phase == "backup_cancellation"
@@ -160,6 +167,58 @@ impl BackupResponse {
                 || !hash(&receipt.registry_generation_checksum))
         {
             return Err(MaintenanceWireFailure);
+        }
+        if verification {
+            if phase == "backup_cancellation"
+                || self.terminal_error_code.as_deref() == Some("backup_retention_not_due")
+                || self.cleanup_pending
+                || self.receipt.is_some()
+                || self.retention_receipt.is_some()
+                || (op.status == "succeeded") != self.verification_report.is_some()
+                || self.verification_report.is_some() != self.verification_report_checksum.is_some()
+                || self
+                    .verification_report_checksum
+                    .as_deref()
+                    .is_some_and(|value| !hash(value))
+                || self.verification_report.as_deref().is_some_and(|value| {
+                    value.len() > 2048
+                        || value.is_empty()
+                        || !value.len().is_multiple_of(2)
+                        || !value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+                || op.status == "succeeded"
+                    && (phase != "published" || boundary != "verification_report_published")
+            {
+                return Err(MaintenanceWireFailure);
+            }
+        } else if self.verification_report.is_some() || self.verification_report_checksum.is_some()
+        {
+            return Err(MaintenanceWireFailure);
+        }
+        if let (Some(report), Some(checksum)) = (
+            &self.verification_report,
+            &self.verification_report_checksum,
+        ) {
+            use sha2::{Digest, Sha256};
+            let bytes = report
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    std::str::from_utf8(pair)
+                        .ok()
+                        .and_then(|text| u8::from_str_radix(text, 16).ok())
+                        .ok_or(MaintenanceWireFailure)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let actual = Sha256::digest(&bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            if &actual != checksum || self.repository.is_none() {
+                return Err(MaintenanceWireFailure);
+            }
         }
         if op.status == "succeeded"
             && (snapshot && self.receipt.is_none() || retention && self.retention_receipt.is_none())

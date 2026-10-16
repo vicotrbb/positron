@@ -387,8 +387,9 @@ impl BackupPublisher<'_> {
             .ok_or(RepositoryFailure::NotFound)?;
         Ok(claim.progress(registry.ok_or(RepositoryFailure::CorruptState)?))
     }
-    /// One provider delete and one exact Registry CAS. Ambiguous or denied
-    /// deletion retains the signed claim and never reports the object deleted.
+    /// One deletion or a bounded local batch of confirmed-absent objects, then
+    /// one exact Registry CAS. Ambiguous or denied deletion retains the signed
+    /// claim and never reports an unacknowledged deletion as deleted.
     pub async fn delete_expired_step(
         &self,
         owner: [u8; 16],
@@ -402,24 +403,40 @@ impl BackupPublisher<'_> {
             .iter_mut()
             .find(|claim| claim.owner == owner && claim.receipt.manifest.checksum() == manifest)
             .ok_or(RepositoryFailure::NotFound)?;
-        let Some(object) = claim.remaining.first().copied() else {
+        if claim.remaining.is_empty() {
             return Ok(claim.progress(previous.ok_or(RepositoryFailure::CorruptState)?));
-        };
-        match self.repository.delete(object).await? {
-            crate::DeleteOutcome::Deleted => {
-                claim.deleted = claim
-                    .deleted
-                    .checked_add(1)
-                    .ok_or(RepositoryFailure::LimitExceeded)?
-            },
-            crate::DeleteOutcome::AlreadyAbsent => {
-                claim.absent = claim
-                    .absent
-                    .checked_add(1)
-                    .ok_or(RepositoryFailure::LimitExceeded)?
-            },
         }
-        claim.remaining.remove(0);
+        let started = tokio::time::Instant::now();
+        let mut confirmed = 0;
+        // Coalesce only proven absence on the local provider. Retain the
+        // existing cooperative 8-step/10ms ceiling and stop after a deletion.
+        // A failed provider outcome leaves the original signed claim intact.
+        for object in claim.remaining.iter().take(8).copied() {
+            let deleted = match self.repository.delete(object).await? {
+                crate::DeleteOutcome::Deleted => {
+                    claim.deleted = claim
+                        .deleted
+                        .checked_add(1)
+                        .ok_or(RepositoryFailure::LimitExceeded)?;
+                    true
+                },
+                crate::DeleteOutcome::AlreadyAbsent => {
+                    claim.absent = claim
+                        .absent
+                        .checked_add(1)
+                        .ok_or(RepositoryFailure::LimitExceeded)?;
+                    false
+                },
+            };
+            confirmed += 1;
+            if deleted
+                || self.identity.provider_kind() != "localFilesystem"
+                || started.elapsed() >= std::time::Duration::from_millis(10)
+            {
+                break;
+            }
+        }
+        drop(claim.remaining.drain(..confirmed));
         generation.number = generation
             .number
             .checked_add(1)

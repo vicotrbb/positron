@@ -14,6 +14,8 @@ const OPERATION_MAGIC_V2: [u8; 8] = *b"POSOPR02";
 const OPERATION_MAGIC_V3: [u8; 8] = *b"POSOPR03";
 const OPERATION_MAGIC: [u8; 8] = *b"POSOPR04";
 const REPOSITORY_PARAMETERS_MAGIC: [u8; 8] = *b"POSREP02";
+const VERIFICATION_PARAMETERS_MAGIC: [u8; 8] = *b"POSBVP01";
+const VERIFICATION_REPORT_MAGIC: [u8; 8] = *b"POSBVE01";
 const BACKUP_PARAMETERS_MAGIC: [u8; 8] = *b"POSBKP01";
 const RETENTION_PARAMETERS_MAGIC: [u8; 8] = *b"POSBRP01";
 const RETENTION_CLAIM_MAGIC: [u8; 8] = *b"POSBRC01";
@@ -79,6 +81,10 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
     }
     if let Some(parameters) = operation.backup_parameters {
         match parameters {
+            super::BackupOperationParameters::Verification(value) => {
+                encoded.extend_from_slice(&VERIFICATION_PARAMETERS_MAGIC);
+                value.encode(&mut encoded);
+            },
             super::BackupOperationParameters::Snapshot(value) => {
                 encoded.extend_from_slice(&BACKUP_PARAMETERS_MAGIC);
                 value.encode(&mut encoded);
@@ -89,6 +95,10 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
             },
         }
         match operation.backup_evidence {
+            Some(super::backup_parameters::BackupOperationEvidence::VerificationReport(value)) => {
+                encoded.extend_from_slice(&VERIFICATION_REPORT_MAGIC);
+                encoded.extend_from_slice(&value);
+            },
             Some(super::backup_parameters::BackupOperationEvidence::Snapshot(value)) => {
                 encoded.extend_from_slice(&BACKUP_RECEIPT_MAGIC);
                 value.encode(&mut encoded);
@@ -215,7 +225,7 @@ pub(super) fn decode_operation(
     // root-kind layout by their exact-length check, rather than ignore it.
     let root_parameters = v4 && encoded.get(56) == Some(&4);
     let repository_parameters_present = v4 && encoded.get(56) == Some(&5);
-    let backup_parameters_present = v4 && matches!(encoded.get(56), Some(6 | 7));
+    let backup_parameters_present = v4 && matches!(encoded.get(56), Some(6..=8));
     let v3 = encoded.starts_with(&OPERATION_MAGIC_V3);
     let v2 = encoded.starts_with(&OPERATION_MAGIC_V2);
     if !v4 && !v3 && !v2 && !encoded.starts_with(&OPERATION_MAGIC_V1) {
@@ -381,9 +391,12 @@ pub(super) fn decode_operation(
     };
     let (backup_parameters, backup_evidence) = if backup_parameters_present {
         let magic = take_array::<8>(encoded, &mut offset)?;
+        let verification = request.kind() == DurableOperationKind::BackupVerification;
         let retention = request.kind() == DurableOperationKind::BackupRetention;
         if magic
-            != if retention {
+            != if verification {
+                VERIFICATION_PARAMETERS_MAGIC
+            } else if retention {
                 RETENTION_PARAMETERS_MAGIC
             } else {
                 BACKUP_PARAMETERS_MAGIC
@@ -392,7 +405,7 @@ pub(super) fn decode_operation(
             return Err(DurableOperationFailure::PersistenceUnavailable);
         }
         let length_offset = offset
-            .checked_add(if retention { 162 } else { 122 })
+            .checked_add(if retention || verification { 162 } else { 122 })
             .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
         let length_end = length_offset
             .checked_add(2)
@@ -409,7 +422,11 @@ pub(super) fn decode_operation(
         let bytes = encoded
             .get(offset..end)
             .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
-        let parameters = if retention {
+        let parameters = if verification {
+            super::BackupOperationParameters::Verification(
+                super::BackupVerificationParameters::decode(bytes)?,
+            )
+        } else if retention {
             super::BackupOperationParameters::Retention(super::BackupRetentionParameters::decode(
                 bytes,
             )?)
@@ -424,7 +441,13 @@ pub(super) fn decode_operation(
             let bytes = encoded
                 .get(offset..)
                 .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
-            let value = if magic == BACKUP_RECEIPT_MAGIC {
+            let value = if magic == VERIFICATION_REPORT_MAGIC {
+                super::backup_parameters::BackupOperationEvidence::VerificationReport(
+                    bytes
+                        .try_into()
+                        .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?,
+                )
+            } else if magic == BACKUP_RECEIPT_MAGIC {
                 super::backup_parameters::BackupOperationEvidence::Snapshot(
                     super::BackupOperationReceipt::decode(bytes)?,
                 )
@@ -516,7 +539,9 @@ pub(super) fn encode_audit(
     encoded.extend_from_slice(
         if matches!(
             operation.kind(),
-            DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+            DurableOperationKind::BackupSnapshot
+                | DurableOperationKind::BackupRetention
+                | DurableOperationKind::BackupVerification
         ) {
             b"POSOPA06"
         } else {
@@ -558,7 +583,9 @@ pub(super) fn encode_audit(
     }
     if matches!(
         operation.kind(),
-        DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+        DurableOperationKind::BackupSnapshot
+            | DurableOperationKind::BackupRetention
+            | DurableOperationKind::BackupVerification
     ) {
         let parameters = operation
             .backup_binding()
@@ -569,6 +596,11 @@ pub(super) fn encode_audit(
             .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
         crate::BackupRepositoryAuditIdentity::new(instance, parameters.repository())
             .encode(&mut encoded);
+        if let Some(report) = operation.backup_verification_report() {
+            encoded.push(4);
+            encoded.extend_from_slice(&report);
+            return Ok(encoded);
+        }
         match operation.backup_receipt() {
             Some(receipt) => {
                 encoded.push(1);
@@ -653,6 +685,42 @@ pub fn fuzz_durable_operation_record(data: &[u8]) {
             })
             .expect("policy fixture"),
         );
+    }
+    if data.get(3).copied().unwrap_or_default() & 1 != 0 {
+        let repository = crate::RepositoryOperationParameters::local(
+            crate::RepositoryAction::Verify,
+            "/fuzz/repository",
+            [0x44; 16],
+            [0x55; 32],
+            [0x66; 32],
+        )
+        .expect("verification repository");
+        let parameters = super::BackupVerificationParameters::new(
+            repository, [0x77; 32], [0x88; 16], [0x99; 32],
+        )
+        .expect("verification parameters");
+        let request = DurableOperationRequest::backup_verification(
+            PrincipalId::from_bytes([0x11; 16]).expect("actor"),
+            AdministrativeIdempotencyKey::new([0x22; 16]).expect("key"),
+            [0x33; 16],
+            1,
+            17,
+            parameters.intent_digest(),
+        )
+        .expect("verification request");
+        operation = DurableOperation::accepted(request);
+        operation.backup_parameters =
+            Some(super::BackupOperationParameters::Verification(parameters));
+        if data.get(4).copied().unwrap_or_default() & 1 != 0 {
+            operation = operation
+                .begin(18)
+                .expect("begin")
+                .succeeded(19)
+                .expect("success");
+            operation.backup_evidence = Some(
+                super::backup_parameters::BackupOperationEvidence::VerificationReport([0xaa; 32]),
+            );
+        }
     }
     let mut record = encode_operation(operation);
     for mutation in data.chunks(4).take(128) {

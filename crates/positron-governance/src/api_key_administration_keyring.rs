@@ -49,6 +49,27 @@ pub(super) fn find_tenant_keyring(
     Ok(found)
 }
 
+pub(crate) fn tenant_keyring_count(bytes: &[u8]) -> Result<usize, ApiKeyAdministrationFailure> {
+    let generation = u64::from_be_bytes(
+        bytes
+            .get(24..32)
+            .ok_or(ApiKeyAdministrationFailure::PersistenceUnavailable)?
+            .try_into()
+            .map_err(|_| ApiKeyAdministrationFailure::PersistenceUnavailable)?,
+    );
+    let count = usize::from(u16::from_be_bytes(
+        bytes
+            .get(32..34)
+            .ok_or(ApiKeyAdministrationFailure::PersistenceUnavailable)?
+            .try_into()
+            .map_err(|_| ApiKeyAdministrationFailure::PersistenceUnavailable)?,
+    ));
+    if generation == 0 || count == 0 || count > 128 || bytes.len() != 34 + count * 90 {
+        return Err(ApiKeyAdministrationFailure::PersistenceUnavailable);
+    }
+    Ok(count)
+}
+
 pub(super) fn decode_tenant_keyring(
     bytes: &[u8],
 ) -> Result<(TenantId, TenantKeyring), ApiKeyAdministrationFailure> {
@@ -60,6 +81,7 @@ pub(super) fn decode_tenant_keyring(
             .map_err(|_| ApiKeyAdministrationFailure::PersistenceUnavailable)?,
     )
     .map_err(|_| ApiKeyAdministrationFailure::PersistenceUnavailable)?;
+    let count = tenant_keyring_count(bytes)?;
     let generation = u64::from_be_bytes(
         bytes
             .get(24..32)
@@ -67,19 +89,6 @@ pub(super) fn decode_tenant_keyring(
             .try_into()
             .map_err(|_| ApiKeyAdministrationFailure::PersistenceUnavailable)?,
     );
-    if generation == 0 {
-        return Err(ApiKeyAdministrationFailure::PersistenceUnavailable);
-    }
-    let count = usize::from(u16::from_be_bytes(
-        bytes
-            .get(32..34)
-            .ok_or(ApiKeyAdministrationFailure::PersistenceUnavailable)?
-            .try_into()
-            .map_err(|_| ApiKeyAdministrationFailure::PersistenceUnavailable)?,
-    ));
-    if count == 0 || count > 128 || bytes.len() != 34 + count * 90 {
-        return Err(ApiKeyAdministrationFailure::PersistenceUnavailable);
-    }
     let mut credentials = Vec::new();
     credentials
         .try_reserve_exact(count)

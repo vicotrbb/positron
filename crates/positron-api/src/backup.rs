@@ -118,11 +118,11 @@ impl BackupRequest {
             return Err(MaintenanceWireFailure);
         }
         let expiry_fields = self.snapshot_id.is_some() || self.expected_manifest_checksum.is_some();
-        if self.action != "expire" && expiry_fields {
+        if !matches!(self.action.as_str(), "expire" | "verify") && expiry_fields {
             return Err(MaintenanceWireFailure);
         }
         let valid = match self.action.as_str() {
-            "expire" => {
+            "expire" | "verify" => {
                 mutation
                     && self.repository_id.is_some()
                     && self.operation_id.is_none()

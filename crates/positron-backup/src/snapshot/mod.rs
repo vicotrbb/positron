@@ -11,7 +11,8 @@ use positron_kernel::{BackupControlSigner, BootstrapIntegrityIdentity};
 pub use registry::{
     BackupCleanupPlan, BackupCleanupProgress, BackupCleanupReason, BackupKeyEnvelope,
     BackupListCursor, BackupPublication, BackupPublicationCheck, BackupPublisher, BackupReceipt,
-    BackupRegistryVerification, BackupSnapshotPage,
+    BackupRegistryVerification, BackupSnapshotPage, BackupSnapshotVerification,
+    BackupVerificationReport,
 };
 pub use transfer::{BackupObjectVerification, BackupSource, BackupTransfer};
 
@@ -73,6 +74,7 @@ pub struct BackupCatalogIdentity {
     epoch: u32,
     audit: u64,
     index: [u8; 32],
+    binding: Option<([u8; 16], [u8; 32])>,
 }
 impl BackupCatalogIdentity {
     pub fn new(
@@ -91,7 +93,21 @@ impl BackupCatalogIdentity {
             epoch,
             audit,
             index,
+            binding: None,
         })
+    }
+}
+impl BackupCatalogIdentity {
+    pub fn with_capture_binding(
+        mut self,
+        operation: [u8; 16],
+        request: [u8; 32],
+    ) -> Result<Self, RepositoryFailure> {
+        if operation == [0; 16] || request == [0; 32] {
+            return Err(RepositoryFailure::InvalidInput);
+        }
+        self.binding = Some((operation, request));
+        Ok(self)
     }
 }
 /// Explicit signed retention interval. Publication never infers a deadline from
@@ -122,6 +138,7 @@ pub struct BackupManifest {
     pub(crate) format_epoch: u32,
     pub(crate) audit_frontier: u64,
     pub(crate) capture_index: [u8; 32],
+    pub(crate) capture_binding: Option<([u8; 16], [u8; 32])>,
     pub(crate) created: u64,
     pub(crate) retain_until: u64,
     pub(crate) key_context: [u8; 32],
@@ -184,6 +201,7 @@ impl BackupManifest {
             format_epoch: catalog.epoch,
             audit_frontier: catalog.audit,
             capture_index: catalog.index,
+            capture_binding: catalog.binding,
             created: retention.created,
             retain_until: retention.retain_until,
             key_context,
@@ -193,11 +211,20 @@ impl BackupManifest {
     pub const fn snapshot_id(&self) -> [u8; 16] {
         self.snapshot
     }
+    pub const fn format_epoch(&self) -> u32 {
+        self.format_epoch
+    }
+    pub const fn audit_frontier(&self) -> u64 {
+        self.audit_frontier
+    }
     pub const fn catalog_generation(&self) -> u64 {
         self.catalog_generation
     }
     pub const fn catalog_identity(&self) -> [u8; 32] {
         self.catalog_identity
+    }
+    pub const fn capture_binding(&self) -> Option<([u8; 16], [u8; 32])> {
+        self.capture_binding
     }
     pub const fn capture_index(&self) -> [u8; 32] {
         self.capture_index

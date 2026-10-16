@@ -219,7 +219,7 @@ fn runtime_backup_expiry_waits_for_retention_and_finishes_signed_cleanup()
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
-fn finish_direct(
+pub(super) fn finish_direct(
     services: &ServiceHandle,
     bearer: &str,
     id: &str,

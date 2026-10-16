@@ -4,7 +4,8 @@ mod audit_checkpoint;
 mod backup_capture;
 pub use backup_capture::{
     BackupCapture, BackupCaptureCustody, BackupCaptureFile, BackupCaptureFileKind,
-    BackupCapturePreparation, BackupCaptureResourceEstimate, BackupCatalogObject,
+    BackupCapturePreparation, BackupCaptureResourceEstimate, BackupCaptureVerification,
+    BackupCatalogObject,
 };
 mod budget;
 mod codec;

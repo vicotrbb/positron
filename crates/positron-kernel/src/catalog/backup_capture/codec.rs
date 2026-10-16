@@ -87,6 +87,25 @@ impl BackupCapture {
         request: [u8; 32],
         epoch: FormatEpoch,
     ) -> Result<Self, CatalogFailure> {
+        let (generation, catalog, audit, files) =
+            Self::decode_inventory(bytes, operation, request, epoch)?;
+        Ok(Self {
+            directory,
+            operation,
+            request,
+            generation,
+            catalog,
+            epoch,
+            audit,
+            files,
+        })
+    }
+    pub(super) fn decode_inventory(
+        bytes: &[u8],
+        operation: [u8; 16],
+        request: [u8; 32],
+        epoch: FormatEpoch,
+    ) -> Result<(u64, [u8; 32], u64, Vec<BackupCaptureFile>), CatalogFailure> {
         let mut decoder = Decoder(bytes);
         if decoder.take(8)? != b"POSBCP01"
             || decoder.array::<16>()? != operation
@@ -136,15 +155,6 @@ impl BackupCapture {
         if !decoder.0.is_empty() {
             return Err(fail(CatalogFailureCode::IntegrityCorruption));
         }
-        Ok(Self {
-            directory,
-            operation,
-            request,
-            generation,
-            catalog,
-            epoch,
-            audit,
-            files,
-        })
+        Ok((generation, catalog, audit, files))
     }
 }

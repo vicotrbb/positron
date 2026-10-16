@@ -14,10 +14,11 @@ mod abandonment;
 mod backup_administration;
 mod backup_parameters;
 mod backup_retention_administration;
+mod backup_verification_administration;
 pub use backup_parameters::{
     BackupCleanupReceipt, BackupOperationParameters, BackupOperationReceipt, BackupOperationStage,
     BackupRetentionClaimReceipt, BackupRetentionParameters, BackupRetentionStage,
-    BackupSnapshotParameters,
+    BackupSnapshotParameters, BackupVerificationParameters,
 };
 mod codec;
 mod provider_migration_parameters;
@@ -594,7 +595,10 @@ impl DurableOperationAdministration {
         let operation = find_by_id(&snapshot, operation_id)?
             .ok_or(DurableOperationFailure::UnknownOperation)?;
         validate_system_actor(actor, operation.request.principal)?;
-        if operation.kind() == DurableOperationKind::BackupSnapshot {
+        if matches!(
+            operation.kind(),
+            DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupVerification
+        ) {
             return Err(DurableOperationFailure::InvalidState);
         }
         let cancelled = operation.cancelled(now, idempotency)?;
@@ -846,6 +850,10 @@ fn transition_request_digest(operation: DurableOperation) -> [u8; 32] {
         receipt.encode(&mut bytes);
         hasher.update([2]);
         hasher.update(bytes);
+    }
+    if let Some(report) = operation.backup_verification_report() {
+        hasher.update([4]);
+        hasher.update(report);
     }
     if let Some(receipt) = operation.backup_retention_claim() {
         hasher.update([3]);

@@ -1,5 +1,5 @@
 {
-  "schema_digest": "69354c0375d5f132e87c5b2e84e4d710f7dc1acf36817808a9703f6d2609c527",
+  "schema_digest": "e3cbde40c413fa9de1162051ac11edafe6a71a57cc0ad28a26f587bae52a2a17",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -2782,6 +2782,22 @@
           "json": "terminal_error_code",
           "type": "string",
           "number": 8,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "verification_report",
+          "json": "verification_report",
+          "type": "string",
+          "number": 9,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "verification_report_checksum",
+          "json": "verification_report_checksum",
+          "type": "string",
+          "number": 10,
           "deprecated": false,
           "optional": true
         }

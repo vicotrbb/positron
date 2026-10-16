@@ -50,7 +50,9 @@ pub(super) fn decode(bytes: &[u8]) -> Result<(&[u8], u32, &[u8]), ServiceFailure
 
 const OWNER_MAGIC: &[u8; 8] = b"POSBOW01";
 pub(in crate::services::backup_administration) const MAX_OWNER_FIELD: usize = 1024;
-pub(super) fn unpack(bytes: &[u8]) -> Result<(&[u8], &[u8]), ServiceFailure> {
+pub(in crate::services::backup_administration) fn unpack(
+    bytes: &[u8],
+) -> Result<(&[u8], &[u8]), ServiceFailure> {
     if bytes.is_empty() {
         return Ok((&[], &[]));
     }
@@ -98,7 +100,7 @@ pub(super) fn pack(registry: &[u8], progress: &[u8]) -> Result<Vec<u8>, ServiceF
     bytes.extend_from_slice(progress);
     Ok(bytes)
 }
-pub(super) fn current(
+pub(in crate::services::backup_administration) fn current(
     services: &ServiceHandle,
     execution: &MaintenanceExecution<'_>,
     binding: RepositoryOperationBinding,
@@ -109,7 +111,7 @@ pub(super) fn current(
 }
 /// Replaces only the supplied owner field, retaining the other field from the
 /// current exact dispatch. A failed publication preserves both prior fields.
-pub(super) fn persist(
+pub(in crate::services::backup_administration) fn persist(
     services: &ServiceHandle,
     execution: &MaintenanceExecution<'_>,
     binding: RepositoryOperationBinding,
