@@ -309,7 +309,21 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             &serde_json::json!({"resourceLogs":[{"scopeLogs":[{"logRecords":vec![record;4]}]}]}),
         )?;
         encoded_bytes += batch.len();
-        let response = request(otlp, "/v1/logs", &headers, &batch)?;
+        let mut response = request(otlp, "/v1/logs", &headers, &batch)?;
+        // Capacity rejection explicitly permits retry. Keep the exact payload
+        // and retain the final acknowledgement assertion after bounded retries.
+        for _ in 0..2 {
+            let retry_after_one_second =
+                response.split_once("\r\n\r\n").is_some_and(|(head, _)| {
+                    head.lines()
+                        .any(|line| line.eq_ignore_ascii_case("Retry-After: 1"))
+                });
+            if !response.starts_with("HTTP/1.1 429 ") || !retry_after_one_second {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            response = request(otlp, "/v1/logs", &headers, &batch)?;
+        }
         let diagnostic = if response.starts_with("HTTP/1.1 200 ") {
             String::new()
         } else {

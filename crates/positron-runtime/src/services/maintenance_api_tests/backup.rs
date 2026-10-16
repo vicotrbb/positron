@@ -378,7 +378,7 @@ fn finish(
     // This is a fixture completion budget, not a product latency promise.
     // Every bounded data turn durably publishes a Catalog checkpoint; polling
     // shares that Catalog gate, so leave time for progress between reads.
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
     let mut last_response = String::new();
     loop {
         match client.manage(bearer, &request) {

@@ -246,18 +246,22 @@ fn finish_root(
                 return Ok(status);
             }
             if worker.is_finished() || std::time::Instant::now() >= deadline {
-                return Err(format!(
-                    "root completion deadline: {status:?}; maintenance={:?}",
-                    services.maintenance_status(administrator, br"{}")
-                )
-                .into());
+                return Err(format!("root completion deadline: {status:?}").into());
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     })();
     cancellation.cancel();
     let worker_result = worker.join().map_err(|_| "root worker panic")?;
-    let status = result.map_err(|e| format!("{e}; worker={worker_result:?}"))?;
+    let status = result.map_err(|e| {
+        format!(
+            "{e}; worker={worker_result:?}; maintenance={:?}",
+            services.maintenance_status(administrator, br"{}")
+        )
+    })?;
     worker_result?;
     Ok(status)
 }
+
+#[path = "backup_envelope_completion.rs"]
+mod completion_publication;
