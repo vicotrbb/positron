@@ -84,12 +84,28 @@ impl Server {
                     )?;
                     delay_control.status.store(result.0, Ordering::Release);
                     let (status, extra, reply) = (result.0, result.1, result.2);
-                    write!(
-                        pending.stream,
-                        "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
-                        reply.len()
-                    )?;
-                    pending.stream.write_all(&reply)?;
+                    // The accepted request can outlive its client deadline.
+                    // Its conditional decision above is independent of whether
+                    // the old client can still receive the response.
+                    let delivery = (|| -> std::io::Result<()> {
+                        write!(
+                            pending.stream,
+                            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
+                            reply.len()
+                        )?;
+                        pending.stream.write_all(&reply)?;
+                        Ok(())
+                    })();
+                    if let Err(error) = delivery
+                        && !matches!(
+                            error.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        )
+                    {
+                        return Err(error.into());
+                    }
                 }
                 match listener.accept() {
                     Ok((stream, _)) => serve(stream, &mut state, &injected, &delay_control)?,

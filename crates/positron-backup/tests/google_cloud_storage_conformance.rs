@@ -617,6 +617,11 @@ async fn native_google_tenant_key_purge_retains_permanent_fence() -> TestResult 
         assert_eq!(Repository::delete_tenant_key(&repository,object.id(),&fence).await?,DeleteOutcome::AlreadyAbsent);
         server.delayed.release.store(true,std::sync::atomic::Ordering::Release);
         assert!(late.await?.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while server.delayed.status.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        }).await?;
         assert_eq!(server.delayed.status.load(std::sync::atomic::Ordering::Acquire),412);
         assert_eq!(repository.head(object.id()).await,Err(RepositoryFailure::NotFound));
         assert_eq!(repository.read_range(ObjectRange::new(object.id(),0,1)?).await?.bytes(),b"P");

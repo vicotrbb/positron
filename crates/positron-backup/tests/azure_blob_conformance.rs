@@ -380,6 +380,11 @@ async fn native_azure_tenant_key_purge_retains_permanent_fence()
                 .release
                 .store(true, std::sync::atomic::Ordering::Release);
             assert!(late.await?.is_err());
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while server.delayed.status.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }).await?;
             assert_eq!(
                 server
                     .delayed
