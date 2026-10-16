@@ -343,7 +343,17 @@ fn system_migration_and_scrub_dispatch(migration_first: bool) {
             coordinator
                 .start_next(6, false)
                 .expect("same queued work resumes"),
-            Some(second)
+            Some(second.clone())
+        );
+        coordinator
+            .complete(second.identity(), true)
+            .expect("previously blocked work completes");
+        assert_eq!(
+            coordinator
+                .status(second.identity())
+                .expect("terminal task")
+                .phase(),
+            MaintenanceTaskPhase::Succeeded
         );
     }
 }

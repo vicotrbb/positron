@@ -227,7 +227,9 @@ pub(super) fn finish_root(
     let worker_cancel = cancellation.clone();
     let worker = std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancel));
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        // Initial integrity work may own the conflicting scope for its 60s
+        // progress SLO before this root phase gets its own 30s fixture allowance.
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
         loop {
             let status = match services.manage_provider_migration(administrator, &request) {
                 Ok(status) => status,
