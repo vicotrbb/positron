@@ -82,7 +82,7 @@ impl AzureBlobRepository {
         bytes.extend_from_slice(&record.bytes);
         let digest = Sha256::digest(&bytes).into();
         let authentication = self
-            .upload_authenticator
+            .upload_authenticator()?
             .authenticate(digest)
             .map_err(|_| RepositoryFailure::StorageUnavailable)?;
         bytes.extend_from_slice(&authentication.epoch().to_be_bytes());
@@ -97,7 +97,7 @@ impl AzureBlobRepository {
         Record::decode(
             bytes,
             self.target.commitment(),
-            &self.upload_authenticator,
+            self.upload_authenticator()?,
             id,
         )
     }
@@ -383,6 +383,7 @@ impl AzureBlobRepository {
         Ok(PutOutcome::Created)
     }
     pub async fn begin_upload(&self, plan: UploadPlan) -> Result<UploadState, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         match self.read_object(plan.object).await {
@@ -431,6 +432,7 @@ impl AzureBlobRepository {
         &self,
         id: UploadId,
     ) -> Result<Option<UploadState>, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         self.read_record(id)
@@ -441,6 +443,7 @@ impl AzureBlobRepository {
         &self,
         part: UploadPart,
     ) -> Result<UploadOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         let Some((mut record, etag)) = self.read_record(part.state.id()).await? else {
@@ -489,6 +492,7 @@ impl AzureBlobRepository {
         }
     }
     pub async fn abort_upload(&self, id: UploadId) -> Result<DeleteOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         self.cleanup_upload(id).await

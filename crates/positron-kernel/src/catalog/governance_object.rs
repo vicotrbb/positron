@@ -400,7 +400,9 @@ impl CatalogGovernanceObject {
         let lifecycle_end = prefix.len();
         if !matches!(
             self.version,
-            CatalogGovernanceVersion::V6 | CatalogGovernanceVersion::V7
+            CatalogGovernanceVersion::V6
+                | CatalogGovernanceVersion::V7
+                | CatalogGovernanceVersion::V8
         ) {
             prefix
                 .get_mut(..8)
@@ -410,10 +412,10 @@ impl CatalogGovernanceObject {
             prefix.extend_from_slice(&lifecycle_generation.to_be_bytes());
         } else {
             let generation_start = lifecycle_end
-                .checked_sub(if self.version == CatalogGovernanceVersion::V7 {
-                    24
-                } else {
-                    8
+                .checked_sub(match self.version {
+                    CatalogGovernanceVersion::V8 => 32,
+                    CatalogGovernanceVersion::V7 => 24,
+                    _ => 8,
                 })
                 .ok_or_else(corrupt)?;
             prefix
@@ -426,7 +428,9 @@ impl CatalogGovernanceObject {
         }
         if !matches!(
             self.version,
-            CatalogGovernanceVersion::V6 | CatalogGovernanceVersion::V7
+            CatalogGovernanceVersion::V6
+                | CatalogGovernanceVersion::V7
+                | CatalogGovernanceVersion::V8
         ) {
             let state_start = lifecycle_end.checked_sub(5).ok_or_else(corrupt)?;
             let state = prefix.get_mut(state_start).ok_or_else(corrupt)?;

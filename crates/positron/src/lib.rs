@@ -31,6 +31,7 @@ mod policy;
 mod provider_migration_cli;
 mod recovery_cli;
 mod repository_cli;
+mod restore_cli;
 mod support_bundle;
 mod tenant_alias_cli;
 mod tenant_lifecycle;

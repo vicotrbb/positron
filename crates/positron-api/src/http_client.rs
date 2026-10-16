@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
+pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 use crate::api_keys::{ApiKeyTransport, read_bounded_trust_file};
 
 pub(crate) struct HttpClient {
@@ -45,8 +47,8 @@ impl HttpClient {
             },
         };
         let client = builder
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(5))
+            .connect_timeout(DEFAULT_REQUEST_TIMEOUT)
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .no_proxy()
             .build()
             .map_err(|_| ())?;
@@ -62,12 +64,27 @@ impl HttpClient {
         body: Vec<u8>,
         response_limit: usize,
     ) -> Result<(u16, Zeroizing<Vec<u8>>), ()> {
+        self.post_with_timeout(bearer, path, body, response_limit, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub(crate) fn post_with_timeout(
+        &self,
+        bearer: &str,
+        path: &str,
+        body: Vec<u8>,
+        response_limit: usize,
+        timeout: Duration,
+    ) -> Result<(u16, Zeroizing<Vec<u8>>), ()> {
+        if timeout.is_zero() {
+            return Err(());
+        }
         let response = self
             .client
             .post(format!("{}{path}", self.endpoint))
             .bearer_auth(bearer)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
+            .timeout(timeout.min(DEFAULT_REQUEST_TIMEOUT))
             .send()
             .map_err(|_| ())?;
         let status = response.status().as_u16();

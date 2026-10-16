@@ -6,13 +6,18 @@ mod codec;
 mod expiry;
 use expiry::DeletionClaim;
 pub use expiry::{BackupCleanupPlan, BackupCleanupProgress, BackupCleanupReason};
+mod tombstone;
+pub use tombstone::BackupPurgeTombstone;
 mod overlay;
 pub use overlay::BackupEnvelopeOverlay;
 use overlay::OverlayReference;
+pub(super) use overlay::recovery_overlay;
 mod listing;
 mod publication;
 mod snapshot_verification;
-pub use snapshot_verification::{BackupSnapshotVerification, BackupVerificationReport};
+pub use snapshot_verification::{
+    BackupRestoreReport, BackupSnapshotVerification, BackupVerificationReport,
+};
 mod verification;
 pub use verification::BackupRegistryVerification;
 use verification::{CachedGeneration, VerifiedHead};
@@ -29,6 +34,29 @@ const MAX_CONTROL_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REGISTRY_GENERATIONS: usize = 65_536;
 const MAX_REGISTERED_SNAPSHOTS: usize = 1024;
 const MAX_KEY_ENVELOPES: usize = 4096;
+/// Authenticated source key identity, without requiring a destroyed envelope.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct BackupKeyIdentity {
+    tenant: [u8; 16],
+    epoch: u64,
+    fingerprint: [u8; 32],
+}
+impl BackupKeyIdentity {
+    pub fn new(
+        tenant: [u8; 16],
+        epoch: u64,
+        fingerprint: [u8; 32],
+    ) -> Result<Self, RepositoryFailure> {
+        if tenant == [0; 16] || epoch == 0 || fingerprint == [0; 32] {
+            return Err(RepositoryFailure::InvalidInput);
+        }
+        Ok(Self {
+            tenant,
+            epoch,
+            fingerprint,
+        })
+    }
+}
 /// A tenant KEK envelope already authenticated by Data Protection. The root
 /// key itself, credentials and Recovery Bundles never enter this boundary.
 #[derive(Clone, Eq, PartialEq)]
@@ -165,6 +193,7 @@ struct Generation {
     claims: Vec<DeletionClaim>,
     keys: Vec<KeyReference>,
     overlays: Vec<OverlayReference>,
+    tombstones: Vec<BackupPurgeTombstone>,
 }
 /// Deep Backup workflow boundary; Repository provider calls stay internal.
 pub struct BackupPublisher<'a> {
@@ -233,16 +262,7 @@ impl<'a> BackupPublisher<'a> {
         // 8MiB also covers malformed bounded counts before decoding fails (the
         // largest table is 65536*88 bytes), a bounded range and small headers.
         // For large ranges the 8L term covers that range independently.
-        let native = match self.identity.provider_kind() {
-            "localFilesystem" => 0,
-            "awsS3" => crate::AwsS3Repository::required_resources()
-                .get(positron_kernel::ResourceDimension::MemoryBytes),
-            "googleCloudStorage" => crate::GoogleCloudStorageRepository::required_resources()
-                .get(positron_kernel::ResourceDimension::MemoryBytes),
-            "azureBlob" => crate::AzureBlobRepository::required_resources()
-                .get(positron_kernel::ResourceDimension::MemoryBytes),
-            _ => return Err(RepositoryFailure::InvalidInput),
-        };
+        let native = super::read::native_memory(self.identity)?;
         let memory_bytes = native
             .checked_add(MAX_CONTROL_BYTES)
             .and_then(|n| extent.checked_mul(8).and_then(|e| n.checked_add(e)))
@@ -614,9 +634,16 @@ fn key_references(keys: &[BackupKeyEnvelope]) -> Result<Vec<KeyReference>, Repos
     Ok(references)
 }
 fn context_digest(references: &[KeyReference]) -> [u8; 32] {
+    key_identity_context(references.iter().map(|key| BackupKeyIdentity {
+        tenant: key.tenant,
+        epoch: key.epoch,
+        fingerprint: key.fingerprint,
+    }))
+}
+fn key_identity_context(keys: impl Iterator<Item = BackupKeyIdentity>) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(b"positron-backup-key-context-v1\0");
-    for key in references {
+    for key in keys {
         hash.update(key.tenant);
         hash.update(key.epoch.to_be_bytes());
         hash.update(key.fingerprint);
@@ -625,32 +652,10 @@ fn context_digest(references: &[KeyReference]) -> [u8; 32] {
 }
 impl BackupPublisher<'_> {
     async fn read_control_object(&self, id: ObjectId) -> Result<Vec<u8>, RepositoryFailure> {
-        self.ensure_control_memory(0, 0)?;
-        let size = self.repository.object_size_hint(id).await?;
-        if size > MAX_CONTROL_BYTES {
-            return Err(RepositoryFailure::CorruptState);
-        }
-        self.ensure_control_memory(size, 0)?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(size as usize)
-            .map_err(|_| RepositoryFailure::LimitExceeded)?;
-        while (bytes.len() as u64) < size {
-            let offset = bytes.len() as u64;
-            let length = (size - offset).min(crate::MAX_RANGE_BYTES);
-            let part = self
-                .repository
-                .read_range(ObjectRange::new(id, offset, length)?.with_expected_size(size)?)
-                .await?;
-            if part.bytes().len() as u64 != length {
-                return Err(RepositoryFailure::CorruptState);
-            }
-            bytes.extend_from_slice(part.bytes());
-        }
-        if <[u8; 32]>::from(Sha256::digest(&bytes)) != id.checksum() {
-            return Err(RepositoryFailure::ChecksumMismatch);
-        }
-        Ok(bytes)
+        super::read::object_bytes(self.repository, id, |size| {
+            self.ensure_control_memory(size, 0)
+        })
+        .await
     }
 }
 fn allocation_bytes<T>(capacity: usize) -> Result<u64, RepositoryFailure> {

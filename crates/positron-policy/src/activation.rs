@@ -138,6 +138,23 @@ impl IngestPolicy {
             .ok_or(PolicyActivationFailure)
     }
 
+    /// Returns the tenant only after validating the complete owning activation.
+    pub fn activated_object_tenant(
+        bytes: &[u8],
+    ) -> Result<Option<TenantId>, PolicyActivationFailure> {
+        if !bytes.starts_with(ACTIVATION_MAGIC) {
+            return Ok(None);
+        }
+        let tenant = TenantId::from_bytes(
+            bytes
+                .get(8..24)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(PolicyActivationFailure)?,
+        )
+        .map_err(|_| PolicyActivationFailure)?;
+        Self::decode_activated_object(tenant, bytes)?.ok_or(PolicyActivationFailure)?;
+        Ok(Some(tenant))
+    }
     pub fn decode_activated_object(
         tenant: TenantId,
         bytes: &[u8],

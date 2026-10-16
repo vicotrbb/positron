@@ -398,3 +398,11 @@ Backup management and listing report explicit admission refusal as HTTP 503
 with `code: capacity_unavailable`. The generated client preserves this as
 `BackupServiceClientFailure::CapacityUnavailable`; callers can retry the same
 idempotent request. Unknown or malformed responses remain transport failures.
+
+Fresh-target restore is an offline owner workflow, exposed through
+`positron backup restore start|status|wait|cancel` rather than the serving
+`BackupService.Manage` endpoint. It uses independently pinned recovery inputs
+and the existing Durable Operation/Catalog authorities. See
+[fresh-target restore operations](../../../docs/operations/restore.md) for the
+complete command contract and publication interruption semantics. The HTTP
+schema and its derived artifacts do not acquire an offline restore endpoint.

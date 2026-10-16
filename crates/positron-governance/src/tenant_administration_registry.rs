@@ -6,6 +6,7 @@ use positron_kernel::{CatalogObject, CatalogSnapshot};
 
 use super::tenant_administration_registry_codec::{
     TenantRegistry, decode_registry, is_registry, registry, registry_object,
+    registry_object_with_reservations,
 };
 use super::{TenantAdministration, TenantAdministrationFailure, map_catalog};
 use crate::ResourceGeneration;
@@ -243,6 +244,7 @@ impl TenantAdministration {
             generation: ResourceGeneration::new(1)
                 .map_err(|_| TenantAdministrationFailure::InvalidInput)?,
             tenants: Vec::new(),
+            reserved: Vec::new(),
         });
         if !registry.tenants.contains(&governance.tenant()) {
             registry.tenants.push(governance.tenant());
@@ -259,10 +261,11 @@ impl TenantAdministration {
                 }
             }
         }
-        registry_object(
+        registry_object_with_reservations(
             positron_kernel::InstanceId::new(governance.instance()).map_err(map_catalog)?,
             registry.generation,
             &registry.tenants,
+            &registry.reserved,
         )
     }
 
@@ -365,6 +368,7 @@ fn tenant_inspections(
                 generation: ResourceGeneration::new(1)
                     .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?,
                 tenants: vec![default.tenant],
+                reserved: Vec::new(),
             },
             vec![default],
         ));

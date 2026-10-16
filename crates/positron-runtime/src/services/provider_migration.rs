@@ -300,7 +300,8 @@ pub(super) fn operation_failure(failure: DurableOperationFailure) -> Maintenance
         _ => MaintenanceServiceFailure::AdministrationUnavailable,
     }
 }
-pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrationOperation {
+/// Projects persisted operation state using the public administrative wire vocabulary.
+pub fn operation_response(operation: DurableOperation) -> ProviderMigrationOperation {
     use positron_governance::{
         DurableOperationBoundary as B, DurableOperationCancellation as C,
         DurableOperationPhase as P, DurableOperationRetry as R, DurableOperationStatus as S,
@@ -346,6 +347,7 @@ pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrati
                     positron_governance::DurableOperationKind::BackupSnapshot
                         | positron_governance::DurableOperationKind::BackupRetention
                         | positron_governance::DurableOperationKind::BackupVerification
+                        | positron_governance::DurableOperationKind::BackupRestore
                 ) =>
             {
                 "allowed_before_publication"
@@ -356,6 +358,7 @@ pub(super) fn operation_response(operation: DurableOperation) -> ProviderMigrati
                     positron_governance::DurableOperationKind::BackupSnapshot
                         | positron_governance::DurableOperationKind::BackupRetention
                         | positron_governance::DurableOperationKind::BackupVerification
+                        | positron_governance::DurableOperationKind::BackupRestore
                 ) =>
             {
                 "not_allowed_during_publication"

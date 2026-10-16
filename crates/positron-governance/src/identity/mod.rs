@@ -79,6 +79,38 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// Independent recovery custody may resume the captured administrator for
+    /// an offline restore. Neither repository data nor an unpinned key grants
+    /// this authority; the protected integrity signer must match the pin.
+    pub fn authorize_backup_restore(
+        snapshot: &CatalogSnapshot,
+        custody: &BootstrapKeyCustody,
+        pin: positron_kernel::RecoveryIdentity,
+        now: u64,
+    ) -> Result<AuthorizedContext, AttributionFailure> {
+        let (_, governance) = snapshot
+            .governance_object()
+            .map_err(|_| AttributionFailure)?;
+        if custody
+            .active_root_identity()
+            .map_err(|_| AttributionFailure)?
+            != pin.root()
+            || custody
+                .backup_control_signer(pin.instance(), governance.protected_integrity_key())
+                .map_err(|_| AttributionFailure)?
+                .identity()
+                != pin.integrity()
+        {
+            return Err(AttributionFailure);
+        }
+        let identity = Self::open(snapshot).map_err(|_| AttributionFailure)?;
+        identity.resume_system_operation_actor(
+            governance.principal(),
+            pin.instance().to_bytes(),
+            now,
+        )
+    }
+
     /// Revalidates a persisted system operation's original Principal. Only
     /// Administration's accepted-operation owner calls this recovery seam;
     /// it never accepts a bearer replacement or a caller-selected scope.
@@ -220,6 +252,13 @@ impl Identity {
                 .and_then(|n| n.checked_mul(2))
                 .and_then(|n| {
                     n.checked_add(count.checked_mul(4 * std::mem::size_of::<TenantId>())?)
+                })
+                .and_then(|n| {
+                    if bytes.starts_with(b"POSTRG03") {
+                        n.checked_add(bytes.len().checked_mul(8)?)
+                    } else {
+                        Some(n)
+                    }
                 })
                 .ok_or(IdentityFailure);
         }

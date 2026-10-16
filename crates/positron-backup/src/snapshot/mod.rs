@@ -1,4 +1,6 @@
 //! Signed full-instance snapshots and authoritative Repository Key Registry.
+mod read;
+pub use read::BackupSnapshotReader;
 mod capture;
 mod codec;
 mod context;
@@ -10,8 +12,9 @@ pub use capture::BackupManifestBuilder;
 use positron_kernel::{BackupControlSigner, BootstrapIntegrityIdentity};
 pub use registry::{
     BackupCleanupPlan, BackupCleanupProgress, BackupCleanupReason, BackupEnvelopeOverlay,
-    BackupKeyEnvelope, BackupListCursor, BackupPublication, BackupPublicationCheck,
-    BackupPublisher, BackupReceipt, BackupRegistryVerification, BackupSnapshotPage,
+    BackupKeyEnvelope, BackupKeyIdentity, BackupListCursor, BackupPublication,
+    BackupPublicationCheck, BackupPublisher, BackupPurgeTombstone, BackupReceipt,
+    BackupRegistryVerification, BackupRestoreReport, BackupSnapshotPage,
     BackupSnapshotVerification, BackupVerificationReport,
 };
 pub use transfer::{BackupObjectVerification, BackupSource, BackupTransfer};

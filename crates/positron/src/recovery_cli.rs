@@ -186,46 +186,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Options, &'stati
     let bundle = values.remove("--bundle").map(PathBuf::from);
     let identity = values.remove("--identity-file").map(PathBuf::from);
     let pin = if command == "import" {
-        let instance = InstanceId::new(decode(
-            &values
-                .remove("--instance")
-                .ok_or("--instance is required")?,
-        )?)
-        .map_err(|_| "invalid pinned instance")?;
-        let key_id = decode(
-            &values
-                .remove("--root-key-id")
-                .ok_or("--root-key-id is required")?,
-        )?;
-        let created = values
-            .remove("--root-created-at")
-            .ok_or("--root-created-at is required")?
-            .parse()
-            .map_err(|_| "invalid root creation time")?;
-        let fingerprint = decode(
-            &values
-                .remove("--root-fingerprint")
-                .ok_or("--root-fingerprint is required")?,
-        )?;
-        let root = BootstrapKeyIdentity::from_parts(key_id, fingerprint, created)
-            .map_err(|_| "invalid root identity")?;
-        let integrity = BootstrapIntegrityIdentity::from_pinned(
-            decode(
-                &values
-                    .remove("--integrity-public-key")
-                    .ok_or("--integrity-public-key is required")?,
-            )?,
-            decode(
-                &values
-                    .remove("--integrity-fingerprint")
-                    .ok_or("--integrity-fingerprint is required")?,
-            )?,
-        )
-        .map_err(|_| "invalid pinned integrity identity")?;
-        Some(
-            RecoveryIdentity::new(instance, root, integrity)
-                .map_err(|_| "invalid recovery identity")?,
-        )
+        Some(pinned_identity(&mut values)?)
     } else {
         None
     };
@@ -283,7 +244,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Options, &'stati
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
-fn decode<const N: usize>(value: &str) -> Result<[u8; N], &'static str> {
+pub(super) fn decode<const N: usize>(value: &str) -> Result<[u8; N], &'static str> {
     if value.len() != N * 2 || !value.is_ascii() {
         return Err("invalid hexadecimal pinned identity");
     }
@@ -293,4 +254,49 @@ fn decode<const N: usize>(value: &str) -> Result<[u8; N], &'static str> {
         *slot = u8::from_str_radix(value, 16).map_err(|_| "invalid hexadecimal pinned identity")?;
     }
     Ok(bytes)
+}
+
+pub(super) fn pinned_identity(
+    values: &mut BTreeMap<String, String>,
+) -> Result<RecoveryIdentity, &'static str> {
+    let instance = InstanceId::new(decode(
+        &values
+            .remove("--instance")
+            .ok_or("--instance is required")?,
+    )?)
+    .map_err(|_| "invalid pinned instance")?;
+    let key_id = decode(
+        &values
+            .remove("--root-key-id")
+            .ok_or("--root-key-id is required")?,
+    )?;
+    let created = values
+        .remove("--root-created-at")
+        .ok_or("--root-created-at is required")?
+        .parse()
+        .map_err(|_| "invalid root creation time")?;
+    let fingerprint = decode(
+        &values
+            .remove("--root-fingerprint")
+            .ok_or("--root-fingerprint is required")?,
+    )?;
+    let root = BootstrapKeyIdentity::from_parts(key_id, fingerprint, created)
+        .map_err(|_| "invalid root identity")?;
+    let integrity = BootstrapIntegrityIdentity::from_pinned(
+        decode(
+            &values
+                .remove("--integrity-public-key")
+                .ok_or("--integrity-public-key is required")?,
+        )?,
+        decode(
+            &values
+                .remove("--integrity-fingerprint")
+                .ok_or("--integrity-fingerprint is required")?,
+        )?,
+    )
+    .map_err(|_| "invalid pinned integrity identity")?;
+    RecoveryIdentity::new(instance, root, integrity).map_err(|_| "invalid recovery identity")
+}
+pub(super) fn read_passphrase(confirm: bool) -> Result<RecoveryPassphrase, &'static str> {
+    terminal::passphrase(confirm)
 }

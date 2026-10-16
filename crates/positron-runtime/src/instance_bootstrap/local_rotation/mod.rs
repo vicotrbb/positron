@@ -28,6 +28,7 @@ impl RootMigrationContext<'_> {
             CatalogRootRotationStage::Completed => 6,
             CatalogRootRotationStage::Cancelled => 7,
             CatalogRootRotationStage::Resumed => 8,
+            CatalogRootRotationStage::Restored => 9,
         }]);
         let digest = hash.finalize();
         let bytes = digest
@@ -59,9 +60,11 @@ pub(crate) use backup_envelopes::{BackupRootRetirementProof, registration_digest
 mod cutover;
 mod provider_migration;
 pub use provider_migration::KeyProviderMigrationStatus;
+mod restore;
 mod root_retirement;
 mod root_verification_audit;
 mod state;
+pub(crate) use restore::adopt_restored_route;
 mod tenant;
 mod tenant_migration;
 mod tenant_retirement;

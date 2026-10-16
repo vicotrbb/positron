@@ -76,6 +76,16 @@ async fn native_gcs_requires_admission_before_credential_resolution()
     let grant = governor.reserve(WorkClaim::system_diagnostics(one)?)?;
     let resources = positron_kernel::NativeAwsResources::new(grant.transfer());
     assert_eq!(
+        GoogleCloudStorageRepository::read_only_from_admitted_resources(
+            target.clone(),
+            identity.clone(),
+            resources.clone()
+        )
+        .await
+        .err(),
+        Some(RepositoryFailure::LimitExceeded)
+    );
+    assert_eq!(
         GoogleCloudStorageRepository::from_admitted_resources(
             target,
             identity,

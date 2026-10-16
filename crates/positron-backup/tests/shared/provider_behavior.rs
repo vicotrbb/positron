@@ -10,6 +10,7 @@ pub async fn conformance(
     identity: RepositoryIdentity,
     doctor_budget: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let started = std::time::Instant::now();
     let report = doctor(
         repository,
         DoctorPlan::new(
@@ -19,7 +20,14 @@ pub async fn conformance(
             Arc::new(AtomicBool::new(false)),
         )?,
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        format!(
+            "Repository Doctor after {:?} with {:?} budget: {error}",
+            started.elapsed(),
+            doctor_budget
+        )
+    })?;
     assert!(report.verified() && report.probes_deleted());
     object_conformance(repository, identity).await
 }

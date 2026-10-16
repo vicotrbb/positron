@@ -500,8 +500,17 @@ pub(super) fn map_ledger_failure(failure: LedgerFailure) -> IntegrityFailure {
     })
 }
 
-pub(super) fn map_catalog_failure(_failure: crate::CatalogFailure) -> IntegrityFailure {
-    IntegrityFailure(IntegrityFailureCode::AmbiguousIntegrity)
+pub(super) fn map_catalog_failure(failure: crate::CatalogFailure) -> IntegrityFailure {
+    use crate::CatalogFailureCode;
+    IntegrityFailure(match failure.code() {
+        CatalogFailureCode::StorageUnavailable
+        | CatalogFailureCode::ConcurrentWriter
+        | CatalogFailureCode::StaleGeneration => IntegrityFailureCode::StorageUnavailable,
+        CatalogFailureCode::ResourceAdmissionRefused | CatalogFailureCode::LimitExceeded => {
+            IntegrityFailureCode::FindingCapacity
+        },
+        _ => IntegrityFailureCode::AmbiguousIntegrity,
+    })
 }
 
 pub(super) fn can_localize_quarantine(metadata: super::format::SegmentMetadata) -> bool {
@@ -554,4 +563,31 @@ pub(super) fn fuzz_quarantine_record(data: &[u8]) {
             .unwrap_or(data)
     );
     assert_eq!(decode_quarantine(&encoded), Ok(Some(record)));
+}
+
+#[cfg(test)]
+#[test]
+fn catalog_integrity_work_preserves_retryable_storage_and_admission_failures() {
+    for code in [
+        crate::CatalogFailureCode::StorageUnavailable,
+        crate::CatalogFailureCode::ResourceAdmissionRefused,
+        crate::CatalogFailureCode::LimitExceeded,
+        crate::CatalogFailureCode::ConcurrentWriter,
+        crate::CatalogFailureCode::StaleGeneration,
+    ] {
+        assert!(
+            matches!(
+                map_catalog_failure(crate::CatalogFailure::new(code)).code(),
+                IntegrityFailureCode::StorageUnavailable | IntegrityFailureCode::FindingCapacity
+            ),
+            "{code:?} must not become permanent integrity ambiguity"
+        );
+    }
+    assert_eq!(
+        map_catalog_failure(crate::CatalogFailure::new(
+            crate::CatalogFailureCode::AuthenticationFailed
+        ))
+        .code(),
+        IntegrityFailureCode::AmbiguousIntegrity
+    );
 }

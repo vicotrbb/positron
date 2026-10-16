@@ -10,6 +10,7 @@ impl Generation {
         if records > MAX_REGISTERED_SNAPSHOTS
             || self.keys.len() > MAX_KEY_ENVELOPES
             || self.overlays.len() > overlay::MAX_OVERLAYS
+            || self.tombstones.len() > tombstone::MAX_TOMBSTONES
         {
             return Err(RepositoryFailure::LimitExceeded);
         }
@@ -31,9 +32,13 @@ impl Generation {
             (self.claims.len(), 97),
             (remaining, 32),
             (self.overlays.len(), 80),
+            (
+                self.tombstones.len(),
+                tombstone::MAX_SIGNED_BYTES as u64 + 4,
+            ),
         ]
         .into_iter()
-        .try_fold(240u64, |n, (count, size)| {
+        .try_fold(244u64, |n, (count, size)| {
             (count as u64)
                 .checked_mul(size)
                 .and_then(|v| n.checked_add(v))
@@ -52,10 +57,11 @@ impl Generation {
             .is_none_or(|count| count > MAX_REGISTERED_SNAPSHOTS)
             || self.keys.len() > MAX_KEY_ENVELOPES
             || self.overlays.len() > overlay::MAX_OVERLAYS
+            || self.tombstones.len() > tombstone::MAX_TOMBSTONES
         {
             return Err(RepositoryFailure::LimitExceeded);
         }
-        let mut bytes = b"POSBKG05".to_vec();
+        let mut bytes = b"POSBKG06".to_vec();
         bytes.extend_from_slice(&self.number.to_be_bytes());
         bytes.extend_from_slice(&self.previous);
         bytes.extend_from_slice(&self.repository.encode());
@@ -88,6 +94,12 @@ impl Generation {
             bytes.extend_from_slice(&overlay.target);
             bytes.extend_from_slice(&overlay.object.checksum());
         }
+        bytes.extend_from_slice(&(self.tombstones.len() as u32).to_be_bytes());
+        for tombstone in &self.tombstones {
+            let signed = tombstone.signed_bytes(&self.repository, signer)?;
+            bytes.extend_from_slice(&(signed.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&signed);
+        }
         super::super::codec::sign(bytes, signer)
     }
     pub(super) fn verify(
@@ -98,7 +110,7 @@ impl Generation {
         let mut decoder =
             super::super::codec::Decoder::new(super::super::codec::verify(bytes, integrity)?);
         let version = decoder.take(8)?;
-        if version != b"POSBKG04" && version != b"POSBKG05" {
+        if version != b"POSBKG04" && version != b"POSBKG05" && version != b"POSBKG06" {
             return Err(RepositoryFailure::CorruptState);
         }
         let number = decoder.u64()?;
@@ -207,7 +219,7 @@ impl Generation {
             return Err(RepositoryFailure::CorruptState);
         }
         let mut overlays = Vec::new();
-        if version == b"POSBKG05" {
+        if version != b"POSBKG04" {
             let count = decoder.u32()? as usize;
             if count > overlay::MAX_OVERLAYS {
                 return Err(RepositoryFailure::LimitExceeded);
@@ -233,6 +245,34 @@ impl Generation {
                 overlays.push(reference);
             }
         }
+        let mut tombstones = Vec::new();
+        if version == b"POSBKG06" {
+            let count = decoder.u32()? as usize;
+            if count > tombstone::MAX_TOMBSTONES {
+                return Err(RepositoryFailure::LimitExceeded);
+            }
+            tombstones
+                .try_reserve_exact(count)
+                .map_err(|_| RepositoryFailure::LimitExceeded)?;
+            for _ in 0..count {
+                let length = decoder.u32()? as usize;
+                if length > tombstone::MAX_SIGNED_BYTES {
+                    return Err(RepositoryFailure::LimitExceeded);
+                }
+                let value =
+                    BackupPurgeTombstone::verify(decoder.take(length)?, identity, integrity)?;
+                if tombstones
+                    .last()
+                    .is_some_and(|last: &BackupPurgeTombstone| last.tenant() >= value.tenant())
+                    || tombstones
+                        .iter()
+                        .any(|last: &BackupPurgeTombstone| last.slug() == value.slug())
+                {
+                    return Err(RepositoryFailure::CorruptState);
+                }
+                tombstones.push(value);
+            }
+        }
         decoder.finish()?;
         Ok(Self {
             number,
@@ -243,6 +283,7 @@ impl Generation {
             claims,
             keys,
             overlays,
+            tombstones,
         })
     }
 }

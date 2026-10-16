@@ -27,6 +27,7 @@ impl GoogleCloudStorageRepository {
         slot: HeadSlot,
         change: RegistryHeadChange,
     ) -> Result<CasOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         let current = self.read_head(slot).await?;
@@ -59,6 +60,7 @@ impl GoogleCloudStorageRepository {
         slot: HeadSlot,
         expected: ObjectVersion,
     ) -> Result<DeleteOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         let Some((head, generation)) = self.read_head(slot).await? else {

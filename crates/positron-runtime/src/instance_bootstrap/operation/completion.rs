@@ -77,6 +77,22 @@ fn recover_ledgers(
     let snapshot = catalog.pin().map_err(catalog_failure)?;
     let identity = Identity::open(&snapshot)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+    if !positron_governance::TenantAdministration::restore_key_tenant_ids(&snapshot)
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?
+        .contains(&tenant)
+    {
+        let (_, governance) = snapshot.governance_object().map_err(catalog_failure)?;
+        if governance.tenant() != tenant
+            || !matches!(
+                governance.lifecycle(),
+                positron_domain::lifecycle::TenantLifecycleState::Purging
+                    | positron_domain::lifecycle::TenantLifecycleState::Purged
+            )
+        {
+            return Err(BootstrapFailure::new(BootstrapFailureCode::CorruptState));
+        }
+        return Ok(());
+    }
     let envelope = identity
         .tenant_key_envelope(tenant)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;

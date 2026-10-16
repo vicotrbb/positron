@@ -223,6 +223,7 @@ pub(crate) fn before_current_publication_confirmation(
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogPublicationFault {
+    PartialObjectWrite,
     RemoveBackupCaptureRegistry,
     RenameMarker,
     ReclaimAudit,
@@ -236,6 +237,7 @@ pub enum CatalogPublicationFault {
 impl CatalogPublicationFault {
     const fn storage_event(self) -> CatalogFileEvent {
         match self {
+            Self::PartialObjectWrite => CatalogFileEvent::PartialObjectWrite,
             Self::RemoveBackupCaptureRegistry => CatalogFileEvent::RemoveBackupCaptureRegistry,
             Self::RenameMarker => CatalogFileEvent::RenameMarker,
             Self::ReclaimAudit => CatalogFileEvent::ReclaimAudit,

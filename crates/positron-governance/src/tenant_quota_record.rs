@@ -92,8 +92,8 @@ mod tenant_quota_record_layout;
 pub(crate) use tenant_quota_record_facade::{
     replace_tenant_alias_record, replace_tenant_key_envelope_record,
     replace_tenant_lifecycle_record, replace_tenant_profile_record, replace_tenant_quota_record,
-    tenant_alias_record, tenant_lifecycle_record, tenant_profile_state, tenant_quota_state,
-    tenant_record_metadata,
+    restore_excluded_record, tenant_alias_record, tenant_lifecycle_record, tenant_profile_state,
+    tenant_quota_state, tenant_record_metadata,
 };
 pub(crate) use tenant_quota_record_layout::is_tenant_record;
 use tenant_quota_record_layout::*;

@@ -7,6 +7,7 @@ impl AzureBlobRepository {
         &self,
         object: ImmutableObject,
     ) -> Result<PutOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         let id = object.id();

@@ -14,7 +14,7 @@ pub(super) fn name(bytes: &[u8]) -> String {
 pub(crate) fn file_name(identity: [u8; 32]) -> String {
     format!("f-{}", name(&identity))
 }
-fn directory(parent: &File, name: &str, create: bool) -> Result<File, CatalogFailure> {
+pub(super) fn directory(parent: &File, name: &str, create: bool) -> Result<File, CatalogFailure> {
     if create {
         match unix_fs::mkdirat(parent, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
             Ok(()) | Err(rustix::io::Errno::EXIST) => {},

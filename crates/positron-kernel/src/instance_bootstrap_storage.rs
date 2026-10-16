@@ -13,6 +13,7 @@ use crate::{
 };
 
 mod io;
+mod restore;
 mod root_retirement;
 mod system_envelope;
 #[cfg(test)]
@@ -69,6 +70,7 @@ pub(super) enum BootstrapRoot {
 /// One recognized entry in a bootstrap root.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum BootstrapEntry {
+    RestoreOwnership,
     VolumeLock,
     Pending,
     PendingReplacement,
@@ -211,6 +213,19 @@ impl InstanceBootstrapStorage {
         Ok((volume, BootstrapArtifactAccess { data, secrets }))
     }
 
+    /// Acquires exclusive ownership before proving both roots empty. A held
+    /// inspection alone cannot authorize restore because it does not own the PDV.
+    pub fn acquire_empty(
+        &self,
+    ) -> Result<(OwnedPrimaryDataVolume, BootstrapArtifactAccess), BootstrapStorageFailure> {
+        let (volume, access) = self.acquire()?;
+        let layout = access.layout()?;
+        if layout.unknown_or_unsafe() || !layout.is_empty_instance() {
+            return Err(BootstrapStorageFailure::AlreadyExists);
+        }
+        Ok((volume, access))
+    }
+
     /// Acquires existing ownership for read-only offline inspection. Missing
     /// ownership artifacts are rejected rather than initialized.
     pub fn acquire_read_only(
@@ -272,6 +287,22 @@ pub struct BootstrapArtifactAccess {
 }
 
 impl BootstrapArtifactAccess {
+    /// Binds a restore intent to these pinned physical roots, including the
+    /// secrets root. Paths alone cannot identify the target across replacement.
+    pub fn restore_target_commitment(&self) -> Result<[u8; 32], BootstrapStorageFailure> {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"positron-restore-target-v1\0");
+        for root in [&self.data, &self.secrets] {
+            let metadata = root
+                .metadata()
+                .map_err(|_| BootstrapStorageFailure::Unavailable)?;
+            hash.update(metadata.dev().to_be_bytes());
+            hash.update(metadata.ino().to_be_bytes());
+        }
+        Ok(hash.finalize().into())
+    }
+
     pub(crate) fn prepare_successor_key(
         &self,
         epoch: u64,
@@ -333,7 +364,9 @@ impl BootstrapArtifactAccess {
         Ok(())
     }
 
-    pub(crate) fn publish_recovered_key(
+    /// Publishes opaque recovered custody only after the offline owner has
+    /// authenticated its Catalog and exact bound restore intent.
+    pub fn publish_recovered_key(
         &self,
         key: &BootstrapKeyCustody,
     ) -> Result<(), BootstrapKeyFailure> {
@@ -349,6 +382,11 @@ impl BootstrapArtifactAccess {
             } else {
                 self.publish_recovered_system_envelope(&envelope)?;
             }
+        }
+        if key.active_provider_identity()?.family()
+            != crate::key_provider::ProviderFamily::LocalFile
+        {
+            return Ok(());
         }
         key.publish_recovered_in(&self.secrets)
     }

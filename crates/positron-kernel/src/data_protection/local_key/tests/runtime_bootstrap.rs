@@ -350,6 +350,19 @@ fn live_successor_activation_preserves_hierarchy_and_replaces_provider_identity(
         super::RecoveryUnlock::Identity(&recipient),
         pin,
     )?;
+    // Fresh restore must authenticate custody without publishing a target root.
+    let (metadata, recovered) =
+        recovery.recover_detached(&bundle, super::RecoveryUnlock::Identity(&recipient), pin)?;
+    assert_eq!(metadata.identity(), pin);
+    assert_eq!(recovered.active_root_identity()?, active);
+    assert_eq!(recovered.bootstrap_identity(), anchor);
+    assert_eq!(
+        recovered
+            .open_object(instance, BootstrapObjectPurpose::Initialized, &bootstrap)?
+            .as_slice(),
+        b"stable hierarchy"
+    );
+
     Ok(())
 }
 

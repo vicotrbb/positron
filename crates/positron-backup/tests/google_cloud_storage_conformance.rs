@@ -1,5 +1,8 @@
 //! Only an explicitly authorized real GCS JSON API v1 target qualifies GCS.
 #![cfg(feature = "test-support")]
+#[path = "shared/read_only_repository.rs"]
+mod read_only_repository;
+
 #[path = "shared/native_authority.rs"]
 mod native_authority;
 #[path = "shared/provider_behavior.rs"]
@@ -412,6 +415,10 @@ async fn simulated_native_protocol_conformance() -> TestResult {
             ]);
             assert_eq!(foreign.initialize().await,Err(RepositoryFailure::ForeignPrefix));
             repository.initialize().await?;
+            let read_only = GoogleCloudStorageRepository::read_only_from_local_simulator(target.clone(), identity.clone(), resources.clone(), address)?;
+            assert_eq!(read_only.initialize().await, Err(RepositoryFailure::PermissionDenied));
+            read_only_repository::conformance(&read_only, &repository).await?;
+
             provider_behavior::conformance(&repository, identity.clone(), Duration::from_secs(60))
                 .await?;
             assert_eq!(

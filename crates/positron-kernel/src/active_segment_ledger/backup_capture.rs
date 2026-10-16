@@ -250,3 +250,39 @@ pub(crate) fn verify_backup_capture_inventory(
     }
     Ok(())
 }
+
+pub(crate) fn restore_file_is_reachable(
+    snapshot: &CatalogSnapshot,
+    file: BackupCaptureFile,
+) -> Result<bool, CatalogFailure> {
+    if !matches!(
+        file.kind(),
+        BackupCaptureFileKind::Segment | BackupCaptureFileKind::SegmentFrontier
+    ) {
+        return Ok(false);
+    }
+    for bytes in snapshot.plaintext_objects() {
+        if let Some(segment) = decode_metadata(bytes).map_err(|_| corrupt())? {
+            let mut address = [0; 32];
+            address
+                .get_mut(..16)
+                .ok_or_else(corrupt)?
+                .copy_from_slice(&segment.id.to_bytes());
+            if address == file.address() {
+                return Ok(
+                    segment.state == SegmentState::Sealed && segment.sealed_frontier.is_some()
+                );
+            }
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn restore_object_tenant(
+    bytes: &[u8],
+) -> Result<Option<positron_domain::identity::TenantId>, CatalogFailure> {
+    if let Some(metadata) = decode_metadata(bytes).map_err(|_| corrupt())? {
+        return Ok(Some(metadata.scope.tenant_id()));
+    }
+    super::envelope_overlay::restore_tenant(bytes).map_err(|_| corrupt())
+}

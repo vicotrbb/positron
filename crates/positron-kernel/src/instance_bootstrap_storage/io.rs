@@ -93,7 +93,8 @@ pub(super) fn scan(
             .map_err(|_| BootstrapStorageFailure::Unavailable)?;
         let expected_directory = matches!(
             kind,
-            BootstrapEntry::Catalog
+            BootstrapEntry::RestoreOwnership
+                | BootstrapEntry::Catalog
                 | BootstrapEntry::Segments
                 | BootstrapEntry::Diagnostics
                 | BootstrapEntry::BackupCaptures
@@ -111,6 +112,9 @@ pub(super) fn scan(
 }
 
 fn recognized_entry(root: BootstrapRoot, name: &[u8]) -> Option<BootstrapEntry> {
+    if root == BootstrapRoot::Data && super::restore::is_claim_name(name) {
+        return Some(BootstrapEntry::RestoreOwnership);
+    }
     if root == BootstrapRoot::Secrets
         && let Some(suffix) = name.strip_prefix(b"local-root-key.epoch-")
     {

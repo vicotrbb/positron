@@ -96,6 +96,142 @@ fn backup_capture_is_encrypted_bound_to_one_generation_and_survives_reopen()
     );
     let index = capture.index_file()?;
     let index_bytes = capture.read(index.identity(), 0, index.size())?;
+    // Offline restore authenticates the portable capture before opening a
+    // writable target Catalog. Source custody is the only decryption authority.
+    let secret = CatalogSecret::from_owned(Box::new([2; 32]), Box::new([3; 32]));
+    let mut detached =
+        BackupCaptureVerification::open(instance, &secret, [6; 16], [7; 32], &index_bytes)?;
+    assert!(
+        BackupCaptureVerification::open(
+            InstanceId::new([99; 16])?,
+            &secret,
+            [6; 16],
+            [7; 32],
+            &index_bytes
+        )
+        .is_err()
+    );
+    // The marker MAC key is independent of capture envelope wrapping custody.
+    let marker_only = CatalogSecret::from_owned(Box::new([99; 32]), Box::new([3; 32]));
+    assert!(
+        BackupCaptureVerification::open(instance, &marker_only, [6; 16], [7; 32], &index_bytes)
+            .is_ok()
+    );
+    let wrong = CatalogSecret::from_owned(Box::new([2; 32]), Box::new([99; 32]));
+    assert!(
+        BackupCaptureVerification::open(instance, &wrong, [6; 16], [7; 32], &index_bytes).is_err()
+    );
+    for file in capture.files().iter().filter(|file| {
+        matches!(
+            file.kind(),
+            BackupCaptureFileKind::CatalogObject
+                | BackupCaptureFileKind::GovernanceAudit
+                | BackupCaptureFileKind::AuditCheckpoint
+        )
+    }) {
+        detached.verify_protected_file(
+            &secret,
+            file.identity(),
+            &capture.read(file.identity(), 0, file.size())?,
+        )?;
+    }
+    let origin = detached.finish_restore_origin([0x41; 32], [0x43; 32])?;
+    assert_eq!(origin.snapshot().identity(), basis.identity());
+    let objects = origin
+        .snapshot()
+        .object_identities()
+        .map(|id| {
+            CatalogObject::new(
+                origin
+                    .snapshot()
+                    .object(id)?
+                    .ok_or("source object")?
+                    .to_vec(),
+            )
+            .map_err(Box::<dyn std::error::Error>::from)
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    let origin = origin.with_restored_objects(objects)?;
+
+    let target = path.join("target");
+    std::fs::create_dir(&target)?;
+    let target_authority = establish_catalog_authority_with_pool_units(
+        PrimaryDataVolume::acquire(&target, MountQualification::LocalHost)?,
+        70_000_001,
+        30_000_000,
+    )?;
+    let restored = Catalog::open(
+        &target_authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([2; 32]), Box::new([3; 32])),
+    )?;
+    let restored_origin = restored.install_restore_origin(origin)?;
+    assert_eq!(restored.restore_origin_intent()?, Some([0x43; 32]));
+    assert_ne!(restored.pin()?.identity(), basis.identity());
+    assert_eq!(restored.governance_audit_records()?.len(), 1);
+    assert_eq!(
+        restored
+            .governance_audit_records()?
+            .first()
+            .ok_or("imported audit")?
+            .intent(),
+        b"capture fixture"
+    );
+    drop(restored);
+    let restored = Catalog::open(
+        &target_authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([2; 32]), Box::new([3; 32])),
+    )?;
+    assert_eq!(restored.pin()?.identity(), restored_origin.identity());
+    assert_eq!(restored.restore_origin_intent()?, Some([0x43; 32]));
+    restored.commit(
+        restored.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new([0x42; 16])?,
+            FormatEpoch::CATALOG_V2,
+            vec![CatalogObject::new(b"restored metadata successor".to_vec())?],
+        )?,
+        Some(AuditIntent::new(b"restore successor".to_vec())?),
+    )?;
+    drop(restored);
+    let restored = Catalog::open(
+        &target_authority,
+        instance,
+        CatalogSecret::from_owned(Box::new([2; 32]), Box::new([3; 32])),
+    )?;
+    assert_eq!(restored.governance_audit_records()?.len(), 2);
+    assert_eq!(restored.pin()?.governance_audit_frontier(), 2);
+    restored.rewrap(
+        TransactionId::new([0x43; 16])?,
+        CatalogWrappingKey::from_owned_at_epoch(Box::new([9; 32]), [9; 16], 2)?,
+        AuditIntent::new(b"restored instance root rewrap".to_vec())?,
+    )?;
+    drop(restored);
+    let read_only = Catalog::read_current_view(
+        &target_authority,
+        instance,
+        CatalogSecret::from_owned_at_epoch(Box::new([2; 32]), Box::new([9; 32]), [9; 16], 2)?,
+    )?;
+    assert_eq!(read_only.governance_audit_records().len(), 5);
+    assert_eq!(
+        read_only
+            .governance_audit_records()
+            .first()
+            .ok_or("original source audit")?
+            .intent(),
+        b"capture fixture"
+    );
+    drop(read_only);
+    assert!(
+        Catalog::read_current_view(
+            &target_authority,
+            instance,
+            CatalogSecret::from_owned(Box::new([2; 32]), Box::new([3; 32]))
+        )
+        .is_err()
+    );
+    drop(target_authority);
     let mut verification =
         catalog.begin_backup_capture_verification([6; 16], [7; 32], &index_bytes)?;
     let prospective = verification.prospective_memory_bytes()?;
@@ -369,7 +505,53 @@ fn backup_capture_rejects_active_files_and_retains_sealed_ciphertext_after_live_
             &capture.read(file.identity(), 0, file.size())?,
         )?;
     }
-    assert_eq!(verification.finish()?.identity(), sealed.identity());
+    let origin = verification.finish_restore_origin([0x75; 32], [0x76; 32])?;
+    assert_eq!(origin.snapshot().identity(), sealed.identity());
+    let target = path.join("restored");
+    std::fs::create_dir(&target)?;
+    let target_authority = establish_catalog_authority_with_pool_units(
+        PrimaryDataVolume::acquire(&target, MountQualification::LocalHost)?,
+        70_000_001,
+        30_000_000,
+    )?;
+    let restored = Catalog::open(
+        &target_authority,
+        InstanceId::new([1; 16])?,
+        CatalogSecret::from_owned(Box::new([2; 32]), Box::new([3; 32])),
+    )?;
+    restored.install_restore_origin(origin)?;
+    for file in capture
+        .files()
+        .iter()
+        .filter(|file| {
+            matches!(
+                file.kind(),
+                BackupCaptureFileKind::Segment | BackupCaptureFileKind::SegmentFrontier
+            )
+        })
+        .copied()
+    {
+        let ciphertext = capture.read(file.identity(), 0, file.size())?;
+        let split = ciphertext.len() / 2;
+        assert!(!restored.restore_segment_range(file, 0, &ciphertext[..split])?);
+        assert!(!restored.restore_segment_range(file, 0, &ciphertext[..split])?);
+        let mut wrong = ciphertext[..split].to_vec();
+        *wrong.first_mut().ok_or("nonempty range")? ^= 1;
+        assert!(restored.restore_segment_range(file, 0, &wrong).is_err());
+        assert!(restored.restore_segment_range(file, split as u64, &ciphertext[split..])?);
+        assert!(restored.restore_segment_range(file, 0, &ciphertext)?);
+    }
+    let reopened = ActiveSegmentLedger::open(
+        &target_authority,
+        &restored,
+        scope,
+        SegmentProtectionKey::from_owned(Box::new([4; 32])),
+    )?;
+    assert_eq!(reopened.snapshot()?.blocks().len(), 1);
+    drop(reopened);
+    drop(restored);
+    drop(target_authority);
+
     let file = *capture
         .files()
         .iter()

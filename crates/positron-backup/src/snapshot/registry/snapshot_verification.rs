@@ -1,7 +1,9 @@
 //! Independent, bounded verification of a published snapshot.
 mod report;
+mod restore_report;
 use super::*;
 pub use report::BackupVerificationReport;
+pub use restore_report::BackupRestoreReport;
 
 /// A private verification cursor; a receipt alone never marks its work complete.
 pub struct BackupSnapshotVerification {
@@ -18,6 +20,27 @@ pub struct BackupSnapshotVerification {
     inventory_verified: bool,
 }
 impl BackupSnapshotVerification {
+    fn start(
+        owner: [u8; 16],
+        request: [u8; 32],
+        manifest: BackupManifest,
+        registry: [u8; 32],
+        check: BackupPublicationCheck,
+    ) -> Self {
+        Self {
+            owner,
+            request,
+            manifest,
+            registry,
+            check,
+            files: Vec::new(),
+            next_file: 0,
+            file_object: 0,
+            file_offset: 0,
+            file_hash: Sha256::new(),
+            inventory_verified: false,
+        }
+    }
     pub fn complete(&self) -> bool {
         self.check.complete() && self.next_file == self.files.len()
     }
@@ -43,6 +66,106 @@ impl BackupSnapshotVerification {
     }
 }
 impl BackupPublisher<'_> {
+    /// Source identities come from the independently authenticated portable
+    /// Catalog. Their complete digest must equal the signed original context.
+    /// Only an exact current signed tombstone permits a missing key reference.
+    pub async fn begin_snapshot_restore_verification(
+        &self,
+        snapshot: [u8; 16],
+        owner: [u8; 16],
+        request: [u8; 32],
+        expected: &[BackupKeyIdentity],
+    ) -> Result<BackupSnapshotVerification, RepositoryFailure> {
+        if owner == [0; 16]
+            || request == [0; 32]
+            || expected.is_empty()
+            || expected.len() > MAX_KEY_ENVELOPES
+        {
+            return Err(RepositoryFailure::InvalidInput);
+        }
+        self.require_identity().await?;
+        let (head, generation, registry) = self.current().await?;
+        let generation = generation.ok_or(RepositoryFailure::NotFound)?;
+        let receipt = generation
+            .snapshots
+            .iter()
+            .find(|receipt| receipt.snapshot == snapshot)
+            .ok_or(RepositoryFailure::NotFound)?;
+        let bytes = self.read_control_object(receipt.manifest).await?;
+        let manifest = BackupManifest::verify(&bytes, self.identity, self.signer.identity())?;
+        if manifest.snapshot != receipt.snapshot
+            || manifest.created != receipt.created
+            || manifest.retain_until != receipt.retain_until
+        {
+            return Err(RepositoryFailure::CorruptState);
+        }
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        if expected.windows(2).any(|pair| {
+            pair.first()
+                .zip(pair.get(1))
+                .is_some_and(|(left, right)| left.tenant == right.tenant)
+        }) || key_identity_context(expected.iter().copied()) != manifest.key_context
+        {
+            return Err(RepositoryFailure::IdentityMismatch);
+        }
+        let references = generation
+            .keys
+            .iter()
+            .filter(|key| key.context == manifest.key_context)
+            .collect::<Vec<_>>();
+        if references.iter().any(|key| {
+            !expected.iter().any(|identity| {
+                identity.tenant == key.tenant
+                    && identity.epoch == key.epoch
+                    && identity.fingerprint == key.fingerprint
+            })
+        }) {
+            return Err(RepositoryFailure::IdentityMismatch);
+        }
+        let mut keys = Vec::new();
+        for identity in expected {
+            if generation
+                .tombstones
+                .iter()
+                .any(|tombstone| tombstone.tenant() == identity.tenant)
+            {
+                continue;
+            }
+            let reference = references
+                .iter()
+                .find(|key| {
+                    key.tenant == identity.tenant
+                        && key.epoch == identity.epoch
+                        && key.fingerprint == identity.fingerprint
+                })
+                .ok_or(RepositoryFailure::NotFound)?;
+            keys.push(**reference);
+        }
+        let head = head.ok_or(RepositoryFailure::CorruptState)?;
+        if self
+            .repository
+            .registry_head_at(HeadSlot::registry())
+            .await?
+            .map(|head| head.version())
+            != Some(head)
+        {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        let check = BackupPublicationCheck::start(
+            receipt.manifest.checksum(),
+            head,
+            manifest.objects.len() as u32,
+            keys,
+        );
+        Ok(BackupSnapshotVerification::start(
+            owner,
+            request,
+            manifest,
+            registry.ok_or(RepositoryFailure::CorruptState)?,
+            check,
+        ))
+    }
     /// Loads only authenticated control state; ciphertext advances in separate turns.
     pub async fn begin_snapshot_verification(
         &self,
@@ -70,19 +193,13 @@ impl BackupPublisher<'_> {
             return Err(RepositoryFailure::CorruptState);
         }
         let check = self.prepare_publication(&manifest).await?;
-        Ok(BackupSnapshotVerification {
+        Ok(BackupSnapshotVerification::start(
             owner,
             request,
             manifest,
-            registry: registry.ok_or(RepositoryFailure::CorruptState)?,
+            registry.ok_or(RepositoryFailure::CorruptState)?,
             check,
-            files: Vec::new(),
-            next_file: 0,
-            file_object: 0,
-            file_offset: 0,
-            file_hash: Sha256::new(),
-            inventory_verified: false,
-        })
+        ))
     }
     pub async fn snapshot_verification_step(
         &self,
@@ -297,39 +414,6 @@ impl BackupPublisher<'_> {
             return Err(RepositoryFailure::LimitExceeded);
         }
         self.ensure_control_memory(first.file_size, 0)?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(first.file_size as usize)
-            .map_err(|_| RepositoryFailure::LimitExceeded)?;
-        for object in manifest.objects.iter().filter(|object| object.file == file) {
-            if bytes.len() as u64 != object.offset {
-                return Err(RepositoryFailure::CorruptState);
-            }
-            let mut offset = 0;
-            let mut hash = Sha256::new();
-            while offset < object.length {
-                let length = (object.length - offset).min(crate::MAX_RANGE_BYTES);
-                let part = self
-                    .repository
-                    .read_range(
-                        ObjectRange::new(object.object(), offset, length)?
-                            .with_expected_size(object.length)?,
-                    )
-                    .await?;
-                if part.bytes().len() as u64 != length {
-                    return Err(RepositoryFailure::CorruptState);
-                }
-                hash.update(part.bytes());
-                bytes.extend_from_slice(part.bytes());
-                offset += length;
-            }
-            if <[u8; 32]>::from(hash.finalize()) != object.checksum {
-                return Err(RepositoryFailure::ChecksumMismatch);
-            }
-        }
-        if bytes.len() as u64 != first.file_size {
-            return Err(RepositoryFailure::CorruptState);
-        }
-        Ok(bytes)
+        super::super::read::file_bytes(self.repository, manifest, file).await
     }
 }

@@ -68,7 +68,7 @@ impl GoogleCloudStorageRepository {
             self.faults
                 .at(crate::google_cloud_storage::GoogleCloudStorageFaultPoint::AfterNativeCreate)?;
             record.session = Some(
-                self.upload_authenticator
+                self.upload_authenticator()?
                     .seal_session(session.as_bytes())
                     .map_err(|_| RepositoryFailure::StorageUnavailable)?,
             );
@@ -79,7 +79,7 @@ impl GoogleCloudStorageRepository {
             .as_ref()
             .ok_or(RepositoryFailure::OutcomeUnknown)?;
         let plaintext = self
-            .upload_authenticator
+            .upload_authenticator()?
             .open_session(sealed)
             .map_err(|_| RepositoryFailure::ChecksumMismatch)?;
         let session =
@@ -172,7 +172,7 @@ impl GoogleCloudStorageRepository {
             };
         };
         let plaintext = self
-            .upload_authenticator
+            .upload_authenticator()?
             .open_session(sealed)
             .map_err(|_| RepositoryFailure::ChecksumMismatch)?;
         let session =

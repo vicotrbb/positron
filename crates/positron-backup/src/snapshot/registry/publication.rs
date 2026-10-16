@@ -12,6 +12,23 @@ pub struct BackupPublicationCheck {
     digest: Sha256,
 }
 impl BackupPublicationCheck {
+    pub(super) fn start(
+        manifest: [u8; 32],
+        head: ObjectVersion,
+        objects: u32,
+        keys: Vec<KeyReference>,
+    ) -> Self {
+        Self {
+            manifest,
+            head,
+            objects,
+            next_object: 0,
+            keys,
+            next_key: 0,
+            offset: 0,
+            digest: Sha256::new(),
+        }
+    }
     pub fn retained_memory_bytes(&self) -> Result<u64, RepositoryFailure> {
         allocation_bytes::<KeyReference>(self.keys.capacity())
     }
@@ -122,16 +139,12 @@ impl BackupPublisher<'_> {
         if keys.is_empty() || context_digest(&keys) != manifest.key_context {
             return Err(RepositoryFailure::CorruptState);
         }
-        Ok(BackupPublicationCheck {
-            manifest: object.id().checksum(),
-            head: head.ok_or(RepositoryFailure::CorruptState)?,
-            objects: manifest.objects.len() as u32,
-            next_object: 0,
+        Ok(BackupPublicationCheck::start(
+            object.id().checksum(),
+            head.ok_or(RepositoryFailure::CorruptState)?,
+            manifest.objects.len() as u32,
             keys,
-            next_key: 0,
-            offset: 0,
-            digest: Sha256::new(),
-        })
+        ))
     }
     /// Completed-object counts are authenticated; partial hashes are never
     /// serialized. Recovery starts the unfinished object at offset zero.

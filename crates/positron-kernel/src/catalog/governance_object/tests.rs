@@ -151,6 +151,16 @@ fn v8_profile_successors_preserve_alias_and_remain_decodable() {
         .and_then(|record| record.with_external_tenant_alias(alias.clone(), 2))
         .expect("alias successor encodes");
     let v8 = CatalogGovernanceObject::decode(&v8).expect("v8 record decodes");
+    let purging = v8
+        .with_lifecycle(positron_domain::lifecycle::TenantLifecycleState::Purging, 2)
+        .and_then(|bytes| CatalogGovernanceObject::decode(&bytes))
+        .expect("v8 lifecycle successor remains decodable");
+    assert_eq!(
+        purging.lifecycle(),
+        positron_domain::lifecycle::TenantLifecycleState::Purging
+    );
+    assert_eq!(purging.external_tenant_alias(), Some(alias.clone()));
+    assert_eq!(purging.credentials(), v8.credentials());
     let expected_lifecycle = v8.lifecycle();
     let expected_lifecycle_generation = v8.lifecycle_generation();
     let expected_credential_generation = v8.credential_generation();

@@ -41,7 +41,7 @@ pub struct GoogleCloudStorageRepository {
     runtime: Arc<NativeGoogleRuntime>,
     resources: Arc<NativeAwsResources>,
     active: AtomicBool,
-    upload_authenticator: positron_kernel::RepositoryUploadAuthenticator,
+    upload_authenticator: Option<positron_kernel::RepositoryUploadAuthenticator>,
     faults: fault::Controller,
     listing: std::sync::Mutex<crate::listing::native_cursor::State>,
 }
@@ -52,6 +52,14 @@ impl Drop for Operation<'_> {
     }
 }
 impl GoogleCloudStorageRepository {
+    fn upload_authenticator(
+        &self,
+    ) -> Result<&positron_kernel::RepositoryUploadAuthenticator, RepositoryFailure> {
+        self.upload_authenticator
+            .as_ref()
+            .ok_or(RepositoryFailure::PermissionDenied)
+    }
+
     #[cfg(feature = "test-support")]
     pub fn with_faults(
         mut self,
@@ -87,7 +95,25 @@ impl GoogleCloudStorageRepository {
         resources: Arc<NativeAwsResources>,
         upload_authenticator: positron_kernel::RepositoryUploadAuthenticator,
     ) -> Result<Self, RepositoryFailure> {
-        if upload_authenticator.instance_id() != identity.instance_id()
+        Self::construct(target, identity, resources, Some(upload_authenticator)).await
+    }
+    /// Opens native reads before SYSTEM recovery, without upload authority.
+    pub async fn read_only_from_admitted_resources(
+        target: GoogleCloudStorageTarget,
+        identity: RepositoryIdentity,
+        resources: Arc<NativeAwsResources>,
+    ) -> Result<Self, RepositoryFailure> {
+        Self::construct(target, identity, resources, None).await
+    }
+    async fn construct(
+        target: GoogleCloudStorageTarget,
+        identity: RepositoryIdentity,
+        resources: Arc<NativeAwsResources>,
+        upload_authenticator: Option<positron_kernel::RepositoryUploadAuthenticator>,
+    ) -> Result<Self, RepositoryFailure> {
+        if upload_authenticator
+            .as_ref()
+            .is_some_and(|authority| authority.instance_id() != identity.instance_id())
             || identity.provider_kind() != "googleCloudStorage"
             || identity.prefix_commitment() != target.commitment()
         {
@@ -136,10 +162,37 @@ impl GoogleCloudStorageRepository {
         upload_authenticator: positron_kernel::RepositoryUploadAuthenticator,
         address: std::net::SocketAddr,
     ) -> Result<Self, RepositoryFailure> {
+        Self::simulator(
+            target,
+            identity,
+            resources,
+            Some(upload_authenticator),
+            address,
+        )
+    }
+    #[cfg(feature = "test-support")]
+    pub fn read_only_from_local_simulator(
+        target: GoogleCloudStorageTarget,
+        identity: RepositoryIdentity,
+        resources: Arc<NativeAwsResources>,
+        address: std::net::SocketAddr,
+    ) -> Result<Self, RepositoryFailure> {
+        Self::simulator(target, identity, resources, None, address)
+    }
+    #[cfg(feature = "test-support")]
+    fn simulator(
+        target: GoogleCloudStorageTarget,
+        identity: RepositoryIdentity,
+        resources: Arc<NativeAwsResources>,
+        upload_authenticator: Option<positron_kernel::RepositoryUploadAuthenticator>,
+        address: std::net::SocketAddr,
+    ) -> Result<Self, RepositoryFailure> {
         if !address.ip().is_loopback() || address.port() == 0 {
             return Err(RepositoryFailure::InvalidInput);
         }
-        if upload_authenticator.instance_id() != identity.instance_id()
+        if upload_authenticator
+            .as_ref()
+            .is_some_and(|authority| authority.instance_id() != identity.instance_id())
             || identity.provider_kind() != "googleCloudStorage"
             || identity.prefix_commitment() != target.commitment()
         {

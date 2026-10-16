@@ -42,7 +42,7 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
         .verify_recovery_bundle(&bundle, positron_kernel::RecoveryUnlock::Identity(&unlock))?;
     let mut services = ServiceHandle::new(Arc::clone(&initialized))?;
     let first = publish(
-        &services,
+        &mut services,
         &administrator,
         &path,
         "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
@@ -53,7 +53,7 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
     )];
     if interrupt {
         let second = publish(
-            &services,
+            &mut services,
             &administrator,
             &path,
             "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -89,7 +89,7 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
             let identity_path = path.join("identity");
             let original = fs::read(&identity_path)?;
             fs::write(&identity_path, b"corrupt repository identity")?;
-            let failed = finish_root(&services, &administrator, &operation)?;
+            let failed = finish_root(&mut services, &administrator, &operation)?;
             assert_eq!(
                 failed.operation.as_ref().map(|op| op.status.as_str()),
                 Some("failed")
@@ -100,6 +100,7 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
             return Ok(());
         }
         if action == "verify" && interrupt {
+            services = ServiceHandle::new(Arc::clone(&initialized))?;
             let stop = crate::services::backup_administration::stop_after(
                 crate::services::backup_administration::StopPoint::BackupOverlayPublished,
             )?;
@@ -132,7 +133,7 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
                 Some(operation.as_str())
             );
         }
-        let completed = finish_root(&services, &administrator, &operation)
+        let completed = finish_root(&mut services, &administrator, &operation)
             .map_err(|e| format!("{action}: {e}"))?;
         assert_eq!(
             completed.operation.as_ref().map(|op| op.status.as_str()),
@@ -191,11 +192,12 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
     Ok(())
 }
 fn publish(
-    services: &ServiceHandle,
+    services: &mut ServiceHandle,
     administrator: &str,
     path: &std::path::Path,
     key: &str,
 ) -> Result<BackupResponse, Box<dyn std::error::Error>> {
+    *services = ServiceHandle::new(Arc::clone(&services.instance))?;
     let created = services
         .manage_backup(administrator, &create(services, path, key)?.encode()?)
         .map_err(|e| format!("backup create {e:?}"))?;
@@ -208,12 +210,15 @@ fn publish(
     worker.join().map_err(|_| "backup worker panic")??;
     result
 }
-fn finish_root(
-    services: &ServiceHandle,
+pub(super) fn finish_root(
+    services: &mut ServiceHandle,
     administrator: &str,
     id: &str,
 ) -> Result<positron_api::provider_migration::ProviderMigrationResponse, Box<dyn std::error::Error>>
 {
+    // A prior fixture worker has joined. Re-enter normal service recovery
+    // before replacing it so an interrupted scrub is queued with a new owner.
+    *services = ServiceHandle::new(Arc::clone(&services.instance))?;
     let request = positron_api::provider_migration::ProviderMigrationRequest {
         action: "status".into(),
         expected_catalog_generation: None,
@@ -227,14 +232,18 @@ fn finish_root(
     let worker_cancel = cancellation.clone();
     let worker = std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancel));
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        // Use the existing long-work fixture budget: the owning no-progress SLO
+        // alone is 60 seconds, before any queued prerequisite. Status reads
+        // share the Catalog gate with checkpoints; 100 ms polling reduces
+        // contention tenfold from the former 10 ms cadence.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
         loop {
             let status = match services.manage_provider_migration(administrator, &request) {
                 Ok(status) => status,
                 Err(MaintenanceServiceFailure::AdministrationUnavailable)
                     if !worker.is_finished() && std::time::Instant::now() < deadline =>
                 {
-                    std::thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(100));
                     continue;
                 },
                 Err(failure) => return Err(format!("root lookup {failure:?}").into()),
@@ -248,7 +257,7 @@ fn finish_root(
             if worker.is_finished() || std::time::Instant::now() >= deadline {
                 return Err(format!("root completion deadline: {status:?}").into());
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(100));
         }
     })();
     cancellation.cancel();
@@ -265,3 +274,6 @@ fn finish_root(
 
 #[path = "backup_envelope_completion.rs"]
 mod completion_publication;
+
+#[path = "backup_envelope_worker.rs"]
+mod worker_recovery;

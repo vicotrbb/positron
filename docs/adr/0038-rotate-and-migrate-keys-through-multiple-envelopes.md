@@ -65,6 +65,17 @@ digest-only source binding and resource contract. The retained coordinator lock
 prevents dispatch until ledger retirement inspection completes. Running, paused,
 noncanonical, and checkpointed work retains its ordinary reference fence; live
 reader handles remain protected by the existing snapshot-acquisition barrier.
+Service recovery may derive that queued descriptor from its authenticated Running
+record after its dispatch owner has gone. Reclamation and reference inspection
+share the exact recovery matcher: only the phase and cleared progress timestamp
+may differ; source binding, attempts, resources, and all other persisted fields
+remain exact. This neither removes the queued descriptor nor admits opaque
+checkpoints or a live dispatch.
+System Migration and Integrity Scrub dispatch conflict across signal scopes in
+both directions. An existing running owner completes before the queued task
+starts, so ordinary overlap cannot become a terminal root-verification refusal.
+Other eligible work retains its normal scheduling. Queued canonical digest-only
+scrubs remain reference-free under the unchanged retirement guard.
 
 The authenticated administrative HTTP projection owns online phase admission;
 the CLI uses its canonical descriptor-derived client rather than acquiring an

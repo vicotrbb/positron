@@ -221,6 +221,7 @@ impl AzureBlobRepository {
         self.read_identity().await
     }
     pub async fn initialize(&self) -> Result<(), RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         match self.read_identity().await {
             Ok(_) => return Ok(()),

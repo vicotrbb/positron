@@ -359,7 +359,7 @@ impl QueuedMaintenanceSubmission {
     }
 }
 
-pub(super) fn matches_catalog_reclamation_predecessor(
+pub(in crate::maintenance) fn matches_catalog_reclamation_predecessor(
     durable: &TaskState,
     durable_record: &[u8],
     live: &TaskState,
@@ -367,6 +367,20 @@ pub(super) fn matches_catalog_reclamation_predecessor(
     let live_record = encode_record(live)?;
     if live_record.as_bytes() == durable_record {
         return Ok(true);
+    }
+    // Service recovery requeues an interrupted digest-only scrub without a
+    // live dispatch. Keep its authenticated source, attempt and progress exact;
+    // only recovery's phase and cleared progress timestamp may differ.
+    if durable.phase == MaintenanceTaskPhase::Running
+        && !durable.cancellation_requested
+        && live.phase == MaintenanceTaskPhase::Queued
+        && live.active_dispatch.is_none()
+        && canonical_digest_only_integrity_scrub(live)
+    {
+        let mut recovered = durable.clone();
+        recovered.phase = MaintenanceTaskPhase::Queued;
+        recovered.last_progress_at = None;
+        return Ok(encode_record(&recovered)?.as_bytes() == live_record.as_bytes());
     }
     // Recovery alone canonically derives this terminal live state from an
     // authenticated durable Running cancellation after a pre-physical

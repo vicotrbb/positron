@@ -5,7 +5,9 @@ use positron_kernel::{
 };
 use positron_policy::IngestPolicy;
 
-use super::tenant_administration_registry_codec::{is_registry, registry, registry_object};
+use super::tenant_administration_registry_codec::{
+    is_registry, registry, registry_object_with_reservations,
+};
 use super::tenant_administration_replay::{encode_receipt, replay_snapshot, request_digest};
 use super::{
     TenantAdministration, TenantAdministrationFailure, TenantCreateCandidate, TenantCreation,
@@ -34,6 +36,11 @@ impl TenantAdministration {
         }
         let mut registry =
             registry(&snapshot)?.ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
+        if registry.reserved.iter().any(|reserved| {
+            reserved.tenant_id() == candidate.tenant || reserved.slug() == request.slug.as_str()
+        }) {
+            return Err(TenantAdministrationFailure::DuplicateTenant);
+        }
         let digest = request_digest(request);
         let transaction =
             TransactionId::new(request.idempotency.to_bytes()).map_err(map_catalog)?;
@@ -90,7 +97,12 @@ impl TenantAdministration {
             objects.push(CatalogObject::new(bytes.to_vec()).map_err(map_catalog)?);
         }
         registry.tenants.push(candidate.tenant);
-        objects.push(registry_object(instance, generation, &registry.tenants)?);
+        objects.push(registry_object_with_reservations(
+            instance,
+            generation,
+            &registry.tenants,
+            &registry.reserved,
+        )?);
         let envelope = keys
             .provision_tenant_key_envelope(
                 instance,

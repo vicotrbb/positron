@@ -2735,6 +2735,7 @@ dependencies = [
  "hmac 0.12.1",
  "opentelemetry-proto",
  "positron-api",
+ "positron-backup",
  "positron-config",
  "positron-domain",
  "positron-governance",
@@ -2929,7 +2930,9 @@ version = "0.0.0"
 dependencies = [
  "age",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
+ "crc32c",
  "flate2",
  "h2",
  "http",

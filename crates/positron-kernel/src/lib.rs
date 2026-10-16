@@ -1545,7 +1545,7 @@ pub use data_protection::key_provider::{
 pub use catalog::{
     BackupCapture, BackupCaptureCustody, BackupCaptureFile, BackupCaptureFileKind,
     BackupCapturePreparation, BackupCaptureResourceEstimate, BackupCaptureVerification,
-    BackupCatalogObject,
+    BackupCatalogObject, BackupRestoreOrigin,
 };
 
 #[cfg(test)]

@@ -16,6 +16,8 @@ mod inspection;
 mod preparation;
 mod provider_integrity;
 mod recovery;
+mod restore_origin;
+pub use restore_origin::BackupRestoreOrigin;
 mod rotation;
 mod storage;
 mod types;

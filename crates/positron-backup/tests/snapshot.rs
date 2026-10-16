@@ -241,6 +241,38 @@ async fn signed_registry_and_snapshot_objects_survive_reopen_and_reuse()
             publisher.reconcile_publication(&manifest).await?,
             Some(receipt)
         );
+        let reader = positron_backup::BackupSnapshotReader::open(
+            &repository,
+            &identity,
+            signer.identity(),
+            receipt.manifest(),
+            &resources,
+            external_memory,
+        )
+        .await?;
+        assert_eq!(reader.manifest(), &manifest);
+        assert_eq!(reader.read_file([3; 32], 8 * 1024 * 1024).await?, source.0);
+        assert!(reader.read_file([3; 32], 1).await.is_err());
+        assert!(reader.read_file([99; 32], 8 * 1024 * 1024).await.is_err());
+        let wrong = RepositoryIdentity::local(
+            [99; 16],
+            [2; 16],
+            signer.identity().fingerprint(),
+            &repository_root,
+        )?;
+        assert!(
+            positron_backup::BackupSnapshotReader::open(
+                &repository,
+                &wrong,
+                signer.identity(),
+                receipt.manifest(),
+                &resources,
+                external_memory,
+            )
+            .await
+            .is_err()
+        );
+        drop(reader);
         let different = BackupManifest::new(
             manifest.snapshot_id(),
             identity.clone(),

@@ -388,6 +388,7 @@ pub enum BackupOperationParameters {
     Snapshot(BackupSnapshotParameters),
     Retention(BackupRetentionParameters),
     Verification(BackupVerificationParameters),
+    Restore(super::BackupRestoreParameters),
 }
 impl BackupOperationParameters {
     pub const fn repository(self) -> RepositoryOperationParameters {
@@ -395,6 +396,7 @@ impl BackupOperationParameters {
             Self::Snapshot(value) => value.repository(),
             Self::Retention(value) => value.repository(),
             Self::Verification(value) => value.repository(),
+            Self::Restore(value) => value.source().repository(),
         }
     }
     pub const fn registration_identity(self) -> [u8; 32] {
@@ -402,6 +404,7 @@ impl BackupOperationParameters {
             Self::Snapshot(value) => value.registration_identity(),
             Self::Retention(value) => value.registration_identity(),
             Self::Verification(value) => value.registration_identity(),
+            Self::Restore(value) => value.source().registration_identity(),
         }
     }
     pub fn intent_digest(self) -> [u8; 32] {
@@ -409,6 +412,7 @@ impl BackupOperationParameters {
             Self::Snapshot(value) => value.intent_digest(),
             Self::Retention(value) => value.intent_digest(),
             Self::Verification(value) => value.intent_digest(),
+            Self::Restore(value) => value.intent_digest(),
         }
     }
 }
@@ -418,6 +422,7 @@ impl BackupOperationParameters {
 pub(super) enum BackupOperationEvidence {
     Snapshot(BackupOperationReceipt),
     VerificationReport([u8; 32]),
+    RestoreReport([u8; 32]),
     RetentionClaim(BackupRetentionClaimReceipt),
     Cleanup(BackupCleanupReceipt),
 }

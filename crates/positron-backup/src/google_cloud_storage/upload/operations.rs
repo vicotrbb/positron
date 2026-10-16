@@ -10,7 +10,7 @@ impl GoogleCloudStorageRepository {
             .and_then(|s| s.try_into().ok())
             .ok_or(RepositoryFailure::CorruptState)?;
         let authentication = self
-            .upload_authenticator
+            .upload_authenticator()?
             .authenticate(digest)
             .map_err(|_| RepositoryFailure::StorageUnavailable)?;
         bytes.extend_from_slice(&authentication.epoch().to_be_bytes());
@@ -42,7 +42,7 @@ impl GoogleCloudStorageRepository {
             .ok_or(RepositoryFailure::CorruptState)?;
         let authentication = positron_kernel::ControlTokenAuthentication::new(epoch, tag)
             .map_err(|_| RepositoryFailure::CorruptState)?;
-        self.upload_authenticator
+        self.upload_authenticator()?
             .verify(digest, authentication)
             .map_err(|_| RepositoryFailure::ChecksumMismatch)?;
         bytes.truncate(end);
@@ -114,6 +114,7 @@ impl GoogleCloudStorageRepository {
         Ok(PutOutcome::Created)
     }
     pub async fn begin_upload(&self, plan: UploadPlan) -> Result<UploadState, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         match self.read_object(plan.object).await {
@@ -159,6 +160,7 @@ impl GoogleCloudStorageRepository {
         &self,
         id: UploadId,
     ) -> Result<Option<UploadState>, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         self.read_record(id)
@@ -169,6 +171,7 @@ impl GoogleCloudStorageRepository {
         &self,
         part: UploadPart,
     ) -> Result<UploadOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         let Some((mut record, mut generation)) = self.read_record(part.state.id()).await? else {
@@ -219,6 +222,7 @@ impl GoogleCloudStorageRepository {
         Ok(UploadOutcome::Pending(state))
     }
     pub async fn abort_upload(&self, id: UploadId) -> Result<DeleteOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         self.cleanup_upload(id).await

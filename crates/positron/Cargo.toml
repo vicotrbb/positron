@@ -12,6 +12,7 @@ publish = false
 
 [dependencies]
 positron-api = { path = "../positron-api" }
+positron-backup = { path = "../positron-backup" }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 positron-config = { path = "../positron-config" }
 positron-domain = { path = "../positron-domain" }

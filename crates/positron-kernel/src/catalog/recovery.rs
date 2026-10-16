@@ -14,6 +14,10 @@ pub(super) fn recover(
     secret: &CatalogSecret,
     instance: InstanceId,
 ) -> Result<CatalogState, CatalogFailure> {
+    let origin = storage.read_restore_origin(secret, instance)?;
+    let baseline = origin
+        .as_ref()
+        .map_or_else(CatalogSnapshot::origin, |origin| origin.snapshot.clone());
     let marker_scan = storage.markers(secret)?;
     if marker_scan.authentication_failures != 0 {
         return Err(CatalogFailure::new(
@@ -21,12 +25,28 @@ pub(super) fn recover(
         ));
     }
     if marker_scan.verified.is_empty() {
+        let anchor = super::audit_checkpoint::retention_anchor(&baseline)?;
+        let audit = read_origin_audit(
+            storage,
+            secret,
+            instance,
+            origin.as_ref(),
+            anchor.as_ref(),
+            false,
+        )?;
+        let checkpoint = if anchor.is_none() {
+            storage.latest_audit_checkpoint(secret, instance, &audit)?
+        } else {
+            None
+        };
+        let retained_history_bytes = origin_history_bytes(origin.as_ref(), &audit)?;
+        super::reserve_history(retained_history_bytes, 0, baseline.number())?;
         return Ok(CatalogState {
-            current: CatalogSnapshot::origin(),
-            audit: Vec::new(),
-            audit_checkpoint: None,
+            current: baseline,
+            audit,
+            audit_checkpoint: checkpoint,
             transactions: BTreeMap::new(),
-            retained_history_bytes: 0,
+            retained_history_bytes,
         });
     }
 
@@ -66,8 +86,13 @@ pub(super) fn recover(
         }
         let predecessor = record.predecessor;
         chain.push(record);
-        if expected_number == 1 {
-            if predecessor != CatalogGenerationId::ORIGIN {
+        if expected_number
+            == baseline
+                .number()
+                .checked_add(1)
+                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?
+        {
+            if predecessor != baseline.identity() {
                 return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
             }
             break;
@@ -87,10 +112,10 @@ pub(super) fn recover(
     // Commit records remain complete and authenticated; the signed anchor is
     // the only authority that can replace re-reading the prefix audit frames.
     let current = load_snapshot(storage, secret, instance, latest_record)?;
-    let retained_anchor = audit_retention_anchor(&current, instance, &chain)?;
+    let retained_anchor = audit_retention_anchor(&current, instance, &chain, origin.as_ref())?;
     let missing_retained_prefix = match retained_anchor.as_ref() {
         None => false,
-        Some(anchor) => match retained_prefix_presence(storage, &chain, anchor)? {
+        Some(anchor) => match retained_prefix_presence(storage, &chain, anchor, origin.as_ref())? {
             RetainedPrefixPresence::Complete => false,
             RetainedPrefixPresence::Reclaimed => true,
             RetainedPrefixPresence::Partial => {
@@ -103,11 +128,26 @@ pub(super) fn recover(
             },
         },
     };
-    let mut predecessor_generation = CatalogGenerationId::ORIGIN;
-    let mut predecessor_number = 0_u64;
-    let mut predecessor_audit = AuditFrontier::ORIGIN;
-    let mut audit = Vec::new();
-    let mut audit_bytes = 0_usize;
+    let mut predecessor_generation = baseline.identity();
+    let mut predecessor_number = baseline.number();
+    let mut predecessor_audit = baseline.0.audit_frontier;
+    let mut audit = read_origin_audit(
+        storage,
+        secret,
+        instance,
+        origin.as_ref(),
+        retained_anchor.as_ref(),
+        missing_retained_prefix,
+    )?;
+    let mut audit_bytes = audit
+        .iter()
+        .map(|record| record.intent().len())
+        .sum::<usize>();
+    retained_history_bytes = super::reserve_history(
+        retained_history_bytes,
+        origin_history_bytes(origin.as_ref(), &audit)?,
+        highest_number,
+    )?;
     let mut transactions: BTreeMap<TransactionId, TransactionOutcome> = BTreeMap::new();
     for record in chain {
         if record.predecessor != predecessor_generation || record.number != predecessor_number + 1 {
@@ -207,6 +247,7 @@ fn audit_retention_anchor(
     current: &CatalogSnapshot,
     instance: InstanceId,
     chain: &[CommitRecord],
+    origin: Option<&super::restore_origin::StoredOrigin>,
 ) -> Result<Option<super::AuditRetentionAnchor>, CatalogFailure> {
     let Some(anchor) = super::audit_checkpoint::retention_anchor(current)? else {
         return Ok(None);
@@ -214,10 +255,19 @@ fn audit_retention_anchor(
     let trust = super::audit_checkpoint::retention_trust(current, instance)?;
     anchor.verify(trust)?;
     if anchor.instance() != instance
-        || !chain.iter().any(|record| {
+        || !(chain.iter().any(|record| {
             record.audit_frontier.position == anchor.position()
                 && record.audit_frontier.hash == anchor.record_hash()
-        })
+        }) || origin.is_some_and(|origin| {
+            origin.audit.iter().any(|(position, hash)| {
+                *position == anchor.position() && *hash == anchor.record_hash()
+            }) || super::audit_checkpoint::retention_anchor(&origin.snapshot).is_ok_and(|source| {
+                source.is_some_and(|source| {
+                    source.position() == anchor.position()
+                        && source.record_hash() == anchor.record_hash()
+                })
+            })
+        }))
     {
         return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
     }
@@ -234,10 +284,22 @@ fn retained_prefix_presence(
     storage: &CatalogStorage,
     chain: &[CommitRecord],
     anchor: &super::AuditRetentionAnchor,
+    origin: Option<&super::restore_origin::StoredOrigin>,
 ) -> Result<RetainedPrefixPresence, CatalogFailure> {
     let mut previous = AuditFrontier::ORIGIN;
     let mut present = 0_usize;
     let mut absent = 0_usize;
+    if let Some(origin) = origin {
+        for (position, hash) in &origin.audit {
+            if *position <= anchor.position() {
+                if storage.audit_exists(*position, *hash)? {
+                    present += 1;
+                } else {
+                    absent += 1;
+                }
+            }
+        }
+    }
     for record in chain {
         if record.audit_frontier != previous && record.audit_frontier.position <= anchor.position()
         {
@@ -274,4 +336,59 @@ pub(super) fn load_snapshot(
         objects.insert(*identity, object);
     }
     Ok(snapshot_from_record(record, objects))
+}
+
+fn read_origin_audit(
+    storage: &CatalogStorage,
+    secret: &CatalogSecret,
+    instance: InstanceId,
+    origin: Option<&super::restore_origin::StoredOrigin>,
+    anchor: Option<&super::AuditRetentionAnchor>,
+    prefix_reclaimed: bool,
+) -> Result<Vec<super::GovernanceAuditRecord>, CatalogFailure> {
+    let Some(origin) = origin else {
+        return Ok(Vec::new());
+    };
+    let mut records = Vec::new();
+    records
+        .try_reserve_exact(origin.audit.len())
+        .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+    let mut total = 0usize;
+    for (position, hash) in &origin.audit {
+        if prefix_reclaimed && anchor.is_some_and(|anchor| *position <= anchor.position()) {
+            continue;
+        }
+        let bytes = storage.read_audit(secret, instance, *position, *hash)?;
+        let record = decode_audit(&bytes)?;
+        if record.position() != *position || record.record_hash() != *hash {
+            return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
+        }
+        total = total
+            .checked_add(record.intent().len())
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        if total > MAX_RECOVERED_AUDIT_BYTES {
+            return Err(CatalogFailure::new(CatalogFailureCode::LimitExceeded));
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn origin_history_bytes(
+    origin: Option<&super::restore_origin::StoredOrigin>,
+    records: &[super::GovernanceAuditRecord],
+) -> Result<usize, CatalogFailure> {
+    let Some(origin) = origin else {
+        return Ok(0);
+    };
+    records.iter().try_fold(
+        retained_artifact_bytes(origin.encode()?.len())?,
+        |total, record| {
+            total
+                .checked_add(retained_artifact_bytes(
+                    super::codec::encode_audit(record).len(),
+                )?)
+                .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))
+        },
+    )
 }

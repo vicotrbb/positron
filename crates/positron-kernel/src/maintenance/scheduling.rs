@@ -302,7 +302,23 @@ pub(super) fn tasks_conflict(left: &MaintenanceTask, right: &MaintenanceTask) ->
     }) || left.outputs.iter().any(|object| {
         right.inputs.binary_search(object).is_ok() || right.outputs.binary_search(object).is_ok()
     });
+    // System migration can retire roots used by a scrub in any segment scope.
+    let system_migration_scrub_conflict = matches!(
+        (left.class, left.scope, right.class, right.scope),
+        (
+            MaintenanceTaskClass::Migration,
+            MaintenanceScope::System,
+            MaintenanceTaskClass::IntegrityScrub,
+            _
+        ) | (
+            MaintenanceTaskClass::IntegrityScrub,
+            _,
+            MaintenanceTaskClass::Migration,
+            MaintenanceScope::System
+        )
+    );
     object_conflict
+        || system_migration_scrub_conflict
         || (scopes_overlap(left.scope, right.scope)
             && (matches!(left.class, MaintenanceTaskClass::TenantPurge)
                 || matches!(right.class, MaintenanceTaskClass::TenantPurge)

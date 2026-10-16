@@ -214,3 +214,42 @@ pub(crate) fn replace_tenant_key_envelope_record(
         Ok(successor)
     })
 }
+
+/// Removes recoverable custody and preserves irreversible lifecycle truth.
+pub(crate) fn restore_excluded_record(
+    bytes: &[u8],
+    marker: &[u8],
+) -> Result<Vec<u8>, TenantAdministrationFailure> {
+    let record = record_layout(bytes)?;
+    let state = if record.lifecycle == TenantLifecycleState::Purged {
+        TenantLifecycleState::Purged
+    } else {
+        TenantLifecycleState::Purging
+    };
+    let generation = if record.lifecycle == state {
+        record.lifecycle_generation
+    } else {
+        ResourceGeneration::new(
+            record
+                .lifecycle_generation
+                .get()
+                .checked_add(1)
+                .ok_or(TenantAdministrationFailure::InvalidInput)?,
+        )
+        .map_err(|_| TenantAdministrationFailure::InvalidInput)?
+    };
+    let rewritten = rewrite_lifecycle(bytes, record, TenantLifecycleRecord { generation, state })?;
+    let record = record_layout(&rewritten)?;
+    let end = rewritten
+        .len()
+        .checked_sub(record.envelope.len())
+        .and_then(|value| value.checked_sub(2))
+        .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
+    let mut bytes = rewritten
+        .get(..end)
+        .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?
+        .to_vec();
+    bytes.extend_from_slice(&(marker.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(marker);
+    Ok(bytes)
+}

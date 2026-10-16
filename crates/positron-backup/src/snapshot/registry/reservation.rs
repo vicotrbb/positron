@@ -31,6 +31,7 @@ impl BackupPublisher<'_> {
             claims: Vec::new(),
             keys: Vec::new(),
             overlays: Vec::new(),
+            tombstones: Vec::new(),
         });
         let mut referenced = manifest
             .objects

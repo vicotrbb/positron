@@ -218,3 +218,13 @@ impl CatalogSnapshot {
         Ok(selected)
     }
 }
+
+pub(super) fn restore_tenant(
+    bytes: &[u8],
+) -> Result<Option<positron_domain::identity::TenantId>, LedgerFailure> {
+    decode(bytes)?
+        .map(|envelope| {
+            positron_domain::identity::TenantId::from_bytes(envelope.tenant).map_err(|_| rejected())
+        })
+        .transpose()
+}

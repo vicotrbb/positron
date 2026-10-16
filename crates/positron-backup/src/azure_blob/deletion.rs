@@ -162,6 +162,7 @@ impl AzureBlobRepository {
         })
     }
     pub async fn delete(&self, id: ObjectId) -> Result<DeleteOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
         self.purge_key(&self.key(&id.name()), Proof::Object(id))
