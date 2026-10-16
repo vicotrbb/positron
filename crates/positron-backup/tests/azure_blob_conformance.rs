@@ -42,7 +42,7 @@ async fn native_azure_repository_protocol_and_recovery() -> Result<(), Box<dyn s
             provider_behavior::conformance(
                 &repository,
                 identity.clone(),
-                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(60),
             )
             .await
             .map_err(|e| format!("shared conformance: {e}"))?;
