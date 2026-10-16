@@ -248,7 +248,7 @@ impl ProviderMigrationOperation {
             )
             || !matches!(
                 operation.irreversible_boundary.as_str(),
-                "not_crossed" | "catalog_generation_published"
+                "not_crossed" | "catalog_generation_published" | "backup_registry_published"
             )
             || matches!(operation.status.as_str(), "pending" | "running")
                 && operation.lookup_expires_at_unix_seconds.is_some()

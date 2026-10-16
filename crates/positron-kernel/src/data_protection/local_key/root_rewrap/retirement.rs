@@ -59,6 +59,33 @@ impl RootRewrapSession<'_> {
         };
         with_initialization_fault_after(fault, preceding, action)
     }
+    /// Independently opens an exact local backup route and proves that it
+    /// recovers the current stable SYSTEM KEK across root-provider changes.
+    pub fn verify_local_backup_root_envelope(
+        &self,
+        access: &crate::BootstrapArtifactAccess,
+        current: &BootstrapKeyCustody,
+        instance: InstanceId,
+        root_epoch: u64,
+        encoded: &[u8],
+    ) -> Result<(), BootstrapKeyFailure> {
+        if root_epoch == 0 {
+            return Err(BootstrapKeyFailure::InvalidInput);
+        }
+        let custody = if root_epoch == 1 {
+            access.open_key()?
+        } else {
+            access.open_successor_key(root_epoch)?
+        };
+        let recovered = self.open_system(
+            custody,
+            instance,
+            current.bootstrap_identity(),
+            root_epoch,
+            encoded,
+        )?;
+        recovered.verify_recovered_system_matches(current)
+    }
     pub fn verify_predecessor_custody(
         &self,
         access: &crate::BootstrapArtifactAccess,
@@ -148,3 +175,7 @@ impl RootRewrapSession<'_> {
         Ok((previous, retained))
     }
 }
+
+#[cfg(test)]
+#[path = "retirement_tests.rs"]
+mod tests;

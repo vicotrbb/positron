@@ -66,6 +66,7 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
         snapshots: Vec::new(),
         reservations: Vec::new(),
         keys: vec![key],
+        overlays: Vec::new(),
         claims: Vec::new(),
     };
     match data.first().copied().unwrap_or(0) % 3 {
@@ -85,9 +86,40 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
             shared: 3,
         }),
     }
+    use positron_kernel::key_provider::{
+        EnvelopeContext, KeyEnvelope, KeyScope, ProviderFamily, ProviderKeyUri, WrappingAlgorithm,
+    };
+    let envelope = |version: &str| {
+        KeyEnvelope::from_provider_response(
+            ProviderKeyUri::new(ProviderFamily::LocalFile, "root", version).expect("root URI"),
+            EnvelopeContext::new([2; 16], KeyScope::System, [21; 32], 1, 1).expect("root context"),
+            WrappingAlgorithm::Aes256Kwp,
+            vec![22; 40],
+        )
+        .expect("root envelope")
+    };
+    let overlay = BackupEnvelopeOverlay::new(
+        receipt.snapshot,
+        receipt.manifest,
+        key.context,
+        [23; 16],
+        envelope("one"),
+        envelope("two"),
+    )
+    .expect("overlay");
+    let overlay_bytes = overlay
+        .signed_bytes(&identity, &signer)
+        .expect("signed overlay");
+    generation.overlays.push(OverlayReference {
+        snapshot: receipt.snapshot,
+        target: [24; 32],
+        object: ImmutableObject::new(overlay_bytes.clone())
+            .expect("overlay object")
+            .id(),
+    });
     let registry_bytes = generation.signed_bytes(&signer).expect("signed registry");
     Generation::verify(&registry_bytes, &identity, signer.identity()).expect("valid registry");
-    for (kind, bytes) in [(0, manifest_bytes), (1, registry_bytes)] {
+    for (kind, bytes) in [(0, manifest_bytes), (1, registry_bytes), (2, overlay_bytes)] {
         let mut payload = super::super::codec::verify(&bytes, signer.identity())
             .expect("seed signature")
             .to_vec();
@@ -102,8 +134,10 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
         let mutated = super::super::codec::sign(payload, &signer).expect("bounded signed mutation");
         if kind == 0 {
             let _ = BackupManifest::verify(&mutated, &identity, signer.identity());
-        } else {
+        } else if kind == 1 {
             let _ = Generation::verify(&mutated, &identity, signer.identity());
+        } else {
+            let _ = BackupEnvelopeOverlay::verify(&mutated, &identity, signer.identity());
         }
         let mut corrupt = mutated;
         if let Some(byte) = corrupt.last_mut() {

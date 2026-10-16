@@ -7,7 +7,10 @@ impl Generation {
             .checked_add(self.reservations.len())
             .and_then(|n| n.checked_add(self.claims.len()))
             .ok_or(RepositoryFailure::LimitExceeded)?;
-        if records > MAX_REGISTERED_SNAPSHOTS || self.keys.len() > MAX_KEY_ENVELOPES {
+        if records > MAX_REGISTERED_SNAPSHOTS
+            || self.keys.len() > MAX_KEY_ENVELOPES
+            || self.overlays.len() > overlay::MAX_OVERLAYS
+        {
             return Err(RepositoryFailure::LimitExceeded);
         }
         let remaining = self.claims.iter().try_fold(0usize, |n, claim| {
@@ -27,9 +30,10 @@ impl Generation {
             (self.keys.len(), 120),
             (self.claims.len(), 97),
             (remaining, 32),
+            (self.overlays.len(), 80),
         ]
         .into_iter()
-        .try_fold(236u64, |n, (count, size)| {
+        .try_fold(240u64, |n, (count, size)| {
             (count as u64)
                 .checked_mul(size)
                 .and_then(|v| n.checked_add(v))
@@ -47,10 +51,11 @@ impl Generation {
             .and_then(|count| count.checked_add(self.claims.len()))
             .is_none_or(|count| count > MAX_REGISTERED_SNAPSHOTS)
             || self.keys.len() > MAX_KEY_ENVELOPES
+            || self.overlays.len() > overlay::MAX_OVERLAYS
         {
             return Err(RepositoryFailure::LimitExceeded);
         }
-        let mut bytes = b"POSBKG04".to_vec();
+        let mut bytes = b"POSBKG05".to_vec();
         bytes.extend_from_slice(&self.number.to_be_bytes());
         bytes.extend_from_slice(&self.previous);
         bytes.extend_from_slice(&self.repository.encode());
@@ -77,6 +82,12 @@ impl Generation {
             bytes.extend_from_slice(&key.object.checksum());
         }
         super::expiry::codec::encode(&self.claims, &mut bytes)?;
+        bytes.extend_from_slice(&(self.overlays.len() as u32).to_be_bytes());
+        for overlay in &self.overlays {
+            bytes.extend_from_slice(&overlay.snapshot);
+            bytes.extend_from_slice(&overlay.target);
+            bytes.extend_from_slice(&overlay.object.checksum());
+        }
         super::super::codec::sign(bytes, signer)
     }
     pub(super) fn verify(
@@ -86,7 +97,8 @@ impl Generation {
     ) -> Result<Self, RepositoryFailure> {
         let mut decoder =
             super::super::codec::Decoder::new(super::super::codec::verify(bytes, integrity)?);
-        if decoder.take(8)? != b"POSBKG04" {
+        let version = decoder.take(8)?;
+        if version != b"POSBKG04" && version != b"POSBKG05" {
             return Err(RepositoryFailure::CorruptState);
         }
         let number = decoder.u64()?;
@@ -194,6 +206,33 @@ impl Generation {
         }) {
             return Err(RepositoryFailure::CorruptState);
         }
+        let mut overlays = Vec::new();
+        if version == b"POSBKG05" {
+            let count = decoder.u32()? as usize;
+            if count > overlay::MAX_OVERLAYS {
+                return Err(RepositoryFailure::LimitExceeded);
+            }
+            overlays
+                .try_reserve_exact(count)
+                .map_err(|_| RepositoryFailure::LimitExceeded)?;
+            for _ in 0..count {
+                let reference = OverlayReference {
+                    snapshot: decoder.array()?,
+                    target: decoder.array()?,
+                    object: ObjectId::from_checksum(decoder.array()?),
+                };
+                if reference.snapshot == [0; 16]
+                    || reference.target == [0; 32]
+                    || reference.object.checksum() == [0; 32]
+                    || overlays.last().is_some_and(|last: &OverlayReference| {
+                        (last.snapshot, last.target) >= (reference.snapshot, reference.target)
+                    })
+                {
+                    return Err(RepositoryFailure::CorruptState);
+                }
+                overlays.push(reference);
+            }
+        }
         decoder.finish()?;
         Ok(Self {
             number,
@@ -203,6 +242,7 @@ impl Generation {
             reservations,
             claims,
             keys,
+            overlays,
         })
     }
 }

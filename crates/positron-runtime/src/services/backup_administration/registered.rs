@@ -1,6 +1,6 @@
 //! Authenticated registered Repository inputs shared by creation-free reads and retention.
 use super::*;
-pub(super) fn registered(
+pub(in crate::services) fn registered(
     services: &ServiceHandle,
     repository: [u8; 16],
 ) -> Result<

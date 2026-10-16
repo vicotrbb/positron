@@ -39,6 +39,12 @@ impl EnvelopeContext {
             format,
         })
     }
+    pub const fn instance(self) -> [u8; 16] {
+        self.instance
+    }
+    pub const fn scope(self) -> KeyScope {
+        self.scope
+    }
     pub(crate) fn encode(self, provider: &ProviderKeyUri) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(800);
         bytes.extend_from_slice(b"positron-provider-envelope-context-v1\0");
@@ -209,6 +215,14 @@ impl KeyEnvelope {
             algorithm,
             ciphertext,
         })
+    }
+    pub fn retained_memory_bytes(&self) -> u64 {
+        (self.ciphertext.capacity()
+            + self.provider.locator.capacity()
+            + self.provider.version.capacity()) as u64
+    }
+    pub const fn context(&self) -> EnvelopeContext {
+        self.context
     }
     #[must_use]
     pub fn identity(&self) -> &ProviderKeyUri {

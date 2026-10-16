@@ -3,10 +3,11 @@ use super::*;
 use std::sync::Mutex;
 // Signed fixed header + largest retained record kind + all bounded key and
 // remaining-object records. Even this conservative combination fits one range.
-pub(super) const MAX_GENERATION_BYTES: u64 = 236
+pub(super) const MAX_GENERATION_BYTES: u64 = 240
     + MAX_REGISTERED_SNAPSHOTS as u64 * 97
     + MAX_KEY_ENVELOPES as u64 * 120
-    + expiry::MAX_CLAIMED_OBJECTS as u64 * 32;
+    + expiry::MAX_CLAIMED_OBJECTS as u64 * 32
+    + overlay::MAX_OVERLAYS as u64 * 80;
 const MAX_CURSOR_BYTES: usize = 512;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Stage {
@@ -411,6 +412,7 @@ impl Generation {
             allocation_bytes::<BackupReceipt>(self.snapshots.capacity())?,
             allocation_bytes::<BackupReceipt>(self.reservations.capacity())?,
             allocation_bytes::<KeyReference>(self.keys.capacity())?,
+            allocation_bytes::<OverlayReference>(self.overlays.capacity())?,
             allocation_bytes::<DeletionClaim>(self.claims.capacity())?,
         ]
         .into_iter()

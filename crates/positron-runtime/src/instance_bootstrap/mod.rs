@@ -1,6 +1,8 @@
 mod codec;
 mod local_rotation;
-pub(crate) use local_rotation::RootMigrationContext;
+pub(crate) use local_rotation::{
+    BackupRootRetirementProof, RootMigrationContext, registration_digest,
+};
 mod operation;
 mod recovery;
 pub use local_rotation::{

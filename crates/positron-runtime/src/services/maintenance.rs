@@ -629,7 +629,7 @@ fn complete_installed_maintenance(
         return super::repository_administration::complete(services, execution);
     }
     if let InstalledMaintenanceExecution::RootProviderMigration { execution } = execution {
-        return super::provider_migration::complete(services, execution);
+        return super::provider_migration::complete(services, execution, cancellation);
     }
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
         return Err(ServiceFailure::CatalogBusy);
@@ -1443,7 +1443,8 @@ pub(super) fn run_runtime_maintenance_worker(
                         }
                         let continues_owned_work = match &execution {
                             InstalledMaintenanceExecution::IntegrityScrub { execution, .. }
-                            | InstalledMaintenanceExecution::BackupSnapshot { execution, .. } => {
+                            | InstalledMaintenanceExecution::BackupSnapshot { execution, .. }
+                            | InstalledMaintenanceExecution::RootProviderMigration { execution } => {
                                 match services
                                     .instance
                                     .maintenance_coordinator()

@@ -380,6 +380,54 @@ impl DurableOperationAdministration {
         publish(catalog, &snapshot, operation.succeeded(now)?)
     }
 
+    /// Binds one signed Backup Registry publication to its owning root phase.
+    /// Backup authenticates the registration format; Governance owns the exact
+    /// replacement, current authorization and immutable operation audit record.
+    pub fn publish_key_provider_backup_registry(
+        catalog: &Catalog<'_>,
+        actor: crate::AuthorizedContext,
+        id: OperationId,
+        previous: CatalogObjectId,
+        registration: CatalogObject,
+        now: u64,
+    ) -> Result<DurableOperation, DurableOperationFailure> {
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        let mut operation =
+            find_by_id(&snapshot, id)?.ok_or(DurableOperationFailure::UnknownOperation)?;
+        validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::KeyProviderMigration
+            || operation.status != DurableOperationStatus::Running
+            || operation.phase != DurableOperationPhase::Draining
+            || !operation
+                .key_provider_migration_parameters
+                .is_some_and(|parameters| {
+                    matches!(
+                        parameters.action(),
+                        KeyProviderMigrationAction::Verify | KeyProviderMigrationAction::Retire
+                    )
+                })
+            || snapshot.object(previous).map_err(map_catalog)?.is_none()
+        {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        if now < operation.updated_at_unix_seconds {
+            return Err(DurableOperationFailure::InvalidState);
+        }
+        operation.boundary = DurableOperationBoundary::BackupRegistryPublished;
+        operation.updated_at_unix_seconds = now;
+        operation.revision = operation
+            .revision
+            .checked_add(1)
+            .ok_or(DurableOperationFailure::CapacityExceeded)?;
+        publish_with_objects(
+            catalog,
+            &snapshot,
+            operation,
+            vec![registration],
+            Some(previous),
+        )
+    }
+
     /// Commits the terminal success transition after the Query module has
     /// durably published its signed output manifest.
     pub fn succeed_query_export(

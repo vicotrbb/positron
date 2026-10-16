@@ -144,6 +144,38 @@ impl<'a> RootRewrapSession<'a> {
             reservation,
         )
     }
+    /// Independently recovers an exact retained Backup Envelope Overlay target.
+    /// A historical route may use different ciphertext from the current route;
+    /// its authoritative context and recovered stable SYSTEM KEK must match.
+    pub fn verify_backup_provider_root_envelope(
+        &self,
+        configuration: NativeRootConfiguration,
+        current: &BootstrapKeyCustody,
+        instance: InstanceId,
+        root_epoch: u64,
+        encoded: &[u8],
+    ) -> Result<(), KeyProviderFailure> {
+        let provider = self.native_provider(configuration)?;
+        let recovered = self.open_provider_system_blocking(
+            provider,
+            instance,
+            current.bootstrap_identity(),
+            root_epoch,
+            encoded,
+            KeyCacheLease::default(),
+        )?;
+        recovered
+            .verify_recovered_system_matches(current)
+            .map_err(|failure| match failure {
+                BootstrapKeyFailure::LimitExceeded => KeyProviderFailure::LimitExceeded,
+                BootstrapKeyFailure::Custody | BootstrapKeyFailure::Entropy => {
+                    KeyProviderFailure::Unavailable
+                },
+                BootstrapKeyFailure::Authentication | BootstrapKeyFailure::InvalidInput => {
+                    KeyProviderFailure::WrongKey
+                },
+            })
+    }
     pub fn prepare_provider_migration_blocking(
         &self,
         current: &BootstrapKeyCustody,

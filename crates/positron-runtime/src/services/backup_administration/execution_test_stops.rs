@@ -7,6 +7,7 @@ use std::sync::{
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(in crate::services) enum StopPoint {
     RegistryPublished,
+    BackupOverlayPublished,
     VerificationMetadataVerified,
     VerificationKeyRecovered,
     VerificationReportPublished,

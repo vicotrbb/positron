@@ -40,6 +40,7 @@ fn failed_native_preflight_preserves_source_and_has_no_prepared_route()
 }
 
 mod audit_retention;
+mod backup_overlay;
 mod data;
 mod fixtures;
 use fixtures::*;

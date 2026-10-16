@@ -29,9 +29,9 @@ remains a managed reference even before verification. Its created receipt is
 part of the recovery inventory. A signed audit-retention suffix cannot prove
 that artifacts recorded in the pruned prefix are absent; retirement requires
 the complete initial audit chain unless another canonical recovery owner can
-prove their absence. The current repository
-schema has no persisted repository bindings; that fact does not authorize any
-future repository or replace its eventual reference proof. External retirement
+prove their absence. Persisted Backup Repository registrations require the signed recovery proof
+described below; an absent registration inventory alone cannot stand in for
+inspection of a configured Repository. External retirement
 removes only Positron's predecessor route and envelope, never an external key.
 Local retirement retains the mandatory independently verified Age recovery
 policy. Configuration provides protected provider access under ADR 0055 and
@@ -102,3 +102,36 @@ history retain their existing owners; opaque or unproved descriptors still
 block retirement. Migration's local recovery preflight preserves admission and
 storage failures as unavailable proof, distinct from authenticated absence of
 independent recovery.
+
+Online root verification and retirement inspect every authenticated managed
+Repository registration. For each retained snapshot, Backup authenticates its
+manifest and original key inventory and Data Protection unwraps every required
+tenant envelope and checks its epoch and stable fingerprint. The stable SYSTEM
+KEK remains unchanged across root migration. The exact source and destination
+SYSTEM envelopes are bound to that snapshot, manifest, key context, Repository,
+and requesting Durable Operation in an immutable signed Backup Envelope Overlay.
+Local predecessor and successor routes are independently reopened from protected
+custody and compared with the stable SYSTEM KEK; external destination recovery
+retains the native independent recovery preflight. Source recovery was verified
+by the authenticated preparation and activation workflow.
+
+Signed Registry format 5 adds canonical overlay references while retaining
+format 4 readers. Overlay history is append-only, including after snapshot
+expiry, and has an explicit lifetime limit of 4,096 records per Repository.
+Reaching the limit refuses new overlays without discarding recovery history.
+Exact retries reuse an existing publication; a conflicting target route refuses
+publication. Registry CAS publishes before the Catalog registration anchor and
+its principal-bound operation audit record. Restart reconciles a lost CAS
+acknowledgement through signed ancestry and repairs the anchor. Each worker turn
+publishes at most one missing snapshot overlay, so interruption retains all
+committed routes and the next attempt discovers its progress from the Registry.
+The operation exposes `backup_registry_published` once this irreversible stage
+has been acknowledged; cancellation never removes an overlay.
+
+The existing retirement checks accept the online handler's opaque Repository
+proof only for the exact active SYSTEM envelope and the unchanged authenticated
+registration inventory. Every retained snapshot must have the destination
+recovery route. Unavailable, corrupt, conflicting, changed, or unproved
+Repository state still refuses retirement. Offline callers retain that refusal
+without a live Repository proof. Recovery-artifact, ledger, snapshot-lease,
+maintenance, and native-provider retirement checks remain independent owners.

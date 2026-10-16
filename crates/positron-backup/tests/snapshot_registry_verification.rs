@@ -206,13 +206,18 @@ async fn registry_ancestry_is_bounded_authenticated_and_resumes_after_external_a
         let mut state = publisher
             .begin_registry_verification(owner, request)
             .await?;
+        let max_generation_bytes = (BackupPublisher::registry_read_memory_bytes()
+            - BackupPublisher::control_read_memory_bytes())
+            / 8;
         let mut turns = 0;
         while !state.complete()? {
             let reads = observed.reads.load(Ordering::Relaxed);
             let bytes = observed.bytes.load(Ordering::Relaxed);
             publisher.registry_verification_step(&mut state).await?;
             assert!(observed.reads.load(Ordering::Relaxed) - reads <= 1);
-            assert!(observed.bytes.load(Ordering::Relaxed) - bytes <= 2_852_076);
+            assert!(
+                observed.bytes.load(Ordering::Relaxed) - bytes <= max_generation_bytes as usize
+            );
             let checkpoint = publisher.registry_verification_checkpoint(&state)?;
             assert!(checkpoint.len() <= 1024);
             let mut corrupt = checkpoint.clone();
@@ -310,7 +315,12 @@ async fn registry_ancestry_is_bounded_authenticated_and_resumes_after_external_a
         }
         assert!(rejected);
         // Oversized hostile generations are refused before a body range read.
-        install(&repository, &signer, vec![0; 3 * 1024 * 1024]).await?;
+        install(
+            &repository,
+            &signer,
+            vec![0; usize::try_from(max_generation_bytes)? + 1],
+        )
+        .await?;
         let mut oversized = publisher
             .begin_registry_verification(owner, request)
             .await?;
