@@ -1,16 +1,17 @@
 //! Exact admitted native Repository and signing custody shared by worker phases.
 use super::*;
-pub(super) struct BackupOwner {
-    pub(super) runtime: tokio::runtime::Runtime,
-    pub(super) repository: Box<dyn Repository>,
-    pub(super) identity: RepositoryIdentity,
-    pub(super) signer: BackupControlSigner,
-    pub(super) trusted: Option<[u8; 32]>,
-    pub(super) resources: std::sync::Arc<positron_kernel::NativeAwsResources>,
+pub(in crate::services::backup_administration) struct BackupOwner {
+    pub(in crate::services::backup_administration) runtime: tokio::runtime::Runtime,
+    pub(in crate::services::backup_administration) repository: Box<dyn Repository>,
+    pub(in crate::services::backup_administration) identity: RepositoryIdentity,
+    pub(in crate::services::backup_administration) signer: BackupControlSigner,
+    pub(in crate::services::backup_administration) trusted: Option<[u8; 32]>,
+    pub(in crate::services::backup_administration) resources:
+        std::sync::Arc<positron_kernel::NativeAwsResources>,
     registry: Option<positron_backup::BackupRegistryVerification>,
 }
 impl BackupOwner {
-    pub(super) fn open(
+    pub(in crate::services::backup_administration) fn open(
         services: &ServiceHandle,
         execution: &mut MaintenanceExecution<'_>,
         operation: DurableOperation,
@@ -108,7 +109,7 @@ impl BackupOwner {
         }
         Ok(owner)
     }
-    pub(super) fn set_trusted(&mut self, trusted: [u8; 32]) {
+    pub(in crate::services::backup_administration) fn set_trusted(&mut self, trusted: [u8; 32]) {
         if self.trusted != Some(trusted) {
             self.trusted = Some(trusted);
             self.registry = None;
@@ -126,7 +127,7 @@ impl BackupOwner {
             None => Ok(publisher),
         }
     }
-    pub(super) fn publisher(
+    pub(in crate::services::backup_administration) fn publisher(
         &self,
         external_retained_bytes: u64,
     ) -> Result<BackupPublisher<'_>, RepositoryFailure> {
@@ -138,7 +139,9 @@ impl BackupOwner {
             _ => Ok(publisher),
         }
     }
-    pub(super) fn registry_checkpoint(&self) -> Result<Option<Vec<u8>>, ServiceFailure> {
+    pub(in crate::services::backup_administration) fn registry_checkpoint(
+        &self,
+    ) -> Result<Option<Vec<u8>>, ServiceFailure> {
         self.registry
             .as_ref()
             .map(|registry| {
@@ -150,7 +153,7 @@ impl BackupOwner {
     }
     /// One signed Registry frame per turn. A changed proof is durable before
     /// any subsequent operation step can use its newly established authority.
-    pub(super) fn registry_ready(
+    pub(in crate::services::backup_administration) fn registry_ready(
         &mut self,
         services: &ServiceHandle,
         execution: &MaintenanceExecution<'_>,

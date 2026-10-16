@@ -344,29 +344,71 @@ pub enum BackupRetentionStage {
     Publishing,
 }
 
+/// Exact published snapshot selected for independent verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackupVerificationParameters(BackupRetentionParameters);
+impl BackupVerificationParameters {
+    pub fn new(
+        repository: RepositoryOperationParameters,
+        registration: [u8; 32],
+        snapshot: [u8; 16],
+        manifest: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        BackupRetentionParameters::new(repository, registration, snapshot, manifest).map(Self)
+    }
+    pub const fn repository(self) -> RepositoryOperationParameters {
+        self.0.repository()
+    }
+    pub const fn registration_identity(self) -> [u8; 32] {
+        self.0.registration_identity()
+    }
+    pub const fn snapshot_id(self) -> [u8; 16] {
+        self.0.snapshot_id()
+    }
+    pub const fn manifest_checksum(self) -> [u8; 32] {
+        self.0.manifest_checksum()
+    }
+    pub fn intent_digest(self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"positron-backup-verification-request-v1\0");
+        hash.update(self.0.intent_digest());
+        hash.finalize().into()
+    }
+    pub(super) fn encode(self, bytes: &mut Vec<u8>) {
+        self.0.encode(bytes);
+    }
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, DurableOperationFailure> {
+        BackupRetentionParameters::decode(bytes).map(Self)
+    }
+}
+
 /// One operation owns exactly one accepted Backup intent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupOperationParameters {
     Snapshot(BackupSnapshotParameters),
     Retention(BackupRetentionParameters),
+    Verification(BackupVerificationParameters),
 }
 impl BackupOperationParameters {
     pub const fn repository(self) -> RepositoryOperationParameters {
         match self {
             Self::Snapshot(value) => value.repository(),
             Self::Retention(value) => value.repository(),
+            Self::Verification(value) => value.repository(),
         }
     }
     pub const fn registration_identity(self) -> [u8; 32] {
         match self {
             Self::Snapshot(value) => value.registration_identity(),
             Self::Retention(value) => value.registration_identity(),
+            Self::Verification(value) => value.registration_identity(),
         }
     }
     pub fn intent_digest(self) -> [u8; 32] {
         match self {
             Self::Snapshot(value) => value.intent_digest(),
             Self::Retention(value) => value.intent_digest(),
+            Self::Verification(value) => value.intent_digest(),
         }
     }
 }
@@ -375,6 +417,7 @@ impl BackupOperationParameters {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BackupOperationEvidence {
     Snapshot(BackupOperationReceipt),
+    VerificationReport([u8; 32]),
     RetentionClaim(BackupRetentionClaimReceipt),
     Cleanup(BackupCleanupReceipt),
 }

@@ -276,26 +276,32 @@ impl GovernanceAuditEntry {
             } else {
                 None
             };
-            let (backup_repository, backup_receipt, backup_cleanup_receipt, backup_retention_claim) =
-                if is_v6 {
-                    let (repository, receipt, cleanup, claim) =
-                        super::backup::decode_backup_evidence(
-                            &mut cursor,
-                            action,
-                            outcome,
-                            target_identity,
-                        )?;
-                    (Some(repository), receipt, cleanup, claim)
-                } else {
-                    if matches!(
+            let (
+                backup_repository,
+                backup_receipt,
+                backup_cleanup_receipt,
+                backup_retention_claim,
+                backup_verification_report,
+            ) = if is_v6 {
+                let (repository, receipt, cleanup, claim, report) =
+                    super::backup::decode_backup_evidence(
+                        &mut cursor,
                         action,
-                        DurableOperationKind::BackupSnapshot
-                            | DurableOperationKind::BackupRetention
-                    ) {
-                        return Err(IdentityFailure);
-                    }
-                    (None, None, None, None)
-                };
+                        outcome,
+                        target_identity,
+                    )?;
+                (Some(repository), receipt, cleanup, claim, report)
+            } else {
+                if matches!(
+                    action,
+                    DurableOperationKind::BackupSnapshot
+                        | DurableOperationKind::BackupRetention
+                        | DurableOperationKind::BackupVerification
+                ) {
+                    return Err(IdentityFailure);
+                }
+                (None, None, None, None, None)
+            };
             let canonical_operation_id = DurableOperationRequest::operation_id_for_audit(
                 actor,
                 request_id,
@@ -333,6 +339,7 @@ impl GovernanceAuditEntry {
                             action,
                             DurableOperationKind::BackupSnapshot
                                 | DurableOperationKind::BackupRetention
+                                | DurableOperationKind::BackupVerification
                         ) && outcome == DurableOperationStatus::Running
                             && phase == DurableOperationPhase::BackupCancellation))
                         != cancellation_request_id.is_some()))
@@ -347,6 +354,7 @@ impl GovernanceAuditEntry {
                         receipt: backup_receipt,
                         cleanup: backup_cleanup_receipt,
                         retention_claim: backup_retention_claim,
+                        verification_report: backup_verification_report,
                     })
                 }),
                 position,

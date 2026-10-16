@@ -2,7 +2,10 @@ use positron_domain::identity::TenantId;
 use positron_domain::routing::SignalKind;
 use positron_domain::value::{AttributeNamespace, AttributeValueKind};
 
-use crate::policy::{MAX_COMPILED_POLICY_BYTES, PolicyOccurrence};
+use crate::policy::{
+    MAX_COMPILED_POLICY_BYTES, MAX_PREDICATES_PER_RULE, MAX_RULES, PolicyOccurrence,
+    PolicyPathSegment,
+};
 use crate::{
     IngestPolicy, PolicyAction, PolicyAttributePath, PolicyPredicate, PolicyReceiver, PolicyRule,
     PolicyTarget,
@@ -89,6 +92,52 @@ impl IngestPolicy {
         Ok(ActivatedPolicyObject { object: bytes })
     }
 
+    /// Conservative decode/compile peak, checked before collection allocation.
+    /// Rule and predicate tables use their canonical hard bounds; text and
+    /// path-vector capacities derive from the authenticated encoded length.
+    pub fn activated_object_memory_bound(bytes: &[u8]) -> Result<usize, PolicyActivationFailure> {
+        if bytes.len() > MAX_ACTIVATED_POLICY_OBJECT_BYTES {
+            return Err(PolicyActivationFailure);
+        }
+        let mut input = Input::new(bytes);
+        input.expect(ACTIVATION_MAGIC)?;
+        input.take(16)?;
+        if input.u64()? == 0 {
+            return Err(PolicyActivationFailure);
+        }
+        input.expect(super::policy::canonical::MAGIC)?;
+        let rules = usize::from(input.u16()?);
+        if rules > MAX_RULES {
+            return Err(PolicyActivationFailure);
+        }
+        let predicate_tables = MAX_PREDICATES_PER_RULE
+            .checked_mul(std::mem::size_of::<PolicyPredicate>())
+            .ok_or(PolicyActivationFailure)?;
+        // One complete B-tree node per rule bounds compile's borrowed ID set,
+        // including partially occupied internal nodes and allocator headers.
+        let id_nodes = 12usize
+            .checked_mul(std::mem::size_of::<&str>())
+            .and_then(|n| n.checked_add(16 * std::mem::size_of::<usize>()))
+            .ok_or(PolicyActivationFailure)?;
+        let tables = std::mem::size_of::<PolicyRule>()
+            .checked_add(predicate_tables)
+            .and_then(|n| n.checked_add(id_nodes))
+            .and_then(|n| n.checked_mul(rules))
+            .ok_or(PolicyActivationFailure)?;
+        // Text occupies at most its wire bytes; canonical re-encoding holds a
+        // doubling Vec. Path vectors have minimum capacity four and double,
+        // with every path segment consuming at least one input byte.
+        let wire = std::mem::size_of::<PolicyPathSegment>()
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(3))
+            .and_then(|n| n.checked_mul(bytes.len()))
+            .ok_or(PolicyActivationFailure)?;
+        tables
+            .checked_add(wire)
+            .and_then(|n| n.checked_add(std::mem::size_of::<Self>()))
+            .ok_or(PolicyActivationFailure)
+    }
+
     pub fn decode_activated_object(
         tenant: TenantId,
         bytes: &[u8],
@@ -96,6 +145,7 @@ impl IngestPolicy {
         if !bytes.starts_with(ACTIVATION_MAGIC) {
             return Ok(None);
         }
+        Self::activated_object_memory_bound(bytes)?;
         let mut input = Input::new(bytes);
         input.expect(ACTIVATION_MAGIC)?;
         if input.take(16)? != tenant.to_bytes() {
@@ -123,6 +173,9 @@ impl IngestPolicy {
 fn decode_rule(input: &mut Input<'_>) -> Result<PolicyRule, PolicyActivationFailure> {
     let id = input.text()?;
     let count = usize::from(input.u16()?);
+    if count > MAX_PREDICATES_PER_RULE {
+        return Err(PolicyActivationFailure);
+    }
     let mut predicates = Vec::new();
     predicates
         .try_reserve_exact(count)

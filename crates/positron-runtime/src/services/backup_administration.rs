@@ -1,14 +1,15 @@
 //! Runtime composes authenticated Backup commands with existing durable owners.
 mod execution;
 mod registered;
+mod verification;
 mod wire;
 use super::{ServiceFailure, ServiceHandle, maintenance_api::MaintenanceServiceFailure};
 pub(super) use execution::{BackupWork, complete, recover_accepted_task, reject_repository};
 use positron_governance::{
     AdministrativeIdempotencyKey, BackupRetentionParameters, BackupSnapshotParameters,
-    DurableOperation, DurableOperationAdministration, DurableOperationKind,
-    DurableOperationRequest, OperationId, RepositoryAction, RepositoryOperationParameters,
-    RepositoryProviderKind,
+    BackupVerificationParameters, DurableOperation, DurableOperationAdministration,
+    DurableOperationKind, DurableOperationRequest, OperationId, RepositoryAction,
+    RepositoryOperationParameters, RepositoryProviderKind,
 };
 use positron_kernel::{MaintenancePreconditions, RepositoryOperationBinding};
 fn require_operation(
@@ -17,7 +18,9 @@ fn require_operation(
 ) -> Result<(), ServiceFailure> {
     if !matches!(
         operation.kind(),
-        DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+        DurableOperationKind::BackupSnapshot
+            | DurableOperationKind::BackupRetention
+            | DurableOperationKind::BackupVerification
     ) || operation.target_identity() != Some(instance)
     {
         return Err(ServiceFailure::CorruptState);
@@ -159,16 +162,50 @@ impl ServiceHandle {
     }
 }
 impl ServiceHandle {
-    fn accept_backup_retention(
+    fn accept_backup_snapshot_action(
         &self,
+        verification: bool,
         actor: positron_governance::AuthorizedContext,
         repository: [u8; 16],
-        snapshot: [u8; 16],
-        manifest: [u8; 32],
+        (snapshot, manifest): ([u8; 16], [u8; 32]),
         expected: u64,
         key: AdministrativeIdempotencyKey,
     ) -> Result<DurableOperation, MaintenanceServiceFailure> {
         let (address, registration, parameters, _) = registered::registered(self, repository)?;
+        if verification {
+            let parameters = BackupVerificationParameters::new(
+                parameters,
+                registration
+                    .binding_identity()
+                    .map_err(|_| MaintenanceServiceFailure::SourceUnavailable)?,
+                snapshot,
+                manifest,
+            )
+            .map_err(super::provider_migration::operation_failure)?;
+            let _gate = self
+                .catalog_operation()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let catalog = self.open_maintenance_catalog()?;
+            let now = self.maintenance_status_now()?;
+            let request = DurableOperationRequest::backup_verification(
+                actor.principal_id(),
+                key,
+                self.instance.instance.to_bytes(),
+                expected,
+                now,
+                parameters.intent_digest(),
+            )
+            .map_err(super::provider_migration::operation_failure)?;
+            let operation = DurableOperationAdministration::accept_backup_verification_registered(
+                &catalog, actor, request, parameters, address,
+            )
+            .map_err(super::provider_migration::operation_failure)?;
+            if !operation.status().is_terminal() {
+                submit(&self.instance, &catalog, operation, now)
+                    .map_err(|_| MaintenanceServiceFailure::TaskUnavailable)?;
+            }
+            return Ok(operation);
+        }
         let parameters = BackupRetentionParameters::new(
             parameters,
             registration
@@ -217,7 +254,10 @@ fn submit(
         parameters.intent_digest(),
     )
     .map_err(|_| ServiceFailure::CorruptState)?;
-    if operation.kind() == DurableOperationKind::BackupRetention {
+    if matches!(
+        operation.kind(),
+        DurableOperationKind::BackupRetention | DurableOperationKind::BackupVerification
+    ) {
         let native = super::repository_administration::repository_resources(
             parameters.repository().provider_kind(),
         );
@@ -232,24 +272,28 @@ fn submit(
                 _ => native.get(dimension),
             }),
         );
-        instance
-            .maintenance_coordinator()
-            .submit_backup_retention_operation_with_resources_and_persist(
-                catalog,
-                binding,
-                MaintenancePreconditions::new(
-                    operation
-                        .request()
-                        .accepted_generation()
-                        .checked_add(1)
-                        .ok_or(ServiceFailure::CorruptState)?,
-                    1,
-                )
-                .map_err(|_| ServiceFailure::CorruptState)?,
-                resources,
-                now,
+        let submit = if operation.kind() == DurableOperationKind::BackupVerification {
+            positron_kernel::MaintenanceCoordinator::submit_backup_operation_with_resources_and_persist
+        } else {
+            positron_kernel::MaintenanceCoordinator::submit_backup_retention_operation_with_resources_and_persist
+        };
+        submit(
+            instance.maintenance_coordinator(),
+            catalog,
+            binding,
+            MaintenancePreconditions::new(
+                operation
+                    .request()
+                    .accepted_generation()
+                    .checked_add(1)
+                    .ok_or(ServiceFailure::CorruptState)?,
+                1,
             )
-            .map_err(super::maintenance::map_failure)?;
+            .map_err(|_| ServiceFailure::CorruptState)?,
+            resources,
+            now,
+        )
+        .map_err(super::maintenance::map_failure)?;
         return Ok(());
     }
     let snapshot = catalog

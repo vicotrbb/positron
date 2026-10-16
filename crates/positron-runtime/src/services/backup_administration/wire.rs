@@ -112,7 +112,8 @@ impl ServiceHandle {
                     admission.idempotency,
                 )?
             },
-            "expire" => self.accept_backup_retention(
+            "expire" | "verify" => self.accept_backup_snapshot_action(
+                request.action == "verify",
                 actor,
                 TenantId::parse_canonical(
                     request
@@ -122,20 +123,22 @@ impl ServiceHandle {
                 )
                 .map_err(|_| MaintenanceServiceFailure::InvalidRequest)?
                 .to_bytes(),
-                super::super::maintenance_verification::decode_fixed_hex(
-                    request
-                        .snapshot_id
-                        .as_deref()
-                        .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
-                )
-                .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
-                super::super::maintenance_verification::decode_fixed_hex(
-                    request
-                        .expected_manifest_checksum
-                        .as_deref()
-                        .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
-                )
-                .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                (
+                    super::super::maintenance_verification::decode_fixed_hex(
+                        request
+                            .snapshot_id
+                            .as_deref()
+                            .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                    )
+                    .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                    super::super::maintenance_verification::decode_fixed_hex(
+                        request
+                            .expected_manifest_checksum
+                            .as_deref()
+                            .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                    )
+                    .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                ),
                 request
                     .expected_catalog_generation
                     .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
@@ -176,17 +179,31 @@ impl ServiceHandle {
                 .map_err(super::super::provider_migration::operation_failure)?
                 .ok_or(MaintenanceServiceFailure::SourceUnavailable)?;
                 if request.action == "cancel" {
-                    DurableOperationAdministration::cancel_backup(
-                        &catalog,
-                        actor,
-                        operation.operation_id(),
-                        idempotency(request.idempotency_key.as_deref())?,
-                        request
-                            .expected_operation_revision
-                            .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
-                        self.maintenance_status_now()?,
-                    )
-                    .map_err(super::super::provider_migration::operation_failure)?
+                    if operation.kind() == DurableOperationKind::BackupVerification {
+                        DurableOperationAdministration::cancel_backup_verification(
+                            &catalog,
+                            actor,
+                            operation.operation_id(),
+                            idempotency(request.idempotency_key.as_deref())?,
+                            request
+                                .expected_operation_revision
+                                .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                            self.maintenance_status_now()?,
+                        )
+                        .map_err(super::super::provider_migration::operation_failure)?
+                    } else {
+                        DurableOperationAdministration::cancel_backup(
+                            &catalog,
+                            actor,
+                            operation.operation_id(),
+                            idempotency(request.idempotency_key.as_deref())?,
+                            request
+                                .expected_operation_revision
+                                .ok_or(MaintenanceServiceFailure::InvalidRequest)?,
+                            self.maintenance_status_now()?,
+                        )
+                        .map_err(super::super::provider_migration::operation_failure)?
+                    }
                 } else {
                     operation
                 }
@@ -208,8 +225,37 @@ fn response(
         .repository();
     let hex = super::super::maintenance_api::hex;
     let repository = repository_response(parameters, instance)?;
+    let verification = operation.kind() == DurableOperationKind::BackupVerification;
+    let report = operation
+        .backup_verification_report()
+        .map(|checksum| {
+            let _gate = services
+                .catalog_operation()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let catalog = services.open_maintenance_catalog()?;
+            let basis = catalog
+                .pin()
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let identity = basis
+                .object_identities()
+                .find(|identity| identity.to_bytes() == checksum)
+                .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
+            let bytes = basis
+                .object(identity)
+                .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
+                .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?;
+            Ok::<_, MaintenanceServiceFailure>(
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+            )
+        })
+        .transpose()?;
     let retention = operation.kind() == DurableOperationKind::BackupRetention;
-    let cleanup_pending = if retention {
+    let cleanup_pending = if verification {
+        false
+    } else if retention {
         operation.phase() == positron_governance::DurableOperationPhase::BackupRetentionCleanup
             || operation.phase() == positron_governance::DurableOperationPhase::BackupCancellation
     } else if operation.status() == positron_governance::DurableOperationStatus::Cancelled {
@@ -238,6 +284,8 @@ fn response(
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
     };
     Ok(BackupResponse {
+        verification_report: report,
+        verification_report_checksum: operation.backup_verification_report().map(hex),
         terminal_error_code: match operation.terminal_error() {
             None => None,
             Some(positron_governance::DurableOperationTerminalError::HandlerRejected) => {
@@ -254,7 +302,14 @@ fn response(
             },
         },
         operation_revision: operation.revision(),
-        kind: if retention { "retention" } else { "snapshot" }.into(),
+        kind: if verification {
+            "verification"
+        } else if retention {
+            "retention"
+        } else {
+            "snapshot"
+        }
+        .into(),
         cleanup_pending,
         retention_receipt: if retention {
             operation.backup_cleanup_receipt().map(|receipt| {

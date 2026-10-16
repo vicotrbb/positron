@@ -97,3 +97,42 @@ fn compiler_rejects_malicious_worst_case_steps_and_reports_full_memory() {
         PolicyCompileFailure::EvaluationBudgetExceeded,
     );
 }
+
+#[test]
+fn activation_decode_admission_is_derived_before_untrusted_collection_allocation() {
+    let tenant = TenantId::from_bytes([7; 16]).expect("tenant");
+    let small = IngestPolicy::preserving(1)
+        .expect("policy")
+        .activated_object(tenant)
+        .expect("object")
+        .into_bytes();
+    let small_bound = IngestPolicy::activated_object_memory_bound(&small).expect("preflight");
+    let larger = IngestPolicy::reject_exact_text_body(1, "rule", "body")
+        .expect("policy")
+        .activated_object(tenant)
+        .expect("object")
+        .into_bytes();
+    assert!(IngestPolicy::activated_object_memory_bound(&larger).expect("preflight") > small_bound);
+    assert!(
+        IngestPolicy::decode_activated_object(tenant, &larger)
+            .expect("decode")
+            .is_some()
+    );
+    let mut excess_predicates = larger.clone();
+    let rule_end = excess_predicates
+        .windows(4)
+        .position(|bytes| bytes == b"rule")
+        .expect("canonical rule ID")
+        + 4;
+    excess_predicates[rule_end..rule_end + 2].copy_from_slice(&u16::MAX.to_be_bytes());
+    assert!(IngestPolicy::decode_activated_object(tenant, &excess_predicates).is_err());
+    let mut excess_rules = small.clone();
+    let count = excess_rules.len() - 2;
+    excess_rules[count..].copy_from_slice(&u16::MAX.to_be_bytes());
+    assert!(IngestPolicy::activated_object_memory_bound(&excess_rules).is_err());
+    assert!(IngestPolicy::decode_activated_object(tenant, &excess_rules).is_err());
+    let mut oversized = small;
+    oversized.resize(MAX_ACTIVATED_POLICY_OBJECT_BYTES + 1, 0);
+    assert!(IngestPolicy::activated_object_memory_bound(&oversized).is_err());
+    assert!(IngestPolicy::decode_activated_object(tenant, &oversized).is_err());
+}

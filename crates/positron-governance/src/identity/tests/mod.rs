@@ -514,3 +514,17 @@ fn audit_inspection_is_bounded_to_authorized_tenant_audit_meaning() {
         .active = false;
     assert!(identity.inspect_audit(tenant_context, &audit).is_err());
 }
+
+#[test]
+fn detached_identity_preflight_refuses_registry_cardinality_before_decode() {
+    let mut registry = b"POSTRG02".to_vec();
+    registry.extend_from_slice(&[1; 16]);
+    registry.extend_from_slice(&1_u64.to_be_bytes());
+    registry.extend_from_slice(&u16::MAX.to_be_bytes());
+    registry.resize(34 + usize::from(u16::MAX) * 16, 1);
+    assert!(super::Identity::catalog_object_memory_bound(&registry, 2).is_err());
+    registry.truncate(34 + 16);
+    registry[32..34].copy_from_slice(&1_u16.to_be_bytes());
+    assert!(super::Identity::catalog_object_memory_bound(&registry, 2).is_ok());
+    assert!(super::Identity::catalog_object_memory_bound(&encoded_identity(), 2).is_ok());
+}

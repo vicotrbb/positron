@@ -15,7 +15,8 @@ use crate::{
     TenantAdministration,
 };
 
-const TENANT_KEYRING_MAGIC: [u8; 8] = *b"POSTKC01";
+pub(crate) use api_key_administration_keyring::tenant_keyring_count;
+pub(crate) const TENANT_KEYRING_MAGIC: [u8; 8] = *b"POSTKC01";
 
 pub(crate) fn legacy_receipt_object(
     entry: &ApiKeyLifecycleAuditEntry,

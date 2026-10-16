@@ -202,6 +202,33 @@ async fn snapshot_data_uses_only_size_hints_and_rejects_wrong_final_hash_before_
             .await?;
         assert_eq!(publication.snapshot_id(), manifest.snapshot_id());
         assert_eq!(publisher.verify(manifest.snapshot_id()).await?, manifest);
+        let verification = publisher
+            .begin_snapshot_verification(manifest.snapshot_id(), [42; 16], [43; 32])
+            .await?;
+        assert!(!verification.complete());
+        let checkpoint = publisher.snapshot_verification_checkpoint(&verification)?;
+        let mut resumed = publisher
+            .resume_snapshot_verification(&checkpoint, [42; 16], [43; 32])
+            .await?;
+        assert!(!resumed.complete());
+        while !publisher.snapshot_verification_step(&mut resumed).await? {}
+        assert!(resumed.complete());
+        let mut tampered = checkpoint.clone();
+        if let Some(byte) = tampered.last_mut() {
+            *byte ^= 1;
+        }
+        assert!(
+            publisher
+                .resume_snapshot_verification(&tampered, [42; 16], [43; 32])
+                .await
+                .is_err()
+        );
+        assert!(
+            publisher
+                .resume_snapshot_verification(&checkpoint, [41; 16], [43; 32])
+                .await
+                .is_err()
+        );
         observed.corrupt.store(true, Ordering::Relaxed);
         let before = repository.registry_head_at(HeadSlot::registry()).await?;
         assert_eq!(

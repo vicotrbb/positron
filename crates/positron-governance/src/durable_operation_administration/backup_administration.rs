@@ -322,7 +322,9 @@ impl DurableOperationAdministration {
             find_by_id(&snapshot, id)?.ok_or(DurableOperationFailure::UnknownOperation)?;
         if !matches!(
             operation.kind(),
-            DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+            DurableOperationKind::BackupSnapshot
+                | DurableOperationKind::BackupRetention
+                | DurableOperationKind::BackupVerification
         ) {
             return Err(DurableOperationFailure::InvalidState);
         }
@@ -353,7 +355,9 @@ impl DurableOperationAdministration {
             };
             if !matches!(
                 operation.kind(),
-                DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+                DurableOperationKind::BackupSnapshot
+                    | DurableOperationKind::BackupRetention
+                    | DurableOperationKind::BackupVerification
             ) || operation.status().is_terminal()
                 || after
                     .is_some_and(|after| operation.operation_id().to_bytes() <= after.to_bytes())
@@ -379,7 +383,9 @@ fn authorized(
     validate_system_actor(actor, operation.request.principal)?;
     if !matches!(
         operation.kind(),
-        DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRetention
+        DurableOperationKind::BackupSnapshot
+            | DurableOperationKind::BackupRetention
+            | DurableOperationKind::BackupVerification
     ) {
         return Err(DurableOperationFailure::InvalidState);
     }
@@ -393,6 +399,7 @@ pub(super) fn legal_state(operation: DurableOperation) -> bool {
         || operation.key_provider_migration_parameters.is_some()
         || operation.repository_parameters.is_some()
         || operation.repository_policy.is_some()
+        || operation.backup_verification_report().is_some()
     {
         return false;
     }

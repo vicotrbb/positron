@@ -377,6 +377,23 @@ returns that same failure; a new request can succeed after the deadline.
 An uncertain clock keeps expiry pending with retry guidance. CLI status, lookup,
 wait, and expiry output display the persisted terminal reason.
 
+`BackupService.Manage` also accepts `verify` with the same registered repository,
+snapshot, manifest checksum, Catalog generation, and idempotency fields as
+`expire`. `positron backup verify` submits this independent Durable Operation.
+It reads the current signed Registry and remote ciphertext, authenticates the
+captured native Catalog and audit frontier, unwraps each required remote tenant
+envelope, and rechecks independent recovery readiness. Restart resumes the
+authenticated remote cursor and rebuilds volatile metadata and key proofs.
+
+Verification responses use `kind: verification`. Success publishes one immutable
+signed Verification Report together with the terminal operation and governance
+audit record. `verification_report` contains its lowercase hexadecimal bytes and
+`verification_report_checksum` identifies those exact bytes. The irreversible
+boundary is `verification_report_published`; cancellation before publication
+releases verification reads and preserves the Backup Snapshot. A failed or
+cancelled verification has no success report. Verification does not publish a
+restored instance or execute queries against fresh storage.
+
 Backup management and listing report explicit admission refusal as HTTP 503
 with `code: capacity_unavailable`. The generated client preserves this as
 `BackupServiceClientFailure::CapacityUnavailable`; callers can retry the same

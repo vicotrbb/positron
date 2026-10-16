@@ -112,6 +112,21 @@ impl FuzzFixture {
         let Ok(policy) = compile_policy(data) else {
             return;
         };
+        if let Ok(activated) = policy.activated_object(self.tenant) {
+            let mut encoded = activated.into_bytes();
+            assert!(IngestPolicy::activated_object_memory_bound(&encoded).is_ok());
+            assert!(IngestPolicy::decode_activated_object(self.tenant, &encoded).is_ok());
+            for mutation in data.chunks(3).take(32) {
+                if let [high, low, value] = mutation {
+                    let offset = usize::from(u16::from_be_bytes([*high, *low])) % encoded.len();
+                    if let Some(byte) = encoded.get_mut(offset) {
+                        *byte ^= *value;
+                    }
+                }
+            }
+            let _ = IngestPolicy::activated_object_memory_bound(&encoded);
+            let _ = IngestPolicy::decode_activated_object(self.tenant, &encoded);
+        }
         let request = AuthenticatedOtlpLogsRequest::otlp_grpc_protobuf(
             self.context,
             self.authority.governor(),

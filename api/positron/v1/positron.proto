@@ -859,6 +859,8 @@ message BackupResponse {
   optional BackupRetentionReceipt retention_receipt = 6;
   uint64 operation_revision = 7;
   optional string terminal_error_code = 8;
+  optional string verification_report = 9;
+  optional string verification_report_checksum = 10;
 }
 
 message BackupListRequest {

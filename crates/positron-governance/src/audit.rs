@@ -1051,6 +1051,7 @@ struct BackupAuditEvidence {
     receipt: Option<crate::BackupOperationReceipt>,
     cleanup: Option<crate::BackupCleanupReceipt>,
     retention_claim: Option<crate::BackupRetentionClaimReceipt>,
+    verification_report: Option<[u8; 32]>,
 }
 
 /// Redacted jointly committed evidence for one durable-operation state transition.
@@ -1073,6 +1074,12 @@ pub struct DurableOperationAuditEntry {
 }
 
 impl DurableOperationAuditEntry {
+    pub const fn backup_verification_report(&self) -> Option<[u8; 32]> {
+        match &self.backup {
+            Some(evidence) => evidence.verification_report,
+            None => None,
+        }
+    }
     pub const fn backup_repository(&self) -> Option<BackupRepositoryAuditIdentity> {
         match &self.backup {
             Some(evidence) => Some(evidence.repository),

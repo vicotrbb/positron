@@ -199,6 +199,71 @@ impl Identity {
         self.authorize_policy_activation(context, tenant)
     }
 
+    /// Admission peak for detached identity reconstruction. Callers sum these
+    /// charges across the authenticated Catalog before invoking semantic readers.
+    pub fn catalog_object_memory_bound(
+        bytes: &[u8],
+        maximum_objects: usize,
+    ) -> Result<usize, IdentityFailure> {
+        fn nodes(entry: usize, count: usize) -> Option<usize> {
+            entry
+                .checked_mul(12)?
+                .checked_add(16 * std::mem::size_of::<usize>())?
+                .checked_mul(count)
+        }
+        if crate::tenant_administration::is_registry(bytes) {
+            let count = crate::tenant_administration::registry_count(bytes, maximum_objects)
+                .map_err(|_| IdentityFailure)?;
+            // Registry decoding and membership reconstruction each use one
+            // uniqueness set; their tenant vectors remain live during inspection.
+            return nodes(std::mem::size_of::<TenantId>(), count)
+                .and_then(|n| n.checked_mul(2))
+                .and_then(|n| {
+                    n.checked_add(count.checked_mul(4 * std::mem::size_of::<TenantId>())?)
+                })
+                .ok_or(IdentityFailure);
+        }
+        if bytes.starts_with(&crate::api_key_administration::TENANT_KEYRING_MAGIC) {
+            let count = crate::api_key_administration::tenant_keyring_count(bytes)
+                .map_err(|_| IdentityFailure)?;
+            // Source Catalog credentials and their immutable identity copies
+            // overlap; collect's growing vectors may double their element count.
+            return count
+                .checked_mul(
+                    2 * (std::mem::size_of::<positron_kernel::CatalogCredential>()
+                        + std::mem::size_of::<CredentialIdentity>()),
+                )
+                .and_then(|n| n.checked_add(std::mem::size_of::<AdditionalTenantIdentity>()))
+                .ok_or(IdentityFailure);
+        }
+        if crate::tenant_quota_record::is_tenant_record(bytes) {
+            let record =
+                std::mem::size_of::<(TenantId, crate::tenant_quota_record::TenantRecordMetadata)>();
+            let retained = 2 * std::mem::size_of::<crate::TenantInspection>()
+                + 2 * std::mem::size_of::<AdditionalTenantIdentity>()
+                + 4 * std::mem::size_of::<(TenantId, TenantLifecycleState)>()
+                + 4 * std::mem::size_of::<(TenantId, Vec<u8>)>();
+            // Inspections/record layouts and the retained envelope can overlap
+            // at most three owned copies of the encoded text/envelope payload.
+            return nodes(record, 1)
+                .and_then(|n| n.checked_add(retained))
+                .and_then(|n| n.checked_add(bytes.len().checked_mul(3)?))
+                .ok_or(IdentityFailure);
+        }
+        if bytes.starts_with(b"POSGOV") {
+            // Each encoded credential contains a PrincipalId. The native Kernel
+            // decoder already guards its hard count under the native grant;
+            // this wire-derived ceiling charges the subsequent Identity copies.
+            let credentials = bytes.len() / std::mem::size_of::<PrincipalId>();
+            return credentials
+                .checked_mul(2 * std::mem::size_of::<CredentialIdentity>())
+                .and_then(|n| n.checked_add(bytes.len().checked_mul(3)?))
+                .and_then(|n| n.checked_add(std::mem::size_of::<Self>()))
+                .ok_or(IdentityFailure);
+        }
+        Ok(0)
+    }
+
     /// Reconstructs the unique initialization identity from a pinned Catalog.
     pub fn open(snapshot: &CatalogSnapshot) -> Result<Self, IdentityFailure> {
         let (_, governance) = snapshot.governance_object().map_err(|_| IdentityFailure)?;

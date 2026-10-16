@@ -76,7 +76,11 @@ impl BackupManifest {
         bytes
             .try_reserve_exact(256 + 88 * self.objects.len())
             .map_err(|_| RepositoryFailure::LimitExceeded)?;
-        bytes.extend_from_slice(b"POSBKM01");
+        bytes.extend_from_slice(if self.capture_binding.is_some() {
+            b"POSBKM02"
+        } else {
+            b"POSBKM01"
+        });
         bytes.extend_from_slice(&self.snapshot);
         bytes.extend_from_slice(&self.repository.encode());
         bytes.extend_from_slice(&self.catalog_generation.to_be_bytes());
@@ -84,6 +88,10 @@ impl BackupManifest {
         bytes.extend_from_slice(&self.format_epoch.to_be_bytes());
         bytes.extend_from_slice(&self.audit_frontier.to_be_bytes());
         bytes.extend_from_slice(&self.capture_index);
+        if let Some((operation, request)) = self.capture_binding {
+            bytes.extend_from_slice(&operation);
+            bytes.extend_from_slice(&request);
+        }
         bytes.extend_from_slice(&self.created.to_be_bytes());
         bytes.extend_from_slice(&self.retain_until.to_be_bytes());
         bytes.extend_from_slice(&self.key_context);
@@ -99,7 +107,8 @@ impl BackupManifest {
     }
     pub(super) fn decode(bytes: &[u8]) -> Result<Self, RepositoryFailure> {
         let mut decoder = Decoder::new(bytes);
-        if decoder.take(8)? != b"POSBKM01" {
+        let version = decoder.take(8)?;
+        if version != b"POSBKM01" && version != b"POSBKM02" {
             return Err(RepositoryFailure::CorruptState);
         }
         let snapshot = decoder.array()?;
@@ -109,6 +118,11 @@ impl BackupManifest {
         let epoch = decoder.u32()?;
         let audit = decoder.u64()?;
         let index = decoder.array()?;
+        let binding = if version == b"POSBKM02" {
+            Some((decoder.array()?, decoder.array()?))
+        } else {
+            None
+        };
         let created = decoder.u64()?;
         let retain = decoder.u64()?;
         let keys = decoder.array()?;
@@ -130,10 +144,15 @@ impl BackupManifest {
             )?);
         }
         decoder.finish()?;
+        let mut catalog_identity =
+            BackupCatalogIdentity::new(generation, catalog, epoch, audit, index)?;
+        if let Some((operation, request)) = binding {
+            catalog_identity = catalog_identity.with_capture_binding(operation, request)?;
+        }
         Self::new(
             snapshot,
             repository,
-            BackupCatalogIdentity::new(generation, catalog, epoch, audit, index)?,
+            catalog_identity,
             BackupRetention::new(created, retain)?,
             keys,
             objects,

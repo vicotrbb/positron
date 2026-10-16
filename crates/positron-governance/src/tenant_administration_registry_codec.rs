@@ -37,6 +37,38 @@ pub(super) fn registry(
     Ok(found)
 }
 
+pub(crate) fn registry_count(
+    bytes: &[u8],
+    maximum_objects: usize,
+) -> Result<usize, TenantAdministrationFailure> {
+    generation_at(bytes, 24)?;
+    if bytes.starts_with(&TENANT_REGISTRY_V1_MAGIC) {
+        return if bytes.len() == 32 {
+            Ok(0)
+        } else {
+            Err(TenantAdministrationFailure::PersistenceUnavailable)
+        };
+    }
+    if !bytes.starts_with(&TENANT_REGISTRY_V2_MAGIC) {
+        return Err(TenantAdministrationFailure::PersistenceUnavailable);
+    }
+    let count = usize::from(u16::from_be_bytes(
+        bytes
+            .get(32..34)
+            .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?
+            .try_into()
+            .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?,
+    ));
+    let expected = count
+        .checked_mul(16)
+        .and_then(|n| n.checked_add(34))
+        .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
+    if count == 0 || count > maximum_objects || bytes.len() != expected {
+        return Err(TenantAdministrationFailure::PersistenceUnavailable);
+    }
+    Ok(count)
+}
+
 pub(super) fn decode_registry(bytes: &[u8]) -> Result<TenantRegistry, TenantAdministrationFailure> {
     let generation = generation_at(bytes, 24)?;
     if bytes.starts_with(&TENANT_REGISTRY_V1_MAGIC) {
@@ -48,23 +80,7 @@ pub(super) fn decode_registry(bytes: &[u8]) -> Result<TenantRegistry, TenantAdmi
             tenants: Vec::new(),
         });
     }
-    let count = usize::from(u16::from_be_bytes(
-        bytes
-            .get(32..34)
-            .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?
-            .try_into()
-            .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?,
-    ));
-    let expected = 34_usize
-        .checked_add(
-            count
-                .checked_mul(16)
-                .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?,
-        )
-        .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
-    if bytes.len() != expected || count == 0 {
-        return Err(TenantAdministrationFailure::PersistenceUnavailable);
-    }
+    let count = registry_count(bytes, usize::MAX)?;
     let mut tenants = Vec::new();
     tenants
         .try_reserve(count)

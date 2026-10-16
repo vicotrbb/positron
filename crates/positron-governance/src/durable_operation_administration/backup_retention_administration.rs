@@ -218,6 +218,7 @@ pub(super) fn legal_state(operation: DurableOperation) -> bool {
         || operation.key_provider_migration_parameters.is_some()
         || operation.repository_parameters.is_some()
         || operation.repository_policy.is_some()
+        || operation.backup_verification_report().is_some()
     {
         return false;
     }

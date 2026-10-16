@@ -6,7 +6,7 @@ mod capture;
 #[path = "execution_checkpoint.rs"]
 pub(super) mod checkpoint;
 #[path = "execution_owner.rs"]
-mod owner;
+pub(super) mod owner;
 #[path = "execution_retention.rs"]
 mod retention;
 #[cfg(test)]
@@ -26,6 +26,7 @@ use positron_kernel::{
 };
 pub(in crate::services) enum BackupWork {
     Snapshot(Box<SnapshotWork>),
+    Verification(Box<super::verification::VerificationWork>),
     Cancellation(Box<cancellation::CancellationWork>),
     Retention(Box<retention::RetentionWork>),
 }
@@ -89,6 +90,26 @@ pub(in crate::services) fn complete(
         .map_err(|_| ServiceFailure::CorruptState)?;
     let id = OperationId::from_bytes(binding.operation_id())
         .map_err(|_| ServiceFailure::CorruptState)?;
+    {
+        let operation = {
+            let _gate = services.catalog_operation()?;
+            let catalog = services
+                .open_maintenance_catalog()
+                .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+            DurableOperationAdministration::inspect(&catalog, id)
+                .map_err(|_| ServiceFailure::CorruptState)?
+                .ok_or(ServiceFailure::CorruptState)?
+        };
+        if operation.kind() == DurableOperationKind::BackupVerification {
+            return super::verification::complete(
+                services,
+                execution,
+                work,
+                operation,
+                cancellation,
+            );
+        }
+    }
     if execution.task().class() == positron_kernel::MaintenanceTaskClass::RepositoryCleanup {
         let (operation, actor) = {
             let _gate = services.catalog_operation()?;
@@ -740,7 +761,7 @@ fn fail(
     .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     Err(failure)
 }
-fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
+pub(super) fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
     match failure {
         RepositoryFailure::ControlMemoryRequired { memory_bytes } => {
             ServiceFailure::BackupControlMemoryRequired { memory_bytes }
@@ -787,6 +808,18 @@ pub(in crate::services) fn reject_repository(
     let operation = DurableOperationAdministration::inspect(&catalog, id)
         .map_err(|_| ServiceFailure::CatalogUnavailable)?
         .ok_or(ServiceFailure::CorruptState)?;
+    if operation.kind() == DurableOperationKind::BackupVerification
+        && !operation.status().is_terminal()
+    {
+        let now = services
+            .maintenance_status_now()
+            .map_err(|_| ServiceFailure::StorageUnavailable)?;
+        let actor = DurableOperationAdministration::resume_backup_actor(&catalog, id, now)
+            .map_err(|_| ServiceFailure::Unauthorized)?;
+        DurableOperationAdministration::fail_backup(&catalog, actor, id, now)
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+        return Ok(false);
+    }
     // Failed/cancellation cleanup and any possible irreversible mutation retain
     // their existing proof owner until the Repository becomes verifiable again.
     if operation.status().is_terminal()
@@ -818,6 +851,7 @@ impl BackupWork {
     ) -> Result<(), ServiceFailure> {
         let owner = match self {
             Self::Snapshot(work) => &work.owner,
+            Self::Verification(work) => &work.owner,
             Self::Cancellation(work) => &work.owner,
             Self::Retention(work) => &work.owner,
         };

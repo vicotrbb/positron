@@ -190,3 +190,63 @@ pub(crate) fn backup_segment_sources(
     }
     Ok((files, verification))
 }
+
+/// Checks the closed-world segment inventory against decoded native metadata.
+pub(crate) fn verify_backup_capture_inventory(
+    snapshot: &CatalogSnapshot,
+    files: &[BackupCaptureFile],
+) -> Result<(), CatalogFailure> {
+    let mut required = std::collections::BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for bytes in snapshot.plaintext_objects() {
+        let Some(segment) = decode_metadata(bytes).map_err(|_| corrupt())? else {
+            continue;
+        };
+        if !seen.insert(segment.id) {
+            return Err(corrupt());
+        }
+        match segment.state {
+            SegmentState::Active => return Err(corrupt()),
+            SegmentState::Retired => continue,
+            SegmentState::Sealed => {},
+        }
+        if segment.sealed_frontier.is_none() {
+            return Err(corrupt());
+        }
+        let mut address = [0; 32];
+        address
+            .get_mut(..16)
+            .ok_or_else(corrupt)?
+            .copy_from_slice(&segment.id.to_bytes());
+        required.insert(address);
+    }
+    let mut present = std::collections::BTreeSet::new();
+    for file in files {
+        match file.kind() {
+            BackupCaptureFileKind::Segment => {
+                if !required.contains(&file.address())
+                    || !present.insert(file.address())
+                    || file.size() > 64 * 1024 * 1024
+                {
+                    return Err(corrupt());
+                }
+            },
+            BackupCaptureFileKind::SegmentFrontier
+                if !required.contains(&file.address()) || file.size() > 64 * 1024 * 1024 =>
+            {
+                return Err(corrupt());
+            },
+            _ => {},
+        }
+    }
+    if required != present {
+        return Err(corrupt());
+    }
+    if !crate::integrity_quarantine_findings(snapshot)
+        .map_err(|_| corrupt())?
+        .is_empty()
+    {
+        return Err(corrupt());
+    }
+    Ok(())
+}
