@@ -37,3 +37,6 @@ mod envelope_verification;
 
 #[path = "tests/repository_operation.rs"]
 mod repository_operation;
+
+#[path = "tests/root_recovery.rs"]
+mod root_recovery;

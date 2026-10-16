@@ -36,7 +36,7 @@ mod root_reclamation;
 mod transitions;
 
 use catalog::*;
-use transitions::matches_catalog_reclamation_predecessor;
+pub(super) use transitions::matches_catalog_reclamation_predecessor;
 pub(crate) use transitions::{
     CompactionTaskReplacement, QueuedMaintenanceSubmission, RetentionPublicationTaskCompletion,
     RetentionReclamationTaskReplacement, SnapshotLeaseExpiryTaskReplacement,

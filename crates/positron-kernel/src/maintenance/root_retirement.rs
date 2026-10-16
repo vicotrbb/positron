@@ -83,7 +83,7 @@ impl MaintenanceCoordinator {
                 && !queued_digest_scrub_is_reference_free(current)
                 && (current.task.class == MaintenanceTaskClass::Migration
                     || durable_task_retains_unproved_root_reference(bytes)?))
-                || encode_record(current)?.as_bytes() != bytes
+                || !matches_root_retirement_record(current, bytes)?
             {
                 return Err(MaintenanceFailure::PreconditionFailed);
             }
@@ -123,7 +123,7 @@ impl RootRetirementReferenceGuard<'_> {
             .ok_or(MaintenanceFailure::PreconditionFailed)?;
         Ok(
             (self.owned_task == Some(identity) || queued_digest_scrub_is_reference_free(current))
-                && encode_record(current)?.as_bytes() == bytes,
+                && matches_root_retirement_record(current, bytes)?,
         )
     }
 }
@@ -132,4 +132,15 @@ fn queued_digest_scrub_is_reference_free(state: &TaskState) -> bool {
     state.phase == MaintenanceTaskPhase::Queued
         && state.active_dispatch.is_none()
         && canonical_digest_only_integrity_scrub(state)
+}
+
+fn matches_root_retirement_record(
+    current: &TaskState,
+    bytes: &[u8],
+) -> Result<bool, MaintenanceFailure> {
+    if queued_digest_scrub_is_reference_free(current) {
+        persistence::matches_catalog_reclamation_predecessor(&decode_record(bytes)?, bytes, current)
+    } else {
+        Ok(encode_record(current)?.as_bytes() == bytes)
+    }
 }

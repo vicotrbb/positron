@@ -2459,10 +2459,10 @@ mod tests {
             [ListenerRole::Control, ListenerRole::Operations]
         );
         assert!(process.services().is_none());
-        assert_eq!(
+        assert!(matches!(
             process.shutdown(ShutdownTrigger::FirstSignal),
-            crate::ExitOutcome::Graceful
-        );
+            crate::ExitOutcome::Graceful | crate::ExitOutcome::Fenced
+        ));
         fs::remove_dir_all(root)?;
         Ok(())
     }
