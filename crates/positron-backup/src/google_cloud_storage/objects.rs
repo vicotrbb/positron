@@ -127,16 +127,8 @@ impl GoogleCloudStorageRepository {
         self.read_identity().await?;
         let key = self.key(&id.name());
         let metadata = self.metadata(&key, None).await?;
-        if metadata.size <= TenantKeyPurgeFence::MAX_BYTES as u64 {
-            let (bytes, _) = self
-                .read_key(
-                    &key,
-                    Some(metadata.generation),
-                    TenantKeyPurgeFence::MAX_BYTES,
-                )
-                .await?;
-            self.check_purge_fence(id, &bytes)?;
-        }
+        // This unauthenticated observation must remain metadata-only. Head
+        // and full-frame reads own signed-fence authentication.
         Ok(metadata.size)
     }
     pub async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
@@ -157,16 +149,6 @@ impl GoogleCloudStorageRepository {
         self.read_identity().await?;
         let key = self.key(&range.object.name());
         let metadata = self.metadata(&key, None).await?;
-        if metadata.size <= TenantKeyPurgeFence::MAX_BYTES as u64 {
-            let (bytes, _) = self
-                .read_key(
-                    &key,
-                    Some(metadata.generation),
-                    TenantKeyPurgeFence::MAX_BYTES,
-                )
-                .await?;
-            self.check_purge_fence(range.object, &bytes)?;
-        }
         if range
             .expected_size
             .is_some_and(|expected| expected != metadata.size)
@@ -222,6 +204,11 @@ impl GoogleCloudStorageRepository {
             metadata.size,
             reply.body.len(),
         )?;
+        // Only a complete frame can authenticate an absence. Partial ranges
+        // retain their existing checksummed-prefix contract.
+        if range.offset == 0 && range.length == metadata.size {
+            self.check_purge_fence(range.object, &reply.body)?;
+        }
         Ok(ChecksummedBytes {
             checksum: Sha256::digest(&reply.body).into(),
             bytes: reply.body.to_vec(),

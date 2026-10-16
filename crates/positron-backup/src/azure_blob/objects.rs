@@ -36,15 +36,8 @@ impl AzureBlobRepository {
         self.read_identity().await?;
         let key = self.key(&id.name());
         let metadata = self.metadata(&key, "").await?;
-        if metadata.size <= TenantKeyPurgeFence::MAX_BYTES as u64 {
-            let (bytes, read_metadata) = self
-                .read_key(&key, "", TenantKeyPurgeFence::MAX_BYTES)
-                .await?;
-            if read_metadata.etag != metadata.etag {
-                return Err(RepositoryFailure::PreconditionFailed);
-            }
-            self.check_purge_fence(id, &bytes)?;
-        }
+        // This unauthenticated observation must remain metadata-only. Head
+        // and full-frame reads own signed-fence authentication.
         Ok(metadata.size)
     }
     pub async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
@@ -65,15 +58,6 @@ impl AzureBlobRepository {
         self.read_identity().await?;
         let key = self.key(&range.object.name());
         let meta = self.metadata(&key, "").await?;
-        if meta.size <= TenantKeyPurgeFence::MAX_BYTES as u64 {
-            let (bytes, read_metadata) = self
-                .read_key(&key, "", TenantKeyPurgeFence::MAX_BYTES)
-                .await?;
-            if read_metadata.etag != meta.etag {
-                return Err(RepositoryFailure::PreconditionFailed);
-            }
-            self.check_purge_fence(range.object, &bytes)?;
-        }
         if range
             .expected_size
             .is_some_and(|expected| expected != meta.size)
@@ -128,6 +112,11 @@ impl AzureBlobRepository {
         }
         if protocol::md5(&reply.body) != protocol::header(&reply.headers, "content-md5")? {
             return Err(RepositoryFailure::ChecksumMismatch);
+        }
+        // Only a complete frame can authenticate an absence. Partial ranges
+        // retain their existing checksummed-prefix contract.
+        if range.offset == 0 && range.length == meta.size {
+            self.check_purge_fence(range.object, &reply.body)?;
         }
         Ok(ChecksummedBytes {
             checksum: Sha256::digest(&reply.body).into(),

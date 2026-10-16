@@ -73,6 +73,9 @@ pub trait Repository: Send + Sync {
     /// the actual ranged body before trusting signed control data.
     async fn object_size_hint(&self, object: ObjectId) -> Result<u64, RepositoryFailure>;
     async fn head(&self, object: ObjectId) -> Result<ObjectMetadata, RepositoryFailure>;
+    /// Returns checksummed selected bytes. Partial ranges and size hints do
+    /// not authenticate object absence; use authenticated head/full-frame reads
+    /// when deciding whether a tenant key is absent.
     async fn read_range(&self, range: ObjectRange) -> Result<ChecksummedBytes, RepositoryFailure>;
     async fn put_if_absent(&self, object: ImmutableObject)
     -> Result<PutOutcome, RepositoryFailure>;

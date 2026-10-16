@@ -391,12 +391,8 @@ async fn native_azure_tenant_key_purge_retains_permanent_fence()
                 repository.head(object.id()).await,
                 Err(RepositoryFailure::NotFound)
             );
-            assert_eq!(
-                repository
-                    .read_range(ObjectRange::new(object.id(), 0, 1)?)
-                    .await,
-                Err(RepositoryFailure::NotFound)
-            );
+            assert_eq!(repository.read_range(ObjectRange::new(object.id(), 0, 1)?).await?.bytes(), b"P");
+            assert_eq!(repository.read_range(ObjectRange::new(object.id(), 0, fence.bytes().len() as u64)?).await, Err(RepositoryFailure::NotFound));
             assert!(repository.put_if_absent(object.clone()).await.is_err());
             assert!(repository.delete(object.id()).await.is_err());
             assert_eq!(
@@ -432,8 +428,8 @@ async fn native_azure_tenant_key_purge_retains_permanent_fence()
                 DeleteOutcome::Deleted
             );
             assert_eq!(
-                repository.object_size_hint(absent.id()).await,
-                Err(RepositoryFailure::NotFound)
+                repository.object_size_hint(absent.id()).await?,
+                absent_fence.bytes().len() as u64
             );
             assert!(repository.put_if_absent(absent.clone()).await.is_err());
             assert!(repository.delete(absent.id()).await.is_err());

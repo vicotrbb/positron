@@ -108,9 +108,6 @@ impl AwsS3Repository {
             .and_then(|size| u64::try_from(size).ok())
             .filter(|size| *size <= MAX_OBJECT_BYTES)
             .ok_or(RepositoryFailure::CorruptState)?;
-        if size <= crate::TenantKeyPurgeFence::MAX_BYTES as u64 {
-            self.read_object(range.object).await?;
-        }
         if range.expected_size.is_some_and(|expected| expected != size) {
             return Err(RepositoryFailure::PreconditionFailed);
         }
@@ -161,6 +158,17 @@ impl AwsS3Repository {
             .map_err(|_| RepositoryFailure::StorageUnavailable)?;
         if selected.len() as u64 != range.length {
             return Err(RepositoryFailure::CorruptState);
+        }
+        // A range authenticates a purge fence only when it contains the whole
+        // signed frame; an ordinary partial prefix is not an absence proof.
+        if range.offset == 0
+            && range.length == size
+            && validate_object(range.object, &selected).is_err()
+            && crate::TenantKeyPurgeFence::is_frame(&selected)
+        {
+            crate::TenantKeyPurgeFence::verify(&selected, &self.identity, range.object)
+                .map_err(|_| RepositoryFailure::CorruptState)?;
+            return Err(RepositoryFailure::NotFound);
         }
         Ok(ChecksummedBytes {
             checksum: Sha256::digest(&selected).into(),

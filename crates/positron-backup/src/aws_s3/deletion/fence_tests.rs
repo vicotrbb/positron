@@ -89,7 +89,15 @@ async fn occupied_signed_fence_rejects_delayed_conditional_put_and_generic_delet
                     else if first.starts_with("delete ") { state.retain(|(id,_)| !first.contains(&format!("versionid={id}"))); (204,vec![],String::new()) }
                     else {
                         let selected=if first.contains("versionid=v1") {state.iter().find(|(id,_)|id=="v1")} else {state.last()};
-                        match selected { Some((id,body)) => (200, if first.starts_with("head "){vec![]}else{body.clone()},format!("ETag: \"fence\"\r\nx-amz-version-id: {id}\r\n")), None=>(404,b"<Error><Code>NoSuchKey</Code></Error>".to_vec(),String::new()) }
+                        match selected { Some((id,body)) => {
+                            let mut extra = format!("ETag: \"fence\"\r\nx-amz-version-id: {id}\r\n");
+                            if let Some(bounds) = header.lines().find_map(|line| line.strip_prefix("range: bytes=")) {
+                                let (start,end)=bounds.split_once('-').expect("range");
+                                let start=start.parse::<usize>().expect("start"); let end=end.parse::<usize>().expect("end");
+                                extra.push_str(&format!("Content-Range: bytes {start}-{end}/{}\r\n",body.len()));
+                                (206,body[start..=end].to_vec(),extra)
+                            } else { (200,body.clone(),extra) }
+                        }, None=>(404,b"<Error><Code>NoSuchKey</Code></Error>".to_vec(),String::new()) }
                     };
                     let reply=format!("HTTP/1.1 {status} Result\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",body.len());
                     let _=stream.write_all(reply.as_bytes()); let _=stream.write_all(&body);
@@ -111,6 +119,8 @@ async fn occupied_signed_fence_rejects_delayed_conditional_put_and_generic_delet
         assert_eq!(result?, DeleteOutcome::Deleted);
         assert_eq!(delayed_result, Err(RepositoryFailure::NotFound));
         assert_eq!(cleanup.head(object.id()).await, Err(RepositoryFailure::NotFound));
+        assert_eq!(cleanup.read_range(ObjectRange::new(object.id(), 0, 1)?).await?.bytes(), b"P");
+        assert_eq!(cleanup.read_range(ObjectRange::new(object.id(), 0, fence.bytes().len() as u64)?).await, Err(RepositoryFailure::NotFound));
         assert_eq!(cleanup.delete(object.id()).await, Err(RepositoryFailure::PreconditionFailed));
         assert_eq!(cleanup.delete_tenant_key(object.id(), &fence).await?, DeleteOutcome::AlreadyAbsent);
         for changed in [

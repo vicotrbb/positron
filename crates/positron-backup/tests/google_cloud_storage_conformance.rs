@@ -619,7 +619,8 @@ async fn native_google_tenant_key_purge_retains_permanent_fence() -> TestResult 
         assert!(late.await?.is_err());
         assert_eq!(server.delayed.status.load(std::sync::atomic::Ordering::Acquire),412);
         assert_eq!(repository.head(object.id()).await,Err(RepositoryFailure::NotFound));
-        assert_eq!(repository.read_range(ObjectRange::new(object.id(),0,1)?).await,Err(RepositoryFailure::NotFound));
+        assert_eq!(repository.read_range(ObjectRange::new(object.id(),0,1)?).await?.bytes(),b"P");
+        assert_eq!(repository.read_range(ObjectRange::new(object.id(),0,fence.bytes().len() as u64)?).await,Err(RepositoryFailure::NotFound));
         assert!(repository.put_if_absent(object.clone()).await.is_err());
         assert!(repository.delete(object.id()).await.is_err());
         assert_eq!(Repository::delete_tenant_key(&repository,object.id(),&fence).await?,DeleteOutcome::AlreadyAbsent);
@@ -644,7 +645,7 @@ async fn native_google_tenant_key_purge_retains_permanent_fence() -> TestResult 
         let absent_fence=TenantKeyPurgeFence::new(absent.id(),&tombstone,&identity,&signer)?;
         assert!(Repository::delete_tenant_key(&repository,absent.id(),&fence).await.is_err());
         assert_eq!(Repository::delete_tenant_key(&repository,absent.id(),&absent_fence).await?,DeleteOutcome::Deleted);
-        assert_eq!(repository.object_size_hint(absent.id()).await,Err(RepositoryFailure::NotFound));
+        assert_eq!(repository.object_size_hint(absent.id()).await?,absent_fence.bytes().len() as u64);
         assert!(repository.put_if_absent(absent.clone()).await.is_err());
         assert!(repository.delete(absent.id()).await.is_err());
         assert_eq!(Repository::delete_tenant_key(&repository,absent.id(),&absent_fence).await?,DeleteOutcome::AlreadyAbsent);
