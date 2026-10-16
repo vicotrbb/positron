@@ -72,6 +72,16 @@ fn restore_requires_exact_public_pins_and_closed_bounded_options()
         arguments.extend([key.into(), value]);
     }
     assert!(parse(arguments.clone().into_iter()).is_ok());
+    let mut json = arguments.clone();
+    json.extend(["--output".into(), "json".into()]);
+    assert!(
+        parse(json.into_iter()).is_ok(),
+        "durable restore must accept stable JSON output"
+    );
+    let mut invalid_output = arguments.clone();
+    invalid_output.extend(["--output".into(), "xml".into()]);
+    assert!(parse(invalid_output.into_iter()).is_err());
+
     for index in (1..arguments.len()).step_by(2) {
         let mut missing = arguments.clone();
         missing.drain(index..index + 2);

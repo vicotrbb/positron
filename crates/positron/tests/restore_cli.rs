@@ -57,6 +57,25 @@ fn command(action: &str, arguments: &[String], private: &[&str]) -> Result<Outpu
     Ok(output)
 }
 fn field(output: &Output, key: &str) -> Result<String> {
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+        assert_eq!(value["kind"], "backup_restore");
+        assert!(value["operation_revision"].is_u64());
+        assert!(
+            value["operation"]["lookup_expires_at_unix_seconds"].is_null()
+                || value["operation"]["lookup_expires_at_unix_seconds"].is_u64()
+        );
+        let field = match key {
+            "operation_id" => &value["operation"]["id"],
+            "status" => &value["operation"]["status"],
+            "operation_revision" => &value["operation_revision"],
+            _ => &value[key],
+        };
+        return field
+            .as_str()
+            .map(String::from)
+            .or_else(|| field.as_u64().map(|value| value.to_string()))
+            .ok_or_else(|| format!("missing public JSON {key}").into());
+    }
     let prefix = format!("{key}=");
     String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
@@ -188,6 +207,7 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
         )?;
         let mut arguments = Vec::new();
         for (key, value) in [
+            ("--output", "json".into()),
             ("--config", configuration.to_string_lossy().into_owned()),
             (
                 "--locator",
@@ -245,7 +265,9 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
                 "--expected-operation-revision".into(),
                 "0".into(),
             ]);
-            assert!(!command("cancel", &cancel, &secrets)?.status.success());
+            let refused = command("cancel", &cancel, &secrets)?;
+            assert!(!refused.status.success());
+            assert_eq!(field(&refused, "status")?, "pending");
             assert_eq!(
                 command("status", &arguments, &secrets)?.stdout,
                 started.stdout
@@ -254,7 +276,9 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
             let cancelled = command("cancel", &cancel, &secrets)?;
             assert!(cancelled.status.success());
             assert_eq!(field(&cancelled, "status")?, "cancelled");
-            assert!(!command("wait", &arguments, &secrets)?.status.success());
+            let cancelled_wait = command("wait", &arguments, &secrets)?;
+            assert!(!cancelled_wait.status.success());
+            assert_eq!(field(&cancelled_wait, "status")?, "cancelled");
             assert!(!target.join("data/.positron-bootstrap.initialized").exists());
         } else {
             let completed = command("wait", &arguments, &secrets)?;

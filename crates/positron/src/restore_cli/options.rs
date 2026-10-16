@@ -24,6 +24,7 @@ pub(super) fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Optio
         if !matches!(
             name.as_str(),
             "--config"
+                | "--output"
                 | "--locator"
                 | "--repository-id"
                 | "--snapshot-id"
@@ -72,6 +73,11 @@ pub(super) fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Optio
             return Err("duplicate restore option");
         }
     }
+    let json = match values.remove("--output").as_deref() {
+        None | Some("text") => false,
+        Some("json") => true,
+        _ => return Err("restore output must be text or json"),
+    };
     let config = PathBuf::from(take(&mut values, "--config")?);
     let configuration = positron_config::resolve(
         positron_config::ConfigurationInputs::try_from_sources(
@@ -163,6 +169,7 @@ pub(super) fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Optio
         return Err("option does not apply to this restore command");
     }
     Ok(Options {
+        json,
         action,
         paths,
         configuration,

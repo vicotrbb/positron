@@ -1,4 +1,6 @@
 use super::*;
+#[path = "backup_restore/corruption.rs"]
+mod corruption;
 #[path = "backup_restore/driver.rs"]
 mod driver;
 #[path = "backup_restore/fixture.rs"]

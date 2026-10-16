@@ -62,7 +62,13 @@ separate `--cancellation-key UUID`. A stale revision refuses without changing th
 operation. Cancellation is allowed before the publication phase. Public output
 includes status, phase, progress, revision, cancellation disposition, irreversible
 boundary, retry guidance and the signed verification report address when present.
-It does not print recovery secrets or provider credentials.
+Add `--output json` to any restore action for a stable JSON object. It contains
+`kind`, `operation_revision`, the public `operation` view, `terminal_error_code`,
+and `verification_report`, which is the signed report object's checksum or null.
+The operation view uses the same snake-case status, phase, retry, cancellation,
+boundary and lookup-expiry fields as other administrative operations. Accepted
+operation failures and wait deadlines print the current operation before returning
+a nonzero exit code. Recovery secrets and provider credentials are omitted.
 
 Every source ciphertext object is verified, including objects later excluded by
 current signed Purge Tombstones. Exclusions block resurrection and reserve tenant

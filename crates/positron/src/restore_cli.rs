@@ -14,7 +14,7 @@ mod options;
 use options::parse;
 #[cfg(test)]
 mod tests;
-const USAGE: &str = "usage: positron backup restore start|status|wait|cancel --config PATH --repository-id UUID --snapshot-id HEX --expected-manifest-checksum HEX --idempotency-key UUID [--locator PATH | native repository target options] --instance HEX --root-key-id HEX --root-created-at N --root-fingerprint HEX --integrity-public-key HEX --integrity-fingerprint HEX [--bundle PATH --identity-file PATH | --bundle PATH --passphrase | configured provider and --source-root-key-id HEX --source-root-created-at N --source-root-fingerprint HEX --provider-epoch N] [--wait-seconds N --operation-id HEX --expected-operation-revision N --cancellation-key UUID]";
+const USAGE: &str = "usage: positron backup restore start|status|wait|cancel --config PATH --repository-id UUID --snapshot-id HEX --expected-manifest-checksum HEX --idempotency-key UUID [--locator PATH | native repository target options] --instance HEX --root-key-id HEX --root-created-at N --root-fingerprint HEX --integrity-public-key HEX --integrity-fingerprint HEX [--bundle PATH --identity-file PATH | --bundle PATH --passphrase | configured provider and --source-root-key-id HEX --source-root-created-at N --source-root-fingerprint HEX --provider-epoch N] [--output json] [--wait-seconds N --operation-id HEX --expected-operation-revision N --cancellation-key UUID]";
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Action {
     Start,
@@ -27,6 +27,7 @@ enum Unlock {
     Provider,
 }
 struct Options {
+    json: bool,
     action: Action,
     paths: BootstrapPaths,
     configuration: positron_config::EffectiveConfiguration,
@@ -53,7 +54,7 @@ fn execute(
         let operation = inspect(&options, passphrase.as_ref())?;
         check_operation(&options, operation)?;
         if options.action == Action::Status {
-            return render(output, operation);
+            return render(output, operation, options.json);
         }
         Some(operation.operation_id())
     } else {
@@ -65,8 +66,15 @@ fn execute(
         return Err("restore operation changed during ownership transfer");
     }
     if let Some((key, revision)) = options.cancellation {
-        let operation = session.cancel(key, revision).map_err(|_| "restore cancellation refused; inspect the current operation revision and publication boundary")?;
-        return render(output, operation);
+        let operation = session.cancel(key, revision).map_err(|_| "restore cancellation refused; inspect the current operation revision and publication boundary");
+        let operation = match operation {
+            Ok(operation) => operation,
+            Err(error) => {
+                render(output, session.status(), options.json)?;
+                return Err(error);
+            },
+        };
+        return render(output, operation, options.json);
     }
     if let Some(duration) = options.wait {
         let deadline = Instant::now()
@@ -74,14 +82,22 @@ fn execute(
             .ok_or("invalid restore wait duration")?;
         loop {
             if Instant::now() >= deadline {
-                render(output, session.status())?;
+                render(output, session.status(), options.json)?;
                 return Err(
                     "restore remains durable; inspect and resume the same target and idempotency key",
                 );
             }
-            let operation = session.step().map_err(|_| "restore step refused; target remains owned by the same durable operation, inspect before retrying")?;
+            let operation = match session.step() {
+                Ok(operation) => operation,
+                Err(_) => {
+                    render(output, session.status(), options.json)?;
+                    return Err(
+                        "restore step refused; target remains owned by the same durable operation, inspect before retrying",
+                    );
+                },
+            };
             if operation.status().is_terminal() {
-                render(output, operation)?;
+                render(output, operation, options.json)?;
                 return match operation.status() {
                     DurableOperationStatus::Succeeded => Ok(()),
                     DurableOperationStatus::Cancelled => {
@@ -92,7 +108,7 @@ fn execute(
             }
         }
     }
-    render(output, session.status())
+    render(output, session.status(), options.json)
 }
 fn unlock<'a>(
     options: &'a Options,
@@ -166,7 +182,35 @@ fn check_operation(options: &Options, operation: DurableOperation) -> Result<(),
     }
     Ok(())
 }
-fn render(output: &mut impl Write, operation: DurableOperation) -> Result<(), &'static str> {
+fn render(
+    output: &mut impl Write,
+    operation: DurableOperation,
+    json: bool,
+) -> Result<(), &'static str> {
+    if json {
+        use positron_governance::DurableOperationTerminalError;
+        let terminal_error_code = match operation.terminal_error() {
+            None => None,
+            Some(DurableOperationTerminalError::HandlerRejected) => Some("handler_rejected"),
+            Some(DurableOperationTerminalError::LegacyUnknown) => Some("legacy_unknown"),
+            Some(_) => return Err("invalid restore terminal outcome"),
+        };
+        let report = operation.backup_restore_report().map(|report| {
+            report
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        });
+        let value = serde_json::json!({
+            "kind": "backup_restore",
+            "operation_revision": operation.revision(),
+            "operation": positron_runtime::durable_operation_response(operation),
+            "terminal_error_code": terminal_error_code,
+            "verification_report": report,
+        });
+        serde_json::to_writer(&mut *output, &value).map_err(|_| "restore output unavailable")?;
+        return writeln!(output).map_err(|_| "restore output unavailable");
+    }
     let status = match operation.status() {
         DurableOperationStatus::Pending => "pending",
         DurableOperationStatus::Running => "running",

@@ -29,6 +29,7 @@ mod maintenance_window;
 mod otlp;
 pub(crate) mod policy;
 mod provider_migration;
+pub use provider_migration::operation_response as durable_operation_response;
 mod query;
 pub(crate) mod repository_administration;
 mod schema_bootstrap;

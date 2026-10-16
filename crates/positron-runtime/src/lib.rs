@@ -79,7 +79,9 @@ pub use process::{
     RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision, RunningProcess, ServeConfiguration,
     ShutdownTrigger, native_root_configuration,
 };
-pub use services::{ConfiguredExportDestinationResolver, ServiceFailure, ServiceHandle};
+pub use services::{
+    ConfiguredExportDestinationResolver, ServiceFailure, ServiceHandle, durable_operation_response,
+};
 pub use task::{
     RegisteredTask, RunningTask, TaskCancellation, TaskFailure, TaskJoinOutcome, TaskRegistrar,
     TaskRole,

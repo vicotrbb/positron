@@ -160,13 +160,26 @@ impl BackupRestoreSession {
                                 .map_err(|_| failure())?,
                             ),
                         )
-                        .map_err(|_| failure())?;
+                        .map_err(|error| {
+                            repository_failure(&catalog, actor, &mut self.operation, error)
+                        })?;
                     if bytes.bytes().len() as u64 != length {
+                        fail_operation(&catalog, actor, &mut self.operation)?;
                         return Err(failure());
                     }
-                    catalog
-                        .restore_segment_range(file, self.offset, bytes.bytes())
-                        .map_err(|_| failure())?;
+                    if let Err(error) =
+                        catalog.restore_segment_range(file, self.offset, bytes.bytes())
+                    {
+                        if matches!(
+                            error.code(),
+                            positron_kernel::CatalogFailureCode::IntegrityCorruption
+                                | positron_kernel::CatalogFailureCode::AuthenticationFailed
+                                | positron_kernel::CatalogFailureCode::UnsupportedFormat
+                        ) {
+                            fail_operation(&catalog, actor, &mut self.operation)?;
+                        }
+                        return Err(failure());
+                    }
                     self.offset += length;
                     if self.offset == file.size() {
                         self.next_file += 1;
@@ -188,7 +201,9 @@ impl BackupRestoreSession {
                 if !self.remote.complete() {
                     self.runtime
                         .block_on(publisher.snapshot_verification_step(&mut self.remote))
-                        .map_err(|_| failure())?;
+                        .map_err(|error| {
+                            repository_failure(&catalog, actor, &mut self.operation, error)
+                        })?;
                     return Ok(self.operation);
                 }
                 if let Some(scope) = self.native_scopes.get(self.native_index).copied() {
@@ -226,13 +241,7 @@ impl BackupRestoreSession {
                                 positron_kernel::IntegrityFailureCode::AmbiguousIntegrity
                                     | positron_kernel::IntegrityFailureCode::DurabilityFrontierAmbiguity
                             ) {
-                                self.operation = DurableOperationAdministration::fail_backup_restore(
-                                    &catalog,
-                                    actor,
-                                    self.operation.operation_id(),
-                                    now()?,
-                                )
-                                .map_err(|_| failure())?;
+                                fail_operation(&catalog, actor, &mut self.operation)?;
                             }
                             return Err(failure());
                         },
@@ -246,13 +255,7 @@ impl BackupRestoreSession {
                             if self.native_cursor.is_some() => {},
                         IntegrityVerificationOutcome::Quarantined
                         | IntegrityVerificationOutcome::Fenced => {
-                            self.operation = DurableOperationAdministration::fail_backup_restore(
-                                &catalog,
-                                actor,
-                                self.operation.operation_id(),
-                                now()?,
-                            )
-                            .map_err(|_| failure())?;
+                            fail_operation(&catalog, actor, &mut self.operation)?;
                             return Err(failure());
                         },
                         _ => return Err(failure()),
@@ -278,7 +281,9 @@ impl BackupRestoreSession {
                         &basis,
                         self.recovered_keys,
                     ))
-                    .map_err(|_| failure())?;
+                    .map_err(|error| {
+                        repository_failure(&catalog, actor, &mut self.operation, error)
+                    })?;
                 self.operation = DurableOperationAdministration::succeed_backup_restore(
                     &catalog,
                     actor,
@@ -387,4 +392,37 @@ impl BackupRestoreSession {
         }
         Ok(())
     }
+}
+
+fn fail_operation(
+    catalog: &Catalog<'_>,
+    actor: positron_governance::AuthorizedContext,
+    operation: &mut DurableOperation,
+) -> Result<(), BootstrapFailure> {
+    *operation = DurableOperationAdministration::fail_backup_restore(
+        catalog,
+        actor,
+        operation.operation_id(),
+        now()?,
+    )
+    .map_err(|_| failure())?;
+    Ok(())
+}
+fn repository_failure(
+    catalog: &Catalog<'_>,
+    actor: positron_governance::AuthorizedContext,
+    operation: &mut DurableOperation,
+    error: positron_backup::RepositoryFailure,
+) -> BootstrapFailure {
+    if matches!(
+        error,
+        positron_backup::RepositoryFailure::ChecksumMismatch
+            | positron_backup::RepositoryFailure::CorruptState
+            | positron_backup::RepositoryFailure::SourceIntegrityCorruption
+            | positron_backup::RepositoryFailure::IdentityMismatch
+    ) && let Err(error) = fail_operation(catalog, actor, operation)
+    {
+        return error;
+    }
+    failure()
 }
