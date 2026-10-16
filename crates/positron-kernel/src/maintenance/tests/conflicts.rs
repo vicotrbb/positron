@@ -255,3 +255,95 @@ fn integrity_scrub_task_for_tenant(identity: u8, tenant: TenantId, shard: u32) -
     )
     .expect("integrity scrub")
 }
+
+#[test]
+fn system_migration_waits_for_running_integrity_scrub_across_signal_scopes() {
+    system_migration_and_scrub_dispatch(false);
+}
+
+#[test]
+fn integrity_scrub_waits_for_running_system_migration_across_signal_scopes() {
+    system_migration_and_scrub_dispatch(true);
+}
+
+fn system_migration_and_scrub_dispatch(migration_first: bool) {
+    for signal in [
+        positron_domain::routing::SignalKind::Logs,
+        positron_domain::routing::SignalKind::Traces,
+    ] {
+        let coordinator = MaintenanceCoordinator::new();
+        let migration = task(
+            61,
+            MaintenanceTaskClass::Migration,
+            MaintenanceTrigger::Event,
+            MaintenancePriority::Required,
+            Vec::new(),
+        );
+        let scrub = MaintenanceTask::integrity_scrub(
+            MaintenanceTaskId::new([62; 16]).expect("scrub"),
+            MaintenanceScope::segment(
+                TenantId::from_bytes([63; 16]).expect("tenant"),
+                signal,
+                positron_domain::routing::VirtualShardId::new(1).expect("shard"),
+            ),
+            MaintenanceTrigger::Scheduled,
+            MaintenancePreconditions::new(1, 1).expect("basis"),
+            [64; 32],
+            1,
+        )
+        .expect("source-bound scrub");
+        let (first, second) = if migration_first {
+            (migration, scrub)
+        } else {
+            (scrub, migration)
+        };
+        coordinator
+            .submit_at(first.clone(), 1)
+            .expect("first accepted");
+        assert_eq!(
+            coordinator.start_next(2, false).expect("first dispatch"),
+            Some(first.clone())
+        );
+        coordinator
+            .submit_at(second.clone(), 3)
+            .expect("second accepted");
+        assert_eq!(
+            coordinator.start_next(4, false).expect("conflict check"),
+            None,
+            "system root work and an active scrub must not overlap"
+        );
+        let waiting = coordinator
+            .status(second.identity())
+            .expect("queued owner retained");
+        assert_eq!(waiting.phase(), MaintenanceTaskPhase::Queued);
+        assert_eq!(waiting.conflict_owner(), Some(first.identity()));
+        let unrelated = task(
+            65,
+            MaintenanceTaskClass::SchemaStatistics,
+            MaintenanceTrigger::Event,
+            MaintenancePriority::Ordinary,
+            Vec::new(),
+        );
+        coordinator
+            .submit_at(unrelated.clone(), 4)
+            .expect("unrelated work accepted");
+        assert_eq!(
+            coordinator
+                .start_next(5, false)
+                .expect("unrelated dispatch"),
+            Some(unrelated.clone())
+        );
+        coordinator
+            .complete(unrelated.identity(), true)
+            .expect("unrelated completion");
+        coordinator
+            .complete(first.identity(), true)
+            .expect("reference owner completes");
+        assert_eq!(
+            coordinator
+                .start_next(6, false)
+                .expect("same queued work resumes"),
+            Some(second)
+        );
+    }
+}
