@@ -3,6 +3,7 @@ mod codec;
 mod io;
 mod preparation;
 mod resources;
+mod restore;
 mod verification;
 use super::*;
 pub use preparation::{BackupCaptureCustody, BackupCapturePreparation};

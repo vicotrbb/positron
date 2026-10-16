@@ -389,3 +389,136 @@ fn protected_successor_opens_original_bootstrap_after_predecessor_custody_is_abs
     );
     Ok(())
 }
+
+#[test]
+fn fresh_restore_acquisition_rejects_every_nonempty_or_unsafe_root() {
+    for (secrets, name) in [
+        (false, "foreign"),
+        (false, "catalog"),
+        (true, "foreign"),
+        (true, "local-root-key.v1"),
+    ] {
+        let roots = Roots::new();
+        let root = if secrets {
+            roots.secrets()
+        } else {
+            roots.data()
+        };
+        fs::write(root.join(name), b"preserve").expect("existing content");
+        assert!(roots.storage().acquire_empty().is_err());
+        assert_eq!(
+            fs::read(root.join(name)).expect("preserved content"),
+            b"preserve"
+        );
+    }
+    let roots = Roots::new();
+    let storage = roots.storage();
+    let (volume, access) = storage.acquire_empty().expect("fresh target");
+    assert!(access.layout().expect("layout").is_empty_instance());
+    let commitment = access
+        .restore_target_commitment()
+        .expect("physical target identity");
+    assert_ne!(commitment, [0; 32]);
+    assert_eq!(
+        storage
+            .inspect()
+            .expect("same roots")
+            .restore_target_commitment()
+            .expect("identity"),
+        commitment
+    );
+    let other = Roots::new();
+    assert_ne!(
+        other
+            .storage()
+            .inspect()
+            .expect("other roots")
+            .restore_target_commitment()
+            .expect("identity"),
+        commitment
+    );
+
+    assert!(
+        storage.acquire_empty().is_err(),
+        "exclusive target ownership"
+    );
+    drop(volume);
+    drop(access);
+    let (_volume, access) = storage.acquire_empty().expect("lock-only root is empty");
+    assert_eq!(
+        access.restore_target_commitment().expect("stable retry"),
+        commitment
+    );
+}
+
+#[test]
+fn restore_ownership_claim_authenticates_intent_and_physical_roots_before_staging() {
+    let roots = Roots::new();
+    let storage = roots.storage();
+    let (_volume, access) = storage.acquire().expect("exclusive target");
+    let instance = crate::InstanceId::new([0x81; 16]).expect("instance");
+    let secret = crate::CatalogSecret::from_owned(Box::new([0x82; 32]), Box::new([0x83; 32]));
+    assert!(
+        access
+            .verify_restore_target(instance, &secret, [0x84; 32])
+            .is_err()
+    );
+    access
+        .claim_restore_target(instance, &secret, [0x84; 32])
+        .expect("atomic claim");
+    access
+        .claim_restore_target(instance, &secret, [0x84; 32])
+        .expect("exact retry");
+    assert!(
+        access
+            .verify_restore_target(instance, &secret, [0x85; 32])
+            .is_err()
+    );
+    assert!(
+        access
+            .claim_restore_target(instance, &secret, [0x85; 32])
+            .is_err()
+    );
+    let claim = fs::read_dir(roots.data())
+        .expect("entries")
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".positron-restore-owner.")
+        })
+        .expect("claim name");
+    let foreign = Roots::new();
+    fs::create_dir(foreign.data().join(claim.file_name())).expect("copied claim");
+    fs::set_permissions(
+        foreign.data().join(claim.file_name()),
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("claim permissions");
+    let (_foreign_volume, foreign_access) = foreign.storage().acquire().expect("foreign lock");
+    assert!(
+        foreign_access
+            .verify_restore_target(instance, &secret, [0x84; 32])
+            .is_err(),
+        "copy cannot authenticate different physical roots"
+    );
+    fs::write(claim.path().join("foreign"), b"preserve").expect("foreign claim content");
+    assert!(
+        access
+            .verify_restore_target(instance, &secret, [0x84; 32])
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(claim.path().join("foreign")).expect("preserved content"),
+        b"preserve"
+    );
+    fs::remove_file(claim.path().join("foreign")).expect("remove test content");
+    fs::remove_dir(claim.path()).expect("remove test claim");
+    std::os::unix::fs::symlink(foreign.data(), claim.path()).expect("substituted link");
+    assert!(
+        access
+            .verify_restore_target(instance, &secret, [0x84; 32])
+            .is_err()
+    );
+}

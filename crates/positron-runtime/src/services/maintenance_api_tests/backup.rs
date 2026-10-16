@@ -542,3 +542,6 @@ mod verification_http;
 
 #[path = "backup_envelope_migration.rs"]
 mod envelope_migration;
+
+#[path = "backup_restore.rs"]
+mod restore;

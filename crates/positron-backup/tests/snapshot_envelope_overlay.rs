@@ -97,6 +97,23 @@ async fn overlay_is_append_only_idempotent_and_bound_to_published_snapshot()
                 .await?,
             Some(overlay.clone())
         );
+        let reader = positron_backup::BackupSnapshotReader::open(
+            &repository,
+            &identity,
+            signer.identity(),
+            publication.manifest(),
+            &resources,
+            0,
+        )
+        .await?;
+        assert_eq!(
+            reader.recovery_overlay(overlay.target().identity()).await?,
+            Some(overlay.clone())
+        );
+        assert_eq!(
+            reader.recovery_overlay(overlay.source().identity()).await?,
+            None
+        );
         assert_eq!(publisher.verify(manifest.snapshot_id()).await?, manifest);
         assert_eq!(
             publisher

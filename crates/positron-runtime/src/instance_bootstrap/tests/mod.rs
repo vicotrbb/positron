@@ -22,4 +22,4 @@ mod recovery;
 mod root_recovery;
 mod root_retirement;
 
-mod provider_migration;
+pub(crate) mod provider_migration;

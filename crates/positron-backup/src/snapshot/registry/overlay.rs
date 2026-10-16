@@ -289,3 +289,67 @@ impl BackupPublisher<'_> {
         Ok(())
     }
 }
+
+/// Public-pin discovery permits recovery after the original provider retires.
+/// It grants no publication authority and does not replace ancestry verification.
+pub(crate) async fn recovery_overlay(
+    repository: &dyn Repository,
+    identity: &RepositoryIdentity,
+    integrity: BootstrapIntegrityIdentity,
+    manifest: &BackupManifest,
+    manifest_id: ObjectId,
+    target: &ProviderKeyUri,
+) -> Result<Option<BackupEnvelopeOverlay>, RepositoryFailure> {
+    if repository.identify().await? != *identity {
+        return Err(RepositoryFailure::IdentityMismatch);
+    }
+    let head = repository
+        .registry_head_at(HeadSlot::registry())
+        .await?
+        .ok_or(RepositoryFailure::NotFound)?;
+    let mut decoder =
+        super::super::codec::Decoder::new(super::super::codec::verify(head.bytes(), integrity)?);
+    if decoder.take(8)? != b"POSBKH01" {
+        return Err(RepositoryFailure::CorruptState);
+    }
+    let generation_id = ObjectId::from_checksum(decoder.array()?);
+    decoder.finish()?;
+    let bytes = super::super::read::object_bytes(repository, generation_id, |_| Ok(())).await?;
+    let generation = Generation::verify(&bytes, identity, integrity)?;
+    let receipt = generation
+        .snapshots
+        .iter()
+        .find(|receipt| receipt.snapshot == manifest.snapshot_id())
+        .ok_or(RepositoryFailure::NotFound)?;
+    if receipt.manifest != manifest_id {
+        return Err(RepositoryFailure::IdentityMismatch);
+    }
+    let digest = target_digest(target);
+    let result = match generation.overlays.iter().find(|reference| {
+        reference.snapshot == manifest.snapshot_id() && reference.target == digest
+    }) {
+        Some(reference) => {
+            let bytes =
+                super::super::read::object_bytes(repository, reference.object, |_| Ok(())).await?;
+            let overlay = BackupEnvelopeOverlay::verify(&bytes, identity, integrity)?;
+            if overlay.snapshot != manifest.snapshot_id()
+                || overlay.manifest != manifest_id
+                || overlay.context != manifest.key_context()
+                || overlay.target.identity() != target
+            {
+                return Err(RepositoryFailure::IdentityMismatch);
+            }
+            Some(overlay)
+        },
+        None => None,
+    };
+    if repository
+        .registry_head_at(HeadSlot::registry())
+        .await?
+        .as_ref()
+        != Some(&head)
+    {
+        return Err(RepositoryFailure::PreconditionFailed);
+    }
+    Ok(result)
+}

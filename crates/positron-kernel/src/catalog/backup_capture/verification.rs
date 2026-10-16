@@ -28,6 +28,24 @@ impl Catalog<'_> {
         request: [u8; 32],
         index: &[u8],
     ) -> Result<BackupCaptureVerification, CatalogFailure> {
+        let secret = self
+            .secret
+            .lock()
+            .map_err(|_| fail(CatalogFailureCode::ConcurrentWriter))?;
+        BackupCaptureVerification::open(self.instance, &secret, operation, request, index)
+    }
+}
+
+impl BackupCaptureVerification {
+    /// Authenticates a portable capture before any writable target Catalog is
+    /// opened. The caller must admit `required_memory_bytes` before decoding.
+    pub fn open(
+        instance: InstanceId,
+        secret: &CatalogSecret,
+        operation: [u8; 16],
+        request: [u8; 32],
+        index: &[u8],
+    ) -> Result<Self, CatalogFailure> {
         if operation == [0; 16] || request == [0; 32] {
             return Err(fail(CatalogFailureCode::InvalidInput));
         }
@@ -46,13 +64,9 @@ impl Catalog<'_> {
         if !epoch.is_catalog_readable() {
             return Err(fail(CatalogFailureCode::UnsupportedFormat));
         }
-        let secret = self
-            .secret
-            .lock()
-            .map_err(|_| fail(CatalogFailureCode::ConcurrentWriter))?;
         let plaintext = storage::artifact::open_backup_capture(
-            &secret,
-            self.instance,
+            secret,
+            instance,
             codec::index_identity(operation, request),
             epoch,
             index
@@ -62,7 +76,7 @@ impl Catalog<'_> {
         let (generation, catalog, audit, files) =
             BackupCapture::decode_inventory(&plaintext, operation, request, epoch)?;
         Ok(BackupCaptureVerification {
-            instance: self.instance,
+            instance,
             generation,
             catalog,
             epoch,
@@ -277,6 +291,24 @@ impl BackupCaptureVerification {
         identity: [u8; 32],
         encoded: &[u8],
     ) -> Result<(), CatalogFailure> {
+        if catalog.instance != self.instance {
+            return Err(fail(CatalogFailureCode::IntegrityCorruption));
+        }
+        let secret = catalog
+            .secret
+            .lock()
+            .map_err(|_| fail(CatalogFailureCode::ConcurrentWriter))?;
+        self.verify_protected_file(&secret, identity, encoded)
+    }
+
+    /// Authenticates one bounded metadata ciphertext with independently
+    /// recovered SYSTEM custody, without creating live target state.
+    pub fn verify_protected_file(
+        &mut self,
+        secret: &CatalogSecret,
+        identity: [u8; 32],
+        encoded: &[u8],
+    ) -> Result<(), CatalogFailure> {
         let file = self
             .files
             .binary_search_by_key(&identity, |file| file.identity)
@@ -295,19 +327,14 @@ impl BackupCaptureVerification {
         if encoded.len() > limit {
             return Err(fail(CatalogFailureCode::LimitExceeded));
         }
-        if catalog.instance != self.instance
-            || self.accepted.contains(&identity)
+        if self.accepted.contains(&identity)
             || encoded.len() as u64 != file.size
             || <[u8; 32]>::from(Sha256::digest(encoded)) != file.checksum
         {
             return Err(fail(CatalogFailureCode::IntegrityCorruption));
         }
-        let secret = catalog
-            .secret
-            .lock()
-            .map_err(|_| fail(CatalogFailureCode::ConcurrentWriter))?;
         let plaintext = storage::artifact::open_backup_capture(
-            &secret,
+            secret,
             self.instance,
             file.address,
             self.epoch,
@@ -357,7 +384,40 @@ impl BackupCaptureVerification {
 
     /// Validates cross-object consistency and returns an unpublished read view.
     /// The caller must separately verify every ciphertext checksum before using it.
-    pub fn finish(mut self) -> Result<CatalogSnapshot, CatalogFailure> {
+    pub fn finish(self) -> Result<CatalogSnapshot, CatalogFailure> {
+        self.finish_verified().map(|(snapshot, _, _)| snapshot)
+    }
+
+    pub fn finish_restore_origin(
+        self,
+        manifest: [u8; 32],
+        intent: [u8; 32],
+    ) -> Result<super::super::restore_origin::BackupRestoreOrigin, CatalogFailure> {
+        if manifest == [0; 32] || intent == [0; 32] {
+            return Err(fail(CatalogFailureCode::InvalidInput));
+        }
+        let instance = self.instance;
+        let (snapshot, audit, checkpoint) = self.finish_verified()?;
+        Ok(super::super::restore_origin::BackupRestoreOrigin {
+            instance,
+            manifest,
+            intent,
+            snapshot,
+            audit,
+            checkpoint,
+        })
+    }
+
+    fn finish_verified(
+        mut self,
+    ) -> Result<
+        (
+            CatalogSnapshot,
+            Vec<GovernanceAuditRecord>,
+            Option<GovernanceAuditCheckpoint>,
+        ),
+        CatalogFailure,
+    > {
         if self.objects.is_empty()
             || self.files.iter().any(|file| {
                 matches!(
@@ -439,7 +499,7 @@ impl BackupCaptureVerification {
                 .map_or([0; 32], AuditRetentionAnchor::record_hash);
         }
         crate::active_segment_ledger::verify_backup_capture_inventory(&snapshot, &self.files)?;
-        Ok(snapshot)
+        Ok((snapshot, self.records, self.checkpoint))
     }
 }
 

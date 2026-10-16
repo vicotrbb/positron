@@ -14,6 +14,7 @@ pub enum CatalogRootRotationStage {
     Completed,
     Cancelled,
     Resumed,
+    Restored,
 }
 
 impl CatalogRootRotationStage {
@@ -28,6 +29,7 @@ impl CatalogRootRotationStage {
             Self::Completed => "catalog.root-rotation.completed",
             Self::Cancelled => "catalog.root-rotation.cancelled",
             Self::Resumed => "catalog.root-rotation.resumed",
+            Self::Restored => "catalog.root-rotation.restored",
         }
     }
 }
@@ -71,6 +73,7 @@ impl CatalogRootRotationAuditEntry {
             b"completed" => CatalogRootRotationStage::Completed,
             b"cancelled" => CatalogRootRotationStage::Cancelled,
             b"resumed" => CatalogRootRotationStage::Resumed,
+            b"restored" => CatalogRootRotationStage::Restored,
             _ => return Err(IdentityFailure),
         };
         let body = remaining
@@ -222,6 +225,7 @@ fn root_rotation_bytes(
         CatalogRootRotationStage::Completed => b"completed".as_slice(),
         CatalogRootRotationStage::Cancelled => b"cancelled".as_slice(),
         CatalogRootRotationStage::Resumed => b"resumed".as_slice(),
+        CatalogRootRotationStage::Restored => b"restored".as_slice(),
     };
     let mut bytes = Vec::with_capacity(ROOT_ROTATION_MAGIC.len() + stage.len() + 41);
     bytes.extend_from_slice(ROOT_ROTATION_MAGIC);

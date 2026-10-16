@@ -15,6 +15,10 @@ const USAGE: &str = "usage: positron backup create|verify|expire|status|lookup|w
 
 pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     let mut arguments = arguments.peekable();
+    if arguments.peek().is_some_and(|action| action == "restore") {
+        arguments.next();
+        return crate::restore_cli::run(arguments);
+    }
     if arguments.peek().is_some_and(|action| action == "list") {
         arguments.next();
         return crate::administrative_cli::exit(list::execute(

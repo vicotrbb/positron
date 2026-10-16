@@ -208,7 +208,7 @@ fn publish(
     worker.join().map_err(|_| "backup worker panic")??;
     result
 }
-fn finish_root(
+pub(super) fn finish_root(
     services: &ServiceHandle,
     administrator: &str,
     id: &str,

@@ -49,6 +49,9 @@ tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
+base64 = "=0.22.1"
+crc32c = "=0.6.8"
+positron-backup = { path = "../positron-backup", features = ["test-support"] }
 positron-kernel = { path = "../positron-kernel", features = ["test-support"] }
 async-trait = "=0.1.89"
 h2 = "=0.4.16"

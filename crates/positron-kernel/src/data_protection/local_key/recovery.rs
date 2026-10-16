@@ -328,7 +328,7 @@ impl<'a> RecoverySession<'a> {
         access: &crate::BootstrapArtifactAccess,
         validate: impl FnOnce(&BootstrapKeyCustody) -> Result<(), RecoveryFailure>,
     ) -> Result<BootstrapKeyCustody, RecoveryFailure> {
-        let (_, custody) = self.recover(ciphertext, unlock, pin)?;
+        let (_, custody) = self.recover_detached(ciphertext, unlock, pin)?;
         access
             .require_recovery_target_absent(&custody)
             .map_err(|_| RecoveryFailure::AlreadyExists)?;
@@ -344,7 +344,7 @@ impl<'a> RecoverySession<'a> {
         unlock: RecoveryUnlock<'_>,
         pin: RecoveryIdentity,
     ) -> Result<RecoveryMetadata, RecoveryFailure> {
-        self.recover(ciphertext, unlock, pin)
+        self.recover_detached(ciphertext, unlock, pin)
             .map(|(metadata, _)| metadata)
     }
     pub fn verify(
@@ -361,7 +361,7 @@ impl<'a> RecoverySession<'a> {
         {
             return Err(RecoveryFailure::Authentication);
         }
-        let (metadata, recovered) = self.recover(ciphertext, unlock, pin)?;
+        let (metadata, recovered) = self.recover_detached(ciphertext, unlock, pin)?;
         use subtle::ConstantTimeEq;
         let equal = custody
             .with_root_key(|root| {
@@ -376,7 +376,10 @@ impl<'a> RecoverySession<'a> {
         }
         Ok(metadata)
     }
-    fn recover(
+    /// Authenticates an independently pinned bundle into opaque custody without
+    /// publishing any target artifact. Fresh restore validates the source Catalog
+    /// and repository before granting this custody ownership of an empty target.
+    pub fn recover_detached(
         &self,
         ciphertext: &[u8],
         unlock: RecoveryUnlock<'_>,

@@ -42,7 +42,7 @@ fn failed_native_preflight_preserves_source_and_has_no_prepared_route()
 mod audit_retention;
 mod backup_overlay;
 mod data;
-mod fixtures;
+pub(crate) mod fixtures;
 use fixtures::*;
 use std::sync::Arc;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

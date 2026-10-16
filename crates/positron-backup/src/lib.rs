@@ -97,9 +97,10 @@ pub use azure_blob::fuzz_azure_blob_repository;
 mod snapshot;
 pub use snapshot::{
     BackupCaptureContext, BackupCatalogIdentity, BackupCleanupPlan, BackupCleanupProgress,
-    BackupCleanupReason, BackupEnvelopeOverlay, BackupKeyEnvelope, BackupListCursor,
-    BackupManifest, BackupManifestBuilder, BackupObject, BackupObjectVerification,
-    BackupPublication, BackupPublicationCheck, BackupPublisher, BackupReceipt,
-    BackupRegistryVerification, BackupRepositoryRegistration, BackupRetention, BackupSnapshotPage,
+    BackupCleanupReason, BackupEnvelopeOverlay, BackupKeyEnvelope, BackupKeyIdentity,
+    BackupListCursor, BackupManifest, BackupManifestBuilder, BackupObject,
+    BackupObjectVerification, BackupPublication, BackupPublicationCheck, BackupPublisher,
+    BackupPurgeTombstone, BackupReceipt, BackupRegistryVerification, BackupRepositoryRegistration,
+    BackupRestoreReport, BackupRetention, BackupSnapshotPage, BackupSnapshotReader,
     BackupSnapshotVerification, BackupSource, BackupTransfer, BackupVerificationReport,
 };

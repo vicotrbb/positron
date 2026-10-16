@@ -14,6 +14,8 @@ const OPERATION_MAGIC_V2: [u8; 8] = *b"POSOPR02";
 const OPERATION_MAGIC_V3: [u8; 8] = *b"POSOPR03";
 const OPERATION_MAGIC: [u8; 8] = *b"POSOPR04";
 const REPOSITORY_PARAMETERS_MAGIC: [u8; 8] = *b"POSREP02";
+const RESTORE_PARAMETERS_MAGIC: [u8; 8] = *b"POSBRP02";
+const RESTORE_REPORT_MAGIC: [u8; 8] = *b"POSBRE01";
 const VERIFICATION_PARAMETERS_MAGIC: [u8; 8] = *b"POSBVP01";
 const VERIFICATION_REPORT_MAGIC: [u8; 8] = *b"POSBVE01";
 const BACKUP_PARAMETERS_MAGIC: [u8; 8] = *b"POSBKP01";
@@ -81,6 +83,10 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
     }
     if let Some(parameters) = operation.backup_parameters {
         match parameters {
+            super::BackupOperationParameters::Restore(value) => {
+                encoded.extend_from_slice(&RESTORE_PARAMETERS_MAGIC);
+                value.encode(&mut encoded);
+            },
             super::BackupOperationParameters::Verification(value) => {
                 encoded.extend_from_slice(&VERIFICATION_PARAMETERS_MAGIC);
                 value.encode(&mut encoded);
@@ -95,6 +101,10 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
             },
         }
         match operation.backup_evidence {
+            Some(super::backup_parameters::BackupOperationEvidence::RestoreReport(value)) => {
+                encoded.extend_from_slice(&RESTORE_REPORT_MAGIC);
+                encoded.extend_from_slice(&value);
+            },
             Some(super::backup_parameters::BackupOperationEvidence::VerificationReport(value)) => {
                 encoded.extend_from_slice(&VERIFICATION_REPORT_MAGIC);
                 encoded.extend_from_slice(&value);
@@ -225,13 +235,13 @@ pub(super) fn decode_operation(
     // root-kind layout by their exact-length check, rather than ignore it.
     let root_parameters = v4 && encoded.get(56) == Some(&4);
     let repository_parameters_present = v4 && encoded.get(56) == Some(&5);
-    let backup_parameters_present = v4 && matches!(encoded.get(56), Some(6..=8));
+    let backup_parameters_present = v4 && matches!(encoded.get(56), Some(6..=9));
     let v3 = encoded.starts_with(&OPERATION_MAGIC_V3);
     let v2 = encoded.starts_with(&OPERATION_MAGIC_V2);
     if !v4 && !v3 && !v2 && !encoded.starts_with(&OPERATION_MAGIC_V1) {
         return Ok(None);
     }
-    if (backup_parameters_present && !(351..=2688).contains(&encoded.len()))
+    if (backup_parameters_present && !(351..=2784).contains(&encoded.len()))
         || (repository_parameters_present && !(310..=2428).contains(&encoded.len()))
         || (root_parameters && !(261..=2309).contains(&encoded.len()))
         || (!root_parameters
@@ -391,10 +401,13 @@ pub(super) fn decode_operation(
     };
     let (backup_parameters, backup_evidence) = if backup_parameters_present {
         let magic = take_array::<8>(encoded, &mut offset)?;
+        let restore = request.kind() == DurableOperationKind::BackupRestore;
         let verification = request.kind() == DurableOperationKind::BackupVerification;
         let retention = request.kind() == DurableOperationKind::BackupRetention;
         if magic
-            != if verification {
+            != if restore {
+                RESTORE_PARAMETERS_MAGIC
+            } else if verification {
                 VERIFICATION_PARAMETERS_MAGIC
             } else if retention {
                 RETENTION_PARAMETERS_MAGIC
@@ -405,7 +418,13 @@ pub(super) fn decode_operation(
             return Err(DurableOperationFailure::PersistenceUnavailable);
         }
         let length_offset = offset
-            .checked_add(if retention || verification { 162 } else { 122 })
+            .checked_add(if restore {
+                258
+            } else if retention || verification {
+                162
+            } else {
+                122
+            })
             .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
         let length_end = length_offset
             .checked_add(2)
@@ -422,7 +441,11 @@ pub(super) fn decode_operation(
         let bytes = encoded
             .get(offset..end)
             .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
-        let parameters = if verification {
+        let parameters = if restore {
+            super::BackupOperationParameters::Restore(super::BackupRestoreParameters::decode(
+                bytes,
+            )?)
+        } else if verification {
             super::BackupOperationParameters::Verification(
                 super::BackupVerificationParameters::decode(bytes)?,
             )
@@ -441,7 +464,13 @@ pub(super) fn decode_operation(
             let bytes = encoded
                 .get(offset..)
                 .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
-            let value = if magic == VERIFICATION_REPORT_MAGIC {
+            let value = if magic == RESTORE_REPORT_MAGIC {
+                super::backup_parameters::BackupOperationEvidence::RestoreReport(
+                    bytes
+                        .try_into()
+                        .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?,
+                )
+            } else if magic == VERIFICATION_REPORT_MAGIC {
                 super::backup_parameters::BackupOperationEvidence::VerificationReport(
                     bytes
                         .try_into()
@@ -720,6 +749,43 @@ pub fn fuzz_durable_operation_record(data: &[u8]) {
             operation.backup_evidence = Some(
                 super::backup_parameters::BackupOperationEvidence::VerificationReport([0xaa; 32]),
             );
+        }
+    }
+    if data.get(5).copied().unwrap_or_default() & 1 != 0 {
+        let repository = crate::RepositoryOperationParameters::local(
+            crate::RepositoryAction::Verify,
+            "/fuzz/repository",
+            [0x44; 16],
+            [0x55; 32],
+            [0x66; 32],
+        )
+        .expect("restore repository");
+        let source = super::BackupVerificationParameters::new(
+            repository, [0x77; 32], [0x88; 16], [0x99; 32],
+        )
+        .expect("restore source");
+        let parameters =
+            super::BackupRestoreParameters::new(source, [0xab; 32], [0xac; 32], [0xad; 32])
+                .expect("restore parameters");
+        let request = DurableOperationRequest::backup_restore(
+            PrincipalId::from_bytes([0x11; 16]).expect("actor"),
+            AdministrativeIdempotencyKey::new([0x22; 16]).expect("key"),
+            [0x33; 16],
+            1,
+            17,
+            parameters.intent_digest(),
+        )
+        .expect("restore request");
+        operation = DurableOperation::accepted(request);
+        operation.backup_parameters = Some(super::BackupOperationParameters::Restore(parameters));
+        if data.get(6).copied().unwrap_or_default() & 1 != 0 {
+            operation = operation
+                .begin(18)
+                .expect("begin restore")
+                .succeeded(19)
+                .expect("restore success");
+            operation.backup_evidence =
+                Some(super::backup_parameters::BackupOperationEvidence::RestoreReport([0xae; 32]));
         }
     }
     let mut record = encode_operation(operation);

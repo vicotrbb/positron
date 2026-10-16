@@ -15,6 +15,9 @@ mod backup_administration;
 mod backup_parameters;
 mod backup_retention_administration;
 mod backup_verification_administration;
+mod restore_parameters;
+pub use restore_parameters::{BackupRestoreParameters, BackupRestoreStage};
+mod restore_administration;
 pub use backup_parameters::{
     BackupCleanupReceipt, BackupOperationParameters, BackupOperationReceipt, BackupOperationStage,
     BackupRetentionClaimReceipt, BackupRetentionParameters, BackupRetentionStage,
@@ -253,7 +256,14 @@ impl DurableOperationAdministration {
         catalog: &Catalog<'_>,
         idempotency: AdministrativeIdempotencyKey,
     ) -> Result<Option<DurableOperation>, DurableOperationFailure> {
-        match find_by_key(&catalog.pin().map_err(map_catalog)?, idempotency)? {
+        Self::inspect_snapshot_by_idempotency(&catalog.pin().map_err(map_catalog)?, idempotency)
+    }
+    /// Inspects a generation-pinned authenticated read view without a writer.
+    pub fn inspect_snapshot_by_idempotency(
+        snapshot: &CatalogSnapshot,
+        idempotency: AdministrativeIdempotencyKey,
+    ) -> Result<Option<DurableOperation>, DurableOperationFailure> {
+        match find_by_key(snapshot, idempotency)? {
             Some(OperationKeyLookup::Operation(operation)) => Ok(Some(*operation)),
             Some(OperationKeyLookup::Expired(_)) | None => Ok(None),
         }

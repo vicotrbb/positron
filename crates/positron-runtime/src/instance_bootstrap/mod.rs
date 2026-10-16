@@ -5,11 +5,13 @@ pub(crate) use local_rotation::{
 };
 mod operation;
 mod recovery;
+mod restore;
 pub use local_rotation::{
     KeyProviderMigrationStatus, LocalKeyRotationFailure, LocalKeyRotationPhase,
     LocalKeyRotationStatus, TenantKeyMigrationProgress, TenantKeyRotationStatus,
     TenantKeyVerificationProgress,
 };
+pub use restore::{BackupRestoreRequest, BackupRestoreSession};
 mod resources;
 pub use recovery::RecoveryReadiness;
 mod storage;
@@ -22,7 +24,7 @@ mod types;
 const DEFAULT_MAX_REGISTERED_TENANTS: u16 = 2;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use operation::recover_initial_ledgers;
 #[cfg(any(test, feature = "test-support"))]

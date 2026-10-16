@@ -2713,6 +2713,7 @@ dependencies = [
  "age",
  "hmac 0.12.1",
  "positron-api",
+ "positron-backup",
  "positron-config",
  "positron-domain",
  "positron-governance",

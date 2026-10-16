@@ -2,7 +2,7 @@ use super::*;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-pub(super) const PIN: &str =
+pub(crate) const PIN: &str =
     "sha256:0606060606060606060606060606060606060606060606060606060606060606";
 const CA: &[u8] = include_bytes!("../../../../tests/native_transport/fixtures/mtls-ca-cert.pem");
 const CLIENT_CERT: &[u8] =
@@ -13,7 +13,7 @@ const SERVER_CERT: &[u8] =
     include_bytes!("../../../../tests/native_transport/fixtures/mtls-server-cert.pem");
 const SERVER_KEY: &[u8] =
     include_bytes!("../../../../tests/native_transport/fixtures/mtls-server-key.pem");
-pub(super) fn model(
+pub(crate) fn model(
     root: &std::path::Path,
 ) -> Result<ProviderCredentialModel, Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
@@ -27,7 +27,7 @@ pub(super) fn model(
         trust_roots: CredentialFileReference::new(&root.join("ca"))?,
     })
 }
-pub(super) async fn transcript_transport(
+pub(crate) async fn transcript_transport(
     build: impl FnOnce(u16) -> Vec<Vec<Vec<u8>>>,
     versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> Result<
@@ -205,7 +205,7 @@ pub(super) fn metadata(id: &str) -> Vec<u8> {
     )
 }
 
-pub(super) fn migration_replies(
+pub(crate) fn migration_replies(
     instance: &crate::InitializedInstance,
     port: u16,
     id: &str,

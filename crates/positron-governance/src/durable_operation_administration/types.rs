@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::AdministrativeIdempotencyKey;
 
-const REQUEST_DOMAIN: &[u8] = b"positron.durable-operation.request.v1\0";
+pub(super) const REQUEST_DOMAIN: &[u8] = b"positron.durable-operation.request.v1\0";
 const COMPLETED_LOOKUP_RETENTION_SECONDS: u64 = 2_592_000;
 
 /// Closed taxonomy of long-running Release 1 administration work.
@@ -27,6 +27,7 @@ pub enum DurableOperationKind {
     BackupSnapshot,
     BackupRetention,
     BackupVerification,
+    BackupRestore,
 }
 
 impl DurableOperationKind {
@@ -39,6 +40,7 @@ impl DurableOperationKind {
             Self::BackupSnapshot => DurableOperationBoundary::BackupRegistryPublished,
             Self::BackupRetention => DurableOperationBoundary::BackupRegistryExpired,
             Self::BackupVerification => DurableOperationBoundary::VerificationReportPublished,
+            Self::BackupRestore => DurableOperationBoundary::CatalogGenerationPublished,
             Self::SegmentAbandonment => DurableOperationBoundary::CatalogGenerationPublished,
             Self::KeyProviderMigration | Self::RepositoryInspection => {
                 DurableOperationBoundary::CatalogGenerationPublished
@@ -56,6 +58,7 @@ impl DurableOperationKind {
             Self::BackupSnapshot => 6,
             Self::BackupRetention => 7,
             Self::BackupVerification => 8,
+            Self::BackupRestore => 9,
         }
     }
 
@@ -69,6 +72,7 @@ impl DurableOperationKind {
             6 => Ok(Self::BackupSnapshot),
             7 => Ok(Self::BackupRetention),
             8 => Ok(Self::BackupVerification),
+            9 => Ok(Self::BackupRestore),
             _ => Err(DurableOperationFailure::PersistenceUnavailable),
         }
     }
@@ -160,7 +164,8 @@ impl DurableOperationRequest {
             | DurableOperationKind::RepositoryInspection
             | DurableOperationKind::BackupSnapshot
             | DurableOperationKind::BackupRetention
-            | DurableOperationKind::BackupVerification => {
+            | DurableOperationKind::BackupVerification
+            | DurableOperationKind::BackupRestore => {
                 if applicable_tenant.is_some() {
                     return Err(DurableOperationFailure::InvalidInput);
                 }
@@ -567,7 +572,8 @@ impl DurableOperationRequest {
             | DurableOperationKind::RepositoryInspection
             | DurableOperationKind::BackupSnapshot
             | DurableOperationKind::BackupRetention
-            | DurableOperationKind::BackupVerification => None,
+            | DurableOperationKind::BackupVerification
+            | DurableOperationKind::BackupRestore => None,
         }
     }
 
@@ -709,6 +715,23 @@ impl DurableOperationRequest {
                         return None;
                     }
                     Self::backup_verification(
+                        self.principal,
+                        self.idempotency,
+                        instance,
+                        self.accepted_generation,
+                        self.accepted_at_unix_seconds,
+                        self.operation_request_digest?,
+                    )
+                    .ok()
+                })
+                .is_some_and(|canonical| canonical == self),
+            DurableOperationKind::BackupRestore => self
+                .target_identity
+                .and_then(|instance| {
+                    if self.applicable_tenant.is_some() {
+                        return None;
+                    }
+                    Self::backup_restore(
                         self.principal,
                         self.idempotency,
                         instance,
@@ -1184,6 +1207,20 @@ pub struct DurableOperation {
 }
 
 impl DurableOperation {
+    pub const fn backup_restore_parameters(self) -> Option<super::BackupRestoreParameters> {
+        match self.backup_parameters {
+            Some(super::BackupOperationParameters::Restore(value)) => Some(value),
+            _ => None,
+        }
+    }
+    pub const fn backup_restore_report(self) -> Option<[u8; 32]> {
+        match self.backup_evidence {
+            Some(super::backup_parameters::BackupOperationEvidence::RestoreReport(value)) => {
+                Some(value)
+            },
+            _ => None,
+        }
+    }
     pub const fn backup_verification_parameters(
         self,
     ) -> Option<super::BackupVerificationParameters> {
@@ -1458,8 +1495,10 @@ impl DurableOperation {
             )
         );
         let cancellable = cancellable
-            || (self.kind() == DurableOperationKind::BackupSnapshot
-                && self.status == DurableOperationStatus::Running
+            || (matches!(
+                self.kind(),
+                DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupRestore
+            ) && self.status == DurableOperationStatus::Running
                 && matches!(
                     self.phase,
                     DurableOperationPhase::BackupCapture
@@ -1608,6 +1647,9 @@ impl DurableOperation {
             return false;
         }
 
+        if self.request.kind == DurableOperationKind::BackupRestore {
+            return super::restore_administration::legal_state(self);
+        }
         if self.request.kind == DurableOperationKind::BackupVerification {
             return super::backup_verification_administration::legal_state(self);
         }

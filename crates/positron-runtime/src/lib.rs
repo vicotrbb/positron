@@ -42,12 +42,13 @@ pub use health::{
 #[cfg(any(test, feature = "test-support"))]
 pub use instance_bootstrap::GovernanceTestFixture;
 pub use instance_bootstrap::{
-    BackupRepositoryInspection, BootstrapClaim, BootstrapFailure, BootstrapFailureCode,
-    BootstrapPaths, BootstrapState, DoctorRuntimeFacts, GracefulShutdownRecord, InitializationPlan,
-    InitializedInstance, InstanceBootstrap, KeyProviderMigrationStatus, LocalKeyRotationFailure,
-    LocalKeyRotationPhase, LocalKeyRotationStatus, OfflineSupportBundleFailure,
-    OfflineSupportBundleInspection, RecoveryReadiness, TenantKeyMigrationProgress,
-    TenantKeyRotationStatus, TenantKeyVerificationProgress, TenantRetentionImpactPreview,
+    BackupRepositoryInspection, BackupRestoreRequest, BackupRestoreSession, BootstrapClaim,
+    BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BootstrapState, DoctorRuntimeFacts,
+    GracefulShutdownRecord, InitializationPlan, InitializedInstance, InstanceBootstrap,
+    KeyProviderMigrationStatus, LocalKeyRotationFailure, LocalKeyRotationPhase,
+    LocalKeyRotationStatus, OfflineSupportBundleFailure, OfflineSupportBundleInspection,
+    RecoveryReadiness, TenantKeyMigrationProgress, TenantKeyRotationStatus,
+    TenantKeyVerificationProgress, TenantRetentionImpactPreview,
 };
 pub use integrity_verification::{
     OfflineDiskPressure, OfflineInspectionFacts, OfflineIntegrityAggregateOutcome,

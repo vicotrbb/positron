@@ -837,3 +837,9 @@ mod backup_operation_tests;
 
 #[path = "backup_failure_tests.rs"]
 mod backup_failure_tests;
+
+#[path = "restore_catalog_tests.rs"]
+mod restore_catalog_tests;
+
+#[path = "restore_purge_tests.rs"]
+mod restore_purge_tests;

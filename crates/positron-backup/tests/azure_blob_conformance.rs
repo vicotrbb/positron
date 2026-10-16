@@ -7,6 +7,8 @@ mod azure_simulator;
 mod native_authority;
 #[path = "shared/provider_behavior.rs"]
 mod provider_behavior;
+#[path = "shared/read_only_repository.rs"]
+mod read_only_repository;
 use positron_backup::*;
 use positron_kernel::*;
 #[tokio::test]
@@ -34,6 +36,9 @@ async fn native_azure_repository_protocol_and_recovery() -> Result<(), Box<dyn s
                 .initialize()
                 .await
                 .map_err(|e| format!("initialize: {e:?}"))?;
+            let read_only = AzureBlobRepository::read_only_from_local_simulator(target.clone(), identity.clone(), resources.clone(), server.address)?;
+            assert_eq!(read_only.initialize().await, Err(RepositoryFailure::PermissionDenied));
+            read_only_repository::conformance(&read_only, &repository).await?;
             provider_behavior::conformance(
                 &repository,
                 identity.clone(),

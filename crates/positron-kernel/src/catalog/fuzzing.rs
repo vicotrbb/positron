@@ -60,6 +60,7 @@ pub(super) fn fuzz_catalog_stateful(data: &[u8]) {
         return;
     };
     super::backup_capture::fuzz_capture_verification(&catalog, data);
+    super::restore_origin::fuzz_restore_origin(&catalog, data);
     let operation_count = usize::from(data.first().copied().unwrap_or_default() % 4) + 1;
     let mut acknowledged = 0_u64;
     let mut latest_payload = None;

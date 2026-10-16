@@ -27,6 +27,7 @@ pub(super) enum ArtifactKind {
     AuditCheckpoint,
     ExportOutput,
     BackupCapture,
+    RestoreOrigin,
     /// Artifacts written while `AuditCheckpoint` occupied tag 3. These
     /// variants are decode-only: the tag is part of the authenticated
     /// envelope context and therefore cannot be silently reinterpreted.
@@ -47,6 +48,7 @@ impl ArtifactKind {
             Self::AuditCheckpoint => 5,
             Self::ExportOutput => 6,
             Self::BackupCapture => 7,
+            Self::RestoreOrigin => 8,
             Self::TransitionalCommit => 4,
             Self::TransitionalPrepared => 5,
             Self::TransitionalAuditCheckpoint => 3,
@@ -64,7 +66,7 @@ impl ArtifactKind {
                 SystemObjectKind::GovernanceAudit
             },
             Self::ExportOutput => SystemObjectKind::ExportOutput,
-            Self::BackupCapture => SystemObjectKind::BackupMetadata,
+            Self::BackupCapture | Self::RestoreOrigin => SystemObjectKind::BackupMetadata,
         }
     }
 }

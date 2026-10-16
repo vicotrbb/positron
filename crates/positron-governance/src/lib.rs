@@ -57,11 +57,12 @@ pub use audit::{
 pub use durable_operation_administration::fuzz_durable_operation_record;
 pub use durable_operation_administration::{
     BackupCleanupReceipt, BackupOperationParameters, BackupOperationReceipt, BackupOperationStage,
-    BackupRetentionClaimReceipt, BackupRetentionParameters, BackupRetentionStage,
-    BackupSnapshotParameters, BackupVerificationParameters, DurableOperation,
-    DurableOperationAdministration, DurableOperationBoundary, DurableOperationCancellation,
-    DurableOperationFailure, DurableOperationKind, DurableOperationLookupRetention,
-    DurableOperationPhase, DurableOperationRequest, DurableOperationRetry, DurableOperationStatus,
+    BackupRestoreParameters, BackupRestoreStage, BackupRetentionClaimReceipt,
+    BackupRetentionParameters, BackupRetentionStage, BackupSnapshotParameters,
+    BackupVerificationParameters, DurableOperation, DurableOperationAdministration,
+    DurableOperationBoundary, DurableOperationCancellation, DurableOperationFailure,
+    DurableOperationKind, DurableOperationLookupRetention, DurableOperationPhase,
+    DurableOperationRequest, DurableOperationRetry, DurableOperationStatus,
     DurableOperationTerminalError, DurableQueryBudgetDimension, DurableQueryExportFailure,
     DurableQueryExportFailureCode, KeyProviderMigrationAction, KeyProviderMigrationParameters,
     OperationId, RepositoryAction, RepositoryOperationParameters, RepositoryProviderKind,
@@ -96,9 +97,9 @@ pub use system_audit_retention_administration::{
     SystemAuditRetentionRequest, SystemAuditRetentionUpdate,
 };
 pub use tenant_administration::{
-    TenantAdministration, TenantAdministrationFailure, TenantCreateConfiguration,
-    TenantCreateRequest, TenantCreation, TenantInspection, TenantInspectionPage,
-    TenantListContinuation,
+    RestorePurgeExclusion, TenantAdministration, TenantAdministrationFailure,
+    TenantCreateConfiguration, TenantCreateRequest, TenantCreation, TenantInspection,
+    TenantInspectionPage, TenantListContinuation,
 };
 pub use tenant_alias_administration::{
     TenantAliasAdministration, TenantAliasAdministrationFailure, TenantAliasBindRequest,
@@ -461,6 +462,7 @@ impl Error for GovernanceIntentFailure {}
 /// generation-pinned [`Identity`] and committed [`GovernanceAuditEntry`] values.
 #[cfg(fuzzing)]
 pub fn fuzz_parse_governance(identity: &[u8], audit: &[u8]) {
+    tenant_administration::fuzz_registry(identity);
     let _ = identity::codec::decode_initial_identity(identity);
     let mut transaction = [0_u8; 16];
     if let Some(suffix) = audit.get(audit.len().saturating_sub(16)..) {

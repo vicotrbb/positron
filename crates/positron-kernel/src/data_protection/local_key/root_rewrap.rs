@@ -466,7 +466,13 @@ impl BootstrapKeyCustody {
             .iter()
             .find(|route| route.root == root && route.epoch == epoch)
             .ok_or(BootstrapKeyFailure::Authentication)?;
-        let canonical = wrap_system(self, instance)?;
+        let canonical = if self.active_provider_identity()?.family()
+            != crate::key_provider::ProviderFamily::LocalFile
+        {
+            self.stored_system_envelope(instance)?
+        } else {
+            wrap_system(self, instance)?
+        };
         if route.envelope != canonical {
             return Err(BootstrapKeyFailure::Authentication);
         }

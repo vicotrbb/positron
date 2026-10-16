@@ -80,6 +80,28 @@ impl Catalog<'_> {
                 Some(predecessor) => predecessor,
                 None => &secret.wrapping,
             };
+            if let Some(origin) = self.storage.read_restore_origin(&secret, self.instance)? {
+                for identity in origin.snapshot.object_identities() {
+                    self.storage.rewrap_object(
+                        current,
+                        &replacement,
+                        self.instance,
+                        identity,
+                        super::FormatEpoch::CATALOG_V2,
+                    )?;
+                }
+                for audit in &state.audit {
+                    self.storage.rewrap_audit(
+                        current,
+                        &replacement,
+                        self.instance,
+                        audit.position(),
+                        audit.record_hash(),
+                    )?;
+                }
+                self.storage
+                    .rewrap_restore_origin(current, &replacement, self.instance)?;
+            }
             for outcome in state.transactions.values() {
                 for identity in &outcome.record.objects {
                     self.storage.rewrap_object(

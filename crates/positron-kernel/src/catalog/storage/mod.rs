@@ -21,6 +21,7 @@ pub(crate) mod fault;
 mod inspection;
 mod io;
 mod marker;
+mod restore_origin;
 
 #[cfg(test)]
 mod tests;

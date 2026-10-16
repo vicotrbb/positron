@@ -15,3 +15,31 @@ key-recovery readiness before publishing its immutable signed Verification Repor
 The report binds the exact repository, snapshot, manifest, Registry Generation,
 Catalog Generation, key context, examined counts, and completion scope. It does
 not substitute for fresh-target restore publication and query execution.
+
+Fresh restore holds the target Primary Data Volume lock while proving that both
+roots contain no instance artifacts. The lock file alone is permitted. A retry
+must authenticate the existing restore origin and the exact physical roots,
+effective configuration digest, source manifest, recovery input and idempotency
+key before opening a writable Catalog. An initialized or unrelated nonempty
+target is refused without adopting it. The target retains the recovered instance
+identity and gets a new Catalog identity bound to the verified source and restore
+intent; it does not impersonate a historical source transaction.
+
+The encrypted restore-origin descriptor records the verified source Catalog and
+audit frontier as an authenticated prefix boundary. Original audit records retain
+their identities and timestamps. Normal successor transactions, audit retention,
+root rewrap and read-only recovery continue from that boundary. The descriptor
+contains bounded provenance rather than a second permanent audit store. Native
+root adoption records a new target transaction with the actual recovered route;
+it does not fabricate a source migration or predecessor retirement.
+
+The accepted restore Durable Operation owns staged data before copying begins.
+Transfer and integrity verification use bounded resumable steps. Cold restart
+revalidates source ciphertext and native integrity before publication. Current
+signed tombstones are checked again at publication; a changed exclusion plan
+fails the accepted operation and leaves the target offline. Cancellation is
+revision-bound and is allowed before publication. The irreversible boundary is
+the target Catalog transaction that records the signed Restore Report and
+`Succeeded`. Root custody and the bootstrap gate are then synchronized. If that
+final synchronization is interrupted, normal startup remains blocked and an
+exact retry reconciles publication forward from the authenticated receipt.

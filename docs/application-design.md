@@ -1350,12 +1350,31 @@ ancestry gap returns an explicit refusal rather than partial results.
 
 Restore:
 
-1. Runtime proves the target data and secrets roots are empty.
-2. Backup verifies repository identity, current registry chain, snapshot,
-   signatures, checksums, Format Epoch, and keys.
-3. Purge Tombstones are applied before any tenant becomes visible.
-4. Objects are staged in fresh storage and fully verified.
-5. One atomic publication initializes the recovered instance.
+1. Runtime exclusively locks the Primary Data Volume and proves its data and
+   secrets roots empty. Exact retries authenticate the physical roots, effective
+   configuration, recovery input and original restore intent before writing.
+2. Independent local or native-provider recovery supplies custody. Backup verifies
+   repository identity, the complete current signed Registry chain, manifest,
+   checksums, Format Epoch, key identities and authenticated Catalog/audit prefix.
+3. Governance accepts the restore Durable Operation in the new target Catalog.
+   Current signed Purge Tombstones remove excluded keys and live reachability,
+   preserve lifecycle truth and reserve tenant identities before visibility.
+4. Kernel stages native objects with bounded transfer and integrity passes.
+   Restart revalidates source and target; cancellation compares the persisted
+   operation revision and is refused after publication begins.
+5. A current-head fence precedes the Catalog transaction that commits the signed
+   Restore Report and `Succeeded` at `CatalogGenerationPublished`. Root custody
+   and the bootstrap gate then synchronize. An interruption in that final step
+   leaves startup blocked; the same authenticated operation completes publication
+   on retry. Original audit history is preserved behind a bounded authenticated
+   restore-origin boundary, followed by real target transactions.
+
+The offline `backup restore start|status|wait|cancel` commands use these owners.
+Status only authenticates existing state: it neither accepts an operation nor
+advances adoption, copying, verification or publication. Wait and cancel first
+inspect the exact accepted intent, then reacquire its exclusive target ownership.
+See [fresh-target restore operations](operations/restore.md) for inputs and
+interruption semantics.
 
 ### 6.7 Tenant Purge
 

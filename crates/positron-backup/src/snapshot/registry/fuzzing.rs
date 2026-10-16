@@ -39,6 +39,7 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
     .expect("manifest");
     let manifest_bytes = manifest.signed_bytes(&signer).expect("signed manifest");
     let _ = BackupVerificationReport::verify(data, &identity, signer.identity());
+    let _ = BackupRestoreReport::verify(data, &identity, signer.identity());
     assert_eq!(
         BackupManifest::verify(&manifest_bytes, &identity, signer.identity())
             .expect("valid manifest"),
@@ -67,6 +68,7 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
         reservations: Vec::new(),
         keys: vec![key],
         overlays: Vec::new(),
+        tombstones: Vec::new(),
         claims: Vec::new(),
     };
     match data.first().copied().unwrap_or(0) % 3 {
@@ -117,9 +119,40 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
             .expect("overlay object")
             .id(),
     });
+    let tombstone =
+        BackupPurgeTombstone::new([25; 16], "purged-tenant", [26; 16], 1001).expect("tombstone");
+    let tombstone_bytes = tombstone
+        .signed_bytes(&identity, &signer)
+        .expect("signed tombstone");
+    generation.tombstones.push(tombstone);
+    let mut report = b"POSBRR02".to_vec();
+    report.extend_from_slice(&[3; 16]);
+    report.extend_from_slice(&[4; 32]);
+    report.extend_from_slice(&identity.encode());
+    for value in 5..9 {
+        report.extend_from_slice(&[value; 32]);
+    }
+    report.extend_from_slice(&1u64.to_be_bytes());
+    report.extend_from_slice(&2u64.to_be_bytes());
+    report.extend_from_slice(&1u32.to_be_bytes());
+    report.extend_from_slice(&0u64.to_be_bytes());
+    report.extend_from_slice(&[9; 32]);
+    report.extend_from_slice(&1u32.to_be_bytes());
+    report.extend_from_slice(&1u32.to_be_bytes());
+    report.extend_from_slice(&[25; 16]);
+    report.extend_from_slice(&[1, 1, 1]);
+    let report_bytes = super::super::codec::sign(report, &signer).expect("signed restore report");
+    BackupRestoreReport::verify(&report_bytes, &identity, signer.identity())
+        .expect("valid restore report");
     let registry_bytes = generation.signed_bytes(&signer).expect("signed registry");
     Generation::verify(&registry_bytes, &identity, signer.identity()).expect("valid registry");
-    for (kind, bytes) in [(0, manifest_bytes), (1, registry_bytes), (2, overlay_bytes)] {
+    for (kind, bytes) in [
+        (0, manifest_bytes),
+        (1, registry_bytes),
+        (2, overlay_bytes),
+        (3, tombstone_bytes),
+        (4, report_bytes),
+    ] {
         let mut payload = super::super::codec::verify(&bytes, signer.identity())
             .expect("seed signature")
             .to_vec();
@@ -136,8 +169,12 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
             let _ = BackupManifest::verify(&mutated, &identity, signer.identity());
         } else if kind == 1 {
             let _ = Generation::verify(&mutated, &identity, signer.identity());
-        } else {
+        } else if kind == 2 {
             let _ = BackupEnvelopeOverlay::verify(&mutated, &identity, signer.identity());
+        } else if kind == 3 {
+            let _ = BackupPurgeTombstone::verify(&mutated, &identity, signer.identity());
+        } else {
+            let _ = BackupRestoreReport::verify(&mutated, &identity, signer.identity());
         }
         let mut corrupt = mutated;
         if let Some(byte) = corrupt.last_mut() {

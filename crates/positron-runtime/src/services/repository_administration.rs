@@ -2,6 +2,7 @@
 mod execution;
 mod open;
 pub(in crate::services) use open::open as open_repository;
+pub(crate) use open::open_for_recovery;
 mod policy_projection;
 mod wire;
 use super::{ServiceHandle, maintenance_api::MaintenanceServiceFailure};
@@ -153,7 +154,7 @@ fn require_operation(
     Ok(())
 }
 
-pub(super) fn repository_resources(
+pub(crate) fn repository_resources(
     kind: positron_governance::RepositoryProviderKind,
 ) -> positron_kernel::ResourceAmounts {
     let mut amounts = [131_072, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384];

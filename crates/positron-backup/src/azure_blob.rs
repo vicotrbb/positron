@@ -21,7 +21,7 @@ pub struct AzureBlobRepository {
     identity: RepositoryIdentity,
     runtime: NativeAzureRepositoryRuntime,
     resources: Arc<NativeAwsResources>,
-    upload_authenticator: positron_kernel::RepositoryUploadAuthenticator,
+    upload_authenticator: Option<positron_kernel::RepositoryUploadAuthenticator>,
     active: AtomicBool,
     listing: std::sync::Mutex<crate::listing::native_cursor::State>,
 }
@@ -32,6 +32,14 @@ impl Drop for Operation<'_> {
     }
 }
 impl AzureBlobRepository {
+    fn upload_authenticator(
+        &self,
+    ) -> Result<&positron_kernel::RepositoryUploadAuthenticator, RepositoryFailure> {
+        self.upload_authenticator
+            .as_ref()
+            .ok_or(RepositoryFailure::PermissionDenied)
+    }
+
     pub const fn required_resources() -> ResourceAmounts {
         ResourceAmounts::new([256 * 1024 * 1024, 16, 16, 0, 0, 1, 10, 16, 1, 16, 0])
     }
@@ -56,9 +64,9 @@ impl AzureBlobRepository {
         target: &AzureBlobTarget,
         identity: &RepositoryIdentity,
         resources: &NativeAwsResources,
-        custody: &positron_kernel::RepositoryUploadAuthenticator,
+        custody: Option<&positron_kernel::RepositoryUploadAuthenticator>,
     ) -> Result<(), RepositoryFailure> {
-        if custody.instance_id() != identity.instance_id()
+        if custody.is_some_and(|authority| authority.instance_id() != identity.instance_id())
             || identity.provider_kind() != "azureBlob"
             || identity.prefix_commitment() != target.commitment()
         {
@@ -82,14 +90,29 @@ impl AzureBlobRepository {
         resources: Arc<NativeAwsResources>,
         custody: positron_kernel::RepositoryUploadAuthenticator,
     ) -> Result<Self, RepositoryFailure> {
-        Self::validate(&target, &identity, &resources, &custody)?;
+        Self::validate(&target, &identity, &resources, Some(&custody))?;
         let runtime = NativeAzureRepositoryRuntime::from_resources(
             resources.clone(),
             target.account(),
             target.container(),
         )
         .map_err(|_| RepositoryFailure::PermissionDenied)?;
-        Self::new(target, identity, resources, custody, runtime)
+        Self::new(target, identity, resources, Some(custody), runtime)
+    }
+    /// Opens native reads before SYSTEM recovery, without upload authority.
+    pub async fn read_only_from_admitted_resources(
+        target: AzureBlobTarget,
+        identity: RepositoryIdentity,
+        resources: Arc<NativeAwsResources>,
+    ) -> Result<Self, RepositoryFailure> {
+        Self::validate(&target, &identity, &resources, None)?;
+        let runtime = NativeAzureRepositoryRuntime::from_resources(
+            resources.clone(),
+            target.account(),
+            target.container(),
+        )
+        .map_err(|_| RepositoryFailure::PermissionDenied)?;
+        Self::new(target, identity, resources, None, runtime)
     }
     #[cfg(feature = "test-support")]
     pub fn from_local_simulator(
@@ -99,7 +122,26 @@ impl AzureBlobRepository {
         custody: positron_kernel::RepositoryUploadAuthenticator,
         address: std::net::SocketAddr,
     ) -> Result<Self, RepositoryFailure> {
-        Self::validate(&target, &identity, &resources, &custody)?;
+        Self::simulator(target, identity, resources, Some(custody), address)
+    }
+    #[cfg(feature = "test-support")]
+    pub fn read_only_from_local_simulator(
+        target: AzureBlobTarget,
+        identity: RepositoryIdentity,
+        resources: Arc<NativeAwsResources>,
+        address: std::net::SocketAddr,
+    ) -> Result<Self, RepositoryFailure> {
+        Self::simulator(target, identity, resources, None, address)
+    }
+    #[cfg(feature = "test-support")]
+    fn simulator(
+        target: AzureBlobTarget,
+        identity: RepositoryIdentity,
+        resources: Arc<NativeAwsResources>,
+        custody: Option<positron_kernel::RepositoryUploadAuthenticator>,
+        address: std::net::SocketAddr,
+    ) -> Result<Self, RepositoryFailure> {
+        Self::validate(&target, &identity, &resources, custody.as_ref())?;
         let runtime = NativeAzureRepositoryRuntime::from_local_simulator(
             resources.clone(),
             target.account(),
@@ -113,7 +155,7 @@ impl AzureBlobRepository {
         target: AzureBlobTarget,
         identity: RepositoryIdentity,
         resources: Arc<NativeAwsResources>,
-        upload_authenticator: positron_kernel::RepositoryUploadAuthenticator,
+        upload_authenticator: Option<positron_kernel::RepositoryUploadAuthenticator>,
         runtime: NativeAzureRepositoryRuntime,
     ) -> Result<Self, RepositoryFailure> {
         Ok(Self {
