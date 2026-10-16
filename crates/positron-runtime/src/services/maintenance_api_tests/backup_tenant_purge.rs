@@ -86,7 +86,6 @@ fn purged_default_can_register_a_clean_repository_and_back_up_after_cold_restart
     let publisher = publisher.with_registry_verification(&proof)?;
     assert_eq!(runtime.block_on(publisher.purge_tombstones())?.len(), 1);
     drop(publisher);
-    drop(proof);
     drop(resources);
     drop(repository);
     drop(runtime);
