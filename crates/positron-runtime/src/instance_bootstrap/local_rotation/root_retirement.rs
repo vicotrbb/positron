@@ -13,7 +13,7 @@ impl InitializedInstance {
         {
             return Err(LocalKeyRotationFailure::Custody);
         }
-        self.retire_root_predecessor(&session, None, true, None, None)
+        self.retire_root_predecessor(&session, None, true, None, None, None)
     }
     pub fn verify_key_provider_migration(
         &self,
@@ -22,7 +22,7 @@ impl InitializedInstance {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
         let basis = self.provider_retirement_proof(&session, configuration, None)?;
-        self.retire_root_predecessor(&session, Some(&basis), false, None, None)?;
+        self.retire_root_predecessor(&session, Some(&basis), false, None, None, None)?;
         self.key_provider_migration_status()
     }
     pub fn verify_local_key_rotation(
@@ -37,7 +37,7 @@ impl InitializedInstance {
         {
             return Err(LocalKeyRotationFailure::Custody);
         }
-        self.retire_root_predecessor(&session, None, false, None, None)?;
+        self.retire_root_predecessor(&session, None, false, None, None, None)?;
         self.local_key_rotation_status()
     }
     pub fn retire_key_provider_predecessor(
@@ -47,7 +47,7 @@ impl InitializedInstance {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
         let basis = self.provider_retirement_proof(&session, configuration, None)?;
-        self.retire_root_predecessor(&session, Some(&basis), true, None, None)
+        self.retire_root_predecessor(&session, Some(&basis), true, None, None, None)
     }
     pub(crate) fn verify_or_retire_key_provider_for_operation(
         &self,
@@ -55,6 +55,7 @@ impl InitializedInstance {
         context: RootMigrationContext<'_>,
         execution: &positron_kernel::MaintenanceExecution<'_>,
         retire: bool,
+        backup_proof: Option<&BackupRootRetirementProof>,
     ) -> Result<(), LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
@@ -110,6 +111,7 @@ impl InitializedInstance {
             retire,
             Some(context),
             Some((execution, binding)),
+            backup_proof,
         )
     }
     fn provider_retirement_proof(
@@ -177,6 +179,7 @@ impl InitializedInstance {
             &positron_kernel::MaintenanceExecution<'_>,
             positron_kernel::RootProviderMigrationBinding,
         )>,
+        backup_proof: Option<&BackupRootRetirementProof>,
     ) -> Result<(), LocalKeyRotationFailure> {
         let catalog = self.rotation_catalog_for_operation(session, context)?;
         let mut basis = catalog
@@ -226,6 +229,13 @@ impl InitializedInstance {
         if BackupRepositoryInspection::from_authenticated_catalog(&basis)
             .map_err(|_| LocalKeyRotationFailure::Authentication)?
             != BackupRepositoryInspection::NotConfigured
+            && !match backup_proof {
+                Some(proof) => {
+                    registration_digest(&basis)? == proof.registrations
+                        && <[u8; 32]>::from(Sha256::digest(&state.active.envelope)) == proof.target
+                },
+                None => false,
+            }
         {
             return Err(LocalKeyRotationFailure::RetirementRefused);
         }

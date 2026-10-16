@@ -9,10 +9,10 @@ use crate::{RepositoryFailure, RepositoryIdentity};
 pub use capture::BackupManifestBuilder;
 use positron_kernel::{BackupControlSigner, BootstrapIntegrityIdentity};
 pub use registry::{
-    BackupCleanupPlan, BackupCleanupProgress, BackupCleanupReason, BackupKeyEnvelope,
-    BackupListCursor, BackupPublication, BackupPublicationCheck, BackupPublisher, BackupReceipt,
-    BackupRegistryVerification, BackupSnapshotPage, BackupSnapshotVerification,
-    BackupVerificationReport,
+    BackupCleanupPlan, BackupCleanupProgress, BackupCleanupReason, BackupEnvelopeOverlay,
+    BackupKeyEnvelope, BackupListCursor, BackupPublication, BackupPublicationCheck,
+    BackupPublisher, BackupReceipt, BackupRegistryVerification, BackupSnapshotPage,
+    BackupSnapshotVerification, BackupVerificationReport,
 };
 pub use transfer::{BackupObjectVerification, BackupSource, BackupTransfer};
 

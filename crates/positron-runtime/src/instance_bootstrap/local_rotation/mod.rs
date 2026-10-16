@@ -54,6 +54,8 @@ impl std::ops::DerefMut for RootRotationCatalog<'_> {
         &mut self.catalog
     }
 }
+mod backup_envelopes;
+pub(crate) use backup_envelopes::{BackupRootRetirementProof, registration_digest};
 mod cutover;
 mod provider_migration;
 pub use provider_migration::KeyProviderMigrationStatus;

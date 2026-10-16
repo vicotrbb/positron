@@ -30,6 +30,7 @@ impl BackupPublisher<'_> {
             reservations: Vec::new(),
             claims: Vec::new(),
             keys: Vec::new(),
+            overlays: Vec::new(),
         });
         let mut referenced = manifest
             .objects

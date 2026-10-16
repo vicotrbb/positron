@@ -1,4 +1,5 @@
 //! Admission binds the authenticated requester before the maintenance dispatch.
+mod backup_envelopes;
 mod execution;
 use super::{
     ServiceHandle,

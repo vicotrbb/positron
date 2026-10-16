@@ -539,3 +539,6 @@ fn backup_inspection_proof(
 
 #[path = "backup_verification_http.rs"]
 mod verification_http;
+
+#[path = "backup_envelope_migration.rs"]
+mod envelope_migration;

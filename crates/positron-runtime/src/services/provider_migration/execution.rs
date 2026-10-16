@@ -61,6 +61,7 @@ pub(in crate::services) fn recover_accepted_task(
 pub(in crate::services) fn complete(
     services: &ServiceHandle,
     execution: &positron_kernel::MaintenanceExecution<'_>,
+    cancellation: Option<&crate::TaskCancellation>,
 ) -> Result<bool, crate::ServiceFailure> {
     use crate::ServiceFailure;
     use positron_governance::{DurableOperationPhase, DurableOperationStatus};
@@ -175,6 +176,47 @@ pub(in crate::services) fn complete(
         operation: id,
         catalog_gate: &services.catalog_operation,
     };
+    let backup_proof = if matches!(
+        parameters.action(),
+        KeyProviderMigrationAction::Verify | KeyProviderMigrationAction::Retire
+    ) {
+        match super::backup_envelopes::step(
+            services,
+            operation,
+            actor,
+            configuration.as_ref(),
+            cancellation,
+        ) {
+            Ok(Some(proof)) => Some(proof),
+            Ok(None) => return Ok(false),
+            Err(ServiceFailure::BackupRepositoryRejected) => {
+                let _gate = services.catalog_operation()?;
+                let catalog = services
+                    .open_maintenance_catalog()
+                    .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+                DurableOperationAdministration::fail_key_provider_migration(
+                    &catalog,
+                    actor,
+                    id,
+                    services
+                        .maintenance_status_now()
+                        .map_err(|_| ServiceFailure::StorageUnavailable)?,
+                )
+                .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+                execution
+                    .complete_and_persist(
+                        services.instance.maintenance_coordinator(),
+                        &catalog,
+                        false,
+                    )
+                    .map_err(crate::services::maintenance::map_failure)?;
+                return Ok(true);
+            },
+            Err(failure) => return Err(failure),
+        }
+    } else {
+        None
+    };
     let instance = &services.instance;
     let mut retirement_refused = false;
     let phase_result = (|| -> Result<(), ServiceFailure> {
@@ -227,6 +269,7 @@ pub(in crate::services) fn complete(
                     context,
                     execution,
                     parameters.action() == KeyProviderMigrationAction::Retire,
+                    backup_proof.as_ref(),
                 );
                 retirement_refused = matches!(
                     result,

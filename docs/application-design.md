@@ -1029,6 +1029,16 @@ immutable encrypted objects, publishes signed repository control state, and
 reports success only after complete verification and independent key-recovery
 readiness.
 
+Root-provider migration adds signed Backup Envelope Overlays through the same
+Registry owner. Each overlay binds one retained snapshot and its original key
+context to the verified source and destination SYSTEM envelopes. Immutable
+snapshot ciphertext and tenant envelopes are retained unchanged. Online Verify
+and Retire operations recover every retained key inventory, reconcile signed
+Registry CAS publication with the Catalog registration and operation audit, and
+refuse retirement unless every managed Repository has the target recovery path.
+Interrupted and cancelled work retains committed overlays; retry discovers them
+from the Registry. Offline retirement cannot substitute for this live proof.
+
 Restore opens only an empty offline target, verifies the current registry chain
 and snapshot, applies Purge Tombstones, and atomically publishes the recovered
 instance. It has no merge or in-place overwrite path.

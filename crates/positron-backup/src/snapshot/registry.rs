@@ -6,6 +6,9 @@ mod codec;
 mod expiry;
 use expiry::DeletionClaim;
 pub use expiry::{BackupCleanupPlan, BackupCleanupProgress, BackupCleanupReason};
+mod overlay;
+pub use overlay::BackupEnvelopeOverlay;
+use overlay::OverlayReference;
 mod listing;
 mod publication;
 mod snapshot_verification;
@@ -161,6 +164,7 @@ struct Generation {
     reservations: Vec<BackupReceipt>,
     claims: Vec<DeletionClaim>,
     keys: Vec<KeyReference>,
+    overlays: Vec<OverlayReference>,
 }
 /// Deep Backup workflow boundary; Repository provider calls stay internal.
 pub struct BackupPublisher<'a> {

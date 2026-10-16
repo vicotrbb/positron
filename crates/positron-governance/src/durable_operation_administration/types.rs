@@ -1620,6 +1620,18 @@ impl DurableOperation {
         if self.backup_parameters.is_some() || self.backup_evidence.is_some() {
             return false;
         }
+        let root_overlay_boundary = self.kind() == DurableOperationKind::KeyProviderMigration
+            && self.phase == DurableOperationPhase::Draining
+            && self.boundary == DurableOperationBoundary::BackupRegistryPublished
+            && self
+                .key_provider_migration_parameters
+                .is_some_and(|parameters| {
+                    matches!(
+                        parameters.action(),
+                        super::KeyProviderMigrationAction::Verify
+                            | super::KeyProviderMigrationAction::Retire
+                    )
+                });
         let active_checkpoint = match self.phase {
             DurableOperationPhase::Preflight => {
                 Some((10, DurableOperationCancellation::AllowedBeforeDrain))
@@ -1648,7 +1660,8 @@ impl DurableOperation {
                     self.progress_percent == progress
                         && self.retry == DurableOperationRetry::InspectByOperationId
                         && self.cancellation == cancellation
-                        && self.boundary == DurableOperationBoundary::NotCrossed
+                        && (self.boundary == DurableOperationBoundary::NotCrossed
+                            || root_overlay_boundary)
                         && self.terminal_error.is_none()
                         && self.cancellation_idempotency.is_none()
                         && self.completed_at_unix_seconds.is_none()
@@ -1670,7 +1683,8 @@ impl DurableOperation {
                         self.progress_percent == progress
                             && self.retry == DurableOperationRetry::Never
                             && self.cancellation == cancellation
-                            && self.boundary == DurableOperationBoundary::NotCrossed
+                            && (self.boundary == DurableOperationBoundary::NotCrossed
+                                || root_overlay_boundary)
                     });
                 let failed_after_query_manifest = self.request.kind
                     == DurableOperationKind::QueryExport

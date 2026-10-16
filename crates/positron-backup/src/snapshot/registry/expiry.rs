@@ -469,7 +469,7 @@ impl BackupPublisher<'_> {
         generation.previous = previous.ok_or(RepositoryFailure::CorruptState)?;
         self.publish_generation(version, &generation).await
     }
-    async fn read_registered_manifest(
+    pub(super) async fn read_registered_manifest(
         &self,
         receipt: BackupReceipt,
     ) -> Result<BackupManifest, RepositoryFailure> {

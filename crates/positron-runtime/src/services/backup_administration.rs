@@ -1,6 +1,6 @@
 //! Runtime composes authenticated Backup commands with existing durable owners.
 mod execution;
-mod registered;
+pub(in crate::services) mod registered;
 mod verification;
 mod wire;
 use super::{ServiceFailure, ServiceHandle, maintenance_api::MaintenanceServiceFailure};
