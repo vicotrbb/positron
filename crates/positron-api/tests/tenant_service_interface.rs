@@ -66,10 +66,10 @@ fn tenant_list_pages_have_a_rendered_response_bound() {
         tenant: "22222222-2222-2222-2222-222222222222".to_owned(),
         slug: "a".repeat(63),
         // This permitted 128-byte value combines UTF-8 and JSON escaping.
-        display_name: format!("{}😀", "\0".repeat(124)),
-        retention_seconds: u64::MAX,
-        display_generation: u64::MAX,
-        retention_generation: u64::MAX,
+        display_name: Some(format!("{}😀", "\0".repeat(124))),
+        retention_seconds: Some(u64::MAX),
+        display_generation: Some(u64::MAX),
+        retention_generation: Some(u64::MAX),
         lifecycle: TenantLifecycleState::Suspended,
     };
     let page = TenantListResponse {
@@ -202,4 +202,15 @@ fn tenant_service_client_maps_the_published_display_generation_conflict()
     );
     server.join().map_err(|_| "server panicked")??;
     Ok(())
+}
+
+#[test]
+fn purged_tenant_descriptor_reserves_identity_without_retaining_profile() {
+    let descriptor = TenantDescriptor::decode(
+        br#"{"tenant":"22222222-2222-2222-2222-222222222222","slug":"acme-observability","lifecycle":"purged"}"#,
+    ).expect("identity-only terminal descriptor");
+    assert!(descriptor.display_name.is_none());
+    assert!(descriptor.retention_seconds.is_none());
+    assert!(TenantDescriptor::decode(br#"{"tenant":"22222222-2222-2222-2222-222222222222","slug":"acme-observability","lifecycle":"active"}"#).is_err());
+    assert!(TenantDescriptor::decode(br#"{"tenant":"22222222-2222-2222-2222-222222222222","slug":"acme-observability","display_name":"Acme","retention_seconds":1,"display_generation":1,"retention_generation":1,"lifecycle":"purged"}"#).is_err());
 }

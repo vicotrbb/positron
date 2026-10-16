@@ -160,10 +160,14 @@ fn descriptor(inspection: &positron_governance::TenantInspection) -> TenantDescr
     TenantDescriptor {
         tenant: inspection.tenant_id().to_canonical_text(),
         slug: inspection.slug().to_owned(),
-        display_name: inspection.display_name().to_owned(),
+        display_name: inspection.display_name().map(str::to_owned),
         retention_seconds: inspection.retention_seconds(),
-        display_generation: inspection.display_generation().get(),
-        retention_generation: inspection.retention_generation().get(),
+        display_generation: inspection
+            .display_generation()
+            .map(positron_governance::ResourceGeneration::get),
+        retention_generation: inspection
+            .retention_generation()
+            .map(positron_governance::ResourceGeneration::get),
         lifecycle: lifecycle(inspection.lifecycle()),
     }
 }

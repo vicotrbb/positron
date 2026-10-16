@@ -35,6 +35,7 @@ mod restore_cli;
 mod support_bundle;
 mod tenant_alias_cli;
 mod tenant_lifecycle;
+mod tenant_purge_cli;
 mod tenant_quotas;
 mod tenant_retention;
 mod tenant_service_cli;
@@ -110,6 +111,7 @@ pub fn run_native(
     {
         arguments.next();
         return match arguments.next().as_deref() {
+            Some("purge") => tenant_purge_cli::run(arguments),
             Some("lifecycle") => tenant_lifecycle::run(arguments),
             Some("alias") => tenant_alias_cli::run(arguments),
             Some("retention") => tenant_retention::run(arguments),

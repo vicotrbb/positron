@@ -7,12 +7,27 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     thread,
     time::Duration,
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+#[derive(Clone, Default)]
+pub struct DelayedPut {
+    pub target: Arc<Mutex<Option<String>>>,
+    pub waiting: Arc<AtomicBool>,
+    pub release: Arc<AtomicBool>,
+    pub status: Arc<AtomicU16>,
+}
+struct PendingPut {
+    stream: TcpStream,
+    method: String,
+    path: String,
+    query: BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
+    bytes: Vec<u8>,
+}
 #[derive(Clone)]
 struct Object {
     generation: u64,
@@ -26,6 +41,7 @@ struct Session {
 }
 #[derive(Default)]
 struct State {
+    delayed: Option<PendingPut>,
     generation: u64,
     objects: BTreeMap<String, Vec<Object>>,
     sessions: BTreeMap<String, Session>,
@@ -33,6 +49,8 @@ struct State {
 pub type Race = Arc<Mutex<Option<(String, String)>>>;
 pub type Replies = Arc<Mutex<VecDeque<(String, u16, String, Value)>>>;
 pub struct Server {
+    #[allow(dead_code)] // Optional concurrency hook used by provider conformance tests.
+    pub delayed: DelayedPut,
     pub replies: Replies,
     pub race: Race,
     pub address: SocketAddr,
@@ -50,17 +68,39 @@ impl Server {
         let injected = replies.clone();
         let race: Race = Default::default();
         let interleaving = race.clone();
+        let delayed = DelayedPut::default();
+        let delay_control = delayed.clone();
         let worker = thread::spawn(move || {
             let mut state = State::default();
             let mut count = 0;
             while !stopping.load(Ordering::Acquire) {
+                if delay_control.release.load(Ordering::Acquire)
+                    && let Some(mut pending) = state.delayed.take()
+                {
+                    let result = dispatch(
+                        &mut state,
+                        &pending.method,
+                        &pending.path,
+                        &pending.query,
+                        &pending.headers,
+                        &pending.bytes,
+                    )?;
+                    delay_control.status.store(result.0, Ordering::Release);
+                    let (status, extra, reply) = (result.0, result.1, result.2);
+                    write!(
+                        pending.stream,
+                        "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
+                        reply.len()
+                    )?;
+                    pending.stream.write_all(&reply)?;
+                }
                 match listener.accept() {
                     Ok((stream, _)) => {
                         count += 1;
                         if count > 10000 {
                             return Err("request bound".into());
                         }
-                        serve(stream, &mut state, &injected, &interleaving)?;
+                        serve(stream, &mut state, &injected, &interleaving, &delay_control)?;
                     },
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1))
@@ -71,6 +111,7 @@ impl Server {
             Ok(())
         });
         Ok(Self {
+            delayed,
             address,
             replies,
             race,
@@ -108,7 +149,13 @@ fn decode(input: &str) -> Result<String> {
 fn metadata(key: &str, object: &Object) -> Value {
     json!({"name":key, "generation":object.generation.to_string(), "metageneration":"1", "size":object.bytes.len().to_string(), "crc32c":STANDARD.encode(crc32c::crc32c(&object.bytes).to_be_bytes())})
 }
-fn serve(mut stream: TcpStream, state: &mut State, injected: &Replies, race: &Race) -> Result<()> {
+fn serve(
+    mut stream: TcpStream,
+    state: &mut State,
+    injected: &Replies,
+    race: &Race,
+    delayed: &DelayedPut,
+) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -164,6 +211,31 @@ fn serve(mut stream: TcpStream, state: &mut State, injected: &Replies, race: &Ra
         .map(|(k, v)| Ok((k.to_owned(), decode(v)?)))
         .collect::<Result<_>>()?;
     let body = raw.get(end..end + length).ok_or("body")?;
+    let should_delay = {
+        let mut target = delayed.target.lock().map_err(|_| "fixture delayed lock")?;
+        if target.as_deref() == Some(url) {
+            target.take();
+            true
+        } else {
+            false
+        }
+    };
+    if should_delay {
+        if state.delayed.is_some() {
+            return Err("one delayed request bound".into());
+        }
+        state.delayed = Some(PendingPut {
+            stream,
+            method: method.into(),
+            path: path.into(),
+            query,
+            headers,
+            bytes: body.to_vec(),
+        });
+        delayed.waiting.store(true, Ordering::Release);
+        return Ok(());
+    }
+
     let overridden = {
         let mut replies = injected.lock().map_err(|_| "fixture reply lock")?;
         if replies

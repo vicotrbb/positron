@@ -269,10 +269,10 @@ message TenantListRequest {
 message TenantDescriptor {
   string tenant = 1;
   string slug = 2;
-  string display_name = 3;
-  uint64 retention_seconds = 4;
-  uint64 display_generation = 5;
-  uint64 retention_generation = 6;
+  optional string display_name = 3;
+  optional uint64 retention_seconds = 4;
+  optional uint64 display_generation = 5;
+  optional uint64 retention_generation = 6;
   TenantLifecycleTarget lifecycle = 7;
 }
 
@@ -888,4 +888,23 @@ message BackupRetentionReceipt {
   uint32 deleted_objects = 4;
   uint32 already_absent_objects = 5;
   uint32 retained_shared_objects = 6;
+}
+
+// Irreversible whole-tenant purge within registered managed repositories.
+service TenantPurgeService {
+  rpc Manage(TenantPurgeRequest) returns (TenantPurgeResponse);
+}
+message TenantPurgeRequest {
+  string action = 1;
+  optional string tenant_id = 2;
+  optional string confirmation_slug = 3;
+  optional uint64 expected_catalog_generation = 4;
+  optional uint64 expected_lifecycle_generation = 5;
+  optional string idempotency_key = 6;
+  optional string operation_id = 7;
+}
+message TenantPurgeResponse {
+  uint64 catalog_generation = 1;
+  optional ProviderMigrationOperation operation = 2;
+  string managed_scope = 3;
 }

@@ -10,7 +10,7 @@ impl AwsS3Repository {
         proof: &Proof,
     ) -> Result<(), RepositoryFailure> {
         let max = match proof {
-            Proof::Object(_) => MAX_OBJECT_BYTES,
+            Proof::Object(_) | Proof::Tenant(_, _) => MAX_OBJECT_BYTES,
             Proof::Head => (MAX_REGISTRY_HEAD_BYTES + 40) as u64,
             Proof::Upload(_) => MAX_OBJECT_BYTES + 65536,
         };
@@ -41,6 +41,13 @@ impl AwsS3Repository {
         let bytes = crate::aws_s3::http::read_bytes(response.body, length, max).await?;
         match proof {
             Proof::Object(id) => validate_object(*id, &bytes),
+            Proof::Tenant(id, fence) => {
+                if bytes == fence.bytes() {
+                    crate::TenantKeyPurgeFence::verify(&bytes, &self.identity, *id).map(|_| ())
+                } else {
+                    validate_object(*id, &bytes)
+                }
+            },
             Proof::Head => RegistryHead::decode_frame(&bytes).map(|_| ()),
             Proof::Upload(id) => {
                 Record::inspect_owned(&bytes, self.target.commitment(), *id).map(|_| ())

@@ -4,12 +4,23 @@ pub(super) mod native_authority;
 use positron_kernel::*;
 use std::sync::Arc;
 /// Keeps the admitted task and authority alive for the entire test operation.
+#[allow(dead_code)]
 pub async fn admitted<F, Fut>(memory_bytes: u64, case: F) -> Result<(), Box<dyn std::error::Error>>
 where
     F: FnOnce(Arc<NativeAwsResources>) -> Fut,
     Fut: Future<Output = Result<(), Box<dyn std::error::Error>>>,
 {
     let peak = ResourceAmounts::new([memory_bytes, 1, 1, 0, 1, 0, 1, 1, 1, 8, 16384]);
+    admitted_with_peak(peak, case).await
+}
+pub async fn admitted_with_peak<F, Fut>(
+    peak: ResourceAmounts,
+    case: F,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnOnce(Arc<NativeAwsResources>) -> Fut,
+    Fut: Future<Output = Result<(), Box<dyn std::error::Error>>>,
+{
     let directory = TemporaryDirectory::new()?;
     let authority = native_authority::authority(directory.path(), peak)?;
     let instance = InstanceId::new([2; 16])?;

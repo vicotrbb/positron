@@ -375,6 +375,44 @@ impl<'a> BackupPublisher<'a> {
         }
         Ok(generation)
     }
+    pub(super) fn adopt_purge_head(
+        &self,
+        initial: [u8; 32],
+        previous: [u8; 32],
+        generation: [u8; 32],
+        version: [u8; 32],
+        number: u64,
+    ) -> Result<(), RepositoryFailure> {
+        let mut known = self
+            .known_head
+            .lock()
+            .map_err(|_| RepositoryFailure::CorruptState)?;
+        if known.is_some_and(|head| ![initial, previous, generation].contains(&head.generation)) {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        if let Some(state) = self.verification {
+            let mut cursor = state.get()?;
+            self.cursor_binding(cursor)?;
+            if cursor.stage != Stage::Complete
+                || ![initial, previous, generation].contains(&cursor.target)
+            {
+                return Err(RepositoryFailure::PreconditionFailed);
+            }
+            cursor.anchor = generation;
+            cursor.target = generation;
+            cursor.head = version;
+            cursor.next = [0; 32];
+            cursor.expected = 0;
+            cursor.number = number;
+            cursor.count = 0;
+            state.set(cursor)?;
+        }
+        *known = (generation != [0; 32]).then_some(VerifiedHead {
+            version: ObjectVersion::from_checksum(version),
+            generation,
+        });
+        Ok(())
+    }
     pub(super) fn retain_successor(
         &self,
         head: VerifiedHead,

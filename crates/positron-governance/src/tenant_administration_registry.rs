@@ -79,10 +79,10 @@ impl TenantInspectionPage {
 pub struct TenantInspection {
     tenant: TenantId,
     slug: TenantSlug,
-    display_name: String,
-    retention_seconds: u64,
-    display_generation: ResourceGeneration,
-    retention_generation: ResourceGeneration,
+    display_name: Option<String>,
+    retention_seconds: Option<u64>,
+    display_generation: Option<ResourceGeneration>,
+    retention_generation: Option<ResourceGeneration>,
     lifecycle: TenantLifecycleState,
 }
 
@@ -98,22 +98,22 @@ impl TenantInspection {
     }
 
     #[must_use]
-    pub fn display_name(&self) -> &str {
-        &self.display_name
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
     }
 
     #[must_use]
-    pub const fn retention_seconds(&self) -> u64 {
+    pub const fn retention_seconds(&self) -> Option<u64> {
         self.retention_seconds
     }
 
     #[must_use]
-    pub const fn display_generation(&self) -> ResourceGeneration {
+    pub const fn display_generation(&self) -> Option<ResourceGeneration> {
         self.display_generation
     }
 
     #[must_use]
-    pub const fn retention_generation(&self) -> ResourceGeneration {
+    pub const fn retention_generation(&self) -> Option<ResourceGeneration> {
         self.retention_generation
     }
 
@@ -287,32 +287,10 @@ impl TenantAdministration {
     pub(crate) fn registered_tenant_lifecycles(
         snapshot: &CatalogSnapshot,
     ) -> Result<Vec<(TenantId, TenantLifecycleState)>, TenantAdministrationFailure> {
-        let registered = Self::registered_tenant_ids(snapshot)?;
-        let (_, governance) = snapshot.governance_object().map_err(map_catalog)?;
-        let mut lifecycles = vec![(governance.tenant(), governance.lifecycle())];
-        for identity in snapshot.object_identities() {
-            let bytes = snapshot
-                .object(identity)
-                .map_err(map_catalog)?
-                .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
-            if !is_tenant_record(bytes) {
-                continue;
-            }
-            let record = tenant_record_metadata(bytes)?;
-            if record.tenant == governance.tenant()
-                || !registered.contains(&record.tenant)
-                || lifecycles
-                    .iter()
-                    .any(|(tenant, _)| *tenant == record.tenant)
-            {
-                return Err(TenantAdministrationFailure::PersistenceUnavailable);
-            }
-            lifecycles.push((record.tenant, record.lifecycle));
-        }
-        if lifecycles.len() != registered.len() {
-            return Err(TenantAdministrationFailure::PersistenceUnavailable);
-        }
-        Ok(lifecycles)
+        Ok(Self::list(snapshot)?
+            .into_iter()
+            .map(|inspection| (inspection.tenant_id(), inspection.lifecycle()))
+            .collect())
     }
 
     /// Reconstructs only the non-default tenant envelopes whose immutable
@@ -340,7 +318,25 @@ impl TenantAdministration {
             }
             envelopes.push((record.tenant, record.envelope));
         }
-        if envelopes.len().checked_add(1) != Some(tenants.len()) {
+        let mut terminal = 0usize;
+        for id in snapshot.object_identities() {
+            if super::tenant_purge_record::decode(
+                snapshot
+                    .object(id)
+                    .map_err(map_catalog)?
+                    .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?,
+            )?
+            .is_some()
+            {
+                terminal += 1;
+            }
+        }
+        if envelopes
+            .len()
+            .checked_add(1)
+            .and_then(|n| n.checked_add(terminal))
+            != Some(tenants.len())
+        {
             return Err(TenantAdministrationFailure::PersistenceUnavailable);
         }
         Ok(envelopes)
@@ -354,11 +350,17 @@ fn tenant_inspections(
     let default = TenantInspection {
         tenant: governance.tenant(),
         slug: governance.tenant_slug(),
-        display_name: governance.display_name().to_owned(),
+        display_name: governance.display_name().map(str::to_owned),
         retention_seconds: governance.retention_seconds(),
-        display_generation: ResourceGeneration::new(governance.display_generation())
+        display_generation: governance
+            .display_generation()
+            .map(ResourceGeneration::new)
+            .transpose()
             .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?,
-        retention_generation: ResourceGeneration::new(governance.retention_generation())
+        retention_generation: governance
+            .retention_generation()
+            .map(ResourceGeneration::new)
+            .transpose()
             .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?,
         lifecycle: governance.lifecycle(),
     };
@@ -376,6 +378,7 @@ fn tenant_inspections(
 
     let mut registry = None;
     let mut records = BTreeMap::new();
+    let mut terminal = BTreeMap::new();
     for identity in snapshot.object_identities() {
         let bytes = snapshot
             .object(identity)
@@ -386,6 +389,10 @@ fn tenant_inspections(
                 return Err(TenantAdministrationFailure::PersistenceUnavailable);
             }
             registry = Some(decode_registry(bytes)?);
+        } else if let Some(record) = super::tenant_purge_record::decode(bytes)? {
+            if record.tenant == default.tenant || terminal.insert(record.tenant, record).is_some() {
+                return Err(TenantAdministrationFailure::PersistenceUnavailable);
+            }
         } else if is_tenant_record(bytes) {
             let record = tenant_record_metadata(bytes)?;
             if record.tenant == default.tenant || records.insert(record.tenant, record).is_some() {
@@ -397,7 +404,11 @@ fn tenant_inspections(
     let registered = registry.tenants.iter().copied().collect::<BTreeSet<_>>();
     if registered.len() != registry.tenants.len()
         || !registered.contains(&default.tenant)
-        || records.len().checked_add(1) != Some(registered.len())
+        || records
+            .len()
+            .checked_add(terminal.len())
+            .and_then(|n| n.checked_add(1))
+            != Some(registered.len())
         || records.keys().any(|tenant| !registered.contains(tenant))
     {
         return Err(TenantAdministrationFailure::PersistenceUnavailable);
@@ -411,6 +422,21 @@ fn tenant_inspections(
             inspections.push(default.clone());
             continue;
         }
+        if let Some(record) = terminal.remove(tenant) {
+            if records.contains_key(tenant) {
+                return Err(TenantAdministrationFailure::PersistenceUnavailable);
+            }
+            inspections.push(TenantInspection {
+                tenant: record.tenant,
+                slug: record.slug,
+                display_name: None,
+                retention_seconds: None,
+                display_generation: None,
+                retention_generation: None,
+                lifecycle: TenantLifecycleState::Purged,
+            });
+            continue;
+        }
         let record = records
             .remove(tenant)
             .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
@@ -418,14 +444,14 @@ fn tenant_inspections(
             tenant: record.tenant,
             slug: TenantSlug::parse_canonical(&record.slug)
                 .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?,
-            display_name: record.display_name,
-            retention_seconds: record.retention_seconds,
-            display_generation: record.display_generation,
-            retention_generation: record.retention_generation,
+            display_name: Some(record.display_name),
+            retention_seconds: Some(record.retention_seconds),
+            display_generation: Some(record.display_generation),
+            retention_generation: Some(record.retention_generation),
             lifecycle: record.lifecycle,
         });
     }
-    if !records.is_empty() {
+    if !records.is_empty() || !terminal.is_empty() {
         return Err(TenantAdministrationFailure::PersistenceUnavailable);
     }
     Ok((registry, inspections))

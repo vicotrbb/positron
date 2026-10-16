@@ -84,7 +84,9 @@ fn resource_sizing(max_registered_tenants: u16) -> Result<ResourceSizing, Bootst
     let durability = at_least(add(add(large, large)?, large)?, dual_scope_recovery);
     let retention = at_least(large, tenant_recovery);
     let compaction = at_least(uniform(3), dual_scope_recovery);
-    let purge = at_least(small, tenant_recovery);
+    // One purge holds its protected task grant while reading and deleting a
+    // bounded Repository control generation, independently of ordinary backups.
+    let purge = at_least(multiply(large, max_registered_tenants)?, tenant_recovery);
     // Repair capacity is shared by every registered tenant. One integrity
     // scrub can hold the complete bounded Catalog-recovery peak, so preserve
     // one such claim for each tenant that may be scheduled concurrently. The

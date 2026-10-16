@@ -146,6 +146,25 @@ impl BackupPublisher<'_> {
         self.publish_generation(version, &successor).await?;
         Ok(checksum)
     }
+    /// Removes every reachable tenant KEK envelope, including historical provider
+    /// versions. Callers must drain tenant key uploads before entering this
+    /// irreversible workflow. An error leaves the signed exclusion in force and
+    /// must keep the tenant purge pending. System-root overlays remain available
+    /// for other tenants; they contain no tenant KEK envelope.
+    pub async fn purge_tenant(
+        &self,
+        tombstone: &BackupPurgeTombstone,
+    ) -> Result<[u8; 32], RepositoryFailure> {
+        let request = Sha256::digest(tombstone.signed_bytes(self.identity, self.signer)?).into();
+        let mut state = self
+            .begin_tenant_purge(tombstone, tombstone.operation(), request)
+            .await?;
+        while !self.tenant_purge_step(&mut state).await? {}
+        state
+            .registry_generation()
+            .ok_or(RepositoryFailure::CorruptState)
+    }
+
     /// Reads only the authoritative head's permanent purge inventory.
     pub async fn purge_tombstones(&self) -> Result<Vec<BackupPurgeTombstone>, RepositoryFailure> {
         self.require_identity().await?;

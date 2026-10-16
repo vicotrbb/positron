@@ -264,10 +264,14 @@ impl TenantDisplayNameUpdateRequest {
 pub struct TenantDescriptor {
     pub tenant: String,
     pub slug: String,
-    pub display_name: String,
-    pub retention_seconds: u64,
-    pub display_generation: u64,
-    pub retention_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_generation: Option<u64>,
     pub lifecycle: TenantLifecycleState,
 }
 impl TenantDescriptor {
@@ -275,14 +279,20 @@ impl TenantDescriptor {
         decode_response(body)
     }
     pub fn validate(&self) -> Result<(), TenantServiceWireFailure> {
-        if identifier(&self.tenant)
-            && slug(&self.slug)
-            && !self.display_name.is_empty()
-            && self.display_name.len() <= 128
-            && self.retention_seconds != 0
-            && self.display_generation != 0
-            && self.retention_generation != 0
-        {
+        let profile = if self.lifecycle == TenantLifecycleState::Purged {
+            self.display_name.is_none()
+                && self.retention_seconds.is_none()
+                && self.display_generation.is_none()
+                && self.retention_generation.is_none()
+        } else {
+            self.display_name
+                .as_deref()
+                .is_some_and(|name| !name.is_empty() && name.len() <= 128)
+                && self.retention_seconds.is_some_and(|n| n != 0)
+                && self.display_generation.is_some_and(|n| n != 0)
+                && self.retention_generation.is_some_and(|n| n != 0)
+        };
+        if identifier(&self.tenant) && slug(&self.slug) && profile {
             Ok(())
         } else {
             Err(TenantServiceWireFailure)

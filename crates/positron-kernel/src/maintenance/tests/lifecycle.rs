@@ -368,3 +368,59 @@ fn a_repeated_urgent_scope_cannot_starve_an_unserved_tenant() {
         Some(second)
     );
 }
+
+#[test]
+fn global_catalog_purge_waits_for_reference_owners_and_releases_unrelated_work() {
+    for purge_first in [true, false] {
+        let coordinator = MaintenanceCoordinator::new();
+        let make = |id, class, scope| {
+            MaintenanceTask::with_contract(
+                MaintenanceTaskId::new([id; 16]).expect("id"),
+                class,
+                scope,
+                MaintenanceTrigger::Event,
+                MaintenancePreconditions::new(1, 1).expect("preconditions"),
+                Vec::new(),
+                Vec::new(),
+                ResourceAmounts::new([1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]),
+            )
+            .expect("task")
+        };
+        let purge = make(
+            110,
+            MaintenanceTaskClass::TenantPurge,
+            MaintenanceScope::tenant(TenantId::from_bytes([98; 16]).expect("purged tenant")),
+        );
+        let other = make(
+            111,
+            MaintenanceTaskClass::Compaction,
+            MaintenanceScope::tenant(TenantId::from_bytes([99; 16]).expect("unrelated tenant")),
+        );
+        let (first, second) = if purge_first {
+            (purge, other)
+        } else {
+            (other, purge)
+        };
+        coordinator.submit(first.clone()).expect("first");
+        assert_eq!(
+            coordinator.start_next(1, false).expect("dispatch"),
+            Some(first.clone())
+        );
+        coordinator.submit(second.clone()).expect("second");
+        assert_eq!(
+            coordinator
+                .start_next(2, false)
+                .expect("references exclude overlap"),
+            None
+        );
+        coordinator
+            .complete(first.identity(), true)
+            .expect("release");
+        assert_eq!(
+            coordinator
+                .start_next(3, false)
+                .expect("eventually dispatch"),
+            Some(second)
+        );
+    }
+}

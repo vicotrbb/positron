@@ -73,3 +73,49 @@ impl GoogleCloudStorageRepository {
         })
     }
 }
+
+impl GoogleCloudStorageRepository {
+    pub(super) async fn verify_control_inventory(
+        &self,
+        allowed: &[crate::ObjectId],
+        head: &[u8],
+    ) -> Result<(), RepositoryFailure> {
+        let _guard = self.enter()?;
+        self.read_identity().await?;
+        let mut inventory = crate::control_inventory::ControlInventory::new(allowed)?;
+        let page = self
+            .inventory(self.target.prefix(), None, 4, true, false)
+            .await?;
+        if page.next.is_some() {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        for item in &page.items {
+            let name = protocol::string(item, "name")?
+                .strip_prefix(self.target.prefix())
+                .ok_or(RepositoryFailure::PreconditionFailed)?;
+            inventory.observe(name)?;
+        }
+        inventory.finish()?;
+        let soft = self
+            .inventory(self.target.prefix(), None, 1, false, true)
+            .await?;
+        if !soft.items.is_empty() || soft.next.is_some() {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        for id in allowed {
+            if inventory.has_object(*id) {
+                self.read_object(*id).await?;
+            }
+        }
+        let actual = self
+            .read_head(crate::HeadSlot::registry())
+            .await?
+            .map(|(head, _)| head);
+        if actual.as_ref().is_some_and(|value| value.bytes() != head)
+            || inventory.has_head() && actual.is_none()
+        {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        Ok(())
+    }
+}

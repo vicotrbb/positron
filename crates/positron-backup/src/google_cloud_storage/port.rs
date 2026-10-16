@@ -3,6 +3,14 @@ use crate::*;
 
 #[async_trait::async_trait]
 impl Repository for GoogleCloudStorageRepository {
+    async fn verify_control_inventory(
+        &self,
+        allowed: &[ObjectId],
+        head: &[u8],
+        _pending: Option<&ImmutableObject>,
+    ) -> Result<(), RepositoryFailure> {
+        Self::verify_control_inventory(self, allowed, head).await
+    }
     async fn storage_policy(&self) -> Result<RepositoryPolicy, RepositoryFailure> {
         Self::storage_policy(self).await
     }
@@ -41,6 +49,13 @@ impl Repository for GoogleCloudStorageRepository {
     }
     async fn delete(&self, id: ObjectId) -> Result<DeleteOutcome, RepositoryFailure> {
         Self::delete(self, id).await
+    }
+    async fn delete_tenant_key(
+        &self,
+        id: ObjectId,
+        fence: &TenantKeyPurgeFence,
+    ) -> Result<DeleteOutcome, RepositoryFailure> {
+        Self::delete_tenant_key(self, id, fence).await
     }
     async fn registry_head_at(
         &self,

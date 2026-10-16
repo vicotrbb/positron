@@ -24,6 +24,15 @@ pub(crate) fn establish_catalog_authority_with_pool_units(
     repair_memory_bytes: u64,
     ordinary_unit: u64,
 ) -> Result<StorageKernelResourceAuthority, Box<dyn std::error::Error>> {
+    establish_catalog_authority_with_purge_pool(volume, repair_memory_bytes, ordinary_unit, false)
+}
+
+pub(super) fn establish_catalog_authority_with_purge_pool(
+    volume: OwnedPrimaryDataVolume,
+    repair_memory_bytes: u64,
+    ordinary_unit: u64,
+    large_purge: bool,
+) -> Result<StorageKernelResourceAuthority, Box<dyn std::error::Error>> {
     let cardinality = InventoryCardinalityLimits::new(1, 16)?;
     let large = ResourceAmounts::new([
         repair_memory_bytes,
@@ -41,7 +50,11 @@ pub(crate) fn establish_catalog_authority_with_pool_units(
     let small = uniform(1);
     let dual = uniform(2);
     let durability = add(add(large, large)?, large)?;
-    let recovery_capacity = add(add(add(durability, large)?, large)?, uniform(6))?;
+    let purge = if large_purge { large } else { small };
+    let recovery_capacity = add(
+        add(add(add(durability, large)?, large)?, uniform(5))?,
+        purge,
+    )?;
     let governed = add(recovery_capacity, uniform(16 * ordinary_unit))?;
     let raw = add(governed, cardinality.governor_bootstrap_overhead(1)?)?;
     let observed = ObservedResourceEnvironment::for_test(
@@ -72,7 +85,7 @@ pub(crate) fn establish_catalog_authority_with_pool_units(
         )?,
     )?;
     let recovery =
-        RecoveryPoolCapacities::new(durability, small, dual, small, large, small, small)?;
+        RecoveryPoolCapacities::new(durability, small, dual, purge, large, small, small)?;
     let configuration = ResourceGovernorConfiguration::new(inventory, policy, recovery)?;
     Ok(StorageKernelResourceAuthority::establish(
         volume,

@@ -21,7 +21,13 @@ async fn purge_tombstone_is_signed_permanent_and_exactly_retryable()
         let signer = custody.backup_control_signer(instance, &protected)?;
         let identity =
             RepositoryIdentity::local([1; 16], [2; 16], signer.identity().fingerprint(), &path)?;
-        let repository = LocalRepository::initialize(&path, identity.clone()).await?;
+        let repository = LocalRepository::initialize(&path, identity.clone())
+            .await?
+            .with_faults(vec![LocalFault::new(
+                LocalFaultPoint::AfterDeletion,
+                LocalFaultEffect::OutcomeUnknown,
+                0,
+            )])?;
         let publisher = BackupPublisher::new(&repository, &identity, &signer)
             .with_control_resources(&resources, 64 * 1024)?;
         let tombstone = BackupPurgeTombstone::new([3; 16], "default", [9; 16], 10)?;
@@ -64,7 +70,10 @@ async fn purge_tombstone_is_signed_permanent_and_exactly_retryable()
             publisher.record_purge_tombstone(&conflict).await,
             Err(RepositoryFailure::PreconditionFailed)
         );
-        let keys = vec![BackupKeyEnvelope::new([4; 16], 1, [4; 32], vec![5; 64])?];
+        let keys = vec![
+            BackupKeyEnvelope::new([4; 16], 1, [4; 32], vec![5; 64])?,
+            BackupKeyEnvelope::new([8; 16], 1, [8; 32], vec![9; 64])?,
+        ];
         let object = ImmutableObject::new(vec![6; 64])?;
         let manifest = BackupManifest::new(
             [5; 16],
@@ -84,12 +93,174 @@ async fn purge_tombstone_is_signed_permanent_and_exactly_retryable()
         publisher.reserve(&manifest, &keys).await?;
         let publication = publisher.publish(&manifest, &keys).await?;
         assert_eq!(publisher.purge_tombstones().await?, vec![tombstone.clone()]);
-        let generation = publication.registry_generation();
+        let verifier = BackupPublisher::new(&repository, &identity, &signer)
+            .with_trusted_generation(publication.registry_generation())?
+            .with_control_resources(&resources, 64 * 1024)?;
+        let mut proof = verifier
+            .begin_registry_verification([12; 16], [13; 32])
+            .await?;
+        while !proof.complete()? {
+            verifier.registry_verification_step(&mut proof).await?;
+        }
+        let publisher = BackupPublisher::new(&repository, &identity, &signer)
+            .with_trusted_generation(publication.registry_generation())?
+            .with_control_resources(&resources, 64 * 1024)?
+            .with_registry_verification(&proof)?;
+        let purged_key = BackupKeyEnvelope::new([4; 16], 1, [4; 32], vec![5; 64])?;
+        let mut envelope = b"POSBKE01".to_vec();
+        envelope.extend_from_slice(&purged_key.tenant());
+        envelope.extend_from_slice(&purged_key.epoch().to_be_bytes());
+        envelope.extend_from_slice(&purged_key.fingerprint());
+        envelope.extend_from_slice(&64_u32.to_be_bytes());
+        envelope.extend_from_slice(purged_key.protected());
+        let envelope_id = ImmutableObject::new(envelope)?.id();
+        let mut surviving_envelope = b"POSBKE01".to_vec();
+        surviving_envelope.extend_from_slice(&[8; 16]);
+        surviving_envelope.extend_from_slice(&1_u64.to_be_bytes());
+        surviving_envelope.extend_from_slice(&[8; 32]);
+        surviving_envelope.extend_from_slice(&64_u32.to_be_bytes());
+        surviving_envelope.extend_from_slice(&[9; 64]);
+        let surviving_id = ImmutableObject::new(surviving_envelope)?.id();
+        let purge = BackupPurgeTombstone::new([4; 16], "second", [11; 16], 12)?;
+        assert_eq!(
+            publisher.purge_tenant(&purge).await,
+            Err(RepositoryFailure::OutcomeUnknown)
+        );
+        assert_eq!(
+            publisher.purge_tombstones().await?,
+            vec![tombstone.clone(), purge.clone()]
+        );
+        let generation = publisher.purge_tenant(&purge).await?;
+        assert!(matches!(
+            repository.head(envelope_id).await,
+            Err(RepositoryFailure::NotFound)
+        ));
+        assert_eq!(publisher.purge_tenant(&purge).await?, generation);
+        assert_eq!(
+            publisher.reserve(&manifest, &keys).await,
+            Err(RepositoryFailure::PreconditionFailed)
+        );
+        assert!(repository.head(surviving_id).await.is_ok());
+        assert!(repository.head(publication.manifest()).await.is_ok());
+        assert_eq!(
+            publisher.prepare_key_step(&manifest, &keys, 0).await,
+            Err(RepositoryFailure::PreconditionFailed)
+        );
         let reopened = LocalRepository::attach(&path, &identity).await?;
         let cold = BackupPublisher::new(&reopened, &identity, &signer)
             .with_trusted_generation(generation)?
             .with_control_resources(&resources, 64 * 1024)?;
-        assert_eq!(cold.purge_tombstones().await?, vec![tombstone]);
+        assert_eq!(cold.purge_tombstones().await?, vec![tombstone, purge]);
+        assert!(matches!(
+            publisher
+                .begin_snapshot_restore_verification(
+                    manifest.snapshot_id(),
+                    [21; 16],
+                    [22; 32],
+                    &[],
+                )
+                .await,
+            Err(RepositoryFailure::IdentityMismatch)
+        ));
+        let zero_object = ImmutableObject::new(vec![42; 32])?;
+        let zero_manifest = BackupManifest::new(
+            [24; 16],
+            identity.clone(),
+            BackupCatalogIdentity::new(2, [25; 32], 2, 1, [26; 32])?,
+            BackupRetention::new(2, 3)?,
+            BackupPublisher::key_context(&[])?,
+            vec![BackupObject::new(
+                [26; 32],
+                32,
+                0,
+                zero_object.id().checksum(),
+                32,
+            )?],
+        )?;
+        repository.put_if_absent(zero_object).await?;
+        publisher.reserve(&zero_manifest, &[]).await?;
+        let zero_publication = publisher.publish(&zero_manifest, &[]).await?;
+        assert_eq!(
+            publisher.verify(zero_manifest.snapshot_id()).await?,
+            zero_manifest
+        );
+        assert!(
+            publisher
+                .begin_snapshot_restore_verification(
+                    zero_manifest.snapshot_id(),
+                    [28; 16],
+                    [29; 32],
+                    &[],
+                )
+                .await
+                .is_ok()
+        );
+
+        let pending_key = BackupKeyEnvelope::new([30; 16], 1, [31; 32], vec![32; 64])?;
+        let pending_manifest = BackupManifest::new(
+            [33; 16],
+            identity.clone(),
+            BackupCatalogIdentity::new(3, [34; 32], 2, 1, [26; 32])?,
+            BackupRetention::new(3, 4)?,
+            BackupPublisher::key_context(std::slice::from_ref(&pending_key))?,
+            zero_manifest.objects().to_vec(),
+        )?;
+        let interrupted = LocalRepository::attach(&path, &identity)
+            .await?
+            .with_faults(vec![LocalFault::new(
+                LocalFaultPoint::BeforeObjectPublication,
+                LocalFaultEffect::OutcomeUnknown,
+                2,
+            )])?;
+        let pending = BackupPublisher::new(&interrupted, &identity, &signer)
+            .with_trusted_generation(zero_publication.registry_generation())?
+            .with_control_resources(&resources, 64 * 1024)?;
+        pending
+            .reserve(&pending_manifest, std::slice::from_ref(&pending_key))
+            .await?;
+        assert_eq!(
+            pending
+                .prepare_key_step(&pending_manifest, std::slice::from_ref(&pending_key), 0)
+                .await,
+            Err(RepositoryFailure::OutcomeUnknown)
+        );
+        assert_eq!(
+            pending.verify(pending_manifest.snapshot_id()).await,
+            Err(RepositoryFailure::NotFound)
+        );
+        let mut pending_bytes = b"POSBKE01".to_vec();
+        pending_bytes.extend_from_slice(&[30; 16]);
+        pending_bytes.extend_from_slice(&1_u64.to_be_bytes());
+        pending_bytes.extend_from_slice(&[31; 32]);
+        pending_bytes.extend_from_slice(&64_u32.to_be_bytes());
+        pending_bytes.extend_from_slice(&[32; 64]);
+        let pending_id = ImmutableObject::new(pending_bytes)?.id();
+        assert!(matches!(
+            interrupted.head(pending_id).await,
+            Err(RepositoryFailure::NotFound)
+        ));
+        let staged = path.join(format!(
+            "p-o-{}",
+            pending_id
+                .checksum()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ));
+        assert!(staged.exists());
+        pending
+            .purge_tenant(&BackupPurgeTombstone::new(
+                [30; 16], "pending", [35; 16], 13,
+            )?)
+            .await?;
+        assert!(matches!(
+            interrupted.head(pending_id).await,
+            Err(RepositoryFailure::NotFound)
+        ));
+        assert!(
+            !staged.exists(),
+            "purge removes unpublished KEK staging bytes"
+        );
         Ok(())
     })
     .await

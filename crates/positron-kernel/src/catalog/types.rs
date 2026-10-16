@@ -253,6 +253,9 @@ pub struct CatalogObject {
 }
 
 impl CatalogObject {
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.plaintext
+    }
     pub fn new(plaintext: Vec<u8>) -> Result<Self, CatalogFailure> {
         if plaintext.is_empty() || plaintext.len() > MAX_CATALOG_OBJECT_BYTES {
             return Err(CatalogFailure::new(CatalogFailureCode::LimitExceeded));

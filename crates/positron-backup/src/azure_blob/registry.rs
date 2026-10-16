@@ -4,7 +4,7 @@ use super::{
 };
 use crate::*;
 impl AzureBlobRepository {
-    async fn read_head(
+    pub(super) async fn read_head(
         &self,
         slot: HeadSlot,
     ) -> Result<Option<(RegistryHead, String)>, RepositoryFailure> {

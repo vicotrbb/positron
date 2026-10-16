@@ -1150,3 +1150,35 @@ fn live_disk_headroom_tracks_observation_reservation_resize_and_release()
 }
 use super::resource_governor_test_support as resource_governor_support;
 use resource_governor_support::TestKernel;
+
+#[test]
+fn protected_tenant_purge_grants_authorize_repository_deletion_only_for_purge()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = tenant(0xa5)?;
+    let governor = establish(tenant, 100, 70)?;
+    let amounts = ResourceAmounts::only(ResourceDimension::MemoryBytes, 1)?;
+    let purge = positron_kernel::NativeAwsResources::new(
+        governor
+            .recovery()
+            .reserve(RecoveryWorkClaim::tenant(
+                tenant,
+                RecoveryWorkKind::Purge,
+                amounts,
+            )?)?
+            .transfer(),
+    );
+    assert!(purge.authorizes_repository_transport());
+    drop(purge);
+    let repair = positron_kernel::NativeAwsResources::new(
+        governor
+            .recovery()
+            .reserve(RecoveryWorkClaim::tenant(
+                tenant,
+                RecoveryWorkKind::Repair,
+                amounts,
+            )?)?
+            .transfer(),
+    );
+    assert!(!repair.authorizes_repository_transport());
+    Ok(())
+}

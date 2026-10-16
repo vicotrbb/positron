@@ -1,5 +1,5 @@
 {
-  "schema_digest": "e3cbde40c413fa9de1162051ac11edafe6a71a57cc0ad28a26f587bae52a2a17",
+  "schema_digest": "45230ec5ced4d227cb563a9c9da84460d0a3c2044dd834b28968a7dbcc5d865f",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -2885,6 +2885,106 @@
         "404": "source_unavailable",
         "409": "precondition_failed",
         "503": "administration_unavailable or capacity_unavailable"
+      }
+    },
+    {
+      "rpc": "positron.v1.TenantPurgeService/Manage",
+      "method": "POST",
+      "path": "/v1/tenant-purges:manage",
+      "request": "TenantPurgeRequest",
+      "response": "TenantPurgeResponse",
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "unknown_fields": "reject",
+      "request_fields": [
+        {
+          "proto": "action",
+          "json": "action",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "tenant_id",
+          "json": "tenant_id",
+          "type": "string",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "confirmation_slug",
+          "json": "confirmation_slug",
+          "type": "string",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "expected_catalog_generation",
+          "json": "expected_catalog_generation",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "expected_lifecycle_generation",
+          "json": "expected_lifecycle_generation",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 6,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "operation_id",
+          "json": "operation_id",
+          "type": "string",
+          "number": 7,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "response_fields": [
+        {
+          "proto": "catalog_generation",
+          "json": "catalog_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "operation",
+          "json": "operation",
+          "type": "ProviderMigrationOperation",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "managed_scope",
+          "json": "managed_scope",
+          "type": "string",
+          "number": 3,
+          "deprecated": false
+        }
+      ],
+      "responses": {
+        "200": "TenantPurgeResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
       }
     }
   ]

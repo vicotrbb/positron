@@ -106,7 +106,7 @@ pub(in super::super) fn verify(
             .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     let identity =
         Identity::open(&snapshot).map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
-    let tenants = TenantAdministration::registered_tenant_ids(&snapshot)
+    let tenants = TenantAdministration::restore_key_tenant_ids(&snapshot)
         .map_err(|_| crate::OfflineIntegrityFailure::CorruptState)?;
     let rewrap = positron_kernel::RootRewrapSession::admit(&authority)
         .map_err(|_| crate::OfflineIntegrityFailure::CapacityUnavailable)?;

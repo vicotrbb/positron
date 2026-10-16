@@ -37,6 +37,7 @@ mod schema_maintenance;
 mod segment_abandonment;
 pub(crate) mod tenant_aliases;
 pub(crate) mod tenant_lifecycle;
+mod tenant_purge;
 pub(crate) mod tenant_quotas;
 pub(crate) mod tenant_retention;
 mod tenant_rotation;

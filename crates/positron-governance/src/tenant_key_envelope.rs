@@ -90,7 +90,7 @@ impl TenantAdministration {
         keys: &[(TenantId, u64, [u8; 32])],
     ) -> Result<Vec<positron_kernel::BackupCatalogObject>, TenantAdministrationFailure> {
         use crate::tenant_quota_record::{is_tenant_record, tenant_record_metadata};
-        let registered = Self::registered_tenant_ids(snapshot)?;
+        let registered = Self::restore_key_tenant_ids(snapshot)?;
         if keys.len() != registered.len()
             || keys.iter().any(|(tenant, epoch, fingerprint)| {
                 !registered.contains(tenant) || *epoch == 0 || *fingerprint == [0; 32]
@@ -129,12 +129,20 @@ impl TenantAdministration {
                 .object(identity)
                 .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?
                 .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
-            let bytes = if identity == governance_id {
+            let bytes = if identity == governance_id && registered.contains(&governance.tenant()) {
                 governance
                     .with_tenant_key_envelope(&marker(governance.tenant())?)
                     .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?
             } else if is_tenant_record(original) {
                 let record = tenant_record_metadata(original)?;
+                if !registered.contains(&record.tenant) {
+                    objects.push(positron_kernel::BackupCatalogObject::new(
+                        identity,
+                        CatalogObject::new(original.to_vec())
+                            .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?,
+                    ));
+                    continue;
+                }
                 let prefix = original
                     .len()
                     .checked_sub(record.envelope.len())

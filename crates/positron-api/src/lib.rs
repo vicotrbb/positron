@@ -28,6 +28,7 @@ pub mod tenant_aliases;
 /// V1 tenant retention preview and confirmed update wire types.
 pub mod tenant_retention;
 
+pub mod tenant_purge;
 /// V1 system tenant-registry administration wire types.
 pub mod tenant_service;
 

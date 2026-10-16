@@ -166,6 +166,14 @@ pub(crate) const SERVICES: &[ServiceSpec] = &[
         }],
     },
     ServiceSpec {
+        name: "TenantPurgeService",
+        methods: &[MethodSpec {
+            name: "Manage",
+            input: ".positron.v1.TenantPurgeRequest",
+            output: ".positron.v1.TenantPurgeResponse",
+        }],
+    },
+    ServiceSpec {
         name: "ApiKeyService",
         methods: API_KEY_METHODS,
     },

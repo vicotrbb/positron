@@ -49,6 +49,10 @@ impl AwsS3Repository {
         let length = response.content_length();
         let bytes =
             crate::aws_s3::http::read_bytes(response.body, length, MAX_OBJECT_BYTES).await?;
+        if validate_object(id, &bytes).is_err() && crate::TenantKeyPurgeFence::is_frame(&bytes) {
+            crate::TenantKeyPurgeFence::verify(&bytes, &self.identity, id)?;
+            return Err(RepositoryFailure::NotFound);
+        }
         validate_object(id, &bytes)?;
         Ok((bytes, protection))
     }
@@ -104,6 +108,9 @@ impl AwsS3Repository {
             .and_then(|size| u64::try_from(size).ok())
             .filter(|size| *size <= MAX_OBJECT_BYTES)
             .ok_or(RepositoryFailure::CorruptState)?;
+        if size <= crate::TenantKeyPurgeFence::MAX_BYTES as u64 {
+            self.read_object(range.object).await?;
+        }
         if range.expected_size.is_some_and(|expected| expected != size) {
             return Err(RepositoryFailure::PreconditionFailed);
         }

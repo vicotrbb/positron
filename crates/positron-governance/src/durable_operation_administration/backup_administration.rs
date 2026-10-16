@@ -6,12 +6,13 @@ impl DurableOperationAdministration {
         actor: crate::AuthorizedContext,
         request: DurableOperationRequest,
         parameters: BackupSnapshotParameters,
+        registration_binding: [u8; 32],
         registration: CatalogObject,
     ) -> Result<DurableOperation, DurableOperationFailure> {
         validate_system_actor(actor, request.principal)?;
         if request.kind() != DurableOperationKind::BackupSnapshot
             || request.operation_request_digest != Some(parameters.intent_digest())
-            || registration.identity().to_bytes() != parameters.registration_identity()
+            || registration_binding != parameters.registration_identity()
         {
             return Err(DurableOperationFailure::InvalidInput);
         }
@@ -38,6 +39,9 @@ impl DurableOperationAdministration {
         if snapshot.number() != request.accepted_generation() {
             return Err(DurableOperationFailure::StaleGeneration);
         }
+        // Backup owns native Repository admission and authenticates this stable
+        // binding before supplying an anchored registration. The anchor changes
+        // its Catalog address without changing the accepted Repository intent.
         publish_with_additions(catalog, &snapshot, operation, vec![registration])
     }
     /// Backup's registration owner authenticates the canonical row and its

@@ -157,8 +157,9 @@ impl InitializedInstance {
         }
         Ok(TenantRetentionImpactPreview {
             tenant,
-            retention_generation: ResourceGeneration::new(inspection.retention_generation().get())
-                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?,
+            retention_generation: inspection.retention_generation().ok_or_else(|| {
+                BootstrapFailure::new(BootstrapFailureCode::TenantLifecycleInvalidTransition)
+            })?,
             proposed_retention_seconds,
             catalog_identity: snapshot.identity(),
             catalog_generation: snapshot.number(),

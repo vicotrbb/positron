@@ -22,13 +22,15 @@ pub(super) fn default_tenant_successor(
             TenantQuotaAdministrationFailureCode::Unauthorized,
         ));
     }
-    if governance.quota_generation() != request.expected.get() {
+    if governance.quota_generation().ok_or_else(corrupt)? != request.expected.get() {
         return Err(TenantQuotaAdministrationFailure::stale(
             TenantQuotaState {
-                generation: ResourceGeneration::new(governance.quota_generation())
-                    .map_err(|_| corrupt())?,
-                weight: governance.quota_weight(),
-                resources: governance.quota_resources(),
+                generation: ResourceGeneration::new(
+                    governance.quota_generation().ok_or_else(corrupt)?,
+                )
+                .map_err(|_| corrupt())?,
+                weight: governance.quota_weight().ok_or_else(corrupt)?,
+                resources: governance.quota_resources().ok_or_else(corrupt)?,
             },
             request,
         ));
@@ -97,7 +99,8 @@ pub(super) fn map_commit_failure(
                             TenantQuotaAdministrationFailureCode::Unauthorized,
                         ));
                     }
-                    ResourceGeneration::new(governance.quota_generation()).map_err(|_| corrupt())
+                    ResourceGeneration::new(governance.quota_generation().ok_or_else(corrupt)?)
+                        .map_err(|_| corrupt())
                 },
             }
         });

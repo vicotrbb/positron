@@ -22,6 +22,8 @@ mod inspection;
 mod io;
 mod marker;
 mod restore_origin;
+mod tenant_purge;
+pub(in crate::catalog) mod tenant_purge_inventory;
 
 #[cfg(test)]
 mod tests;
@@ -534,6 +536,23 @@ impl CatalogStorage {
     }
 
     pub(super) fn read_object(
+        &self,
+        secret: &CatalogSecret,
+        instance: InstanceId,
+        identity: CatalogObjectId,
+        format_epoch: FormatEpoch,
+    ) -> Result<Arc<[u8]>, CatalogFailure> {
+        if !entry_exists(&self.objects, &object_name(format_epoch, identity))?
+            && self
+                .reclaimed_key_ids(secret, instance)?
+                .contains(&identity)
+        {
+            return Ok(Arc::from(b"PKEYGONE".as_slice()));
+        }
+        self.read_object_raw(secret, instance, identity, format_epoch)
+    }
+
+    pub(super) fn read_object_raw(
         &self,
         secret: &CatalogSecret,
         instance: InstanceId,

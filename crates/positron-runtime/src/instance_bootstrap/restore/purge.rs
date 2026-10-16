@@ -30,6 +30,9 @@ pub(super) fn apply(
                 TenantSlug::parse_canonical(tombstone.slug()).map_err(|_| failure())?,
                 proof,
             )
+            .and_then(|exclusion| {
+                exclusion.with_authorization(tombstone.operation(), tombstone.created_at())
+            })
             .map_err(|_| failure())
         })
         .collect::<Result<Vec<_>, _>>()?;

@@ -121,3 +121,37 @@ fn checkpoint_inspection_of_an_absent_session_does_not_admit_empty_state() {
             .base_charge_bytes()
     );
 }
+
+#[test]
+fn purge_evicts_only_the_named_tenant_session_and_releases_its_capacity() {
+    let fixture = crate::tests::support::fixture().expect("fixture");
+    let registry = TenantSchemaRegistry::new(1).expect("registry");
+    let before = fixture
+        .authority
+        .governor()
+        .inspect()
+        .expect("before")
+        .outstanding_total();
+    drop(
+        registry
+            .session(fixture.tenant, fixture.authority.governor())
+            .expect("session"),
+    );
+    registry.evict(fixture.tenant).expect("evict");
+    assert!(
+        registry
+            .session_if_present(fixture.tenant)
+            .expect("read")
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .authority
+            .governor()
+            .inspect()
+            .expect("after")
+            .outstanding_total(),
+        before
+    );
+    registry.evict(fixture.tenant).expect("idempotent eviction");
+}

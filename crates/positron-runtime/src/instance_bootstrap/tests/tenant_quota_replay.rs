@@ -338,7 +338,7 @@ fn failed_quota_catalog_publication_preserves_the_durable_and_live_limit()
         initialized.key.catalog_secret(initialized.instance)?,
     )?;
     let (_, governance) = catalog.pin()?.governance_object()?;
-    assert_eq!(governance.quota_generation(), 1);
+    assert_eq!(governance.quota_generation(), Some(1));
     let reservation = initialized
         ._authority
         .governor()

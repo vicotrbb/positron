@@ -274,3 +274,12 @@ pub(super) fn commit_tenant_keyring(
     }
     Ok(())
 }
+
+pub(crate) fn purge_keyring_owner(
+    bytes: &[u8],
+) -> Result<Option<TenantId>, ApiKeyAdministrationFailure> {
+    if !bytes.starts_with(&TENANT_KEYRING_MAGIC) {
+        return Ok(None);
+    }
+    decode_tenant_keyring(bytes).map(|(tenant, _)| Some(tenant))
+}

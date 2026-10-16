@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "e3cbde40c413fa9de1162051ac11edafe6a71a57cc0ad28a26f587bae52a2a17"
+    "x-positron-schema-digest": "45230ec5ced4d227cb563a9c9da84460d0a3c2044dd834b28968a7dbcc5d865f"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1303,6 +1303,38 @@
           }
         }
       }
+    },
+    "/v1/tenant-purges:manage": {
+      "post": {
+        "operationId": "ManageTenantPurge",
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TenantPurgeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Managed purge status or durable operation receipt; unmanaged copies are not revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantPurgeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2064,10 +2096,6 @@
         "required": [
           "tenant",
           "slug",
-          "display_name",
-          "retention_seconds",
-          "display_generation",
-          "retention_generation",
           "lifecycle"
         ],
         "properties": {
@@ -4353,6 +4381,58 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295
+          }
+        }
+      },
+      "TenantPurgeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "confirmation_slug": {
+            "type": "string"
+          },
+          "expected_catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expected_lifecycle_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        }
+      },
+      "TenantPurgeResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "catalog_generation",
+          "managed_scope"
+        ],
+        "properties": {
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ProviderMigrationOperation"
+          },
+          "managed_scope": {
+            "type": "string"
           }
         }
       }

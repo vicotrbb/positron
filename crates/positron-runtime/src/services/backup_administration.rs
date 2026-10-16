@@ -1,5 +1,6 @@
 //! Runtime composes authenticated Backup commands with existing durable owners.
 mod execution;
+mod purge_barrier;
 pub(in crate::services) mod registered;
 mod verification;
 mod wire;
@@ -145,13 +146,18 @@ impl ServiceHandle {
                     &catalog, actor, request, parameters, address,
                 )
             },
-            None => DurableOperationAdministration::accept_backup(
-                &catalog,
-                actor,
-                request,
-                parameters,
-                registration,
-            ),
+            None => {
+                let registration =
+                    purge_barrier::prepare(self, &catalog, parameters, registration)?;
+                DurableOperationAdministration::accept_backup(
+                    &catalog,
+                    actor,
+                    request,
+                    parameters,
+                    parameters.registration_identity(),
+                    registration,
+                )
+            },
         }
         .map_err(super::provider_migration::operation_failure)?;
         if !operation.status().is_terminal() {
@@ -301,7 +307,7 @@ fn submit(
         .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     let identity =
         positron_governance::Identity::open(&snapshot).map_err(|_| ServiceFailure::CorruptState)?;
-    let tenants = positron_governance::TenantAdministration::registered_tenant_ids(&snapshot)
+    let tenants = positron_governance::TenantAdministration::restore_key_tenant_ids(&snapshot)
         .map_err(|_| ServiceFailure::CorruptState)?;
     let context_bytes = tenants.iter().try_fold(136usize, |sum, tenant| {
         sum.checked_add(

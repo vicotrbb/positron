@@ -27,6 +27,7 @@ pub enum CatalogGovernanceVersion {
     V6,
     V7,
     V8,
+    V9,
 }
 
 #[derive(Clone)]
@@ -141,6 +142,9 @@ impl CatalogGovernanceObject {
     /// Decodes one immutable governance object without authenticating Catalog membership.
     /// Product authority is established only by [`CatalogSnapshot::governance_object`].
     pub fn decode(encoded: &[u8]) -> Result<Self, CatalogFailure> {
+        if encoded.starts_with(b"POSGOV09") {
+            return terminal::decode(encoded);
+        }
         codec::decode(encoded)
     }
 
@@ -165,18 +169,18 @@ impl CatalogGovernanceObject {
     }
 
     #[must_use]
-    pub fn display_name(&self) -> &str {
-        &self.display_name
+    pub fn display_name(&self) -> Option<&str> {
+        (self.version != CatalogGovernanceVersion::V9).then_some(self.display_name.as_str())
     }
 
     #[must_use]
-    pub const fn display_generation(&self) -> u64 {
-        self.display_generation
+    pub fn display_generation(&self) -> Option<u64> {
+        (self.version != CatalogGovernanceVersion::V9).then_some(self.display_generation)
     }
 
     #[must_use]
-    pub const fn retention_generation(&self) -> u64 {
-        self.retention_generation
+    pub fn retention_generation(&self) -> Option<u64> {
+        (self.version != CatalogGovernanceVersion::V9).then_some(self.retention_generation)
     }
 
     /// Returns the generation of the immutable external-alias resource.
@@ -186,8 +190,8 @@ impl CatalogGovernanceObject {
     }
 
     #[must_use]
-    pub const fn retention_seconds(&self) -> u64 {
-        self.retention_seconds
+    pub fn retention_seconds(&self) -> Option<u64> {
+        (self.version != CatalogGovernanceVersion::V9).then_some(self.retention_seconds)
     }
 
     #[must_use]
@@ -227,18 +231,18 @@ impl CatalogGovernanceObject {
 
     /// Returns the independently durable generation for tenant quota mutations.
     #[must_use]
-    pub const fn quota_generation(&self) -> u64 {
-        self.quota_generation
+    pub fn quota_generation(&self) -> Option<u64> {
+        (self.version != CatalogGovernanceVersion::V9).then_some(self.quota_generation)
     }
 
     #[must_use]
-    pub const fn quota_weight(&self) -> u32 {
-        self.quota_weight
+    pub fn quota_weight(&self) -> Option<u32> {
+        (self.version != CatalogGovernanceVersion::V9).then_some(self.quota_weight)
     }
 
     #[must_use]
-    pub const fn quota_resources(&self) -> [u64; 11] {
-        self.quota_resources
+    pub fn quota_resources(&self) -> Option<[u64; 11]> {
+        (self.version != CatalogGovernanceVersion::V9).then_some(self.quota_resources)
     }
 
     /// Returns the public verification identity for Governance Audit checkpoints.
@@ -320,6 +324,15 @@ impl CatalogGovernanceObject {
         generation: u64,
         credentials: &[CatalogCredential],
     ) -> Result<Vec<u8>, CatalogFailure> {
+        if self.version == CatalogGovernanceVersion::V9 {
+            if generation == 0
+                || credentials.len() != 1
+                || credentials.first().is_none_or(|value| value.scope != 4)
+            {
+                return Err(corrupt());
+            }
+            return encode_credentials(&self.credential_prefix, generation, credentials);
+        }
         if generation == 0 || !(1..=MAX_CREDENTIALS).contains(&credentials.len()) {
             return Err(corrupt());
         }
@@ -393,6 +406,9 @@ impl CatalogGovernanceObject {
         lifecycle: TenantLifecycleState,
         lifecycle_generation: u64,
     ) -> Result<Vec<u8>, CatalogFailure> {
+        if self.version == CatalogGovernanceVersion::V9 {
+            return Err(corrupt());
+        }
         if lifecycle_generation == 0 {
             return Err(corrupt());
         }
@@ -474,6 +490,9 @@ impl CatalogGovernanceObject {
         quota_weight: u32,
         quota_resources: [u64; 11],
     ) -> Result<Vec<u8>, CatalogFailure> {
+        if self.version == CatalogGovernanceVersion::V9 {
+            return Err(corrupt());
+        }
         if quota_generation == 0
             || quota_weight == 0
             || quota_weight > u32::from(u16::MAX)
@@ -509,6 +528,9 @@ impl CatalogGovernanceObject {
         display_name: &str,
         display_generation: u64,
     ) -> Result<Vec<u8>, CatalogFailure> {
+        if self.version == CatalogGovernanceVersion::V9 {
+            return Err(corrupt());
+        }
         if display_name.is_empty() || display_name.len() > 128 || display_generation == 0 {
             return Err(corrupt());
         }
@@ -529,6 +551,9 @@ impl CatalogGovernanceObject {
         retention_seconds: u64,
         retention_generation: u64,
     ) -> Result<Vec<u8>, CatalogFailure> {
+        if self.version == CatalogGovernanceVersion::V9 {
+            return Err(corrupt());
+        }
         if retention_seconds == 0
             || retention_seconds > MAX_RETENTION_SECONDS
             || retention_generation == 0
@@ -568,6 +593,9 @@ impl CatalogGovernanceObject {
         alias: ExternalTenantAlias,
         alias_generation: u64,
     ) -> Result<Vec<u8>, CatalogFailure> {
+        if self.version == CatalogGovernanceVersion::V9 {
+            return Err(corrupt());
+        }
         if alias_generation == 0
             || !matches!(
                 self.version,
@@ -809,3 +837,5 @@ use codec::{corrupt, encode_credentials, is_governance, lifecycle_code};
 
 #[cfg(test)]
 mod tests;
+
+mod terminal;

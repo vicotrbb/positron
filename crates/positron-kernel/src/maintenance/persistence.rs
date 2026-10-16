@@ -319,6 +319,7 @@ impl MaintenanceCoordinator {
                 && matches!(
                     task.class(),
                     MaintenanceTaskClass::Migration
+                        | MaintenanceTaskClass::TenantPurge
                         | MaintenanceTaskClass::RepositoryVerification
                         | MaintenanceTaskClass::BackupSnapshot
                 )
@@ -334,6 +335,7 @@ impl MaintenanceCoordinator {
                     )
                     .is_ok(),
                     MaintenanceTaskClass::RepositoryVerification
+                    | MaintenanceTaskClass::TenantPurge
                     | MaintenanceTaskClass::BackupSnapshot => {
                         RepositoryOperationBinding::from_task(
                             &stored.task,

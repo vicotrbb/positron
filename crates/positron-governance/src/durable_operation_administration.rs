@@ -16,6 +16,7 @@ mod backup_parameters;
 mod backup_retention_administration;
 mod backup_verification_administration;
 mod restore_parameters;
+mod tenant_purge;
 pub use restore_parameters::{BackupRestoreParameters, BackupRestoreStage};
 mod restore_administration;
 pub use backup_parameters::{
@@ -1070,4 +1071,32 @@ pub(crate) fn transition_transaction_bytes(
         return Err(DurableOperationFailure::PersistenceUnavailable);
     };
     Ok(*bytes)
+}
+
+#[cfg(test)]
+mod purge_request_tests {
+    use super::*;
+    #[test]
+    fn purge_request_binds_tenant_generation_confirmation_and_survives_codec() {
+        let principal =
+            positron_domain::identity::PrincipalId::from_bytes([1; 16]).expect("principal");
+        let tenant = positron_domain::identity::TenantId::from_bytes([2; 16]).expect("tenant");
+        let key = AdministrativeIdempotencyKey::new([3; 16]).expect("key");
+        let request = DurableOperationRequest::tenant_purge(principal, tenant, key, 7, 10, [4; 32])
+            .expect("request");
+        let operation = DurableOperation::accepted(request);
+        assert_eq!(
+            codec::decode_operation(&codec::encode_operation(operation)).expect("decode"),
+            Some(operation)
+        );
+        let changed = DurableOperationRequest::tenant_purge(principal, tenant, key, 8, 10, [4; 32])
+            .expect("request");
+        assert_ne!(request.operation_id(), changed.operation_id());
+        let changed = DurableOperationRequest::tenant_purge(principal, tenant, key, 7, 10, [5; 32])
+            .expect("request");
+        assert_ne!(request.operation_id(), changed.operation_id());
+        assert!(
+            DurableOperationRequest::tenant_purge(principal, tenant, key, 7, 10, [0; 32]).is_err()
+        );
+    }
 }

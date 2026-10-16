@@ -85,7 +85,7 @@ impl BackupCaptureContext {
         }
         let retention = BackupRetention::new(decoder.u64()?, decoder.u64()?)?;
         let count = decoder.u32()? as usize;
-        if count == 0 || count > 4096 {
+        if count > 4096 {
             return Err(RepositoryFailure::LimitExceeded);
         }
         let mut keys = Vec::new();

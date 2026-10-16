@@ -15,7 +15,7 @@ pub use registry::{
     BackupKeyEnvelope, BackupKeyIdentity, BackupListCursor, BackupPublication,
     BackupPublicationCheck, BackupPublisher, BackupPurgeTombstone, BackupReceipt,
     BackupRegistryVerification, BackupRestoreReport, BackupSnapshotPage,
-    BackupSnapshotVerification, BackupVerificationReport,
+    BackupSnapshotVerification, BackupTenantPurge, BackupVerificationReport, TenantKeyPurgeFence,
 };
 pub use transfer::{BackupObjectVerification, BackupSource, BackupTransfer};
 

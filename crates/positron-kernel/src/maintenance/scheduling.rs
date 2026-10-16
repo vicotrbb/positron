@@ -317,7 +317,13 @@ pub(super) fn tasks_conflict(left: &MaintenanceTask, right: &MaintenanceTask) ->
             MaintenanceScope::System
         )
     );
+    // Managed purge removes historical Catalog objects and staging copies
+    // shared by capture, scrub, and root-rewrap owners. Its resource claim
+    // remains attributed to the tenant, while physical conflicts are global.
+    let global_purge = left.class == MaintenanceTaskClass::TenantPurge
+        || right.class == MaintenanceTaskClass::TenantPurge;
     object_conflict
+        || global_purge
         || system_migration_scrub_conflict
         || (scopes_overlap(left.scope, right.scope)
             && (matches!(left.class, MaintenanceTaskClass::TenantPurge)

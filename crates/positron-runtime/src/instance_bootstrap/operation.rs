@@ -528,14 +528,20 @@ fn apply_catalog_quota(
     snapshot: &positron_kernel::CatalogSnapshot,
 ) -> Result<(), BootstrapFailure> {
     let (_, governance) = snapshot.governance_object().map_err(catalog_failure)?;
-    authority
-        .update_tenant_quota(
-            governance.tenant(),
-            u16::try_from(governance.quota_weight())
-                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?,
-            ResourceAmounts::new(governance.quota_resources()),
-        )
-        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?;
+    match (governance.quota_weight(), governance.quota_resources()) {
+        (Some(weight), Some(resources)) => authority
+            .update_tenant_quota(
+                governance.tenant(),
+                u16::try_from(weight)
+                    .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?,
+                ResourceAmounts::new(resources),
+            )
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?,
+        (None, None)
+            if governance.lifecycle()
+                == positron_domain::lifecycle::TenantLifecycleState::Purged => {},
+        _ => return Err(BootstrapFailure::new(BootstrapFailureCode::CorruptState)),
+    }
     for (tenant, weight, resources) in TenantAdministration::registered_tenant_quotas(snapshot)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CorruptState))?
     {

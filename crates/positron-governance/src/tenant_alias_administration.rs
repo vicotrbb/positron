@@ -328,6 +328,14 @@ fn alias_exists(
         TenantAdministration::registered_tenant_ids(snapshot).map_err(map_tenant_record)?
     {
         if tenant != excluded
+            && crate::tenant_administration::purged_tenant_alias(snapshot, tenant)
+                .map_err(map_tenant_record)?
+                .as_ref()
+                == Some(alias)
+        {
+            return Ok(true);
+        }
+        if tenant != excluded
             && tenant_alias_record(snapshot, tenant)
                 .map_err(map_tenant_record)?
                 .and_then(|record| record.alias)

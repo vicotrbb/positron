@@ -306,6 +306,7 @@ fn retention_reduction_confirmation_is_required_and_bound_to_its_tenant_and_cand
         initialized
             .inspect_tenant(actor, tenant)?
             .retention_generation()
+            .expect("live tenant generation")
             .get(),
         1
     );

@@ -273,7 +273,7 @@ pub(super) fn complete(
             .owner
             .publisher(prospective)
             .map_err(provider_failure)?;
-        let tenants = positron_governance::TenantAdministration::registered_tenant_ids(&snapshot)
+        let tenants = positron_governance::TenantAdministration::restore_key_tenant_ids(&snapshot)
             .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
         if tenants.len() != publisher.verification_key_count(remote) {
             return Err(ServiceFailure::BackupRepositoryRejected);
@@ -310,7 +310,7 @@ pub(super) fn complete(
                 .publisher(prospective)
                 .map_err(provider_failure)?;
             let tenants =
-                positron_governance::TenantAdministration::registered_tenant_ids(snapshot)
+                positron_governance::TenantAdministration::restore_key_tenant_ids(snapshot)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
             verify_schema_object(bytes, &tenants, &mut work.schema_tenants, memory)?;
         }
@@ -327,7 +327,7 @@ pub(super) fn complete(
                 .publisher(prospective)
                 .map_err(provider_failure)?;
             let tenants =
-                positron_governance::TenantAdministration::registered_tenant_ids(snapshot)
+                positron_governance::TenantAdministration::restore_key_tenant_ids(snapshot)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
             verify_policy_object(bytes, &tenants, &mut work.policy_tenants)?;
         }

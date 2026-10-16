@@ -14,6 +14,11 @@ fn captured_envelopes_and_registered_repository_survive_cold_decoding()
     ));
     std::fs::create_dir(&root)?;
     let identity = RepositoryIdentity::local([1; 16], [2; 16], [3; 32], &root)?;
+    let empty =
+        BackupCaptureContext::new(identity.clone(), BackupRetention::new(1000, 2000)?, vec![])?;
+    let empty = BackupCaptureContext::decode(&empty.encode()?, &identity)?;
+    assert!(empty.keys().is_empty());
+    assert_ne!(empty.key_context()?, [0; 32]);
     let first = BackupKeyEnvelope::new([4; 16], 7, [5; 32], vec![6; 128])?;
     let rotated = BackupKeyEnvelope::new([4; 16], 7, [5; 32], vec![8; 128])?;
     let context = BackupCaptureContext::new(

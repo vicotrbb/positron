@@ -263,6 +263,9 @@ impl TransferredResourceReservation {
                     tenant: None,
                     kind: WorkKind::OrdinaryMaintenanceBackup,
                     ..
+                } | ReservationIdentity::Recovery {
+                    scope: super::RecoveryScope::Tenant(_),
+                    kind: super::RecoveryWorkKind::Purge,
                 }
             )
     }

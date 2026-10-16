@@ -47,8 +47,20 @@ pub use upload::{UploadId, UploadOutcome, UploadPart, UploadPlan, UploadState};
 
 pub use positron_domain::repository::RepositoryFailure;
 
+mod control_inventory;
 #[async_trait::async_trait]
 pub trait Repository: Send + Sync {
+    /// Proves the native prefix contains only authenticated control objects,
+    /// identity and the exact head, including versions and unfinished writes.
+    /// Unsupported adapters fail closed; this never authorizes deletion.
+    async fn verify_control_inventory(
+        &self,
+        _allowed: &[ObjectId],
+        _head: &[u8],
+        _pending: Option<&ImmutableObject>,
+    ) -> Result<(), RepositoryFailure> {
+        Err(RepositoryFailure::PreconditionFailed)
+    }
     async fn storage_policy(&self) -> Result<RepositoryPolicy, RepositoryFailure>;
     async fn list(&self, request: ListRequest) -> Result<ListPage, RepositoryFailure>;
     async fn begin_upload(&self, plan: UploadPlan) -> Result<UploadState, RepositoryFailure>;
@@ -65,6 +77,17 @@ pub trait Repository: Send + Sync {
     async fn put_if_absent(&self, object: ImmutableObject)
     -> Result<PutOutcome, RepositoryFailure>;
     async fn delete(&self, object: ObjectId) -> Result<DeleteOutcome, RepositoryFailure>;
+    /// Proves full historical absence and that no previously admitted writer can
+    /// recreate this tenant key object after the proof. Unsupported transports
+    /// must refuse; an ordinary object deletion is insufficient.
+    async fn delete_tenant_key(
+        &self,
+        _object: ObjectId,
+        _fence: &crate::TenantKeyPurgeFence,
+    ) -> Result<DeleteOutcome, RepositoryFailure> {
+        Err(RepositoryFailure::PreconditionFailed)
+    }
+
     async fn registry_head_at(
         &self,
         slot: HeadSlot,
@@ -102,5 +125,6 @@ pub use snapshot::{
     BackupObjectVerification, BackupPublication, BackupPublicationCheck, BackupPublisher,
     BackupPurgeTombstone, BackupReceipt, BackupRegistryVerification, BackupRepositoryRegistration,
     BackupRestoreReport, BackupRetention, BackupSnapshotPage, BackupSnapshotReader,
-    BackupSnapshotVerification, BackupSource, BackupTransfer, BackupVerificationReport,
+    BackupSnapshotVerification, BackupSource, BackupTenantPurge, BackupTransfer,
+    BackupVerificationReport, TenantKeyPurgeFence,
 };

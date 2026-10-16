@@ -31,6 +31,16 @@ impl TenantSchemaRegistry {
         })
     }
 
+    /// Evicts the process-local schema cache after the caller has drained tenant work.
+    pub fn evict(&self, tenant: TenantId) -> Result<(), SchemaSessionFailure> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SchemaSessionFailure::StateUnavailable)?;
+        state.sessions.retain(|(known, _)| *known != tenant);
+        Ok(())
+    }
+
     pub fn session(
         &self,
         tenant: TenantId,

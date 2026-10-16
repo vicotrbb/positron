@@ -81,7 +81,11 @@ impl Catalog<'_> {
                 None => &secret.wrapping,
             };
             if let Some(origin) = self.storage.read_restore_origin(&secret, self.instance)? {
+                let reclaimed = super::tenant_purge::reclaimed_ids(&state.current)?;
                 for identity in origin.snapshot.object_identities() {
+                    if reclaimed.contains(&identity) {
+                        continue;
+                    }
                     self.storage.rewrap_object(
                         current,
                         &replacement,
@@ -102,8 +106,12 @@ impl Catalog<'_> {
                 self.storage
                     .rewrap_restore_origin(current, &replacement, self.instance)?;
             }
+            let reclaimed = super::tenant_purge::reclaimed_ids(&state.current)?;
             for outcome in state.transactions.values() {
                 for identity in &outcome.record.objects {
+                    if reclaimed.contains(identity) {
+                        continue;
+                    }
                     self.storage.rewrap_object(
                         current,
                         &replacement,

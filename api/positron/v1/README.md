@@ -8,7 +8,8 @@ the same product surface and must change together.
 `positron-api/build.rs` generates Protobuf messages, fixed enums, and the Rust
 `ApiKeyServiceClient`, `TenantQuotaServiceClient`, `TenantServiceClient`, `TenantAliasServiceClient`, `TenantLifecycleServiceClient`, `TenantRetentionServiceClient`,
 `PolicyPreviewServiceClient`, `PolicyTestServiceClient`, `PolicyDiffServiceClient`,
-`PolicyExplainServiceClient`, `PolicyActivateServiceClient`, `ProviderMigrationServiceClient`, and `RepositoryServiceClient` directly from this schema using locked `prost-build 0.14.3` and
+`PolicyExplainServiceClient`, `PolicyActivateServiceClient`, `ProviderMigrationServiceClient`,
+`TenantPurgeServiceClient`, and `RepositoryServiceClient` directly from this schema using locked `prost-build 0.14.3` and
 `protoc-bin-vendored 3.2.0`. Ordinary Cargo builds regenerate the output in
 `OUT_DIR`; no globally installed compiler is required. API-key HTTP clients
 and the runtime service use those generated messages and client through the
@@ -406,3 +407,30 @@ and the existing Durable Operation/Catalog authorities. See
 [fresh-target restore operations](../../../docs/operations/restore.md) for the
 complete command contract and publication interruption semantics. The HTTP
 schema and its derived artifacts do not acquire an offline restore endpoint.
+
+`TenantPurgeService.Manage` is served at `POST /v1/tenant-purges:manage`
+for System Administration. Requests and responses are bounded to 4096 bytes.
+`start` requires the immutable canonical Tenant ID, exact `confirmation_slug`,
+positive expected Catalog and lifecycle generations, and an idempotency key.
+`status` requires an operation ID; `lookup` requires the original idempotency
+key. `cancel` requires an operation ID, current expected Catalog generation,
+and an idempotency key, and succeeds only before the irreversible drain boundary.
+Unknown fields and action-inapplicable fields are rejected.
+
+`positron tenant purge start|status|lookup|wait|cancel` uses the generated
+`TenantPurgeServiceClient`, protected-stdin credentials, and TLS-default
+transport. Start uses `--tenant-id UUID --confirmation-slug SLUG
+--expected-generation N --expected-lifecycle-generation N --idempotency-key UUID`.
+Wait requires `--operation-id ID` and accepts `--wait-seconds 1..60`.
+A timeout or transport failure leaves the operation outcome unknown; inspect
+the same operation or idempotency key before retrying. Every response states
+`managed_repositories_only;unmanaged_copies_not_revoked`: exported, unregistered,
+and offline copies outside managed scope cannot be revoked by this operation.
+An accepted operation and a signed repository tombstone do not prove completion;
+unavailable or immutable repositories and reachable historical KEK envelopes
+keep the operation pending.
+
+A `TenantDescriptor` for a `purged` tenant contains only its reserved Tenant ID,
+slug, and lifecycle. It omits `display_name`, `retention_seconds`,
+`display_generation`, and `retention_generation`. These four optional wire fields
+remain required and populated for every nonterminal descriptor.

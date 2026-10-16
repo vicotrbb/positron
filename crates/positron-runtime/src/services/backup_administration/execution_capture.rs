@@ -44,7 +44,7 @@ pub(super) fn prepare(
         .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     let identity =
         positron_governance::Identity::open(&basis).map_err(|_| ServiceFailure::CorruptState)?;
-    let tenants = positron_governance::TenantAdministration::registered_tenant_ids(&basis)
+    let tenants = positron_governance::TenantAdministration::restore_key_tenant_ids(&basis)
         .map_err(|_| ServiceFailure::CorruptState)?;
     let mut keys = Vec::new();
     let mut stable = Vec::new();

@@ -43,6 +43,20 @@ impl GoogleCloudStorageRepository {
         metadata.verify(&reply.body)?;
         Ok((std::mem::take(&mut *reply.body), metadata))
     }
+    pub(super) fn check_purge_fence(
+        &self,
+        id: ObjectId,
+        bytes: &[u8],
+    ) -> Result<(), RepositoryFailure> {
+        if <[u8; 32]>::from(Sha256::digest(bytes)) != id.checksum()
+            && TenantKeyPurgeFence::is_frame(bytes)
+        {
+            TenantKeyPurgeFence::verify(bytes, &self.identity, id)
+                .map_err(|_| RepositoryFailure::CorruptState)?;
+            return Err(RepositoryFailure::NotFound);
+        }
+        Ok(())
+    }
     pub(super) async fn read_object(
         &self,
         id: ObjectId,
@@ -50,6 +64,7 @@ impl GoogleCloudStorageRepository {
         let result = self
             .read_key(&self.key(&id.name()), None, MAX_OBJECT_BYTES as usize)
             .await?;
+        self.check_purge_fence(id, &result.0)?;
         if <[u8; 32]>::from(Sha256::digest(&result.0)) != id.checksum() {
             return Err(RepositoryFailure::ChecksumMismatch);
         }
@@ -110,9 +125,19 @@ impl GoogleCloudStorageRepository {
     pub async fn object_size_hint(&self, id: ObjectId) -> Result<u64, RepositoryFailure> {
         let _guard = self.enter()?;
         self.read_identity().await?;
-        self.metadata(&self.key(&id.name()), None)
-            .await
-            .map(|metadata| metadata.size)
+        let key = self.key(&id.name());
+        let metadata = self.metadata(&key, None).await?;
+        if metadata.size <= TenantKeyPurgeFence::MAX_BYTES as u64 {
+            let (bytes, _) = self
+                .read_key(
+                    &key,
+                    Some(metadata.generation),
+                    TenantKeyPurgeFence::MAX_BYTES,
+                )
+                .await?;
+            self.check_purge_fence(id, &bytes)?;
+        }
+        Ok(metadata.size)
     }
     pub async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
         let _guard = self.enter()?;
@@ -132,6 +157,16 @@ impl GoogleCloudStorageRepository {
         self.read_identity().await?;
         let key = self.key(&range.object.name());
         let metadata = self.metadata(&key, None).await?;
+        if metadata.size <= TenantKeyPurgeFence::MAX_BYTES as u64 {
+            let (bytes, _) = self
+                .read_key(
+                    &key,
+                    Some(metadata.generation),
+                    TenantKeyPurgeFence::MAX_BYTES,
+                )
+                .await?;
+            self.check_purge_fence(range.object, &bytes)?;
+        }
         if range
             .expected_size
             .is_some_and(|expected| expected != metadata.size)

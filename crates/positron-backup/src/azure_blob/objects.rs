@@ -34,9 +34,18 @@ impl AzureBlobRepository {
     pub async fn object_size_hint(&self, id: ObjectId) -> Result<u64, RepositoryFailure> {
         let _guard = self.enter()?;
         self.read_identity().await?;
-        self.metadata(&self.key(&id.name()), "")
-            .await
-            .map(|metadata| metadata.size)
+        let key = self.key(&id.name());
+        let metadata = self.metadata(&key, "").await?;
+        if metadata.size <= TenantKeyPurgeFence::MAX_BYTES as u64 {
+            let (bytes, read_metadata) = self
+                .read_key(&key, "", TenantKeyPurgeFence::MAX_BYTES)
+                .await?;
+            if read_metadata.etag != metadata.etag {
+                return Err(RepositoryFailure::PreconditionFailed);
+            }
+            self.check_purge_fence(id, &bytes)?;
+        }
+        Ok(metadata.size)
     }
     pub async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
         let _guard = self.enter()?;
@@ -56,6 +65,15 @@ impl AzureBlobRepository {
         self.read_identity().await?;
         let key = self.key(&range.object.name());
         let meta = self.metadata(&key, "").await?;
+        if meta.size <= TenantKeyPurgeFence::MAX_BYTES as u64 {
+            let (bytes, read_metadata) = self
+                .read_key(&key, "", TenantKeyPurgeFence::MAX_BYTES)
+                .await?;
+            if read_metadata.etag != meta.etag {
+                return Err(RepositoryFailure::PreconditionFailed);
+            }
+            self.check_purge_fence(range.object, &bytes)?;
+        }
         if range
             .expected_size
             .is_some_and(|expected| expected != meta.size)

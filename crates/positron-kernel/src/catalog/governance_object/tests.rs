@@ -85,15 +85,15 @@ fn v6_display_and_retention_successors_upgrade_independent_generations() {
     }
     let decoded = CatalogGovernanceObject::decode(&v6).expect("v6 record decodes");
 
-    assert_eq!(decoded.display_generation(), 1);
-    assert_eq!(decoded.retention_generation(), 1);
+    assert_eq!(decoded.display_generation(), Some(1));
+    assert_eq!(decoded.retention_generation(), Some(1));
     let display = decoded
         .with_display_name("Renamed tenant", 2)
         .expect("display successor encodes");
     let display = CatalogGovernanceObject::decode(&display).expect("v7 display decodes");
-    assert_eq!(display.display_name(), "Renamed tenant");
-    assert_eq!(display.display_generation(), 2);
-    assert_eq!(display.retention_generation(), 1);
+    assert_eq!(display.display_name(), Some("Renamed tenant"));
+    assert_eq!(display.display_generation(), Some(2));
+    assert_eq!(display.retention_generation(), Some(1));
     assert_eq!(display.tenant_key_envelope(), decoded.tenant_key_envelope());
     assert_eq!(display.quota_resources(), decoded.quota_resources());
     assert_eq!(
@@ -105,9 +105,9 @@ fn v6_display_and_retention_successors_upgrade_independent_generations() {
         .with_retention_seconds(86_400, 2)
         .expect("retention successor encodes");
     let retention = CatalogGovernanceObject::decode(&retention).expect("v7 retention decodes");
-    assert_eq!(retention.retention_seconds(), 86_400);
-    assert_eq!(retention.display_generation(), 2);
-    assert_eq!(retention.retention_generation(), 2);
+    assert_eq!(retention.retention_seconds(), Some(86_400));
+    assert_eq!(retention.display_generation(), Some(2));
+    assert_eq!(retention.retention_generation(), Some(2));
     assert_eq!(
         retention.tenant_key_envelope(),
         decoded.tenant_key_envelope()
@@ -124,8 +124,8 @@ fn v6_display_and_retention_successors_upgrade_independent_generations() {
     let lifecycle = CatalogGovernanceObject::decode(&lifecycle).expect("v7 lifecycle decodes");
     assert_eq!(lifecycle.lifecycle(), TenantLifecycleState::ReadOnly);
     assert_eq!(lifecycle.lifecycle_generation(), 2);
-    assert_eq!(lifecycle.display_generation(), 2);
-    assert_eq!(lifecycle.retention_generation(), 2);
+    assert_eq!(lifecycle.display_generation(), Some(2));
+    assert_eq!(lifecycle.retention_generation(), Some(2));
 }
 
 #[test]
@@ -173,9 +173,9 @@ fn v8_profile_successors_preserve_alias_and_remain_decodable() {
         .expect("display successor encodes");
     assert!(display.starts_with(b"POSGOV08"));
     let display = CatalogGovernanceObject::decode(&display).expect("v8 display successor decodes");
-    assert_eq!(display.display_name(), "Revised tenant");
-    assert_eq!(display.display_generation(), 3);
-    assert_eq!(display.retention_generation(), 1);
+    assert_eq!(display.display_name(), Some("Revised tenant"));
+    assert_eq!(display.display_generation(), Some(3));
+    assert_eq!(display.retention_generation(), Some(1));
     assert_eq!(display.external_tenant_alias(), Some(alias.clone()));
     assert_eq!(display.alias_generation(), 2);
 
@@ -185,10 +185,10 @@ fn v8_profile_successors_preserve_alias_and_remain_decodable() {
     assert!(successor.starts_with(b"POSGOV08"));
     let successor =
         CatalogGovernanceObject::decode(&successor).expect("v8 retention successor decodes");
-    assert_eq!(successor.retention_seconds(), 86_400);
-    assert_eq!(successor.display_name(), "Revised tenant");
-    assert_eq!(successor.display_generation(), 3);
-    assert_eq!(successor.retention_generation(), 2);
+    assert_eq!(successor.retention_seconds(), Some(86_400));
+    assert_eq!(successor.display_name(), Some("Revised tenant"));
+    assert_eq!(successor.display_generation(), Some(3));
+    assert_eq!(successor.retention_generation(), Some(2));
     assert_eq!(successor.external_tenant_alias(), Some(alias));
     assert_eq!(successor.alias_generation(), 2);
     assert_eq!(successor.lifecycle(), expected_lifecycle);
@@ -240,8 +240,8 @@ fn fixture_lifecycle_mutation_preserves_v7_v8_generations_and_alias_from_decoded
         .expect("fixture-mutated v7 record decodes");
     assert_eq!(v7_lifecycle.lifecycle(), TenantLifecycleState::ReadOnly);
     assert_eq!(v7_lifecycle.lifecycle_generation(), 1);
-    assert_eq!(v7_lifecycle.display_generation(), 2);
-    assert_eq!(v7_lifecycle.retention_generation(), 2);
+    assert_eq!(v7_lifecycle.display_generation(), Some(2));
+    assert_eq!(v7_lifecycle.retention_generation(), Some(2));
     assert_eq!(v7_lifecycle.alias_generation(), 1);
     assert_eq!(v7_lifecycle.external_tenant_alias(), v7_alias);
 
@@ -257,8 +257,8 @@ fn fixture_lifecycle_mutation_preserves_v7_v8_generations_and_alias_from_decoded
         .expect("fixture-mutated v8 record decodes");
     assert_eq!(v8_lifecycle.lifecycle(), TenantLifecycleState::Suspended);
     assert_eq!(v8_lifecycle.lifecycle_generation(), 1);
-    assert_eq!(v8_lifecycle.display_generation(), 2);
-    assert_eq!(v8_lifecycle.retention_generation(), 2);
+    assert_eq!(v8_lifecycle.display_generation(), Some(2));
+    assert_eq!(v8_lifecycle.retention_generation(), Some(2));
     assert_eq!(v8_lifecycle.alias_generation(), 2);
     assert_eq!(v8_lifecycle.external_tenant_alias(), Some(alias));
 
