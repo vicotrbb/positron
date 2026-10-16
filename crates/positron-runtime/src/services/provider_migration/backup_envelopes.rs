@@ -68,7 +68,7 @@ pub(super) fn step(
     for repository_id in registrations {
         let (_, registration, parameters, signer) =
             super::super::backup_administration::registered::registered(services, repository_id)
-                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
+                .map_err(registration_failure)?;
         let native = super::super::repository_administration::repository_resources(
             parameters.provider_kind(),
         );
@@ -252,6 +252,13 @@ pub(super) fn step(
         target: Sha256::digest(target.encode()).into(),
     }))
 }
+fn registration_failure(failure: MaintenanceServiceFailure) -> ServiceFailure {
+    match failure {
+        MaintenanceServiceFailure::AdministrationUnavailable => ServiceFailure::CatalogUnavailable,
+        MaintenanceServiceFailure::CapacityUnavailable => ServiceFailure::CapacityUnavailable,
+        _ => ServiceFailure::BackupRepositoryRejected,
+    }
+}
 fn failure(failure: positron_backup::RepositoryFailure) -> ServiceFailure {
     use positron_backup::RepositoryFailure as F;
     match failure {
@@ -350,5 +357,16 @@ fn verify_target(
         Ok(())
     } else {
         Err(ServiceFailure::BackupRepositoryRejected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unavailable_registered_catalog_preserves_migration_retry() {
+        let failure = registration_failure(MaintenanceServiceFailure::AdministrationUnavailable);
+        assert!(!matches!(failure, ServiceFailure::BackupRepositoryRejected));
+        assert_eq!(failure, ServiceFailure::CatalogUnavailable);
     }
 }
