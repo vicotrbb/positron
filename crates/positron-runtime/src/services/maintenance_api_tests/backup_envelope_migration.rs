@@ -137,7 +137,9 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
         assert_eq!(
             completed.operation.as_ref().map(|op| op.status.as_str()),
             Some("succeeded"),
-            "{action}: {completed:?}"
+            "{action}: {completed:?}; maintenance={:?}; readiness={:?}",
+            services.maintenance_status(&administrator, br"{}"),
+            initialized.backup_key_recovery_readiness()
         );
         if action == "activate" {
             routes = Some(initialized.backup_migration_envelopes()?);
@@ -244,7 +246,11 @@ fn finish_root(
                 return Ok(status);
             }
             if worker.is_finished() || std::time::Instant::now() >= deadline {
-                return Err(format!("root completion deadline: {status:?}").into());
+                return Err(format!(
+                    "root completion deadline: {status:?}; maintenance={:?}",
+                    services.maintenance_status(administrator, br"{}")
+                )
+                .into());
             }
             std::thread::sleep(Duration::from_millis(10));
         }

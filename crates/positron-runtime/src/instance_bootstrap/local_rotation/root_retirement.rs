@@ -80,6 +80,8 @@ impl InitializedInstance {
                     })?
             };
             if readiness != RecoveryReadiness::Verified {
+                #[cfg(test)]
+                eprintln!("DIAG109 root guard: independent recovery readiness {readiness:?}");
                 let catalog = self.rotation_catalog_for_operation(&session, Some(context))?;
                 let basis = catalog
                     .pin()
@@ -237,10 +239,14 @@ impl InitializedInstance {
                 None => false,
             }
         {
+            #[cfg(test)]
+            eprintln!("DIAG109 root guard: backup registration/target proof mismatch");
             return Err(LocalKeyRotationFailure::RetirementRefused);
         }
         let Some(predecessor) = state.predecessor.clone() else {
             if !recovery_predecessor_absent {
+                #[cfg(test)]
+                eprintln!("DIAG109 root guard: recovery predecessor without root predecessor");
                 self.publish_rotation_for_operation(
                     &catalog,
                     &basis,
@@ -293,6 +299,8 @@ impl InitializedInstance {
                 .map_err(|_| LocalKeyRotationFailure::Custody)?;
         }
         if !recovery_predecessor_absent {
+            #[cfg(test)]
+            eprintln!("DIAG109 root guard: recovery predecessor reference");
             self.publish_rotation_for_operation(
                 &catalog,
                 &basis,
@@ -319,9 +327,11 @@ impl InitializedInstance {
         let _references = match references {
             Ok(guard) => guard,
             Err(
-                positron_kernel::MaintenanceFailure::ConcurrentAccess
-                | positron_kernel::MaintenanceFailure::PreconditionFailed,
+                _failure @ (positron_kernel::MaintenanceFailure::ConcurrentAccess
+                | positron_kernel::MaintenanceFailure::PreconditionFailed),
             ) => {
+                #[cfg(test)]
+                eprintln!("DIAG109 root guard: coordinator {_failure:?}");
                 self.publish_rotation_for_operation(
                     &catalog,
                     &basis,
@@ -351,6 +361,8 @@ impl InitializedInstance {
                 Err(failure)
                     if failure.code() == positron_kernel::LedgerFailureCode::ConcurrentWriter =>
                 {
+                    #[cfg(test)]
+                    eprintln!("DIAG109 root guard: active ledger ConcurrentWriter");
                     self.publish_rotation_for_operation(
                         &catalog,
                         &basis,

@@ -103,6 +103,8 @@ pub(in crate::services) fn complete(
         ) {
             Ok(actor) => actor,
             Err(positron_governance::DurableOperationFailure::Unauthorized) => {
+                #[cfg(test)]
+                eprintln!("DIAG109 terminal owner: requester authorization");
                 DurableOperationAdministration::reject_key_provider_migration_authorization(
                     &catalog, id, now,
                 )
@@ -136,6 +138,8 @@ pub(in crate::services) fn complete(
         .map(positron_config::EffectiveConfiguration::audit_binding_digest)
         != parameters.configuration_digest()
     {
+        #[cfg(test)]
+        eprintln!("DIAG109 terminal owner: configuration digest mismatch");
         let _gate = services.catalog_operation()?;
         let catalog = services
             .open_maintenance_catalog()
@@ -190,6 +194,8 @@ pub(in crate::services) fn complete(
             Ok(Some(proof)) => Some(proof),
             Ok(None) => return Ok(false),
             Err(ServiceFailure::BackupRepositoryRejected) => {
+                #[cfg(test)]
+                eprintln!("DIAG109 terminal owner: backup recovery rejection");
                 let _gate = services.catalog_operation()?;
                 let catalog = services
                     .open_maintenance_catalog()
@@ -282,6 +288,8 @@ pub(in crate::services) fn complete(
     })();
     if let Err(failure) = phase_result {
         if retirement_refused {
+            #[cfg(test)]
+            eprintln!("DIAG109 terminal owner: root retirement refusal");
             let _gate = services.catalog_operation()?;
             let catalog = services
                 .open_maintenance_catalog()
