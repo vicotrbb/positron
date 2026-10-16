@@ -48,10 +48,10 @@ fn exercise_corruption(damage: Damage) -> Result<(), Box<dyn std::error::Error>>
                 path.extension()
                     .is_some_and(|extension| extension == "segment")
             });
-        if let Some(segment) = candidate {
-            if !remote || status.phase() == DurableOperationPhase::BackupVerification {
-                break segment;
-            }
+        if let Some(segment) = candidate
+            && (!remote || status.phase() == DurableOperationPhase::BackupVerification)
+        {
+            break segment;
         }
         if std::time::Instant::now() >= deadline {
             return Err("corruption setup deadline".into());
