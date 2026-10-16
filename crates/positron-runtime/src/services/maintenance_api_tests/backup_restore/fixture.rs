@@ -34,7 +34,7 @@ impl RestoreTestFixture {
             .enable_all()
             .build()?;
         drop(runtime.block_on(LocalRepository::initialize(&repository_path, identity))?);
-        let services = ServiceHandle::new(Arc::clone(&initialized))?;
+        let mut services = ServiceHandle::new(Arc::clone(&initialized))?;
         services.ingest_otlp_logs(&ingest, request("restored telemetry").encode_to_vec())?;
         let unlock = age::x25519::Identity::generate();
         let mut bundle = export.join("restore.age");
@@ -170,8 +170,11 @@ impl RestoreTestFixture {
                     .manage_provider_migration(&administrator, &input)
                     .map_err(|error| format!("retired source {action}: {error:?}"))?;
                 let operation = accepted.operation.ok_or("root operation")?.id;
-                let completed =
-                    super::envelope_migration::finish_root(&services, &administrator, &operation)?;
+                let completed = super::envelope_migration::finish_root(
+                    &mut services,
+                    &administrator,
+                    &operation,
+                )?;
                 assert_eq!(
                     completed
                         .operation
