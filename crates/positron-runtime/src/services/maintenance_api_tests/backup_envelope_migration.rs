@@ -232,14 +232,18 @@ pub(super) fn finish_root(
     let worker_cancel = cancellation.clone();
     let worker = std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancel));
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        // Use the existing long-work fixture budget: the owning no-progress SLO
+        // alone is 60 seconds, before any queued prerequisite. Status reads
+        // share the Catalog gate with checkpoints; 100 ms polling reduces
+        // contention tenfold from the former 10 ms cadence.
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
         loop {
             let status = match services.manage_provider_migration(administrator, &request) {
                 Ok(status) => status,
                 Err(MaintenanceServiceFailure::AdministrationUnavailable)
                     if !worker.is_finished() && std::time::Instant::now() < deadline =>
                 {
-                    std::thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(100));
                     continue;
                 },
                 Err(failure) => return Err(format!("root lookup {failure:?}").into()),
@@ -253,7 +257,7 @@ pub(super) fn finish_root(
             if worker.is_finished() || std::time::Instant::now() >= deadline {
                 return Err(format!("root completion deadline: {status:?}").into());
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(100));
         }
     })();
     cancellation.cancel();

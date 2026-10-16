@@ -142,9 +142,29 @@ fn runtime_backup_expiry_waits_for_retention_and_finishes_signed_cleanup()
                 let _gate = services.catalog_operation()?;
                 open_catalog(&initialized)?.pin()?.number()
             });
-            let due = services
-                .manage_backup(&administrator, &due_request.encode()?)
-                .map_err(|failure| format!("accept due expiry: {failure:?}"))?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let due = loop {
+                match services.manage_backup(&administrator, &due_request.encode()?) {
+                    Ok(response) => break response,
+                    Err(MaintenanceServiceFailure::PreconditionFailed) => {
+                        let generation = {
+                            let _gate = services.catalog_operation()?;
+                            open_catalog(&initialized)?.pin()?.number()
+                        };
+                        if due_request.expected_catalog_generation == Some(generation)
+                            || std::time::Instant::now() >= deadline
+                        {
+                            return Err("accept due expiry: Catalog precondition refused".into());
+                        }
+                        // Rejection precedes acceptance; refresh only the stale
+                        // generation while preserving the exact expiry intent and key.
+                        due_request.expected_catalog_generation = Some(generation);
+                    },
+                    Err(failure) => {
+                        return Err(format!("accept due expiry: {failure:?}").into());
+                    },
+                }
+            };
             due.encode()?;
             let completed = finish_direct(&services, &administrator, &due.operation.id)?;
             assert_eq!(completed.operation.status, "succeeded");
