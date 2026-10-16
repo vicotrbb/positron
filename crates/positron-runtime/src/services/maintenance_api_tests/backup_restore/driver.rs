@@ -19,8 +19,9 @@ pub(super) fn drive_restore(
         pin,
         provider,
     } = context;
-    let begin = || -> Result<crate::BackupRestoreSession, crate::BootstrapFailure> {
-        match provider {
+    // Repeated cold retries retain one bounded session off the test-thread stack.
+    let begin = || -> Result<Box<crate::BackupRestoreSession>, crate::BootstrapFailure> {
+        let session = match provider {
             Some(provider) => crate::InstanceBootstrap::begin_restore_with_provider(
                 paths,
                 configuration,
@@ -35,7 +36,8 @@ pub(super) fn drive_restore(
                 restore,
                 positron_kernel::RecoveryUnlock::Identity(unlock),
             ),
-        }
+        };
+        session.map(Box::new)
     };
     if case == RestoreCase::InspectFresh {
         assert!(
