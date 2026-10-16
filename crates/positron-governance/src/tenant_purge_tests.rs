@@ -110,6 +110,7 @@ fn exercise_live_purge(secondary: bool) -> Result<(), Box<dyn std::error::Error>
     } else {
         default_tenant
     };
+    reject_unrelated_purge_transitions(&catalog, actor, target)?;
     let proof_digest = [88; 32];
     assert!(
         TenantAdministration::live_purge_objects(
@@ -172,18 +173,63 @@ fn exercise_live_purge(secondary: bool) -> Result<(), Box<dyn std::error::Error>
         TenantAdministration::begin_live_purge_inventory(&catalog, target, [89; 32]),
         Err(TenantAdministrationFailure::InvalidInput)
     ));
-    let proof = TenantAdministration::reclaim_live_purge(&catalog, target, proof_digest)?;
-    let basis = catalog.pin()?;
-    let objects = TenantAdministration::complete_live_purge_objects(&basis, target, &proof)?;
-    catalog.commit(
-        basis.identity(),
-        CatalogProposal::new(
-            TransactionId::new([0xf3; 16])?,
-            positron_kernel::FormatEpoch::CATALOG_V2,
-            objects,
-        )?,
-        Some(AuditIntent::new(b"purged fixture".to_vec())?),
+    let stale_proof = TenantAdministration::reclaim_live_purge(&catalog, target, proof_digest)?;
+    let request = DurableOperationRequest::tenant_purge(
+        administrator,
+        target,
+        AdministrativeIdempotencyKey::new([0xb3; 16])?,
+        catalog.pin()?.number(),
+        24,
+        [0xb4; 32],
     )?;
+    let accepted = DurableOperationAdministration::accept_tenant_purge(&catalog, actor, request)?;
+    let operation =
+        DurableOperationAdministration::begin(&catalog, actor, accepted.operation_id(), 24)?;
+    DurableOperationAdministration::mark_draining(&catalog, actor, operation.operation_id(), 25)?;
+    DurableOperationAdministration::publish_tenant_purge_boundary(
+        &catalog,
+        actor,
+        operation.operation_id(),
+        25,
+    )?;
+    let basis = catalog.pin()?;
+    let mut progress_objects = Vec::new();
+    for id in basis.object_identities() {
+        progress_objects.push(CatalogObject::new(
+            basis.object(id)?.ok_or("object")?.to_vec(),
+        )?);
+    }
+    let progress = DurableOperationAdministration::publish_tenant_purge_progress(
+        &catalog,
+        actor,
+        operation.operation_id(),
+        progress_objects,
+        26,
+    )?;
+    assert_eq!(progress.status(), DurableOperationStatus::Running);
+    assert_eq!(
+        TenantAdministration::lifecycle_state(&catalog.pin()?, target)?.0,
+        positron_domain::lifecycle::TenantLifecycleState::Purging
+    );
+    assert!(matches!(
+        DurableOperationAdministration::complete_tenant_purge(
+            &catalog,
+            actor,
+            operation.operation_id(),
+            &stale_proof,
+            27
+        ),
+        Err(DurableOperationFailure::InvalidState)
+    ));
+    let proof = TenantAdministration::reclaim_live_purge(&catalog, target, proof_digest)?;
+    let completed = DurableOperationAdministration::complete_tenant_purge(
+        &catalog,
+        actor,
+        operation.operation_id(),
+        &proof,
+        27,
+    )?;
+    assert_eq!(completed.status(), DurableOperationStatus::Succeeded);
     let snapshot = catalog.pin()?;
     assert_eq!(
         TenantAdministration::inspect(&snapshot, target)?.lifecycle(),
@@ -262,5 +308,58 @@ fn exercise_live_purge(secondary: bool) -> Result<(), Box<dyn std::error::Error>
         TenantAdministration::restore_purge_exclusions(&catalog.pin()?)?.len(),
         1
     );
+    Ok(())
+}
+
+fn reject_unrelated_purge_transitions(
+    catalog: &Catalog<'_>,
+    actor: crate::AuthorizedContext,
+    target: TenantId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::*;
+    let create = |key, now| -> Result<DurableOperation, Box<dyn std::error::Error>> {
+        let request = DurableOperationRequest::tenant_purge(
+            actor.principal_id(),
+            target,
+            AdministrativeIdempotencyKey::new([key; 16])?,
+            catalog.pin()?.number(),
+            now,
+            [0x97; 32],
+        )?;
+        let accepted =
+            DurableOperationAdministration::accept_tenant_purge(catalog, actor, request)?;
+        Ok(DurableOperationAdministration::begin(
+            catalog,
+            actor,
+            accepted.operation_id(),
+            now,
+        )?)
+    };
+    let first = create(0xb1, 17)?;
+    let success = DurableOperationAdministration::succeed_catalog_format_migration(
+        catalog,
+        actor,
+        first.operation_id(),
+        18,
+    );
+    let second = create(0xb2, 19)?;
+    DurableOperationAdministration::mark_draining(catalog, actor, second.operation_id(), 20)?;
+    let drained =
+        DurableOperationAdministration::mark_drained(catalog, actor, second.operation_id(), 21);
+    let failed = DurableOperationAdministration::fail_catalog_format_migration(
+        catalog,
+        actor,
+        second.operation_id(),
+        22,
+        DurableOperationTerminalError::HandlerRejected,
+    );
+    assert!(
+        matches!(success, Err(DurableOperationFailure::InvalidState))
+            && matches!(drained, Err(DurableOperationFailure::InvalidState))
+            && matches!(failed, Err(DurableOperationFailure::InvalidState)),
+        "unrelated migration transitions accepted purge: success={success:?}, drained={drained:?}, failed={failed:?}"
+    );
+    DurableOperationAdministration::reject_tenant_purge(catalog, actor, first.operation_id(), 22)?;
+    DurableOperationAdministration::reject_tenant_purge(catalog, actor, second.operation_id(), 22)?;
     Ok(())
 }

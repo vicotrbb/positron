@@ -108,3 +108,11 @@ The native fence protocol is covered by local HTTP provider simulations,
 including delayed conditional uploads. These tests do not establish live AWS,
 Google Cloud, or Azure qualification; real-provider acceptance remains separate
 and requires explicitly authorized disposable resources.
+
+Public operation transitions retain their owning operation kind. Purge progress
+publication cannot report success. Its separate terminal transition requires the
+live kernel's private tenant/instance proof for the exact current Catalog
+generation and constructs the terminal tenant representation itself. Runtime
+invokes it only after its private registered-repository scope proof remains
+current under the same Catalog mutation gate. An old live proof cannot authorize
+terminal publication after an intervening Catalog change.

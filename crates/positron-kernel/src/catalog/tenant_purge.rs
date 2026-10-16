@@ -13,8 +13,12 @@ pub struct TenantKeyReclamationProof {
     tenant: TenantId,
     instance: InstanceId,
     proof: [u8; 32],
+    generation: CatalogGenerationId,
 }
 impl TenantKeyReclamationProof {
+    pub const fn catalog_generation(&self) -> CatalogGenerationId {
+        self.generation
+    }
     pub const fn instance_id(&self) -> InstanceId {
         self.instance
     }

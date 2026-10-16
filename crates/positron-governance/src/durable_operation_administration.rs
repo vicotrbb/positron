@@ -354,6 +354,9 @@ impl DurableOperationAdministration {
         let operation = find_by_id(&snapshot, operation_id)?
             .ok_or(DurableOperationFailure::UnknownOperation)?;
         validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::CatalogFormatMigration {
+            return Err(DurableOperationFailure::InvalidState);
+        }
         publish(catalog, &snapshot, operation.drained(now)?)
     }
 
@@ -371,6 +374,9 @@ impl DurableOperationAdministration {
         let operation = find_by_id(&snapshot, operation_id)?
             .ok_or(DurableOperationFailure::UnknownOperation)?;
         validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::CatalogFormatMigration {
+            return Err(DurableOperationFailure::InvalidState);
+        }
         publish(catalog, &snapshot, operation.succeeded(now)?)
     }
 
@@ -547,6 +553,9 @@ impl DurableOperationAdministration {
         let operation = find_by_id(&snapshot, operation_id)?
             .ok_or(DurableOperationFailure::UnknownOperation)?;
         validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::CatalogFormatMigration {
+            return Err(DurableOperationFailure::InvalidState);
+        }
         publish(catalog, &snapshot, operation.failed(now, error)?)
     }
 

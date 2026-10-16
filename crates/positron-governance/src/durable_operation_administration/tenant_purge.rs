@@ -214,12 +214,11 @@ impl DurableOperationAdministration {
         )
     }
     /// Commits the owning modules' purge transformation with the operation transition and audit.
-    pub fn publish_tenant_purge_objects(
+    pub fn publish_tenant_purge_progress(
         catalog: &Catalog<'_>,
         actor: crate::AuthorizedContext,
         id: OperationId,
-        mut objects: Vec<CatalogObject>,
-        completed: bool,
+        objects: Vec<CatalogObject>,
         now: u64,
     ) -> Result<DurableOperation, DurableOperationFailure> {
         let snapshot = catalog.pin().map_err(map_catalog)?;
@@ -231,9 +230,7 @@ impl DurableOperationAdministration {
         {
             return Err(DurableOperationFailure::InvalidState);
         }
-        let next = if completed {
-            operation.succeeded(now)?
-        } else if operation.phase == DurableOperationPhase::CatalogPublication
+        let next = if operation.phase == DurableOperationPhase::CatalogPublication
             && now >= operation.updated_at_unix_seconds
         {
             let mut next = operation;
@@ -246,32 +243,72 @@ impl DurableOperationAdministration {
         } else {
             operation.drained(now)?
         };
-        let mut retained = Vec::new();
-        for object in objects.drain(..) {
-            if decode_operation(object.canonical_bytes())?
-                .is_some_and(|value| value.operation_id() == id)
-            {
-                continue;
-            }
-            retained.push(object);
+        publish_purge_objects(catalog, &snapshot, next, objects)
+    }
+    /// The Runtime's repository owner must prove its complete registered scope
+    /// under the same Catalog gate. Governance additionally requires the live
+    /// owner's private exact-generation proof and constructs terminal records.
+    pub fn complete_tenant_purge(
+        catalog: &Catalog<'_>,
+        actor: crate::AuthorizedContext,
+        id: OperationId,
+        proof: &positron_kernel::TenantKeyReclamationProof,
+        now: u64,
+    ) -> Result<DurableOperation, DurableOperationFailure> {
+        let snapshot = catalog.pin().map_err(map_catalog)?;
+        let operation =
+            find_by_id(&snapshot, id)?.ok_or(DurableOperationFailure::UnknownOperation)?;
+        validate_system_actor(actor, operation.request.principal)?;
+        if operation.kind() != DurableOperationKind::TenantPurge
+            || operation.phase != DurableOperationPhase::CatalogPublication
+            || operation.boundary != DurableOperationBoundary::CatalogGenerationPublished
+            || operation.request.applicable_tenant != Some(proof.tenant_id())
+            || snapshot.identity() != proof.catalog_generation()
+        {
+            return Err(DurableOperationFailure::InvalidState);
         }
-        retained.push(CatalogObject::new(encode_operation(next)).map_err(map_catalog)?);
-        let proposal = CatalogProposal::new(
-            transition_transaction(next)?,
-            snapshot
-                .format_epoch()
-                .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
-            retained,
+        let objects = crate::TenantAdministration::complete_live_purge_objects(
+            &snapshot,
+            proof.tenant_id(),
+            proof,
+        )
+        .map_err(|_| DurableOperationFailure::InvalidState)?;
+        publish_purge_objects(catalog, &snapshot, operation.succeeded(now)?, objects)
+    }
+}
+
+fn publish_purge_objects(
+    catalog: &Catalog<'_>,
+    snapshot: &CatalogSnapshot,
+    next: DurableOperation,
+    mut objects: Vec<CatalogObject>,
+) -> Result<DurableOperation, DurableOperationFailure> {
+    let id = next.operation_id();
+    let mut retained = Vec::new();
+    for object in objects.drain(..) {
+        if decode_operation(object.canonical_bytes())?
+            .is_some_and(|value| value.operation_id() == id)
+        {
+            continue;
+        }
+        retained.push(object);
+    }
+    retained.push(CatalogObject::new(encode_operation(next)).map_err(map_catalog)?);
+    let proposal = CatalogProposal::new(
+        transition_transaction(next)?,
+        snapshot
+            .format_epoch()
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
+        retained,
+    )
+    .map_err(map_catalog)?;
+    let commit = catalog
+        .commit_prepared(
+            snapshot.identity(),
+            proposal,
+            AuditIntent::new(encode_audit(next)?).map_err(map_catalog)?,
+            transition_request_digest(next),
         )
         .map_err(map_catalog)?;
-        let commit = catalog
-            .commit_prepared(
-                snapshot.identity(),
-                proposal,
-                AuditIntent::new(encode_audit(next)?).map_err(map_catalog)?,
-                transition_request_digest(next),
-            )
-            .map_err(map_catalog)?;
-        operation_from_snapshot(commit.snapshot(), id)
-    }
+    operation_from_snapshot(commit.snapshot(), id)
 }

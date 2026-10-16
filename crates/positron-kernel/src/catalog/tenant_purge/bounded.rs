@@ -150,6 +150,7 @@ impl Catalog<'_> {
                     tenant,
                     instance: self.instance,
                     proof,
+                    generation: snapshot.identity(),
                 },
             ));
         }

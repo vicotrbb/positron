@@ -256,8 +256,8 @@ fn complete_inner(
             }
         }
         let objects = retained;
-        operation = DurableOperationAdministration::publish_tenant_purge_objects(
-            &catalog, actor, id, objects, false, now,
+        operation = DurableOperationAdministration::publish_tenant_purge_progress(
+            &catalog, actor, id, objects, now,
         )
         .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     }
@@ -313,17 +313,11 @@ fn complete_inner(
         },
         Err(_) => return Err(ServiceFailure::CatalogUnavailable),
     };
-    let snapshot = catalog
-        .pin()
-        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-    let objects = TenantAdministration::complete_live_purge_objects(&snapshot, tenant, &proof)
-        .map_err(|_| ServiceFailure::CorruptState)?;
-    DurableOperationAdministration::publish_tenant_purge_objects(
+    DurableOperationAdministration::complete_tenant_purge(
         &catalog,
         actor,
         id,
-        objects,
-        true,
+        &proof,
         services
             .maintenance_status_now()
             .map_err(|_| ServiceFailure::StorageUnavailable)?,

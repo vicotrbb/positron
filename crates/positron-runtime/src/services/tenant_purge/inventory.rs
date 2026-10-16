@@ -79,12 +79,11 @@ pub(super) fn prepare(
                             objects.push(descriptor);
                         }
                     }
-                    DurableOperationAdministration::publish_tenant_purge_objects(
+                    DurableOperationAdministration::publish_tenant_purge_progress(
                         &catalog,
                         actor,
                         id,
                         objects,
-                        false,
                         services
                             .maintenance_status_now()
                             .map_err(|_| ServiceFailure::StorageUnavailable)?,
