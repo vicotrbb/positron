@@ -13,10 +13,14 @@ impl RepositoryServiceClient {{
         Ok(Self {{ http }})
     }}
     pub fn manage(&self, bearer: &str, request: &super::RepositoryRequest) -> Result<super::RepositoryResponse, super::RepositoryServiceClientFailure> {{
+        self.manage_with_timeout(bearer, request, crate::http_client::DEFAULT_REQUEST_TIMEOUT)
+    }}
+    /// Bounds this request by the supplied duration, capped at the default five seconds.
+    pub fn manage_with_timeout(&self, bearer: &str, request: &super::RepositoryRequest, timeout: std::time::Duration) -> Result<super::RepositoryResponse, super::RepositoryServiceClientFailure> {{
         use super::RepositoryServiceClientFailure as Failure;
         let body = request.encode().map_err(|_| Failure::InvalidRequest)?;
         if body.len() > {request_limit} {{ return Err(Failure::InvalidRequest); }}
-        let (status, bytes) = self.http.post(bearer, {path:?}, body, {response_limit}).map_err(|_| Failure::Transport)?;
+        let (status, bytes) = self.http.post_with_timeout(bearer, {path:?}, body, {response_limit}, timeout).map_err(|_| Failure::Transport)?;
         if !(200..300).contains(&status) {{
             let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
             let code = value.as_ref().and_then(|value| value.get("code")?.as_str());
@@ -28,6 +32,7 @@ impl RepositoryServiceClient {{
                 (409, Some("precondition_failed")) => Failure::PreconditionFailed,
                 (409, Some("idempotency_conflict")) => Failure::IdempotencyConflict,
                 (503, Some("administration_unavailable")) => Failure::AdministrationUnavailable,
+                (503, Some("capacity_unavailable")) => Failure::CapacityUnavailable,
                 _ => Failure::Transport,
             }});
         }}

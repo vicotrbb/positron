@@ -23,27 +23,55 @@ fn execute(
     let credential = crate::administrative_cli::credential()?;
     let bearer = credential.trim_end_matches(['\r', '\n']);
     let client = RepositoryServiceClient::new(transport).map_err(client_failure)?;
-    let mut response = client.manage(bearer, &request).map_err(client_failure)?;
-    if let Some(duration) = wait {
-        let deadline = Instant::now()
-            .checked_add(duration)
-            .ok_or("invalid wait duration")?;
-        while response
-            .operation
-            .as_ref()
-            .is_some_and(|operation| matches!(operation.status.as_str(), "pending" | "running"))
-        {
-            if Instant::now() >= deadline {
-                write_response(output, &response)?;
-                return Err(
-                    "operation outcome remains unknown; inspect the same operation ID before retrying",
-                );
+    let deadline = wait
+        .map(|duration| {
+            Instant::now()
+                .checked_add(duration)
+                .ok_or("invalid wait duration")
+        })
+        .transpose()?;
+    let mut response = None;
+    loop {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if let Some(response) = &response {
+                write_response(output, response)?;
             }
-            std::thread::sleep(Duration::from_millis(100));
-            response = client.manage(bearer, &request).map_err(client_failure)?;
+            return Err(
+                "operation outcome remains unknown; inspect the same operation ID before retrying",
+            );
         }
+        let result = match deadline {
+            Some(deadline) => client.manage_with_timeout(
+                bearer,
+                &request,
+                deadline.saturating_duration_since(Instant::now()),
+            ),
+            None => client.manage(bearer, &request),
+        };
+        match result {
+            Ok(current) => {
+                if deadline.is_none()
+                    || current.operation.as_ref().is_none_or(|operation| {
+                        !matches!(operation.status.as_str(), "pending" | "running")
+                    })
+                {
+                    return write_response(output, &current);
+                }
+                response = Some(current);
+            },
+            Err(
+                RepositoryServiceClientFailure::AdministrationUnavailable
+                | RepositoryServiceClientFailure::CapacityUnavailable,
+            ) if deadline.is_some() => {},
+            Err(RepositoryServiceClientFailure::Transport)
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {},
+            Err(failure) => return Err(client_failure(failure)),
+        }
+        let remaining = deadline
+            .ok_or("invalid wait duration")?
+            .saturating_duration_since(Instant::now());
+        std::thread::sleep(Duration::from_millis(100).min(remaining));
     }
-    write_response(output, &response)
 }
 fn write_response(
     output: &mut impl Write,
