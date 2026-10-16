@@ -27,7 +27,7 @@ async fn cold_capture_corruption_cannot_be_signed_as_a_fresh_snapshot()
         CatalogProposal::new(
             TransactionId::new([4; 16])?,
             FormatEpoch::CATALOG_V2,
-            vec![CatalogObject::new(b"captured metadata".to_vec())?],
+            vec![CatalogObject::new(vec![0x61; 64 * 1024])?],
         )?,
         None,
     )?;
@@ -152,6 +152,25 @@ async fn cold_capture_corruption_cannot_be_signed_as_a_fresh_snapshot()
             let mut native =
                 catalog.begin_backup_capture_verification([6; 16], [7; 32], &index_bytes)?;
             let files = native.files().to_vec();
+            // Inventory acceptance must establish the grant for every native
+            // metadata file before the caller starts hashing and decoding them.
+            snapshot_resources::admitted(8 * 1024 * 1024 + 64 * 1024, |limited| {
+                let (port, repository, signer, files, verification) =
+                    (port, repository, signer, &files, &mut verification);
+                async move {
+                    let limited = BackupPublisher::new(port, repository, signer)
+                        .with_control_resources(&limited, 0)?;
+                    assert!(
+                        matches!(
+                            limited.validate_snapshot_inventory(verification, files),
+                            Err(RepositoryFailure::ControlMemoryRequired { .. })
+                        ),
+                        "native metadata must be admitted before accepting its inventory"
+                    );
+                    Ok(())
+                }
+            })
+            .await?;
             publisher.validate_snapshot_inventory(&mut verification, &files)?;
             assert!(
                 publisher

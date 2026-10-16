@@ -222,6 +222,23 @@ impl BackupPublisher<'_> {
         if objects.next().is_some() {
             return Err(RepositoryFailure::CorruptState);
         }
+        // The authenticated inventory already establishes every native file
+        // size. Admit its largest buffered metadata read before accepting it,
+        // so later files cannot force repeated replay of earlier verification.
+        let metadata_extent = files
+            .iter()
+            .filter(|file| {
+                matches!(
+                    file.kind(),
+                    positron_kernel::BackupCaptureFileKind::CatalogObject
+                        | positron_kernel::BackupCaptureFileKind::GovernanceAudit
+                        | positron_kernel::BackupCaptureFileKind::AuditCheckpoint
+                )
+            })
+            .map(|file| file.size())
+            .max()
+            .unwrap_or(0);
+        self.ensure_control_memory(metadata_extent, 0)?;
         self.manifest_memory(
             &state.manifest,
             allocation_bytes::<positron_kernel::BackupCaptureFile>(files.len())?,
