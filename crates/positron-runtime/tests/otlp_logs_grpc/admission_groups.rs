@@ -60,7 +60,7 @@ async fn assignment_unavailable_is_exposed_as_retryable_capacity()
         .export(harness.authorize(tonic::Request::new(otlp_request("capacity")))?)
         .await
         .expect_err("unavailable assignment must refuse the request");
-    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(status.code(), tonic::Code::Unavailable);
     drop(client);
     assert_eq!(
         harness.shutdown(ShutdownTrigger::FirstSignal).await?,

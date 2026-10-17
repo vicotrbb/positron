@@ -331,11 +331,12 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         "initial Log response: {response}; public resource metrics: {diagnostic}"
     );
     assert!(
-        request(
+        request_with_capacity_retry(
             loki,
             "/loki/api/v1/push",
             &headers,
-            br#"{"streams":[{"stream":{"app":"audit"},"values":[["43","binary-loki"]]}]}"#
+            br#"{"streams":[{"stream":{"app":"audit"},"values":[["43","binary-loki"]]}]}"#,
+            admission_budget,
         )?
         .starts_with("HTTP/1.1 204 No Content")
     );
@@ -362,7 +363,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         .await?
         .expect_err("anonymous gRPC ingest must fail");
         assert_eq!(denied.code(), tonic::Code::Unauthenticated);
-        let mut request = tonic::Request::new(ExportLogsServiceRequest {
+        let payload = ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 scope_logs: vec![ScopeLogs {
                     log_records: vec![LogRecord {
@@ -376,17 +377,32 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
                 }],
                 ..ResourceLogs::default()
             }],
-        });
-        request
-            .metadata_mut()
-            .insert("authorization", bearer.parse()?);
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), client.export(request))
-                .await??
-                .into_inner()
-                .partial_success
-                .is_none()
-        );
+        };
+        let deadline = tokio::time::Instant::now() + admission_budget;
+        let mut backoff = Duration::from_millis(100);
+        let response = loop {
+            let mut request = tonic::Request::new(payload.clone());
+            request
+                .metadata_mut()
+                .insert("authorization", bearer.parse()?);
+            let attempt_deadline =
+                deadline.min(tokio::time::Instant::now() + Duration::from_secs(5));
+            match tokio::time::timeout_at(attempt_deadline, client.export(request)).await? {
+                Ok(response) => break response,
+                Err(status)
+                    if status.code() == tonic::Code::Unavailable
+                        && status.message() == "OTLP Logs ingest capacity is unavailable"
+                        && tokio::time::Instant::now() + backoff < deadline =>
+                {
+                    // This explicit precommit refusal admits no records. Never retry
+                    // ambiguous outcomes, authentication, hard limits, or timeouts.
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2).min(Duration::from_secs(1));
+                },
+                Err(status) => return Err(status.into()),
+            }
+        };
+        assert!(response.into_inner().partial_success.is_none());
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     let traces = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"01010101010101010101010101010101","spanId":"0202020202020202","name":"audit-span","startTimeUnixNano":"42","endTimeUnixNano":"84"}]}]}]}"#;
