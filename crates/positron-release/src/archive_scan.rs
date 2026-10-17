@@ -75,13 +75,22 @@ fn scan(
     }
     if tar {
         let mut archive = tar::Archive::new(stream);
-        for entry in archive.entries().map_err(|_| ReleaseError::Invalid)? {
+        // Raw iteration must precede our bounds: automatic GNU/PAX expansion
+        // reads metadata into unbounded vectors inside the upstream parser.
+        for entry in archive
+            .entries()
+            .map_err(|_| ReleaseError::Invalid)?
+            .raw(true)
+        {
             budget.entries = budget
                 .entries
                 .checked_sub(1)
                 .ok_or(ReleaseError::LimitExceeded)?;
             let mut entry = entry.map_err(|_| ReleaseError::Invalid)?;
-            if entry.size() > MAX_MEMBER || entry.path_bytes().len() > 4096 {
+            if entry.size() > MAX_MEMBER
+                || entry.size() > budget.remaining
+                || entry.path_bytes().len() > 4096
+            {
                 return Err(ReleaseError::LimitExceeded);
             }
             if contains_secret(&entry.path_bytes(), canaries)
@@ -89,12 +98,36 @@ fn scan(
             {
                 return Err(ReleaseError::SecretDetected);
             }
-            scan(
-                Box::new(&mut entry) as Box<dyn Read>,
-                canaries,
-                depth + 1,
-                budget,
-            )?;
+            let kind = entry.header().entry_type();
+            if kind.is_gnu_sparse() {
+                return Err(ReleaseError::Unsupported);
+            }
+            if kind.is_gnu_longname()
+                || kind.is_gnu_longlink()
+                || kind.is_pax_local_extensions()
+                || kind.is_pax_global_extensions()
+            {
+                // Metadata is screened as serialized bytes, never interpreted
+                // as another archive or applied to a later header.
+                let expected = entry.size();
+                let size =
+                    inspect_reader(&mut entry, canaries, budget.remaining.min(MAX_MEMBER), true)?
+                        .size;
+                if size != expected {
+                    return Err(ReleaseError::Invalid);
+                }
+                budget.remaining = budget
+                    .remaining
+                    .checked_sub(size)
+                    .ok_or(ReleaseError::LimitExceeded)?;
+            } else {
+                scan(
+                    Box::new(&mut entry) as Box<dyn Read>,
+                    canaries,
+                    depth + 1,
+                    budget,
+                )?;
+            }
         }
         let remaining = inspect_reader(
             archive.into_inner(),

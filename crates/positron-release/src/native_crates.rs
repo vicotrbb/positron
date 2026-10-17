@@ -201,6 +201,7 @@ fn inspect(
     let mut files = BTreeSet::<String>::new();
     let mut path_budget = 8_388_608_usize;
     let mut manifest = false;
+    let mut source_vcs = false;
     for (index, entry) in archive
         .entries()
         .map_err(|_| ReleaseError::Invalid)?
@@ -288,6 +289,7 @@ fn inspect(
                 if !vcs.path_in_vcs.is_empty() {
                     portable_path(vcs.path_in_vcs)?;
                 }
+                source_vcs = true;
             }
         } else if std::io::copy(&mut entry, &mut std::io::sink())
             .map_err(|_| ReleaseError::Invalid)?
@@ -296,7 +298,7 @@ fn inspect(
             return Err(ReleaseError::Invalid);
         }
     }
-    if !manifest {
+    if !manifest || !source_vcs {
         return Err(ReleaseError::Invalid);
     }
     Ok(())

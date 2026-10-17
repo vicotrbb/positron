@@ -267,3 +267,12 @@ fn refuses_links_extensions_traversal_and_oversized_declared_members() {
         assert_eq!(check(&gzip.finish().unwrap()), Err(expected));
     }
 }
+
+#[test]
+fn refuses_a_crate_without_its_embedded_source_vcs_identity() {
+    let bytes = archive(&[
+        ("Cargo.toml", MANIFEST),
+        ("src/lib.rs", b"pub struct Client;\n"),
+    ]);
+    assert_eq!(check(&bytes), Err(ReleaseError::Invalid));
+}

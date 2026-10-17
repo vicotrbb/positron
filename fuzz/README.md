@@ -299,3 +299,8 @@ ZIP CRCs and its unchanged unsigned payload, Go module contents under its signed
 checksum record, normalized Cargo TOML inside a freshly encoded gzip/tar member,
 and Maven POM XML. Only enclosing project metadata is re-signed; native signatures
 and authenticated checksum records retain their independent verification role.
+
+The tar metadata seeds cover raw GNU/PAX iteration, an oversized declared GNU
+extension, sparse refusal, and extension records exhausting the member budget.
+Extension payloads are streamed through the secret matcher and byte budget;
+automatic metadata/sparse expansion is never used by release scanning.

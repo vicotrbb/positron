@@ -79,6 +79,9 @@ or independent build jobs described by their results.
 File measurement streams checksums and screens explicit caller canaries and
 recognized credential forms. Gzip, tar, and ZIP members are scanned after
 decoding without extracting paths, with limits on depth, bytes, and member count.
+Tar iteration stays raw: GNU/PAX metadata is counted, bounded and screened as
+serialized bytes before any expansion; GNU sparse entries are refused. Metadata
+is not applied to subsequent paths or interpreted as a nested archive.
 Unknown package formats still require the separately bound security and secret
 scan results from their native packaging pipeline. Pattern screening is defense
 in depth and does not establish absence of every possible secret.
@@ -147,8 +150,9 @@ Go's bounded profile supports stable `vX.Y.Z`, matching module path major,
 ASCII regular-file ZIP members, and an embedded root `go.mod`. Pseudo versions,
 prereleases, `+incompatible`, `gopkg.in`, explicit directory members and Unicode
 paths are refused. The crates profile supports bounded canonical regular-file
-tar/gzip packages; links, sparse/GNU/PAX extensions and trailing archives are
-refused. These limits qualify supported inputs and do not claim universal
+tar/gzip packages with required normalized `Cargo.toml` and source-matching
+`.cargo_vcs_info.json`; links, sparse/GNU/PAX extensions and trailing archives
+are refused. These limits qualify supported inputs and do not claim universal
 compatibility with every ecosystem package.
 
 These profiles follow the owning specifications:
