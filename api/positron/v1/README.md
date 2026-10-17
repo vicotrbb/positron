@@ -434,3 +434,22 @@ A `TenantDescriptor` for a `purged` tenant contains only its reserved Tenant ID,
 slug, and lifecycle. It omits `display_name`, `retention_seconds`,
 `display_generation`, and `retention_generation`. These four optional wire fields
 remain required and populated for every nonterminal descriptor.
+
+`UpgradeService.Manage` uses `POST /v1/upgrades:manage` with a System
+Administration credential and bounded 4096-byte request and response bodies.
+`start` selects the configured signed candidate by `candidate_manifest`, a
+64-character lowercase manifest digest. It also requires a registered
+`repository_id`, `retention_seconds`, `expected_catalog_generation`, and
+`idempotency_key`. The request cannot select a trust root or an artifact path.
+`status`, `lookup`, and `cancel` use the existing durable operation identifiers
+and preconditions. Responses include exact source and target version, manifest
+and native artifact digests, configuration digest, format epoch, repository,
+stage, verified snapshot digest when available, and rollback availability.
+
+`positron upgrade start|status|lookup|wait|cancel` uses the generated
+`UpgradeServiceClient`, protected credential input, and the existing TLS-default
+transport. The Process owner consumes accepted intent through the existing
+Drain lifecycle. `positron upgrade offline` continues the same operation while
+holding exclusive volume ownership. Executable replacement is an explicit
+operator action. The native adapter delivered here is HTTP administration;
+shared native gRPC administration remains tracked by issue #219.

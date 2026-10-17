@@ -124,6 +124,11 @@ impl WorkClaim {
         Self::system_maintenance(amounts)
     }
 
+    /// Admits bounded signed-release artifact and compatibility preflight work.
+    pub fn upgrade_preflight(amounts: ResourceAmounts) -> Result<Self, GovernorFailure> {
+        Self::system_maintenance(amounts)
+    }
+
     /// Creates a bounded system-scoped diagnostics claim. Diagnostics shares
     /// the ordinary maintenance pool but retains a distinct durable work kind
     /// for inspection and accounting.

@@ -363,7 +363,8 @@ pub struct EffectiveConfiguration {
     pub(crate) provider_access: Option<super::ProviderAccess>,
     pub(crate) key_cache_lease_seconds: u16,
     pub(crate) export_destinations: Vec<ExportDestinationDefinition>,
-    pub(crate) sources: [SettingSource; 103],
+    pub(crate) installed_release: Option<super::InstalledReleaseConfiguration>,
+    pub(crate) sources: [SettingSource; 104],
 }
 
 impl EffectiveConfiguration {
@@ -610,6 +611,9 @@ impl EffectiveConfiguration {
     }
 
     #[must_use]
+    pub fn installed_release(&self) -> Option<&super::InstalledReleaseConfiguration> {
+        self.installed_release.as_ref()
+    }
     pub fn provider_access(&self) -> Option<&super::ProviderAccess> {
         self.provider_access.as_ref()
     }
@@ -1156,6 +1160,7 @@ impl EffectiveConfiguration {
                 | Setting::SecurityKeyCacheLeaseSeconds
                 | Setting::SecurityLocalKeyFile
                 | Setting::SecurityProviderAccess
+                | Setting::ReleaseInstallation
                 | Setting::ExportDestinations => {},
             }
         }
@@ -1538,6 +1543,7 @@ impl EffectiveConfiguration {
             },
             Setting::SecurityLocalKeyFile => self.local_key_file != other.local_key_file,
             Setting::SecurityProviderAccess => self.provider_access != other.provider_access,
+            Setting::ReleaseInstallation => self.installed_release != other.installed_release,
             Setting::ExportDestinations => self.export_destinations != other.export_destinations,
         }
     }
@@ -1894,6 +1900,10 @@ impl EffectiveConfiguration {
                 || "disabled".to_owned(),
                 super::ProviderAccess::identity_value,
             ),
+            Setting::ReleaseInstallation => self.installed_release.as_ref().map_or_else(
+                || "disabled".to_owned(),
+                super::InstalledReleaseConfiguration::identity_value,
+            ),
             Setting::ExportDestinations => self.redacted_export_destinations(),
         }
     }
@@ -1964,7 +1974,8 @@ impl EffectiveConfiguration {
             | Setting::ListenerLokiPushTlsPrivateKeyFile
             | Setting::ListenerLokiPushTlsClientCaFile
             | Setting::SecurityLocalKeyFile
-            | Setting::SecurityProviderAccess => "<redacted>".to_owned(),
+            | Setting::SecurityProviderAccess
+            | Setting::ReleaseInstallation => "<redacted>".to_owned(),
             Setting::ListenerOtlpGrpcBindAddress => self.otlp_grpc_bind_address.to_string(),
             Setting::ListenerOtlpGrpcTransport => self.otlp_grpc_transport.as_str().to_owned(),
             Setting::ListenerOtlpGrpcAcceptedSocketLimit => {

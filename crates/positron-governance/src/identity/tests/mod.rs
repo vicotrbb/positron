@@ -128,6 +128,14 @@ fn durable_lifecycle_states_are_decoded_and_query_readability_is_fail_closed() {
         };
         assert_eq!(context.tenant_lifecycle(), expected);
         assert_eq!(identity.validate_query_context(context).is_ok(), readable);
+        assert_eq!(
+            identity.query_readable_tenant_ids().collect::<Vec<_>>(),
+            if readable {
+                vec![identity.tenant]
+            } else {
+                Vec::new()
+            }
+        );
     }
 }
 

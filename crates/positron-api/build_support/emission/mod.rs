@@ -14,6 +14,7 @@ mod tenant_purge;
 mod tenant_quota;
 mod tenant_retention;
 mod tenant_service;
+mod upgrade;
 
 use super::validation::ValidatedOperations;
 use std::error::Error;
@@ -24,6 +25,7 @@ pub(super) fn generate_all(operations: &ValidatedOperations) -> Result<(), Box<d
     maintenance::generate_maintenance_client(operations)?;
     provider_migration::generate(operations)?;
     tenant_purge::generate(operations)?;
+    upgrade::generate(operations)?;
     repository::generate(operations)?;
     backup::generate(operations)?;
     tenant_quota::generate_tenant_quota_client(operations)?;

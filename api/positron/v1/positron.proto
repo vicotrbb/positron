@@ -908,3 +908,55 @@ message TenantPurgeResponse {
   optional ProviderMigrationOperation operation = 2;
   string managed_scope = 3;
 }
+
+// Select the independently authenticated operator-staged release; replacement remains external.
+service UpgradeService { rpc Manage(UpgradeRequest) returns (UpgradeResponse); }
+message UpgradeRequest {
+ string action = 1;
+ optional string candidate_manifest = 2;
+ optional string repository_id = 3;
+ optional uint64 retention_seconds = 4;
+ optional uint64 expected_catalog_generation = 5;
+ optional string idempotency_key = 6;
+ optional string operation_id = 7;
+}
+message UpgradeResponse {
+ uint64 catalog_generation = 1;
+ optional UpgradeOperation operation = 2;
+ optional UpgradeDetails details = 3;
+}
+message UpgradeDetails {
+ reserved 1;
+ string source_version = 2;
+ string target_version = 3;
+ string source_manifest = 4;
+ string target_manifest = 5;
+ string source_artifact = 6;
+ string target_artifact = 7;
+ string configuration = 8;
+ uint32 format_epoch = 9;
+ string repository_id = 10;
+ bool rollback_available = 11;
+ optional string snapshot_manifest = 12;
+}
+
+enum UpgradePhase {
+ UPGRADE_PHASE_UNSPECIFIED = 0;
+ UPGRADE_PHASE_PREFLIGHT = 1;
+ UPGRADE_PHASE_DRAINING = 2;
+ UPGRADE_PHASE_SNAPSHOT = 3;
+ UPGRADE_PHASE_PUBLISHING = 4;
+ UPGRADE_PHASE_AWAITING_RESTART = 5;
+ UPGRADE_PHASE_VERIFYING = 6;
+ UPGRADE_PHASE_SUCCEEDED = 7;
+}
+message UpgradeOperation {
+ string id = 1;
+ string status = 2;
+ UpgradePhase phase = 3;
+ uint32 progress_percent = 4;
+ string retry = 5;
+ string cancellation = 6;
+ string irreversible_boundary = 7;
+ optional uint64 lookup_expires_at_unix_seconds = 8;
+}

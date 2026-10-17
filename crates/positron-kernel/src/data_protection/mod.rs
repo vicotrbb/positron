@@ -49,7 +49,8 @@ pub use control_token::{
 };
 pub use export_manifest_signature::{
     BackupControlSignature, BackupControlSigner, ExportManifestSignature,
-    ExportManifestSignatureFailure, ExportManifestSigner,
+    ExportManifestSignatureFailure, ExportManifestSigner, UpgradeVerificationSignature,
+    UpgradeVerificationSigner,
 };
 pub(crate) use frame::{EncryptedFrame, FrameFailure, FrameFailureCode, VerifiedFrame};
 pub(crate) use key_envelope::{SegmentEnvelopeRoute, WrappedKeyContext};

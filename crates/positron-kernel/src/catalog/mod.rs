@@ -13,6 +13,7 @@ mod codec;
 mod fixture;
 mod governance_object;
 mod inspection;
+mod lifecycle_clock;
 mod preparation;
 mod provider_integrity;
 mod recovery;

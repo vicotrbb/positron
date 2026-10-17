@@ -145,7 +145,7 @@ impl ServiceHandle {
             .number();
         let parameters = operation
             .filter(|operation| operation.status() == DurableOperationStatus::Succeeded)
-            .and_then(DurableOperation::repository_parameters);
+            .and_then(|operation| operation.repository_parameters());
         let identity = parameters
             .map(|parameters| {
                 Ok(RepositoryIdentity {

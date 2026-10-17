@@ -143,7 +143,7 @@ impl OtlpSignal {
         match outcome {
             IngestOutcome::Retryable(IngestFailureCode::CapacityUnavailable) => OtlpFailure {
                 http_status: 429,
-                grpc_code: 8,
+                grpc_code: 14,
                 message: match self {
                     Self::Logs => "OTLP Logs ingest capacity is unavailable",
                     Self::Traces => "OTLP Traces ingest capacity is unavailable",
@@ -204,7 +204,7 @@ impl OtlpSignal {
             ServiceFailure::CapacityUnavailable
             | ServiceFailure::BackupControlMemoryRequired { .. } => OtlpFailure {
                 http_status: 429,
-                grpc_code: 8,
+                grpc_code: 14,
                 message: match self {
                     Self::Logs => "OTLP Logs ingest capacity is unavailable",
                     Self::Traces => "OTLP Traces ingest capacity is unavailable",

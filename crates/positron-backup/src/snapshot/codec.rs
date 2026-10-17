@@ -76,11 +76,7 @@ impl BackupManifest {
         bytes
             .try_reserve_exact(256 + 88 * self.objects.len())
             .map_err(|_| RepositoryFailure::LimitExceeded)?;
-        bytes.extend_from_slice(if self.capture_binding.is_some() {
-            b"POSBKM02"
-        } else {
-            b"POSBKM01"
-        });
+        bytes.extend_from_slice(self.backup_format_epoch().header());
         bytes.extend_from_slice(&self.snapshot);
         bytes.extend_from_slice(&self.repository.encode());
         bytes.extend_from_slice(&self.catalog_generation.to_be_bytes());
@@ -107,10 +103,7 @@ impl BackupManifest {
     }
     pub(super) fn decode(bytes: &[u8]) -> Result<Self, RepositoryFailure> {
         let mut decoder = Decoder::new(bytes);
-        let version = decoder.take(8)?;
-        if version != b"POSBKM01" && version != b"POSBKM02" {
-            return Err(RepositoryFailure::CorruptState);
-        }
+        let version = crate::BackupFormatEpoch::from_header(decoder.take(8)?)?;
         let snapshot = decoder.array()?;
         let repository = RepositoryIdentity::decode(decoder.take(108)?)?;
         let generation = decoder.u64()?;
@@ -118,7 +111,7 @@ impl BackupManifest {
         let epoch = decoder.u32()?;
         let audit = decoder.u64()?;
         let index = decoder.array()?;
-        let binding = if version == b"POSBKM02" {
+        let binding = if version == crate::BackupFormatEpoch::CaptureBound {
             Some((decoder.array()?, decoder.array()?))
         } else {
             None

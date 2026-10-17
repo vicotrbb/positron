@@ -3,6 +3,7 @@ use super::*;
 fn preflight_toml(file: &str) -> Result<(), ConfigurationFailure> {
     let mut entry_count = 0_usize;
     let mut provider_table = false;
+    let mut release_table = false;
     for raw_line in file.lines() {
         let line = content_before_comment(raw_line)?.trim();
         if line.is_empty() {
@@ -14,6 +15,10 @@ fn preflight_toml(file: &str) -> Result<(), ConfigurationFailure> {
                 .strip_prefix('[')
                 .and_then(|header| header.strip_suffix(']'))
                 .is_some_and(|header| header.trim() == "security.provider_access");
+            release_table = line
+                .strip_prefix('[')
+                .and_then(|header| header.strip_suffix(']'))
+                .is_some_and(|header| header.trim() == "release.installation");
             entry_count = entry_count
                 .checked_add(1)
                 .ok_or_else(|| document_failure(ConfigurationFailureCode::ResourceLimit))?;
@@ -40,7 +45,13 @@ fn preflight_toml(file: &str) -> Result<(), ConfigurationFailure> {
         if entry_count > MAX_TOML_ENTRIES {
             return Err(document_failure(ConfigurationFailureCode::ResourceLimit));
         }
-        if provider_table && key == "uri" {
+        if release_table && key == "candidate_artifact_files" && value.starts_with('[') {
+            // The whole document remains bounded; the closed installation parser
+            // checks each path and the complete inventory count before resolution.
+            if value.len() > MAX_CONFIGURATION_BYTES {
+                return Err(document_failure(ConfigurationFailureCode::ResourceLimit));
+            }
+        } else if provider_table && key == "uri" {
             if value.len() > 514 {
                 return Err(document_failure(ConfigurationFailureCode::ResourceLimit));
             }
@@ -109,7 +120,7 @@ fn preflight_table_header(line: &str) -> Result<(), ConfigurationFailure> {
         .and_then(|value| value.strip_suffix(']'))
         .ok_or_else(|| document_failure(ConfigurationFailureCode::Malformed))?
         .trim();
-    if name == "security.provider_access" {
+    if matches!(name, "security.provider_access" | "release.installation") {
         return Ok(());
     }
     if let Some(role) = name.strip_prefix("listener.") {
@@ -340,6 +351,15 @@ fn apply_toml_value(
     value: &toml::Value,
 ) -> Result<(), ConfigurationFailure> {
     match (setting_definition(setting).kind(), value) {
+        (SettingKind::ReleaseInstallation, toml::Value::Table(table)) => {
+            candidate.installed_release = Some(super::InstalledReleaseConfiguration::parse(table)?);
+            let source = candidate
+                .sources
+                .get_mut(setting_index(setting))
+                .ok_or_else(|| document_failure(ConfigurationFailureCode::Malformed))?;
+            *source = SettingSource::ConfigurationFile;
+            Ok(())
+        },
         (SettingKind::ProviderAccess, toml::Value::Table(table)) => {
             candidate.provider_access = Some(ProviderAccess::parse(table)?);
             let source = candidate

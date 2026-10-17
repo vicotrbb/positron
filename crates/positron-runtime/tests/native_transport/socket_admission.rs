@@ -563,7 +563,7 @@ async fn otlp_grpc_repeated_unauthenticated_requests_are_rate_limited_then_recov
     )
     .await?
     .expect_err("a repeated unauthenticated RPC must consume no more auth work");
-    assert_eq!(limited.code(), Code::ResourceExhausted);
+    assert_eq!(limited.code(), Code::Unavailable);
 
     tokio::time::sleep(Duration::from_secs(1) + Duration::from_millis(100)).await;
     let recovered = tokio::time::timeout(
@@ -607,7 +607,7 @@ async fn otlp_grpc_unknown_methods_are_rate_limited_before_routing()
         let _ = connection.await;
     });
 
-    for expected_status in ["12", "8"] {
+    for expected_status in ["12", "14"] {
         let request = HttpRequest::builder()
             .method("POST")
             .uri("http://localhost/positron.Unknown/Export")

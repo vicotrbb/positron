@@ -140,3 +140,26 @@ fn repository_operation_binds_native_locator_identity_actor_and_action()
     );
     Ok(())
 }
+
+#[test]
+fn upgrade_request_binds_the_complete_declarative_plan() -> Result<(), Box<dyn std::error::Error>> {
+    let principal = PrincipalId::from_bytes([0x71; 16])?;
+    let key = AdministrativeIdempotencyKey::new([0x72; 16])?;
+    let request = DurableOperationRequest::upgrade(principal, key, [0x73; 16], 7, 100, [0x74; 32])?;
+    let retry = DurableOperationRequest::upgrade(principal, key, [0x73; 16], 7, 200, [0x74; 32])?;
+    assert_eq!(request.operation_id(), retry.operation_id());
+    assert_eq!(request.kind(), DurableOperationKind::Upgrade);
+    for (instance, generation, plan) in [
+        ([0x75; 16], 7, [0x74; 32]),
+        ([0x73; 16], 8, [0x74; 32]),
+        ([0x73; 16], 7, [0x76; 32]),
+    ] {
+        assert_ne!(
+            request.operation_id(),
+            DurableOperationRequest::upgrade(principal, key, instance, generation, 100, plan)?
+                .operation_id()
+        );
+    }
+    assert!(DurableOperationRequest::upgrade(principal, key, [0x73; 16], 7, 100, [0; 32]).is_err());
+    Ok(())
+}

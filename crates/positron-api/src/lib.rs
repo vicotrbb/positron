@@ -36,3 +36,5 @@ mod http_client;
 mod validation;
 
 pub mod backup;
+
+pub mod upgrade;

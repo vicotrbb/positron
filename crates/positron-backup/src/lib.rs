@@ -1,4 +1,6 @@
 //! Backup-only Repository boundary and native provider adapters.
+mod backup_format;
+pub use backup_format::BackupFormatEpoch;
 mod azure_blob;
 pub use azure_blob::AzureBlobRepository;
 mod azure_blob_target;

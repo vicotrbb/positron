@@ -288,3 +288,62 @@ impl BackupControlSignature {
             .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)
     }
 }
+
+const UPGRADE_DOMAIN: &[u8] = b"positron-upgrade-verification-signature-v1\0";
+/// Instance Integrity Key custody restricted to signed Upgrade verification records.
+pub struct UpgradeVerificationSigner(ExportManifestSigner);
+impl UpgradeVerificationSigner {
+    pub(crate) fn from_seed(seed: Box<[u8; 32]>) -> Result<Self, ExportManifestSignatureFailure> {
+        ExportManifestSigner::from_seed(seed).map(Self)
+    }
+    pub const fn identity(&self) -> BootstrapIntegrityIdentity {
+        self.0.identity()
+    }
+    pub fn sign(
+        &self,
+        payload: &[u8],
+    ) -> Result<UpgradeVerificationSignature, ExportManifestSignatureFailure> {
+        let message = signing_message(UPGRADE_DOMAIN, self.identity(), payload)?;
+        let pair = Ed25519KeyPair::from_seed_unchecked(self.0.seed.as_ref())
+            .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)?;
+        UpgradeVerificationSignature::new(
+            self.identity(),
+            pair.sign(&message)
+                .as_ref()
+                .try_into()
+                .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)?,
+        )
+    }
+}
+impl std::fmt::Debug for UpgradeVerificationSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UpgradeVerificationSigner { <redacted> }")
+    }
+}
+/// Received upgrade verification signature. Trust comes from the independently pinned identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UpgradeVerificationSignature(ExportManifestSignature);
+impl UpgradeVerificationSignature {
+    pub fn new(
+        identity: BootstrapIntegrityIdentity,
+        signature: [u8; 64],
+    ) -> Result<Self, ExportManifestSignatureFailure> {
+        ExportManifestSignature::new(identity, signature).map(Self)
+    }
+    pub const fn bytes(self) -> [u8; 64] {
+        self.0.bytes()
+    }
+    pub fn verify(
+        self,
+        expected: BootstrapIntegrityIdentity,
+        payload: &[u8],
+    ) -> Result<(), ExportManifestSignatureFailure> {
+        if self.0.identity != expected {
+            return Err(ExportManifestSignatureFailure::AuthenticationFailed);
+        }
+        let message = signing_message(UPGRADE_DOMAIN, expected, payload)?;
+        UnparsedPublicKey::new(&ED25519, expected.public_key())
+            .verify(&message, &self.bytes())
+            .map_err(|_| ExportManifestSignatureFailure::AuthenticationFailed)
+    }
+}

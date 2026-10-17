@@ -2,9 +2,19 @@ use super::*;
 
 impl ApplicationRuntime {
     pub fn start(
-        configuration: ServeConfiguration,
+        mut configuration: ServeConfiguration,
         host: HostInputs<'_>,
     ) -> Result<RunningProcess, ExitOutcome> {
+        if configuration.upgrade_verification.is_none()
+            && let Some(effective) = configuration.effective_configuration.as_ref()
+        {
+            configuration.upgrade_verification =
+                crate::upgrade::installed_upgrade_startup(effective)
+                    .map_err(|_| {
+                        ExitOutcome::StartupUnavailable(BootstrapFailureCode::CatalogUnavailable)
+                    })?
+                    .map(Arc::new);
+        }
         let state = ProcessState::starting();
         let drain_deadline = configuration.drain_deadline();
         state
@@ -64,7 +74,7 @@ impl ApplicationRuntime {
             },
         };
         let mut attempt = 0_u8;
-        let instance = loop {
+        let (instance, upgrade_verification_token) = 'bootstrap: loop {
             let bootstrap = host
                 .recovery
                 .prerequisite_status()
@@ -74,15 +84,65 @@ impl ApplicationRuntime {
                 })
                 .and_then(|()| bootstrap_once(&configuration));
             let failure = match bootstrap {
-                Ok((_classified, mut candidate)) => {
+                Ok((_classified, mut candidate)) => 'candidate: {
                     if let Some(planner) = configuration.admission_group_planner.as_ref() {
                         candidate.admission_group_planner = Arc::clone(planner);
                     }
+                    #[cfg(test)]
+                    if let Some(verification) = configuration.upgrade_verification.as_ref() {
+                        verification.install_fixture_clock(&mut candidate);
+                    }
                     let candidate = Arc::new(candidate);
+                    let upgrade_verification_token = match crate::upgrade::startup::authorize(
+                        &candidate,
+                        configuration.effective_configuration.as_deref(),
+                        configuration.upgrade_verification.as_deref(),
+                    ) {
+                        Ok(token) => token,
+                        Err(crate::UpgradeFailure::CapacityUnavailable) => {
+                            // The recovered trusted clock or admitted resources
+                            // may temporarily lag this durable operation. Reuse
+                            // the startup owner's original recovery budget.
+                            break 'candidate BootstrapAttemptFailure {
+                                classified: Some(crate::BootstrapState::Initialized),
+                                failure: BootstrapFailure::new(
+                                    BootstrapFailureCode::ResourceUnavailable,
+                                ),
+                            };
+                        },
+                        Err(_) => {
+                            state
+                                .health()
+                                .record_integrity_fence(IntegrityFenceReason::UnsafeUpgradeState);
+                            state
+                                .set_inspection_authority(Arc::clone(&candidate))
+                                .map_err(|_| {
+                                    cleanup_startup(
+                                        ExitOutcome::StartupUnavailable(
+                                            BootstrapFailureCode::CatalogUnavailable,
+                                        ),
+                                        &cancellation,
+                                        &mut listeners,
+                                        &mut tasks,
+                                    )
+                                })?;
+                            return restricted_fenced_process(
+                                state,
+                                listeners,
+                                tasks,
+                                cancellation,
+                                candidate,
+                                drain_deadline,
+                                ExitOutcome::StartupUnavailable(
+                                    BootstrapFailureCode::CatalogUnavailable,
+                                ),
+                            );
+                        },
+                    };
                     match crate::services::verify_startup_integrity(&candidate) {
                         Ok(()) => {
                             match crate::instance_bootstrap::recover_initial_ledgers(&candidate) {
-                                Ok(()) => break candidate,
+                                Ok(()) => break 'bootstrap (candidate, upgrade_verification_token),
                                 Err(failure) if fences(failure.code()) => {
                                     state
                                         .set_inspection_authority(Arc::clone(&candidate))
@@ -345,6 +405,33 @@ impl ApplicationRuntime {
                 ));
             },
         };
+        if crate::upgrade::startup::complete(
+            &services,
+            &instance,
+            configuration.upgrade_verification.as_deref(),
+            upgrade_verification_token,
+        )
+        .is_err()
+        {
+            return Err(cleanup_startup(
+                ExitOutcome::StartupUnavailable(BootstrapFailureCode::CatalogUnavailable),
+                &cancellation,
+                &mut listeners,
+                &mut tasks,
+            ));
+        }
+        if let Some(runtime) = runtime_configuration.as_ref() {
+            services
+                .attach_upgrade_configuration(Arc::clone(runtime))
+                .map_err(|_| {
+                    cleanup_startup(
+                        ExitOutcome::StartupUnavailable(BootstrapFailureCode::CatalogUnavailable),
+                        &cancellation,
+                        &mut listeners,
+                        &mut tasks,
+                    )
+                })?;
+        }
         services.attach_health(state.health());
         state
             .set_catalog_operation(services.catalog_operation_gate())

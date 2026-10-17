@@ -740,6 +740,26 @@ impl BootstrapKeyCustody {
             .map_err(|_| BootstrapKeyFailure::Authentication)
     }
 
+    /// Opens the protected Instance Integrity Key into Upgrade verification-only custody.
+    pub fn upgrade_verification_signer(
+        &self,
+        instance: InstanceId,
+        protected_integrity_key: &[u8],
+    ) -> Result<crate::UpgradeVerificationSigner, BootstrapKeyFailure> {
+        let mut plaintext = self.open_object(
+            instance,
+            BootstrapObjectPurpose::Initialized,
+            protected_integrity_key,
+        )?;
+        let seed: [u8; 32] = plaintext
+            .as_slice()
+            .try_into()
+            .map_err(|_| BootstrapKeyFailure::Authentication)?;
+        plaintext.zeroize();
+        crate::UpgradeVerificationSigner::from_seed(Box::new(seed))
+            .map_err(|_| BootstrapKeyFailure::Authentication)
+    }
+
     /// Opens the protected Instance Integrity Key into Backup-only signing custody.
     pub fn backup_control_signer(
         &self,
