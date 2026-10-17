@@ -1,0 +1,2 @@
+# Fuzzer selectors and archive seeds are raw byte inputs.
+fuzz/corpus/release_trust/* binary
