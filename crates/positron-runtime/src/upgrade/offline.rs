@@ -21,6 +21,7 @@ pub struct OfflineUpgradeSession {
     instance: Arc<InitializedInstance>,
     services: ServiceHandle,
     id: OperationId,
+    clock_recovery_required: bool,
 }
 impl OfflineUpgradeSession {
     pub fn status(&self) -> Result<DurableOperation, UpgradeFailure> {
@@ -32,6 +33,37 @@ impl OfflineUpgradeSession {
     /// in-flight turn keeps its existing provider bound; unfinished durable
     /// work remains resumable and never fabricates a terminal outcome.
     pub fn advance(&mut self, deadline: Instant) -> Result<DurableOperation, UpgradeFailure> {
+        self.require_recovered_clock()?;
+        let had_budget = Instant::now() < deadline;
+        let result = self.advance_work(deadline);
+        if had_budget && matches!(&result, Ok(_) | Err(UpgradeFailure::CapacityUnavailable)) {
+            let checkpoint = open(&self.instance).and_then(|catalog| {
+                catalog
+                    .checkpoint_lifecycle_time(&self.instance.retention_time)
+                    .map_err(|failure| match failure.code() {
+                        positron_kernel::CatalogFailureCode::ResourceAdmissionRefused => {
+                            UpgradeFailure::CapacityUnavailable
+                        },
+                        _ => UpgradeFailure::PersistenceUnavailable,
+                    })
+            });
+            if let Err(failure) = checkpoint {
+                self.clock_recovery_required = true;
+                return Err(failure);
+            }
+        }
+        result
+    }
+
+    fn require_recovered_clock(&self) -> Result<(), UpgradeFailure> {
+        if self.clock_recovery_required {
+            Err(UpgradeFailure::PersistenceUnavailable)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn advance_work(&mut self, deadline: Instant) -> Result<DurableOperation, UpgradeFailure> {
         let operation = self.status()?;
         if operation.status().is_terminal()
             || operation.upgrade_stage() != Some(UpgradeStage::Snapshot)
@@ -39,9 +71,11 @@ impl OfflineUpgradeSession {
         {
             return Ok(operation);
         }
-        if now(&self.instance)? < operation.updated_at_unix_seconds() {
-            return Ok(operation);
-        }
+        super::await_lifecycle_time(
+            &self.instance,
+            operation.updated_at_unix_seconds(),
+            deadline,
+        )?;
         self.verify_frontiers()?;
         if operation.upgrade_snapshot_evidence().is_some() {
             return self.advance_stage(UpgradeStage::Publishing);
@@ -73,6 +107,7 @@ impl OfflineUpgradeSession {
         &mut self,
         target: &VerifiedReleaseManifest,
     ) -> Result<DurableOperation, UpgradeFailure> {
+        self.require_recovered_clock()?;
         let operation = self.status()?;
         let parameters = operation
             .upgrade_parameters()
@@ -103,6 +138,7 @@ impl OfflineUpgradeSession {
         key: AdministrativeIdempotencyKey,
         revision: u64,
     ) -> Result<DurableOperation, UpgradeFailure> {
+        self.require_recovered_clock()?;
         for key in [
             Administration::upgrade_snapshot_key(self.id).map_err(persistence)?,
             Administration::upgrade_snapshot_verification_key(self.id).map_err(persistence)?,
@@ -129,6 +165,7 @@ impl OfflineUpgradeSession {
             .map_err(persistence)
     }
     pub fn fail(&mut self) -> Result<DurableOperation, UpgradeFailure> {
+        self.require_recovered_clock()?;
         let catalog = open(&self.instance)?;
         let actor = actor(&catalog, &self.instance, self.id)?;
         Administration::fail_upgrade(&catalog, actor, self.id, now(&self.instance)?)
@@ -143,6 +180,7 @@ impl OfflineUpgradeSession {
         key: AdministrativeIdempotencyKey,
         revision: u64,
     ) -> Result<DurableOperation, UpgradeFailure> {
+        self.require_recovered_clock()?;
         let operation = self.status()?;
         if !operation.upgrade_rollback_available() && operation.upgrade_rollback_key() != Some(key)
         {

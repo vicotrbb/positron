@@ -4,6 +4,8 @@ use super::*;
 mod admission;
 #[path = "../../../tests/shared/native_authority.rs"]
 mod native_authority;
+#[path = "snapshot_cursor_fuzz.rs"]
+mod snapshot_cursor;
 pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
     use positron_kernel::{BootstrapKeyCustody, BootstrapObjectPurpose, InstanceId};
     use std::os::unix::fs::PermissionsExt;
@@ -496,6 +498,7 @@ async fn fuzz_cleanup(
         .await
         .expect("protected publication");
     fuzz_registry_cursor(&publisher, signer, data).await;
+    snapshot_cursor::exercise(&publisher, signer, data).await;
     assert_eq!(
         publisher
             .prepare_cancellation(second.snapshot_id(), published.manifest().checksum())

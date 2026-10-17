@@ -1,6 +1,8 @@
 use snapshot_resources::native_authority;
 #[path = "support/snapshot_resources.rs"]
 mod snapshot_resources;
+#[path = "support/verification_checkpoint.rs"]
+mod verification_checkpoint;
 use positron_backup::{
     BackupKeyEnvelope, BackupManifestBuilder, BackupPublisher, BackupRetention, LocalRepository,
     Repository, RepositoryFailure, RepositoryIdentity,
@@ -177,7 +179,7 @@ async fn cold_capture_corruption_cannot_be_signed_as_a_fresh_snapshot()
                     .validate_snapshot_inventory(&mut verification, &[])
                     .is_err()
             );
-            for file in files {
+            for file in &files {
                 if matches!(
                     file.kind(),
                     BackupCaptureFileKind::CatalogObject
@@ -197,10 +199,14 @@ async fn cold_capture_corruption_cannot_be_signed_as_a_fresh_snapshot()
                     .await
                     .is_err()
             );
-            while !publisher
-                .snapshot_verification_step(&mut verification)
-                .await?
-            {}
+            verification = verification_checkpoint::exercise(
+                &publisher,
+                signer,
+                &files,
+                expected,
+                verification,
+            )
+            .await?;
             assert!(
                 publisher
                     .snapshot_verification_report(&verification, &detached, 0)

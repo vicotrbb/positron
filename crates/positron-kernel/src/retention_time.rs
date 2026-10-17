@@ -228,6 +228,42 @@ impl PreparedLifecycleClockAcceptance<'_> {
 }
 
 impl StagedCatalogAnchor<'_> {
+    pub(crate) fn governance_anchor_record(
+        &mut self,
+        snapshot: &CatalogSnapshot,
+    ) -> Result<Vec<u8>, LifecycleClockFailure> {
+        let (record, anchor) = self.observe_candidate(|authority| {
+            let elapsed = authority.elapsed.nanoseconds()?;
+            authority.reconcile_current(elapsed)?;
+            let safety = *authority
+                .safety
+                .lock()
+                .map_err(|_| LifecycleClockFailure::Unavailable)?;
+            let anchor = advance_global(safety, elapsed)?;
+            let mut seen = false;
+            for bytes in snapshot.plaintext_objects() {
+                let Some(record) = decode_catalog_anchor(bytes)? else {
+                    continue;
+                };
+                if seen
+                    || record.anchor > anchor
+                    || (record.state == LifecycleClockState::ClockUncertain
+                        && safety.state != LifecycleClockState::ClockUncertain)
+                {
+                    return Err(LifecycleClockFailure::Unavailable);
+                }
+                seen = true;
+            }
+
+            Ok((
+                encode_catalog_anchor(LifecycleClockSafety { anchor, ..safety })?,
+                anchor,
+            ))
+        })?;
+        self.candidate_anchor = Some(anchor);
+        Ok(record)
+    }
+
     pub(crate) fn ingest_time(
         &mut self,
         scope: SegmentScope,

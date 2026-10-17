@@ -6,6 +6,7 @@ impl OfflineUpgradeSession {
         &mut self,
         configuration: &EffectiveConfiguration,
     ) -> Result<DurableOperation, UpgradeFailure> {
+        self.require_recovered_clock()?;
         let operation = self.status()?;
         let parameters = operation
             .upgrade_parameters()
@@ -34,6 +35,7 @@ impl OfflineUpgradeSession {
         key: AdministrativeIdempotencyKey,
         revision: u64,
     ) -> Result<DurableOperation, UpgradeFailure> {
+        self.require_recovered_clock()?;
         let verification = super::super::installed_upgrade_startup(configuration)?
             .ok_or(UpgradeFailure::AuthenticationFailed)?;
         let executable =

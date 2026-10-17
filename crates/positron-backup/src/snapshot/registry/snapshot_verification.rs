@@ -1,4 +1,5 @@
 //! Independent, bounded verification of a published snapshot.
+mod checkpoint;
 mod report;
 mod restore_report;
 use super::*;
@@ -18,6 +19,7 @@ pub struct BackupSnapshotVerification {
     file_offset: u64,
     file_hash: Sha256,
     inventory_verified: bool,
+    resumed_inventory: Option<([u8; 32], usize)>,
 }
 impl BackupSnapshotVerification {
     fn start(
@@ -39,6 +41,7 @@ impl BackupSnapshotVerification {
             file_offset: 0,
             file_hash: Sha256::new(),
             inventory_verified: false,
+            resumed_inventory: None,
         }
     }
     pub fn complete(&self) -> bool {
@@ -254,52 +257,6 @@ impl BackupPublisher<'_> {
         }
         Ok(state.complete())
     }
-    pub fn snapshot_verification_checkpoint(
-        &self,
-        state: &BackupSnapshotVerification,
-    ) -> Result<Vec<u8>, RepositoryFailure> {
-        let checkpoint = self.publication_checkpoint(&state.check)?;
-        let mut bytes = b"POSBSV01".to_vec();
-        bytes.extend_from_slice(&state.owner);
-        bytes.extend_from_slice(&state.request);
-        bytes.extend_from_slice(&state.manifest.snapshot);
-        bytes.extend_from_slice(&state.registry);
-        bytes.extend_from_slice(&(checkpoint.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(&checkpoint);
-        super::super::codec::sign(bytes, self.signer)
-    }
-    pub async fn resume_snapshot_verification(
-        &self,
-        bytes: &[u8],
-        owner: [u8; 16],
-        request: [u8; 32],
-    ) -> Result<BackupSnapshotVerification, RepositoryFailure> {
-        if bytes.len() > 1024 {
-            return Err(RepositoryFailure::LimitExceeded);
-        }
-        let mut decoder = super::super::codec::Decoder::new(super::super::codec::verify(
-            bytes,
-            self.signer.identity(),
-        )?);
-        if decoder.take(8)? != b"POSBSV01"
-            || decoder.array::<16>()? != owner
-            || decoder.array::<32>()? != request
-        {
-            return Err(RepositoryFailure::IdentityMismatch);
-        }
-        let snapshot = decoder.array()?;
-        let registry = decoder.array::<32>()?;
-        let length = decoder.u32()? as usize;
-        let checkpoint = decoder.take(length)?;
-        decoder.finish()?;
-        let mut state = self
-            .begin_snapshot_verification(snapshot, owner, request)
-            .await?;
-        if state.registry == registry {
-            state.check = self.resume_publication(&state.manifest, checkpoint).await?;
-        }
-        Ok(state)
-    }
 }
 
 impl BackupPublisher<'_> {
@@ -362,8 +319,26 @@ impl BackupPublisher<'_> {
             .map_err(|_| RepositoryFailure::LimitExceeded)?;
         inventory.extend_from_slice(files);
         state.files = inventory;
-        state.next_file = 0;
-        state.file_object = 0;
+        state.next_file = match state.resumed_inventory.take() {
+            Some((digest, completed))
+                if digest == checkpoint::inventory_digest(files) && completed <= files.len() =>
+            {
+                completed
+            },
+            Some(_) => return Err(RepositoryFailure::CorruptState),
+            None => 0,
+        };
+        state.file_object = state
+            .manifest
+            .objects
+            .iter()
+            .position(|object| {
+                state
+                    .files
+                    .get(state.next_file)
+                    .is_some_and(|file| object.file == file.identity())
+            })
+            .unwrap_or(state.manifest.objects.len());
         state.file_offset = 0;
         state.file_hash = Sha256::new();
         state.inventory_verified = true;

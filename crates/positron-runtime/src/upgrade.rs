@@ -33,6 +33,29 @@ impl std::fmt::Display for UpgradeFailure {
 }
 impl std::error::Error for UpgradeFailure {}
 
+/// Keep exclusive cold ownership while the trusted elapsed clock catches up.
+/// Reopening instead would restart elapsed time at the same retained anchor.
+pub(crate) fn await_lifecycle_time(
+    instance: &crate::InitializedInstance,
+    updated_at: u64,
+    deadline: std::time::Instant,
+) -> Result<(), UpgradeFailure> {
+    loop {
+        let observed = instance
+            .retention_time
+            .governance_now_seconds()
+            .map_err(|_| UpgradeFailure::SnapshotUnavailable)?;
+        if observed >= updated_at {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(UpgradeFailure::CapacityUnavailable);
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(10)));
+    }
+}
+
 #[cfg(test)]
 pub(crate) use request::tests::signed as signed_fixture_release;
 

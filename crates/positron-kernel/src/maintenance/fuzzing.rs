@@ -15,6 +15,8 @@ use super::{
     MaintenanceTaskClass, MaintenanceTaskId, MaintenanceTaskPhase,
 };
 
+mod backup_clock;
+
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
 struct FuzzRoot(PathBuf);
@@ -58,7 +60,11 @@ pub fn fuzz_maintenance_catalog_stateful(data: &[u8]) {
     let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
         volume,
         70_000_001,
-        1_048_576 + 16_384,
+        if data.first() == Some(&0xf1) {
+            30_000_000
+        } else {
+            1_048_576 + 16_384
+        },
     )
     .ok();
     let Some(authority) = authority else {
@@ -69,6 +75,10 @@ pub fn fuzz_maintenance_catalog_stateful(data: &[u8]) {
         return;
     };
     if install_basis(&catalog).is_err() {
+        return;
+    }
+    if data.first() == Some(&0xf1) {
+        backup_clock::run(&catalog, &authority, data);
         return;
     }
 
@@ -366,4 +376,10 @@ mod tests {
             super::fuzz_maintenance_catalog_stateful(&input);
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn backup_clock_seed_exercises_elapsed_checkpoint_faults() {
+    fuzz_maintenance_catalog_stateful(&[0xf1, 0, 1, 2, 3, 4, 5, 6, 7]);
 }

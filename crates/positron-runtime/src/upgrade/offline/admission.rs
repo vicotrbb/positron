@@ -163,6 +163,7 @@ impl OfflineUpgradeSession {
             instance,
             services,
             id,
+            clock_recovery_required: false,
         })
     }
 }

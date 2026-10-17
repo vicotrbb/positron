@@ -225,12 +225,13 @@ pub(super) fn complete(
                         8 * 1024 * 1024,
                     ))
                     .map_err(provider_failure)?;
-                let _gate = services.catalog_operation()?;
-                let catalog = services
-                    .open_maintenance_catalog()
-                    .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+                let secret = services
+                    .instance
+                    .key
+                    .catalog_secret(services.instance.instance)
+                    .map_err(|_| ServiceFailure::KeyUnavailable)?;
                 metadata
-                    .verify_file(&catalog, file.identity(), &bytes)
+                    .verify_protected_file(&secret, file.identity(), &bytes)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
                 work.next_file += 1;
                 return Ok(false);

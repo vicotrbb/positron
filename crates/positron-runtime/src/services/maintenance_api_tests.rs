@@ -110,6 +110,8 @@ mod tenant_purge;
 
 #[path = "maintenance_api_tests/upgrade_offline.rs"]
 mod upgrade_offline;
+#[path = "maintenance_api_tests/upgrade_offline_clock.rs"]
+mod upgrade_offline_clock;
 
 #[path = "maintenance_api_tests/upgrade_startup.rs"]
 mod upgrade_startup;

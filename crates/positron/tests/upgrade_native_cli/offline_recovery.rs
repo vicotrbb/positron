@@ -24,8 +24,11 @@ fn source() -> Result<Source> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
-    let root = fs::canonicalize(std::env::temp_dir())?
-        .join(format!("p-upgrade-offline-{}-{nonce}", std::process::id()));
+    let root = fs::canonicalize(std::env::temp_dir())?.join(format!(
+        "p-upgrade-offline-{}-{}-{nonce}",
+        std::process::id(),
+        fixture_id()
+    ));
     directory(&root)?;
     for name in ["data", "secrets", "export", "repository"] {
         directory(&root.join(name))?;
@@ -305,14 +308,43 @@ fn verified_snapshot(
     id: positron_governance::OperationId,
 ) -> Result<positron_governance::BackupVerificationParameters> {
     let mut session = begin_session(case, id)?;
-    let deadline = Instant::now() + Duration::from_secs(180);
+    // The operator API advances in bounded thirty-second calls. This is a
+    // correctness-test watchdog, not a total Backup/Verification product SLO.
+    let watchdog = Instant::now() + Duration::from_secs(300);
+    let initial = session.status()?;
+    let mut revision = initial.revision();
     loop {
-        let operation = session.advance(deadline)?;
+        let turn = (Instant::now() + Duration::from_secs(30)).min(watchdog);
+        let operation = match session.advance(turn) {
+            Ok(operation) => operation,
+            Err(positron_runtime::UpgradeFailure::CapacityUnavailable) => {
+                // The bounded operator call explicitly permits a retry when
+                // its admitted turn cannot make durable progress. Keep the
+                // same intent and overall watchdog; all other failures escape.
+                session.status()?
+            },
+            Err(error) => return Err(error.into()),
+        };
+        assert_eq!(operation.operation_id(), id);
+        assert_eq!(operation.request(), initial.request());
+        assert_eq!(operation.upgrade_parameters(), initial.upgrade_parameters());
+        assert_eq!(
+            operation.upgrade_drain_evidence(),
+            initial.upgrade_drain_evidence()
+        );
+        assert!(operation.revision() >= revision);
+        revision = operation.revision();
         if operation.upgrade_stage() == Some(UpgradeStage::Publishing) {
+            assert!(operation.upgrade_snapshot_evidence().is_some());
             break;
         }
         assert!(!operation.status().is_terminal(), "{operation:?}");
-        assert!(Instant::now() < deadline, "snapshot deadline {operation:?}");
+        assert!(Instant::now() < watchdog, "snapshot watchdog {operation:?}");
+        // Each real offline CLI command releases its owner before the next
+        // invocation resumes the same durable operation.
+        drop(session);
+        session = begin_session(case, id)?;
+        // A stable parent revision makes no claim about either child's progress.
         std::thread::sleep(Duration::from_millis(20));
     }
     session

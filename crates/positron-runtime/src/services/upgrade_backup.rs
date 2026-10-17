@@ -96,7 +96,7 @@ impl ServiceHandle {
 }
 #[cfg(test)]
 pub(in crate::services) mod tests {
-    fn generation(
+    pub(super) fn generation(
         instance: &crate::InitializedInstance,
     ) -> Result<u64, Box<dyn std::error::Error>> {
         Ok(
@@ -117,7 +117,7 @@ pub(in crate::services) mod tests {
         )
     }
     #[inline(never)]
-    fn reopen_with_trusted_test_clock(
+    pub(super) fn reopen_with_trusted_test_clock(
         fixture: &crate::services::tests::schema_maintenance::Fixture,
     ) -> Result<
         (
@@ -396,3 +396,7 @@ pub(in crate::services) mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "upgrade_backup_bounded_tests.rs"]
+mod bounded_tests;

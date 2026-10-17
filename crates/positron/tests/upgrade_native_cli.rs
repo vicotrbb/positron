@@ -24,6 +24,11 @@ use std::{
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 const REPOSITORY: &str = "11111111-1111-4111-8111-111111111111";
 const KEY: &str = "77777777-7777-4777-8777-777777777777";
+fn fixture_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn directory(path: &Path) -> Result {
     fs::create_dir(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -35,7 +40,11 @@ fn hex(bytes: &[u8]) -> String {
 fn host(name: &str) -> Result<NativeHost> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     Ok(NativeHost::new(NativeBindings::new(
-        std::env::temp_dir().join(format!("p-upgrade-cli-{}-{name}.sock", std::process::id())),
+        std::env::temp_dir().join(format!(
+            "p-uc-{}-{}-{name}.sock",
+            std::process::id(),
+            fixture_id()
+        )),
         address,
         address,
         address,
@@ -191,8 +200,11 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
-    let root = fs::canonicalize(std::env::temp_dir())?
-        .join(format!("p-upgrade-cli-{}-{nonce}", std::process::id()));
+    let root = fs::canonicalize(std::env::temp_dir())?.join(format!(
+        "p-upgrade-cli-{}-{}-{nonce}",
+        std::process::id(),
+        fixture_id()
+    ));
     directory(&root)?;
     for name in ["data", "secrets", "export", "repository"] {
         directory(&root.join(name))?;
