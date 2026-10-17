@@ -8,7 +8,7 @@ pub(crate) fn accept_preflight(
     bearer: &str,
     request: UpgradeRequest,
     deadline: Option<std::time::Instant>,
-) -> Result<DurableOperation, UpgradeFailure> {
+) -> Result<(DurableOperation, u64), UpgradeFailure> {
     crate::upgrade::check_admission_deadline(deadline)?;
     // Serialize the bounded physical qualification and intent publication with
     // existing Catalog writers. The caller's generation is never refreshed.
@@ -153,5 +153,10 @@ pub(crate) fn accept_preflight(
         },
         _ => UpgradeFailure::PersistenceUnavailable,
     })?;
-    Ok(operation)
+    // Capture the response basis before releasing the shared Catalog gate.
+    let generation = catalog
+        .pin()
+        .map_err(|_| UpgradeFailure::PersistenceUnavailable)?
+        .number();
+    Ok((operation, generation))
 }

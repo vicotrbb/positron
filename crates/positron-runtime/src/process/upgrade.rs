@@ -76,7 +76,8 @@ impl RunningProcess {
             .map_err(|_| UpgradeFailure::UnsafeState)?;
         let configuration = configuration.effective();
         let services = self.services.as_ref().ok_or(UpgradeFailure::UnsafeState)?;
-        let operation = accept_preflight(instance, services, configuration, bearer, request, None)?;
+        let (operation, _) =
+            accept_preflight(instance, services, configuration, bearer, request, None)?;
         Ok(AcceptedUpgrade { operation })
     }
 

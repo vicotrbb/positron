@@ -97,10 +97,66 @@ fn source() -> Result<Source> {
         idempotency_key: Some("81818181-8181-8181-8181-818181818181".into()),
         operation_id: None,
     };
-    client.manage(claim.secret(), &input)?;
+    let admission_deadline = Instant::now()
+        + effective
+            .network_listener_profile(positron_config::NetworkListenerRole::Api)
+            .ok_or("API profile")?
+            .connection_protection()
+            .request_deadline();
+    let response = match client.manage(claim.secret(), &input) {
+        Ok(response) => response,
+        Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport) => {
+            // A lost start response is ambiguous. Inspect the same key without
+            // resending the mutation or changing its accepted intent.
+            let lookup = positron_api::upgrade::UpgradeRequest {
+                action: "lookup".into(),
+                candidate_manifest: None,
+                repository_id: None,
+                retention_seconds: None,
+                expected_catalog_generation: None,
+                idempotency_key: input.idempotency_key.clone(),
+                operation_id: None,
+            };
+            loop {
+                if Instant::now() >= admission_deadline {
+                    return Err("ambiguous offline preparation exceeded original API budget".into());
+                }
+                match client.manage(claim.secret(), &lookup) {
+                    Ok(response) => break response,
+                    Err(
+                        positron_api::upgrade::UpgradeServiceClientFailure::Transport
+                        | positron_api::upgrade::UpgradeServiceClientFailure::SourceUnavailable
+                        | positron_api::upgrade::UpgradeServiceClientFailure::CapacityUnavailable,
+                    ) if Instant::now() < admission_deadline => {
+                        std::thread::sleep(Duration::from_millis(100));
+                    },
+                    Err(error) => {
+                        return Err(format!("offline preparation lookup: {error:?}").into());
+                    },
+                }
+            }
+        },
+        Err(error) => return Err(error.into()),
+    };
+    let pending = process
+        .pending_upgrade_operation()?
+        .ok_or("source pending intent")?;
+    let operation = response.operation.ok_or("native accepted operation")?;
+    assert_eq!(operation.id, hex(&pending.operation_id().to_bytes()));
+    let parameters = pending.upgrade_parameters().ok_or("source parameters")?;
+    assert_eq!(parameters.target().manifest_digest(), candidate);
+    assert_eq!(
+        parameters.backup().repository().repository_id(),
+        positron_domain::identity::TenantId::parse_canonical(REPOSITORY)?.to_bytes()
+    );
+    assert_eq!(parameters.backup().retention_seconds(), 3600);
+    let details = response.details.ok_or("native accepted details")?;
+    assert_eq!(details.target_manifest, hex(&candidate));
+    assert_eq!(details.repository_id, REPOSITORY);
     let accepted = process
         .resume_configured_upgrade_drain(&effective)?
         .ok_or("source Drain token")?;
+    assert_eq!(accepted.operation(), pending);
     Ok(Source {
         process,
         host,

@@ -7,6 +7,7 @@ pub(super) fn drain_source_case(
     suspended: bool,
     crash_before_drain: bool,
     installed: bool,
+    queued_lookup: bool,
 ) -> Result<DrainedFixture, Box<dyn std::error::Error>> {
     let fixture = Fixture::new()?;
     let configuration = Arc::new(super::upgrade_offline::configuration(&fixture)?);
@@ -173,34 +174,44 @@ pub(super) fn drain_source_case(
         let logical_request = body.clone();
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut attempts = 0;
-        let response = loop {
-            attempts += 1;
-            match client.manage(&administrator, &body) {
-                Ok(response) => break response,
-                Err(positron_api::upgrade::UpgradeServiceClientFailure::PreconditionFailed) => {
-                    // An operator may resubmit the unchanged intent only after
-                    // proving a stale basis, never after an ambiguous acceptance.
-                    let services = process.services().ok_or("refresh services")?;
-                    let _gate = services.catalog_operation()?;
-                    let observed = services
-                        .upgrade_configuration
-                        .get()
-                        .ok_or("installed configuration")?
-                        .observed()?;
-                    assert_eq!(
-                        observed.effective().audit_binding_digest(),
-                        configuration.audit_binding_digest(),
-                        "configuration changed during intent refresh"
-                    );
-                    let catalog = open_catalog(&services.instance)?;
-                    let generation = catalog.pin()?.number();
-                    if body
-                        .expected_catalog_generation
-                        .is_none_or(|previous| generation <= previous)
-                    {
-                        return Err("precondition refusal without an advanced Catalog basis".into());
-                    }
-                    if positron_governance::DurableOperationAdministration::inspect_by_idempotency(
+        let response = if queued_lookup {
+            super::admission_race::start_with_queued_lookup(
+                &process,
+                endpoint,
+                &administrator,
+                &body,
+            )?
+        } else {
+            loop {
+                attempts += 1;
+                match client.manage(&administrator, &body) {
+                    Ok(response) => break response,
+                    Err(positron_api::upgrade::UpgradeServiceClientFailure::PreconditionFailed) => {
+                        // An operator may resubmit the unchanged intent only after
+                        // proving a stale basis, never after an ambiguous acceptance.
+                        let services = process.services().ok_or("refresh services")?;
+                        let _gate = services.catalog_operation()?;
+                        let observed = services
+                            .upgrade_configuration
+                            .get()
+                            .ok_or("installed configuration")?
+                            .observed()?;
+                        assert_eq!(
+                            observed.effective().audit_binding_digest(),
+                            configuration.audit_binding_digest(),
+                            "configuration changed during intent refresh"
+                        );
+                        let catalog = open_catalog(&services.instance)?;
+                        let generation = catalog.pin()?.number();
+                        if body
+                            .expected_catalog_generation
+                            .is_none_or(|previous| generation <= previous)
+                        {
+                            return Err(
+                                "precondition refusal without an advanced Catalog basis".into()
+                            );
+                        }
+                        if positron_governance::DurableOperationAdministration::inspect_by_idempotency(
                         &catalog,
                         AdministrativeIdempotencyKey::new([0xe1; 16])?,
                     )?
@@ -208,33 +219,33 @@ pub(super) fn drain_source_case(
                     {
                         return Err("refused request already has durable intent".into());
                     }
-                    let mut unchanged = body.clone();
-                    unchanged.expected_catalog_generation =
-                        logical_request.expected_catalog_generation;
-                    assert_eq!(
-                        unchanged, logical_request,
-                        "logical intent changed during basis refresh"
-                    );
-                    if attempts >= 4 || Instant::now() >= deadline {
-                        return Err(format!(
+                        let mut unchanged = body.clone();
+                        unchanged.expected_catalog_generation =
+                            logical_request.expected_catalog_generation;
+                        assert_eq!(
+                            unchanged, logical_request,
+                            "logical intent changed during basis refresh"
+                        );
+                        if attempts >= 4 || Instant::now() >= deadline {
+                            return Err(format!(
                             "native admission PreconditionFailed after {attempts} attempts; proven advanced Catalog basis {generation}"
                         ).into());
-                    }
-                    body.expected_catalog_generation = Some(generation);
-                },
-                Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport) => {
-                    // Acceptance is ambiguous: inspect the same key, never send start again.
-                    let lookup = positron_api::upgrade::UpgradeRequest {
-                        action: "lookup".into(),
-                        candidate_manifest: None,
-                        repository_id: None,
-                        retention_seconds: None,
-                        expected_catalog_generation: None,
-                        idempotency_key: body.idempotency_key.clone(),
-                        operation_id: None,
-                    };
-                    break loop {
-                        match client.manage(&administrator, &lookup) {
+                        }
+                        body.expected_catalog_generation = Some(generation);
+                    },
+                    Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport) => {
+                        // Acceptance is ambiguous: inspect the same key, never send start again.
+                        let lookup = positron_api::upgrade::UpgradeRequest {
+                            action: "lookup".into(),
+                            candidate_manifest: None,
+                            repository_id: None,
+                            retention_seconds: None,
+                            expected_catalog_generation: None,
+                            idempotency_key: body.idempotency_key.clone(),
+                            operation_id: None,
+                        };
+                        break loop {
+                            match client.manage(&administrator, &lookup) {
                             Ok(response) => {
                                 let details = response.details.as_ref().ok_or("lookup details")?;
                                 assert_eq!(details.target_manifest, super::hex(target.digest()));
@@ -249,13 +260,15 @@ pub(super) fn drain_source_case(
                                 },
                             Err(error) => return Err(format!("ambiguous admission lookup: {error:?}").into()),
                         }
-                    };
-                },
-                Err(error) => {
-                    return Err(
-                        format!("native admission {error:?} after {attempts} attempts").into(),
-                    );
-                },
+                        };
+                    },
+                    Err(error) => {
+                        return Err(format!(
+                            "native admission {error:?} after {attempts} attempts"
+                        )
+                        .into());
+                    },
+                }
             }
         };
         assert!(response.details.is_some());

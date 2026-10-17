@@ -12,8 +12,18 @@ use positron_kernel::release_manifest::ProductVersion;
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 
+#[path = "upgrade_end_to_end/admission_race.rs"]
+mod admission_race;
 #[path = "upgrade_end_to_end/source.rs"]
 mod source;
+
+#[test]
+fn native_upgrade_acceptance_and_queued_lookup_preserve_one_intent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let _drained = source::drain_source_case(true, false, false, false, true)?;
+    Ok(())
+}
 
 #[test]
 fn native_upgrade_preserves_query_through_real_snapshot_and_verified_restart()
@@ -237,19 +247,19 @@ pub(super) struct DrainedFixture {
 }
 #[inline(never)]
 pub(super) fn drain_source(http: bool) -> Result<DrainedFixture, Box<dyn std::error::Error>> {
-    source::drain_source_case(http, false, false, false)
+    source::drain_source_case(http, false, false, false, false)
 }
 
 pub(super) fn drain_suspended_source() -> Result<DrainedFixture, Box<dyn std::error::Error>> {
-    source::drain_source_case(false, true, false, false)
+    source::drain_source_case(false, true, false, false, false)
 }
 
 pub(super) fn crash_source_before_drain() -> Result<DrainedFixture, Box<dyn std::error::Error>> {
-    source::drain_source_case(false, false, true, false)
+    source::drain_source_case(false, false, true, false, false)
 }
 
 pub(super) fn drain_installed_source() -> Result<DrainedFixture, Box<dyn std::error::Error>> {
-    source::drain_source_case(false, false, false, true)
+    source::drain_source_case(false, false, false, true, false)
 }
 
 #[inline(never)]

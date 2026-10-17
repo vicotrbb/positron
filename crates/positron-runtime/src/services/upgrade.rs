@@ -137,7 +137,7 @@ impl ServiceHandle {
                     .ok_or(Failure::InvalidRequest)?,
             )
             .map_err(upgrade_failure)?;
-            let operation = crate::process::upgrade::accept_preflight(
+            let (operation, catalog_generation) = crate::process::upgrade::accept_preflight(
                 &self.instance,
                 self,
                 configuration.effective(),
@@ -146,12 +146,8 @@ impl ServiceHandle {
                 deadline,
             )
             .map_err(upgrade_failure)?;
-            let catalog = self.open_maintenance_catalog()?;
             return Ok(positron_api::upgrade::UpgradeResponse {
-                catalog_generation: catalog
-                    .pin()
-                    .map_err(|_| Failure::AdministrationUnavailable)?
-                    .number(),
+                catalog_generation,
                 details: Some(details(operation)?),
                 operation: Some(operation_response(operation)?),
             });
