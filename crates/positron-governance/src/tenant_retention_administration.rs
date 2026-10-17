@@ -200,9 +200,19 @@ impl TenantRetentionAdministration {
         let (_, governance) = snapshot.governance_object().map_err(map_catalog)?;
         let (current_seconds, current_generation, objects) =
             if request.tenant == governance.tenant() {
-                let current = ResourceGeneration::new(governance.retention_generation())
-                    .map_err(|_| TenantRetentionAdministrationFailure::PersistenceUnavailable)?;
-                (governance.retention_seconds(), current, None)
+                let current = ResourceGeneration::new(
+                    governance
+                        .retention_generation()
+                        .ok_or(TenantRetentionAdministrationFailure::InvalidInput)?,
+                )
+                .map_err(|_| TenantRetentionAdministrationFailure::PersistenceUnavailable)?;
+                (
+                    governance
+                        .retention_seconds()
+                        .ok_or(TenantRetentionAdministrationFailure::InvalidInput)?,
+                    current,
+                    None,
+                )
             } else {
                 let profile = tenant_profile_state(&snapshot, request.tenant)
                     .map_err(map_record)?

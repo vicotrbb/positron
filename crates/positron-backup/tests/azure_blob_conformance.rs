@@ -265,3 +265,185 @@ async fn azure_head_deletion_preserves_successor_created_after_absence()
     )
     .await
 }
+
+#[tokio::test]
+async fn native_azure_tenant_key_purge_retains_permanent_fence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = azure_simulator::Server::start()?;
+    azure_admission::admitted(
+        AzureBlobRepository::required_resources(),
+        move |resources| async move {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = tempfile::tempdir()?;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+            let custody = BootstrapKeyCustody::initialize(directory.path())?;
+            let instance = InstanceId::new([2; 16])?;
+            let protected =
+                custody.protect(instance, BootstrapObjectPurpose::Initialized, &[7; 32])?;
+            let signer = custody.backup_control_signer(instance, &protected)?;
+            let target = AzureBlobTarget::new("positronbackup", "backups", "owned/")?;
+            let identity = RepositoryIdentity::azure_blob(
+                [1; 16],
+                [2; 16],
+                signer.identity().fingerprint(),
+                &target,
+            )?;
+            let make = || {
+                AzureBlobRepository::from_local_simulator(
+                    target.clone(),
+                    identity.clone(),
+                    resources.clone(),
+                    RepositoryUploadAuthenticator::new(
+                        CatalogSecret::from_owned(Box::new([31; 32]), Box::new([32; 32])),
+                        instance,
+                    ),
+                    server.address,
+                )
+            };
+            let repository = make()?;
+            repository.initialize().await?;
+            let ordinary =
+                ImmutableObject::new(b"POSBKF01ordinary checksum-addressed content".to_vec())?;
+            repository.put_if_absent(ordinary.clone()).await?;
+            assert_eq!(
+                repository.head(ordinary.id()).await?.size(),
+                ordinary.bytes().len() as u64
+            );
+            repository.delete(ordinary.id()).await?;
+            let object = ImmutableObject::new(vec![45; 64])?;
+            let key = format!(
+                "owned/o-{}",
+                object
+                    .id()
+                    .checksum()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+            *server.delayed.target.lock().map_err(|_| "delay lock")? =
+                Some(format!("/backups/{key}"));
+            let late_repository = make()?;
+            let late_object = object.clone();
+            let late =
+                tokio::spawn(async move { late_repository.put_if_absent(late_object).await });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !server
+                    .delayed
+                    .waiting
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+            repository.put_if_absent(object.clone()).await?;
+            let tombstone = BackupPurgeTombstone::new([3; 16], "default", [9; 16], 10)?;
+            let fence = TenantKeyPurgeFence::new(object.id(), &tombstone, &identity, &signer)?;
+            server.rules.lock().map_err(|_| "rules lock")?.push_back((
+                "PUT".into(),
+                format!("/backups/{key}"),
+                azure_simulator::Action::Status(503, String::new(), Vec::new()),
+            ));
+            assert!(
+                Repository::delete_tenant_key(&repository, object.id(), &fence)
+                    .await
+                    .is_err()
+            );
+            {
+                let mut rules = server.rules.lock().map_err(|_| "rules lock")?;
+                rules.push_back((
+                    "PUT".into(),
+                    format!("/backups/{key}"),
+                    azure_simulator::Action::DropAfter,
+                ));
+                rules.push_back((
+                    "DELETE".into(),
+                    format!("/backups/{key}?"),
+                    azure_simulator::Action::Status(503, String::new(), Vec::new()),
+                ));
+            }
+            assert!(
+                Repository::delete_tenant_key(&repository, object.id(), &fence)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                repository.head(object.id()).await,
+                Err(RepositoryFailure::NotFound)
+            );
+            assert_eq!(
+                Repository::delete_tenant_key(&repository, object.id(), &fence).await?,
+                DeleteOutcome::AlreadyAbsent
+            );
+            server
+                .delayed
+                .release
+                .store(true, std::sync::atomic::Ordering::Release);
+            assert!(late.await?.is_err());
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while server.delayed.status.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }).await?;
+            assert_eq!(
+                server
+                    .delayed
+                    .status
+                    .load(std::sync::atomic::Ordering::Acquire),
+                412
+            );
+            assert_eq!(
+                repository.head(object.id()).await,
+                Err(RepositoryFailure::NotFound)
+            );
+            assert_eq!(repository.read_range(ObjectRange::new(object.id(), 0, 1)?).await?.bytes(), b"P");
+            assert_eq!(repository.read_range(ObjectRange::new(object.id(), 0, fence.bytes().len() as u64)?).await, Err(RepositoryFailure::NotFound));
+            assert!(repository.put_if_absent(object.clone()).await.is_err());
+            assert!(repository.delete(object.id()).await.is_err());
+            assert_eq!(
+                Repository::delete_tenant_key(&repository, object.id(), &fence).await?,
+                DeleteOutcome::AlreadyAbsent
+            );
+            // Inspect the independent native inventory after the delayed request;
+        // only the permanent nonsecret current value may remain reachable.
+        use std::io::{Read, Write};
+        let mut inventory=std::net::TcpStream::connect(server.address)?;
+        inventory.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        write!(inventory,"GET /backups/?restype=container&comp=list&prefix={key}&maxresults=64&include=versions%2Csnapshots%2Cdeleted%2Cdeletedwithversions%2Cuncommittedblobs HTTP/1.1\r\nHost: localhost\r\nx-ms-version: 2023-11-03\r\nConnection: close\r\n\r\n")?;
+        let mut raw=String::new();
+        inventory.read_to_string(&mut raw)?;
+        assert!(raw.starts_with("HTTP/1.1 200 "));
+        assert_eq!(raw.matches("<Blob>").count(),1);
+        assert!(!raw.contains("<VersionId>"));
+        assert!(!raw.contains("<Snapshot>"));
+        let other_tombstone=BackupPurgeTombstone::new([3;16],"default",[10;16],11)?;
+        let other_fence=TenantKeyPurgeFence::new(object.id(),&other_tombstone,&identity,&signer)?;
+        assert!(Repository::delete_tenant_key(&repository,object.id(),&other_fence).await.is_err());
+        assert_eq!(Repository::delete_tenant_key(&repository,object.id(),&fence).await?,DeleteOutcome::AlreadyAbsent);
+        let absent = ImmutableObject::new(vec![46; 64])?;
+            let absent_fence =
+                TenantKeyPurgeFence::new(absent.id(), &tombstone, &identity, &signer)?;
+            assert!(
+                Repository::delete_tenant_key(&repository, absent.id(), &fence)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                Repository::delete_tenant_key(&repository, absent.id(), &absent_fence).await?,
+                DeleteOutcome::Deleted
+            );
+            assert_eq!(
+                repository.object_size_hint(absent.id()).await?,
+                absent_fence.bytes().len() as u64
+            );
+            assert!(repository.put_if_absent(absent.clone()).await.is_err());
+            assert!(repository.delete(absent.id()).await.is_err());
+            assert_eq!(
+                Repository::delete_tenant_key(&repository, absent.id(), &absent_fence).await?,
+                DeleteOutcome::AlreadyAbsent
+            );
+            Ok(())
+        },
+    )
+    .await
+}

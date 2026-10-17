@@ -12,6 +12,10 @@ mod tenant_administration_proposal;
 mod tenant_administration_registry;
 #[path = "tenant_administration_registry_codec.rs"]
 mod tenant_administration_registry_codec;
+#[path = "tenant_purge.rs"]
+mod tenant_purge;
+#[path = "tenant_purge_record.rs"]
+mod tenant_purge_record;
 #[path = "tenant_restore.rs"]
 mod tenant_restore;
 pub use tenant_restore::RestorePurgeExclusion;
@@ -220,3 +224,21 @@ pub(super) fn map_catalog(failure: CatalogFailure) -> TenantAdministrationFailur
 
 #[cfg(fuzzing)]
 pub(crate) use tenant_administration_registry_codec::fuzz_registry;
+
+pub(crate) fn purged_tenant_alias(
+    snapshot: &positron_kernel::CatalogSnapshot,
+    tenant: TenantId,
+) -> Result<Option<positron_domain::identity::ExternalTenantAlias>, TenantAdministrationFailure> {
+    for id in snapshot.object_identities() {
+        if let Some(record) = tenant_purge_record::decode(
+            snapshot
+                .object(id)
+                .map_err(map_catalog)?
+                .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?,
+        )? && record.tenant == tenant
+        {
+            return Ok(record.alias);
+        }
+    }
+    Ok(None)
+}

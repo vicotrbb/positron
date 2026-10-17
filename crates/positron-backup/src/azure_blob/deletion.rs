@@ -165,7 +165,160 @@ impl AzureBlobRepository {
         self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
+        match self
+            .read_key(&self.key(&id.name()), "", MAX_OBJECT_BYTES as usize)
+            .await
+        {
+            Ok((bytes, _)) => self.check_purge_fence(id, &bytes)?,
+            Err(RepositoryFailure::NotFound) => {},
+            Err(e) => return Err(e),
+        }
         self.purge_key(&self.key(&id.name()), Proof::Object(id))
             .await
+    }
+}
+
+impl AzureBlobRepository {
+    /// A permanent current blob rejects delayed If-None-Match creators while
+    /// historical envelopes are removed through version-specific requests.
+    pub async fn delete_tenant_key(
+        &self,
+        id: ObjectId,
+        fence: &TenantKeyPurgeFence,
+    ) -> Result<DeleteOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
+        let _guard = self.enter()?;
+        self.read_identity().await?;
+        TenantKeyPurgeFence::verify(fence.bytes(), &self.identity, id)?;
+        let key = self.key(&id.name());
+        let current = match self.read_key(&key, "", MAX_OBJECT_BYTES as usize).await {
+            Ok(value) => Some(value),
+            Err(RepositoryFailure::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        let installed = current
+            .as_ref()
+            .is_some_and(|(bytes, _)| bytes == fence.bytes());
+        if !installed {
+            if let Some((bytes, _)) = &current {
+                self.check_purge_fence(id, bytes)?;
+                self.validate_owned(bytes.clone(), &Proof::Object(id))?;
+            }
+            let expected = current.as_ref().map(|(_, meta)| meta.etag.as_str());
+            match self.write_key(&key, fence.bytes().to_vec(), expected).await {
+                Ok(_)
+                | Err(RepositoryFailure::OutcomeUnknown | RepositoryFailure::PreconditionFailed) =>
+                    {},
+                Err(e) => return Err(e),
+            }
+        }
+        let (bytes, retained) = self
+            .read_key(&key, "", TenantKeyPurgeFence::MAX_BYTES)
+            .await?;
+        if bytes != fence.bytes() {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        TenantKeyPurgeFence::verify(&bytes, &self.identity, id)?;
+        let mut marker = None;
+        let mut items = Vec::new();
+        for _ in 0..4 {
+            let page = self.inventory(&key, marker.as_deref(), 64, true).await?;
+            items.extend(page.items.into_iter().filter(|v| v.name == key));
+            marker = page.next;
+            if marker.is_none() {
+                break;
+            }
+        }
+        if marker.is_some() {
+            return Err(RepositoryFailure::LimitExceeded);
+        }
+        if items.iter().any(|v| v.deleted) {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        for item in items.iter().filter(|v| !v.selector.is_empty()) {
+            let (bytes, metadata) = match self
+                .read_key(&key, &item.selector, MAX_OBJECT_BYTES as usize)
+                .await
+            {
+                Ok(value) => value,
+                Err(RepositoryFailure::NotFound) => continue,
+                Err(e) => return Err(e),
+            };
+            if metadata.etag == retained.etag {
+                if bytes != fence.bytes() {
+                    return Err(RepositoryFailure::CorruptState);
+                }
+                continue;
+            }
+            if TenantKeyPurgeFence::is_frame(&bytes) {
+                TenantKeyPurgeFence::verify(&bytes, &self.identity, id)?;
+            } else {
+                self.validate_owned(bytes, &Proof::Object(id))?;
+            }
+            let headers = Self::condition(Some(&metadata.etag))?;
+            match self
+                .checked(
+                    Method::DELETE,
+                    format!("{}{}", self.url(&key), item.selector),
+                    headers,
+                    Vec::new(),
+                    131072,
+                )
+                .await
+            {
+                Ok(_) | Err(RepositoryFailure::NotFound) => {},
+                Err(e) => return Err(e),
+            }
+            match self.metadata(&key, &item.selector).await {
+                Err(RepositoryFailure::NotFound) => {},
+                Ok(_) => return Err(RepositoryFailure::OutcomeUnknown),
+                Err(e) => return Err(e),
+            }
+        }
+        let page = self.inventory(&key, None, 64, true).await?;
+        if page.next.is_some() {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        for item in page.items.iter().filter(|v| v.name == key) {
+            if item.deleted {
+                return Err(RepositoryFailure::OutcomeUnknown);
+            }
+            let (bytes, metadata) = self
+                .read_key(&key, &item.selector, TenantKeyPurgeFence::MAX_BYTES)
+                .await?;
+            if bytes != fence.bytes() || metadata.etag != retained.etag {
+                return Err(RepositoryFailure::OutcomeUnknown);
+            }
+        }
+        // Put Blob clears pre-existing uncommitted blocks; verify none remain
+        // before acknowledging cryptographic completion.
+        let blocks = self
+            .checked(
+                Method::GET,
+                format!("{}?comp=blocklist&blocklisttype=all", self.url(&key)),
+                HeaderMap::new(),
+                Vec::new(),
+                131072,
+            )
+            .await?;
+        let blocks = super::protocol::xml(&blocks.body)?;
+        if blocks.name != "BlockList"
+            || blocks
+                .child("UncommittedBlocks")?
+                .is_none_or(|group| !group.children.is_empty())
+        {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        let (bytes, final_metadata) = self
+            .read_key(&key, "", TenantKeyPurgeFence::MAX_BYTES)
+            .await?;
+        if bytes != fence.bytes() || final_metadata.etag != retained.etag {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        Ok(if installed {
+            DeleteOutcome::AlreadyAbsent
+        } else {
+            DeleteOutcome::Deleted
+        })
     }
 }

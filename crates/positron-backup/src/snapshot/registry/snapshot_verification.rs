@@ -76,11 +76,7 @@ impl BackupPublisher<'_> {
         request: [u8; 32],
         expected: &[BackupKeyIdentity],
     ) -> Result<BackupSnapshotVerification, RepositoryFailure> {
-        if owner == [0; 16]
-            || request == [0; 32]
-            || expected.is_empty()
-            || expected.len() > MAX_KEY_ENVELOPES
-        {
+        if owner == [0; 16] || request == [0; 32] || expected.len() > MAX_KEY_ENVELOPES {
             return Err(RepositoryFailure::InvalidInput);
         }
         self.require_identity().await?;

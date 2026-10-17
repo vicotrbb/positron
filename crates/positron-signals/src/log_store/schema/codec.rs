@@ -27,6 +27,22 @@ pub(super) const fn text_version(version: u16) -> bool {
 
 impl SchemaCatalog {
     /// Decodes one bounded schema Catalog Object through the production reader.
+    /// Preflights a persisted schema and identifies its owning tenant without allocating its contents.
+    pub fn catalog_tenant(
+        bytes: &[u8],
+    ) -> Result<Option<positron_domain::identity::TenantId>, SchemaFailure> {
+        if !bytes.starts_with(MAGIC) {
+            return Ok(None);
+        }
+        Self::catalog_memory_bound(bytes)?;
+        let mut input = Input::new(bytes);
+        input.take(MAGIC.len())?;
+        input.u16()?;
+        positron_domain::identity::TenantId::from_bytes(input.array()?)
+            .map(Some)
+            .map_err(|_| SchemaFailure::MalformedCatalog)
+    }
+
     pub fn decode_catalog_object(bytes: &[u8]) -> Result<Self, SchemaFailure> {
         decode_checkpoint(bytes).map(|(catalog, _)| catalog)
     }

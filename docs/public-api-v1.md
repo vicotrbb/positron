@@ -278,3 +278,14 @@ identifiers, predicate literals, action values, or any telemetry values. It does
 not activate either candidate or write catalog or governance state. Its stable
 failures are `invalid_request` (400), `authentication_rejected` (401), and
 `administration_unavailable` (503).
+
+Tenant purge uses `TenantPurgeService.Manage` at
+`POST /v1/tenant-purges:manage` with a System Administration bearer. The 4096-byte
+request bound applies before decoding. Start requires the immutable Tenant ID,
+exact slug confirmation, expected Catalog and lifecycle generations, and an
+idempotency key. Status, lookup, and cancellation preserve the durable operation
+identity; cancellation is allowed only before drain. The generated client and
+`positron tenant purge` command share the canonical descriptor and route mapping.
+Responses explicitly limit completion to registered managed repositories and
+state that unmanaged copies are not revoked. See the canonical API README for
+request fields and command arguments.

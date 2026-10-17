@@ -124,6 +124,19 @@ pub(crate) async fn fuzz_control_frames(data: &[u8]) -> bool {
     let tombstone_bytes = tombstone
         .signed_bytes(&identity, &signer)
         .expect("signed tombstone");
+    let fence_object = ObjectId::from_checksum([29; 32]);
+    let fence = TenantKeyPurgeFence::new(fence_object, &tombstone, &identity, &signer)
+        .expect("signed fence");
+    assert_eq!(
+        TenantKeyPurgeFence::verify(fence.bytes(), &identity, fence_object).expect("valid fence"),
+        fence
+    );
+    let _ = TenantKeyPurgeFence::verify(data, &identity, fence_object);
+    let mut corrupted_fence = fence.bytes().to_vec();
+    mutate(&mut corrupted_fence, data);
+    if let Ok(decoded) = TenantKeyPurgeFence::verify(&corrupted_fence, &identity, fence_object) {
+        assert_eq!(decoded, fence);
+    }
     generation.tombstones.push(tombstone);
     let mut report = b"POSBRR02".to_vec();
     report.extend_from_slice(&[3; 16]);
@@ -664,6 +677,56 @@ async fn fuzz_cleanup(
             .expect("shared snapshot survives"),
         second
     );
+    let tombstone = BackupPurgeTombstone::new([9; 16], "purged-tenant", [27; 16], 1002)
+        .expect("purge identity");
+    let mut progress = publisher
+        .begin_tenant_purge(&tombstone, [28; 16], [29; 32])
+        .await
+        .expect("begin bounded purge");
+    for _ in 0..128 {
+        if progress.complete() {
+            break;
+        }
+        let checkpoint = publisher
+            .tenant_purge_checkpoint(&progress)
+            .expect("purge checkpoint");
+        assert!(checkpoint.len() <= BackupTenantPurge::MAX_CHECKPOINT_BYTES);
+        let mut corrupt = checkpoint.clone();
+        let offset = usize::from(data.first().copied().unwrap_or(0)) % corrupt.len();
+        if let Some(byte) = corrupt.get_mut(offset) {
+            *byte ^= 1;
+        }
+        assert!(
+            publisher
+                .resume_tenant_purge_checkpoint(&corrupt, [28; 16], [29; 32])
+                .is_err()
+        );
+        progress = publisher
+            .resume_tenant_purge_checkpoint(&checkpoint, [28; 16], [29; 32])
+            .expect("resume purge");
+        publisher
+            .tenant_purge_step(&mut progress)
+            .await
+            .expect("bounded purge turn");
+    }
+    assert!(progress.complete());
+    let anchor = progress
+        .registry_generation()
+        .expect("complete managed purge");
+    assert_eq!(
+        publisher
+            .purge_tenant(&tombstone)
+            .await
+            .expect("retry purge"),
+        anchor
+    );
+    assert_eq!(
+        repository
+            .head(envelope.object().expect("envelope object").id())
+            .await,
+        Err(RepositoryFailure::NotFound)
+    );
+    assert!(repository.head(object.id()).await.is_ok());
 }
 
 #[cfg(test)]

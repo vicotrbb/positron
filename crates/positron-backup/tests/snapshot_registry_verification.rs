@@ -10,8 +10,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 struct Observed<'a> {
     inner: &'a LocalRepository,
     reads: AtomicUsize,
+    deletes: AtomicUsize,
     bytes: AtomicUsize,
     lose_cas: AtomicBool,
+    pause_cas: AtomicBool,
+    pause_delete: AtomicBool,
+    deny_tenant_delete: AtomicBool,
     fail_readback: AtomicBool,
     append_after_hint: Option<std::path::PathBuf>,
     append_once: AtomicBool,
@@ -72,8 +76,23 @@ impl Repository for Observed<'_> {
     ) -> Result<PutOutcome, RepositoryFailure> {
         self.inner.put_if_absent(object).await
     }
+    async fn delete_tenant_key(
+        &self,
+        object: ObjectId,
+        _fence: &TenantKeyPurgeFence,
+    ) -> Result<DeleteOutcome, RepositoryFailure> {
+        if self.deny_tenant_delete.load(Ordering::Relaxed) {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        self.delete(object).await
+    }
     async fn delete(&self, object: ObjectId) -> Result<DeleteOutcome, RepositoryFailure> {
-        self.inner.delete(object).await
+        self.deletes.fetch_add(1, Ordering::Relaxed);
+        let outcome = self.inner.delete(object).await?;
+        if self.pause_delete.swap(false, Ordering::Relaxed) {
+            std::future::pending::<()>().await;
+        }
+        Ok(outcome)
     }
     async fn registry_head_at(
         &self,
@@ -97,6 +116,9 @@ impl Repository for Observed<'_> {
         change: RegistryHeadChange,
     ) -> Result<CasOutcome, RepositoryFailure> {
         let outcome = self.inner.compare_and_swap_head_at(slot, change).await?;
+        if self.pause_cas.swap(false, Ordering::Relaxed) {
+            std::future::pending::<()>().await;
+        }
         if self.lose_cas.swap(false, Ordering::Relaxed) {
             self.fail_readback.store(true, Ordering::Relaxed);
             return Err(RepositoryFailure::OutcomeUnknown);
@@ -188,8 +210,12 @@ async fn registry_ancestry_is_bounded_authenticated_and_resumes_after_external_a
         let observed = Observed {
             inner: &repository,
             reads: AtomicUsize::new(0),
+            deletes: AtomicUsize::new(0),
             bytes: AtomicUsize::new(0),
             lose_cas: AtomicBool::new(false),
+            pause_cas: AtomicBool::new(false),
+            pause_delete: AtomicBool::new(false),
+            deny_tenant_delete: AtomicBool::new(false),
             fail_readback: AtomicBool::new(false),
             append_after_hint: None,
             append_once: AtomicBool::new(false),
@@ -356,8 +382,12 @@ async fn registry_ancestry_is_bounded_authenticated_and_resumes_after_external_a
         let observed_append = Observed {
             inner: &append_repository,
             reads: AtomicUsize::new(0),
+            deletes: AtomicUsize::new(0),
             bytes: AtomicUsize::new(0),
             lose_cas: AtomicBool::new(false),
+            pause_cas: AtomicBool::new(false),
+            pause_delete: AtomicBool::new(false),
+            deny_tenant_delete: AtomicBool::new(false),
             fail_readback: AtomicBool::new(false),
             append_after_hint: Some(object_path.clone()),
             append_once: AtomicBool::new(false),
@@ -417,8 +447,12 @@ async fn registry_ancestry_is_bounded_authenticated_and_resumes_after_external_a
             let observed = Observed {
                 inner: &claim_repository,
                 reads: AtomicUsize::new(0),
+                deletes: AtomicUsize::new(0),
                 bytes: AtomicUsize::new(0),
                 lose_cas: AtomicBool::new(false),
+                pause_cas: AtomicBool::new(false),
+                pause_delete: AtomicBool::new(false),
+                deny_tenant_delete: AtomicBool::new(false),
                 fail_readback: AtomicBool::new(false),
                 append_after_hint: None,
                 append_once: AtomicBool::new(false),
@@ -478,6 +512,169 @@ async fn registry_ancestry_is_bounded_authenticated_and_resumes_after_external_a
                 Err(RepositoryFailure::NotFound)
             );
         }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn tenant_purge_resumes_signed_progress_with_one_generation_and_key_per_turn()
+-> Result<(), Box<dyn std::error::Error>> {
+    resources::admitted(96 * 1024 * 1024, |resources| async move {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let secrets = dir.path().join("secrets");
+        let path = dir.path().join("repo");
+        for p in [&secrets, &path] {
+            std::fs::create_dir(p)?;
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let custody = BootstrapKeyCustody::initialize(&secrets)?;
+        let instance = InstanceId::new([2; 16])?;
+        let protected = custody.protect(instance, BootstrapObjectPurpose::Initialized, &[7; 32])?;
+        let signer = custody.backup_control_signer(instance, &protected)?;
+        let identity =
+            RepositoryIdentity::local([1; 16], [2; 16], signer.identity().fingerprint(), &path)?;
+        let repository = LocalRepository::initialize(&path, identity.clone()).await?;
+        let observed = Observed {
+            inner: &repository,
+            reads: AtomicUsize::new(0),
+            deletes: AtomicUsize::new(0),
+            bytes: AtomicUsize::new(0),
+            lose_cas: AtomicBool::new(false),
+            pause_cas: AtomicBool::new(false),
+            pause_delete: AtomicBool::new(false),
+            deny_tenant_delete: AtomicBool::new(false),
+            fail_readback: AtomicBool::new(false),
+            append_after_hint: None,
+            append_once: AtomicBool::new(false),
+        };
+        let initial = BackupPublisher::new(&observed, &identity, &signer)
+            .with_control_resources(&resources, 0)?;
+        let keys = vec![
+            BackupKeyEnvelope::new([9; 16], 1, [10; 32], vec![11; 32])?,
+            BackupKeyEnvelope::new([9; 16], 2, [12; 32], vec![13; 32])?,
+        ];
+        let object = ImmutableObject::new(vec![14; 32])?;
+        repository.put_if_absent(object.clone()).await?;
+        let manifest = BackupManifest::new(
+            [15; 16],
+            identity.clone(),
+            BackupCatalogIdentity::new(1, [16; 32], 2, 1, [17; 32])?,
+            BackupRetention::new(1, 2)?,
+            BackupPublisher::key_context(&keys)?,
+            vec![BackupObject::new(
+                [17; 32],
+                32,
+                0,
+                object.id().checksum(),
+                32,
+            )?],
+        )?;
+        initial.reserve(&manifest, &keys).await?;
+        let publication = initial.publish(&manifest, &keys).await?;
+        let authority = publication.registry_generation();
+        let owner = [18; 16];
+        let request = [19; 32];
+        let tombstone = BackupPurgeTombstone::new([9; 16], "excluded", [20; 16], 21)?;
+        // Bind a fresh progress sequence to the stable Catalog authority used by
+        // every cold Maintenance turn.
+        let bound = BackupPublisher::new(&observed, &identity, &signer)
+            .with_trusted_generation(authority)?
+            .with_control_resources(&resources, 0)?;
+        let mut original_proof = bound
+            .begin_registry_verification([26; 16], [27; 32])
+            .await?;
+        while !original_proof.complete()? {
+            bound
+                .registry_verification_step(&mut original_proof)
+                .await?;
+        }
+        let original_proof = bound.registry_verification_checkpoint(&original_proof)?;
+        let mut state = bound.begin_tenant_purge(&tombstone, owner, request).await?;
+        observed.lose_cas.store(true, Ordering::Relaxed);
+        observed.pause_cas.store(true, Ordering::Relaxed);
+        observed.pause_delete.store(true, Ordering::Relaxed);
+        observed.deny_tenant_delete.store(true, Ordering::Relaxed);
+        let mut refused = 0;
+        let mut timeouts = 0;
+        let mut timed_out_deletes = 0;
+        let mut errors = 0;
+        let mut turns = 0;
+        while !state.complete() {
+            let checkpoint = bound.tenant_purge_checkpoint(&state)?;
+            assert!(checkpoint.len() <= 1024);
+            let proof = bound.resume_registry_verification(&original_proof, [26; 16], [27; 32])?;
+            let cold = BackupPublisher::new(&observed, &identity, &signer)
+                .with_trusted_generation(authority)?
+                .with_control_resources(&resources, 0)?
+                .with_registry_verification(&proof)?;
+            assert!(
+                cold.resume_tenant_purge_checkpoint(&checkpoint, [22; 16], request)
+                    .is_err()
+            );
+            let mut corrupt = checkpoint.clone();
+            *corrupt.last_mut().ok_or("signature")? ^= 1;
+            assert!(
+                cold.resume_tenant_purge_checkpoint(&corrupt, owner, request)
+                    .is_err()
+            );
+            state = cold.resume_tenant_purge_checkpoint(&checkpoint, owner, request)?;
+            let reads = observed.reads.load(Ordering::Relaxed);
+            let deletes = observed.deletes.load(Ordering::Relaxed);
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                cold.tenant_purge_step(&mut state),
+            )
+            .await
+            {
+                Err(_) => {
+                    timeouts += 1;
+                    timed_out_deletes += observed.deletes.load(Ordering::Relaxed) - deletes;
+                    assert!(!state.complete());
+                    // The caller retains only its pre-turn durable checkpoint.
+                    // Resume must reconcile the physical CAS/delete already done.
+                    state = cold.resume_tenant_purge_checkpoint(&checkpoint, owner, request)?;
+                },
+                Ok(Ok(done)) => assert_eq!(done, state.complete()),
+                Ok(Err(RepositoryFailure::StorageUnavailable)) => {
+                    errors += 1;
+                    assert_eq!(errors, 1);
+                },
+                Ok(Err(RepositoryFailure::PreconditionFailed)) => {
+                    refused += 1;
+                    assert_eq!(refused, 1);
+                    assert!(!state.complete());
+                    assert_eq!(observed.deletes.load(Ordering::Relaxed), 0);
+                    observed.deny_tenant_delete.store(false, Ordering::Relaxed);
+                },
+                Ok(Err(e)) => return Err(e.into()),
+            }
+            assert!(observed.reads.load(Ordering::Relaxed) - reads <= 1);
+            assert!(observed.deletes.load(Ordering::Relaxed) - deletes <= 1);
+            if refused == 1 && observed.deletes.load(Ordering::Relaxed) == 0 {
+                assert_eq!(cold.purge_tombstones().await?, vec![tombstone.clone()]);
+            }
+            turns += 1;
+            assert!(turns < 40);
+        }
+        assert_eq!(errors, 1);
+        assert_eq!(refused, 1);
+        assert_eq!(timeouts, 2);
+        assert_eq!(timed_out_deletes, 1);
+        assert!(observed.deletes.load(Ordering::Relaxed) >= 4);
+        assert!(repository.head(object.id()).await.is_ok());
+        let complete = state.registry_generation().ok_or("complete anchor")?;
+        let advancing = BackupPublisher::new(&observed, &identity, &signer)
+            .with_trusted_generation(complete)?
+            .with_control_resources(&resources, 0)?;
+        advancing
+            .record_purge_tombstone(&BackupPurgeTombstone::new([23; 16], "other", [24; 16], 25)?)
+            .await?;
+        assert_eq!(
+            advancing.tenant_purge_step(&mut state).await,
+            Err(RepositoryFailure::PreconditionFailed)
+        );
         Ok(())
     })
     .await

@@ -25,6 +25,8 @@ pub(crate) enum CatalogFileEvent {
     SynchronizeAudit,
     SynchronizeAuditDirectory,
     ReclaimAudit,
+    ReclaimKeyObject,
+    SynchronizeReclaimedKeyDirectory,
     SynchronizeReclaimedAuditDirectory,
     PartialAuditCheckpointWrite,
     SynchronizeAuditCheckpoint,

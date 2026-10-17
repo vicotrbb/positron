@@ -2,6 +2,9 @@ use super::*;
 impl CatalogGovernanceObject {
     /// Replaces only the bounded opaque tenant envelope; caller verifies its custody context.
     pub fn with_tenant_key_envelope(&self, envelope: &[u8]) -> Result<Vec<u8>, CatalogFailure> {
+        if self.version == CatalogGovernanceVersion::V9 {
+            return Err(corrupt());
+        }
         if envelope.is_empty() || envelope.len() > 16_384 {
             return Err(corrupt());
         }

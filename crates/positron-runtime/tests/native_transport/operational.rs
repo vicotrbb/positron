@@ -130,8 +130,12 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
     let mut completed_requests = 0;
     let mut completed_query = false;
     while completed_requests < 2 || !completed_query {
-        let request =
-            received.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))?;
+        let request = received
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .map_err(|error| format!(
+                "operational export arrival: {error}; completed_requests={completed_requests}; completed_query={completed_query}; telemetry={}",
+                process.health().operational_telemetry_snapshot()
+            ))?;
         let encoded = request.encode_to_vec();
         assert!(encoded.len() < 4096);
         for canary in [&administrator, &ingest, &query] {

@@ -104,3 +104,6 @@ mod repository;
 
 #[path = "maintenance_api_tests/backup.rs"]
 mod backup;
+
+#[path = "maintenance_api_tests/tenant_purge.rs"]
+mod tenant_purge;

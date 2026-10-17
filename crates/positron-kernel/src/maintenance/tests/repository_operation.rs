@@ -772,3 +772,73 @@ fn backup_readmission_preserves_failed_owner_and_cold_checkpoint()
     }
     Ok(())
 }
+
+#[test]
+fn tenant_purge_start_replay_preserves_advanced_checkpoint()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = CatalogRoot::new()?;
+    let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+        PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+        70_000_001,
+        1_048_576 + 16_384,
+    )?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new(nonzero_id(1))?,
+        CatalogSecret::from_owned(Box::new([0x61; 32]), Box::new([0x62; 32])),
+    )?;
+    catalog.commit(
+        catalog.pin()?.identity(),
+        CatalogProposal::new(
+            TransactionId::new(nonzero_id(2))?,
+            FormatEpoch::CATALOG_V2,
+            vec![CatalogObject::new(b"purge replay basis".to_vec())?],
+        )?,
+        None,
+    )?;
+    let coordinator = MaintenanceCoordinator::new();
+    let binding = RepositoryOperationBinding::new([101; 16], [102; 32]).expect("binding");
+    let tenant = TenantId::from_bytes([103; 16])?;
+    let preconditions = MaintenancePreconditions::new(1, 1).expect("preconditions");
+    let task = coordinator
+        .submit_tenant_purge_and_persist(&catalog, binding, preconditions, tenant, 7)
+        .expect("submit");
+    assert_eq!(
+        coordinator.start_next(8, false).expect("dispatch"),
+        Some(task.clone())
+    );
+    coordinator
+        .checkpoint(
+            task.identity(),
+            binding
+                .backup_checkpoint(2, b"exact deletion cursor")
+                .expect("cursor"),
+        )
+        .expect("progress");
+    assert_eq!(
+        coordinator
+            .submit_tenant_purge_and_persist(&catalog, binding, preconditions, tenant, 9)
+            .expect("exact start replay"),
+        task
+    );
+    assert_eq!(
+        coordinator
+            .status(task.identity())
+            .expect("status")
+            .checkpoint()
+            .map(MaintenanceCheckpoint::sequence),
+        Some(2)
+    );
+    assert!(
+        coordinator
+            .submit_tenant_purge_and_persist(
+                &catalog,
+                RepositoryOperationBinding::new([101; 16], [104; 32]).expect("changed intent"),
+                preconditions,
+                tenant,
+                9
+            )
+            .is_err()
+    );
+    Ok(())
+}

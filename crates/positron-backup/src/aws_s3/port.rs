@@ -3,6 +3,14 @@ use crate::*;
 
 #[async_trait::async_trait]
 impl Repository for AwsS3Repository {
+    async fn verify_control_inventory(
+        &self,
+        allowed: &[ObjectId],
+        head: &[u8],
+        _pending: Option<&ImmutableObject>,
+    ) -> Result<(), RepositoryFailure> {
+        Self::verify_control_inventory(self, allowed, head).await
+    }
     async fn storage_policy(&self) -> Result<RepositoryPolicy, RepositoryFailure> {
         Self::storage_policy(self).await
     }
@@ -38,6 +46,13 @@ impl Repository for AwsS3Repository {
         object: ImmutableObject,
     ) -> Result<PutOutcome, RepositoryFailure> {
         Self::put_if_absent(self, object).await
+    }
+    async fn delete_tenant_key(
+        &self,
+        id: ObjectId,
+        fence: &crate::TenantKeyPurgeFence,
+    ) -> Result<DeleteOutcome, RepositoryFailure> {
+        AwsS3Repository::delete_tenant_key(self, id, fence).await
     }
     async fn delete(&self, id: ObjectId) -> Result<DeleteOutcome, RepositoryFailure> {
         Self::delete(self, id).await

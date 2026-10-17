@@ -322,3 +322,70 @@ mod listing_tests {
         );
     }
 }
+
+impl AwsS3Repository {
+    pub(super) async fn verify_control_inventory(
+        &self,
+        allowed: &[crate::ObjectId],
+        head: &[u8],
+    ) -> Result<(), RepositoryFailure> {
+        let _operation = self.enter()?;
+        self.check_bucket().await?;
+        self.read_identity().await?;
+        let mut inventory = crate::control_inventory::ControlInventory::new(allowed)?;
+        let uploads = self
+            .client
+            .list_multipart_uploads()
+            .bucket(self.target.bucket())
+            .prefix(self.target.prefix())
+            .max_uploads(1)
+            .expected_bucket_owner(self.target.expected_owner())
+            .send()
+            .with_subscriber(tracing::subscriber::NoSubscriber::default())
+            .await
+            .map_err(|e| failure::sdk(e, false))?;
+        if uploads.is_truncated() != Some(false) || !uploads.uploads().is_empty() {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        let page = self
+            .client
+            .list_object_versions()
+            .bucket(self.target.bucket())
+            .prefix(self.target.prefix())
+            .max_keys(4)
+            .expected_bucket_owner(self.target.expected_owner())
+            .send()
+            .with_subscriber(tracing::subscriber::NoSubscriber::default())
+            .await
+            .map_err(|e| failure::sdk(e, false))?;
+        if page.is_truncated() != Some(false)
+            || !page.delete_markers().is_empty()
+            || page.versions().len() > 3
+        {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        for version in page.versions() {
+            let name = version
+                .key()
+                .and_then(|key| key.strip_prefix(self.target.prefix()))
+                .ok_or(RepositoryFailure::PreconditionFailed)?;
+            inventory.observe(name)?;
+        }
+        inventory.finish()?;
+        for id in allowed {
+            if inventory.has_object(*id) {
+                self.read_object(*id).await?;
+            }
+        }
+        let actual = self
+            .read_head(crate::HeadSlot::registry())
+            .await?
+            .map(|(head, _)| head);
+        if actual.as_ref().is_some_and(|value| value.bytes() != head)
+            || inventory.has_head() && actual.is_none()
+        {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        Ok(())
+    }
+}

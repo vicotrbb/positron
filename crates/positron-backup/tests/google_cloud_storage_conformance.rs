@@ -576,3 +576,84 @@ async fn simulated_native_protocol_conformance() -> TestResult {
 }
 #[path = "shared/google_simulator.rs"]
 mod simulator;
+
+#[tokio::test]
+async fn native_google_tenant_key_purge_retains_permanent_fence() -> TestResult {
+    let server = simulator::Server::start()?;
+    let target = GoogleCloudStorageTarget::new("simulation-bucket", "123", "US", "owned/")?;
+    admitted(target,Duration::from_secs(60),false,|target, identity, resources, marker, wrapping| async move {
+        let directory=tempfile::tempdir()?;
+        fs::set_permissions(directory.path(),fs::Permissions::from_mode(0o700))?;
+        let custody=BootstrapKeyCustody::initialize(directory.path())?;
+        let instance=InstanceId::new(identity.instance_id())?;
+        let protected=custody.protect(instance,BootstrapObjectPurpose::Initialized,&[7;32])?;
+        let signer=custody.backup_control_signer(instance,&protected)?;
+        let identity=RepositoryIdentity::google_cloud_storage(identity.repository_id(),identity.instance_id(),signer.identity().fingerprint(),&target)?;
+        let make=|| GoogleCloudStorageRepository::from_local_simulator(target.clone(),identity.clone(),resources.clone(),
+            RepositoryUploadAuthenticator::new(CatalogSecret::from_owned(Box::new(marker),Box::new(wrapping)),instance),server.address);
+        let repository=make()?;
+        repository.initialize().await?;
+        let ordinary=ImmutableObject::new(b"POSBKF01ordinary checksum-addressed content".to_vec())?;
+        repository.put_if_absent(ordinary.clone()).await?;
+        assert_eq!(repository.head(ordinary.id()).await?.size(),ordinary.bytes().len() as u64);
+        repository.delete(ordinary.id()).await?;
+        let object=ImmutableObject::new(vec![45;64])?;
+        let key=format!("owned/o-{}",object.id().checksum().iter().map(|b|format!("{b:02x}")).collect::<String>());
+        *server.delayed.target.lock().map_err(|_|"delay lock")?=Some(format!("/upload/storage/v1/b/simulation-bucket/o?uploadType=media&name={}&ifGenerationMatch=0",key.replace('/',"%2F")));
+        let late_repository=make()?;
+        let late_object=object.clone();
+        let late=tokio::spawn(async move { late_repository.put_if_absent(late_object).await });
+        tokio::time::timeout(Duration::from_secs(5),async {
+            while !server.delayed.waiting.load(std::sync::atomic::Ordering::Acquire) { tokio::task::yield_now().await; }
+        }).await?;
+        repository.put_if_absent(object.clone()).await?;
+        let tombstone=BackupPurgeTombstone::new([3;16],"default",[9;16],10)?;
+        let fence=TenantKeyPurgeFence::new(object.id(),&tombstone,&identity,&signer)?;
+        server.replies.lock().map_err(|_|"replies lock")?.push_back(("POST /upload/storage/v1/b/simulation-bucket/o".into(),503,String::new(),serde_json::json!({})));
+        assert!(Repository::delete_tenant_key(&repository,object.id(),&fence).await.is_err());
+        let interrupted=make()?.with_faults(vec![GoogleCloudStorageFault::new(GoogleCloudStorageFaultPoint::AfterVersionDeletion,GoogleCloudStorageFaultEffect::OutcomeUnknown,0)])?;
+        assert_eq!(Repository::delete_tenant_key(&interrupted,object.id(),&fence).await,Err(RepositoryFailure::OutcomeUnknown));
+        assert_eq!(repository.head(object.id()).await,Err(RepositoryFailure::NotFound));
+        assert_eq!(Repository::delete_tenant_key(&repository,object.id(),&fence).await?,DeleteOutcome::AlreadyAbsent);
+        server.delayed.release.store(true,std::sync::atomic::Ordering::Release);
+        assert!(late.await?.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while server.delayed.status.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        }).await?;
+        assert_eq!(server.delayed.status.load(std::sync::atomic::Ordering::Acquire),412);
+        assert_eq!(repository.head(object.id()).await,Err(RepositoryFailure::NotFound));
+        assert_eq!(repository.read_range(ObjectRange::new(object.id(),0,1)?).await?.bytes(),b"P");
+        assert_eq!(repository.read_range(ObjectRange::new(object.id(),0,fence.bytes().len() as u64)?).await,Err(RepositoryFailure::NotFound));
+        assert!(repository.put_if_absent(object.clone()).await.is_err());
+        assert!(repository.delete(object.id()).await.is_err());
+        assert_eq!(Repository::delete_tenant_key(&repository,object.id(),&fence).await?,DeleteOutcome::AlreadyAbsent);
+        // The native inventory independently proves secret history was removed.
+        use std::io::{Read, Write};
+        let mut inventory=std::net::TcpStream::connect(server.address)?;
+        inventory.set_read_timeout(Some(Duration::from_secs(5)))?;
+        write!(inventory,"GET /storage/v1/b/simulation-bucket/o?prefix={key}&maxResults=64&versions=true HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+        let mut raw=String::new();
+        inventory.read_to_string(&mut raw)?;
+        assert!(raw.starts_with("HTTP/1.1 200 "));
+        let (_,body)=raw.split_once("\r\n\r\n").ok_or("native inventory body")?;
+        let inventory:serde_json::Value=serde_json::from_str(body)?;
+        assert_eq!(inventory["items"].as_array().ok_or("native items")?.len(),1);
+        assert_eq!(inventory["items"][0]["name"],key);
+        assert!(inventory.get("nextPageToken").is_none());
+        let other_tombstone=BackupPurgeTombstone::new([3;16],"default",[10;16],11)?;
+        let other_fence=TenantKeyPurgeFence::new(object.id(),&other_tombstone,&identity,&signer)?;
+        assert!(Repository::delete_tenant_key(&repository,object.id(),&other_fence).await.is_err());
+        assert_eq!(Repository::delete_tenant_key(&repository,object.id(),&fence).await?,DeleteOutcome::AlreadyAbsent);
+        let absent=ImmutableObject::new(vec![46;64])?;
+        let absent_fence=TenantKeyPurgeFence::new(absent.id(),&tombstone,&identity,&signer)?;
+        assert!(Repository::delete_tenant_key(&repository,absent.id(),&fence).await.is_err());
+        assert_eq!(Repository::delete_tenant_key(&repository,absent.id(),&absent_fence).await?,DeleteOutcome::Deleted);
+        assert_eq!(repository.object_size_hint(absent.id()).await?,absent_fence.bytes().len() as u64);
+        assert!(repository.put_if_absent(absent.clone()).await.is_err());
+        assert!(repository.delete(absent.id()).await.is_err());
+        assert_eq!(Repository::delete_tenant_key(&repository,absent.id(),&absent_fence).await?,DeleteOutcome::AlreadyAbsent);
+        Ok(())
+    }).await
+}

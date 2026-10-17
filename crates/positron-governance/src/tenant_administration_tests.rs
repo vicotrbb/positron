@@ -63,19 +63,70 @@ fn fixture_authority(
     volume: positron_kernel::OwnedPrimaryDataVolume,
     tenant: TenantId,
 ) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
-    let cardinality = InventoryCardinalityLimits::new(1, 16)?;
+    fixture_authority_with_purge_pool(volume, tenant, None)
+}
+
+fn fixture_authority_with_purge_pool(
+    volume: positron_kernel::OwnedPrimaryDataVolume,
+    tenant: TenantId,
+    purge_tenant: Option<TenantId>,
+) -> Result<StorageKernelResourceAuthority, Box<dyn Error>> {
+    let extra_tenant = purge_tenant.filter(|purge| *purge != tenant);
+    let tenant_count = if extra_tenant.is_some() { 2 } else { 1 };
+    let cardinality = InventoryCardinalityLimits::new(tenant_count, 16)?;
     let large = ResourceAmounts::new([
         70_000_001, 2, 2, 70_000_001, 65_541, 2, 2, 2, 2, 9, 20_000_001,
     ]);
     let small = ResourceAmounts::new([1; 11]);
     let dual = ResourceAmounts::new([2; 11]);
     let durability = add_amounts(add_amounts(large, large)?, large)?;
+    let purge = if extra_tenant.is_some() {
+        add_amounts(large, large)?
+    } else if purge_tenant.is_some() {
+        large
+    } else {
+        small
+    };
+    let retention = if extra_tenant.is_some() { dual } else { small };
+    let compaction = if extra_tenant.is_some() {
+        ResourceAmounts::new([3; 11])
+    } else {
+        dual
+    };
+    let repair = if extra_tenant.is_some() {
+        add_amounts(large, small)?
+    } else {
+        large
+    };
     let recovery_capacity = add_amounts(
-        add_amounts(add_amounts(durability, large)?, large)?,
-        ResourceAmounts::new([6; 11]),
+        add_amounts(
+            add_amounts(
+                add_amounts(
+                    add_amounts(
+                        add_amounts(add_amounts(durability, retention)?, compaction)?,
+                        purge,
+                    )?,
+                    repair,
+                )?,
+                small,
+            )?,
+            small,
+        )?,
+        large,
     )?;
-    let governed = add_amounts(recovery_capacity, ResourceAmounts::new([16; 11]))?;
-    let raw = add_amounts(governed, cardinality.governor_bootstrap_overhead(1)?)?;
+    let ordinary_unit = if purge_tenant.is_some() {
+        30_000_000
+    } else {
+        1
+    };
+    let governed = add_amounts(
+        recovery_capacity,
+        ResourceAmounts::new([16 * ordinary_unit; 11]),
+    )?;
+    let raw = add_amounts(
+        governed,
+        cardinality.governor_bootstrap_overhead(tenant_count)?,
+    )?;
     let observed = ObservedResourceEnvironment::for_test(
         &volume,
         raw,
@@ -93,17 +144,22 @@ fn fixture_authority(
             raw.get(ResourceDimension::DiskHeadroomBytes),
         )?,
     )?;
-    let policy = GovernorPolicy::new(
-        [TenantQuota::new(tenant, 1, ResourceAmounts::new([16; 11]))?],
-        OrdinaryPoolPolicy::new(
-            ResourceAmounts::new([4; 11]),
-            ResourceAmounts::new([3; 11]),
-            ResourceAmounts::new([2; 11]),
-            ResourceAmounts::new([1; 11]),
-        )?,
+    let pools = OrdinaryPoolPolicy::new(
+        ResourceAmounts::new([4 * ordinary_unit; 11]),
+        ResourceAmounts::new([3 * ordinary_unit; 11]),
+        ResourceAmounts::new([2 * ordinary_unit; 11]),
+        ResourceAmounts::new([ordinary_unit; 11]),
     )?;
-    let recovery =
-        RecoveryPoolCapacities::new(durability, small, dual, small, large, small, small)?;
+    let quota_limits = ResourceAmounts::new([16 * ordinary_unit; 11]);
+    let quota = TenantQuota::new(tenant, 1, quota_limits)?;
+    let policy = if let Some(extra) = extra_tenant {
+        GovernorPolicy::new([quota, TenantQuota::new(extra, 1, quota_limits)?], pools)?
+    } else {
+        GovernorPolicy::new([quota], pools)?
+    };
+    let recovery = RecoveryPoolCapacities::new(
+        durability, retention, compaction, purge, repair, small, small,
+    )?;
     Ok(StorageKernelResourceAuthority::establish(
         volume,
         ResourceGovernorConfiguration::new(inventory, policy, recovery)?,
@@ -500,7 +556,10 @@ fn tenant_list_pages_traverse_a_large_catalog_once_and_reject_a_changed_snapshot
                     inspection.tenant_id(),
                     (
                         inspection.slug().to_owned(),
-                        inspection.display_name().to_owned()
+                        inspection
+                            .display_name()
+                            .ok_or("active tenant profile")?
+                            .to_owned()
                     ),
                 )
                 .is_none(),
@@ -843,3 +902,6 @@ mod restore_catalog_tests;
 
 #[path = "restore_purge_tests.rs"]
 mod restore_purge_tests;
+
+#[path = "tenant_purge_tests.rs"]
+mod tenant_purge_tests;

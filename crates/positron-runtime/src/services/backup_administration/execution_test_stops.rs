@@ -15,6 +15,7 @@ pub(in crate::services) enum StopPoint {
     CancellationCommitted,
     ResourcesRequeued,
     ReservationRegistered,
+    BeforeKeyUpload,
     KeyPreparationPersisted,
     RegistryCursorPersisted,
 }

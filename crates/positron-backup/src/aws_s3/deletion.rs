@@ -1,8 +1,10 @@
 use super::{AwsS3Repository, failure};
 use crate::{ObjectId, RepositoryFailure, UploadId};
+mod fence;
 mod proof;
 pub(super) enum Proof {
     Object(ObjectId),
+    Tenant(ObjectId, crate::TenantKeyPurgeFence),
     Head,
     Upload(UploadId),
 }
@@ -187,6 +189,17 @@ impl AwsS3Repository {
     pub async fn delete(&self, id: ObjectId) -> Result<crate::DeleteOutcome, RepositoryFailure> {
         let _operation = self.enter()?;
         self.read_identity().await?;
+        match self.fence_current(id).await {
+            Ok((bytes, _, _))
+                if super::objects::validate_object(id, &bytes).is_err()
+                    && crate::TenantKeyPurgeFence::is_frame(&bytes) =>
+            {
+                crate::TenantKeyPurgeFence::verify(&bytes, &self.identity, id)?;
+                return Err(RepositoryFailure::PreconditionFailed);
+            },
+            Ok(_) | Err(RepositoryFailure::NotFound) => {},
+            Err(error) => return Err(error),
+        }
         match self.read_object(id).await {
             Ok(_) | Err(RepositoryFailure::NotFound) => {},
             Err(error) => return Err(error),

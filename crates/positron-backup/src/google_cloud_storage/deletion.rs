@@ -154,6 +154,14 @@ impl GoogleCloudStorageRepository {
         self.upload_authenticator()?;
         let _guard = self.enter()?;
         self.read_identity().await?;
+        match self
+            .read_key(&self.key(&id.name()), None, MAX_OBJECT_BYTES as usize)
+            .await
+        {
+            Ok((bytes, _)) => self.check_purge_fence(id, &bytes)?,
+            Err(RepositoryFailure::NotFound) => {},
+            Err(e) => return Err(e),
+        }
         self.purge_key(&self.key(&id.name()), Proof::Object(id), None)
             .await
     }
@@ -190,5 +198,106 @@ impl GoogleCloudStorageRepository {
             .await?;
         }
         self.purge_key(&key, Proof::Upload(id), None).await
+    }
+}
+
+impl GoogleCloudStorageRepository {
+    /// Occupy the old name before removing secret generations, so a delayed
+    /// generation-zero creator can never publish after purge completion.
+    pub async fn delete_tenant_key(
+        &self,
+        id: ObjectId,
+        fence: &TenantKeyPurgeFence,
+    ) -> Result<DeleteOutcome, RepositoryFailure> {
+        self.upload_authenticator()?;
+        let _guard = self.enter()?;
+        self.read_identity().await?;
+        TenantKeyPurgeFence::verify(fence.bytes(), &self.identity, id)?;
+        let key = self.key(&id.name());
+        let current = match self.read_key(&key, None, MAX_OBJECT_BYTES as usize).await {
+            Ok(value) => Some(value),
+            Err(RepositoryFailure::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        let installed = current
+            .as_ref()
+            .is_some_and(|(bytes, _)| bytes == fence.bytes());
+        if !installed {
+            if let Some((bytes, _)) = &current {
+                self.check_purge_fence(id, bytes)?;
+                self.validate_owned(bytes.clone(), &Proof::Object(id))?;
+            }
+            let expected = current.as_ref().map_or(0, |(_, meta)| meta.generation);
+            match self.write_key(&key, fence.bytes().to_vec(), expected).await {
+                Ok(_)
+                | Err(RepositoryFailure::OutcomeUnknown | RepositoryFailure::PreconditionFailed) =>
+                    {},
+                Err(e) => return Err(e),
+            }
+        }
+        let (bytes, retained) = self
+            .read_key(&key, None, TenantKeyPurgeFence::MAX_BYTES)
+            .await?;
+        if bytes != fence.bytes() {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        TenantKeyPurgeFence::verify(&bytes, &self.identity, id)?;
+        for generation in self.generations(&key).await? {
+            if generation == retained.generation {
+                continue;
+            }
+            let (bytes, metadata) = match self
+                .read_key(&key, Some(generation), MAX_OBJECT_BYTES as usize)
+                .await
+            {
+                Ok(value) => value,
+                Err(RepositoryFailure::NotFound) => continue,
+                Err(e) => return Err(e),
+            };
+            if TenantKeyPurgeFence::is_frame(&bytes) {
+                TenantKeyPurgeFence::verify(&bytes, &self.identity, id)?;
+            } else {
+                self.validate_owned(bytes, &Proof::Object(id))?;
+            }
+            let url = format!(
+                "{}?generation={generation}&ifGenerationMatch={generation}&ifMetagenerationMatch={}",
+                self.object_url(&key),
+                metadata.metageneration
+            );
+            match self
+                .checked(Method::DELETE, url, HeaderMap::new(), Vec::new(), 131072)
+                .await
+            {
+                Ok(_) | Err(RepositoryFailure::NotFound) => {},
+                Err(e) => return Err(e),
+            }
+            self.faults
+                .at(super::GoogleCloudStorageFaultPoint::AfterVersionDeletion)?;
+        }
+        if self.generations(&key).await? != vec![retained.generation] {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        let retained_history = self.inventory(&key, None, 1, false, true).await?;
+        if retained_history.next.is_some()
+            || retained_history
+                .items
+                .iter()
+                .any(|v| v.get("name").and_then(|n| n.as_str()) == Some(key.as_str()))
+        {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        let (bytes, final_metadata) = self
+            .read_key(&key, None, TenantKeyPurgeFence::MAX_BYTES)
+            .await?;
+        if bytes != fence.bytes() || final_metadata.generation != retained.generation {
+            return Err(RepositoryFailure::OutcomeUnknown);
+        }
+        self.faults
+            .at(super::GoogleCloudStorageFaultPoint::AfterDeletion)?;
+        Ok(if installed {
+            DeleteOutcome::AlreadyAbsent
+        } else {
+            DeleteOutcome::Deleted
+        })
     }
 }

@@ -256,8 +256,8 @@ fn unequal_weight_that_starves_a_recovery_tenant_rejects_before_publication()
         initialized.key.catalog_secret(initialized.instance)?,
     )?;
     let (_, governance) = catalog.pin()?.governance_object()?;
-    assert_eq!(governance.quota_generation(), 1);
-    assert_eq!(governance.quota_weight(), 1);
+    assert_eq!(governance.quota_generation(), Some(1));
+    assert_eq!(governance.quota_weight(), Some(1));
     Ok(())
 }
 

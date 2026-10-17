@@ -84,7 +84,9 @@ fn resource_sizing(max_registered_tenants: u16) -> Result<ResourceSizing, Bootst
     let durability = at_least(add(add(large, large)?, large)?, dual_scope_recovery);
     let retention = at_least(large, tenant_recovery);
     let compaction = at_least(uniform(3), dual_scope_recovery);
-    let purge = at_least(small, tenant_recovery);
+    // One purge holds its protected task grant while reading and deleting a
+    // bounded Repository control generation, independently of ordinary backups.
+    let purge = at_least(multiply(large, max_registered_tenants)?, tenant_recovery);
     // Repair capacity is shared by every registered tenant. One integrity
     // scrub can hold the complete bounded Catalog-recovery peak, so preserve
     // one such claim for each tenant that may be scheduled concurrently. The
@@ -407,24 +409,71 @@ mod tests {
     }
 
     #[test]
-    fn default_capacity_preserves_the_existing_recovery_reserve() -> Result<(), BootstrapFailure> {
+    fn default_capacity_accounts_for_protected_tenant_purge_reserve() -> Result<(), BootstrapFailure>
+    {
         let sizing = resource_sizing(2)?;
         assert_eq!(
             sizing.recovery_capacity,
             ResourceAmounts::new([
-                630_000_012,
-                40,
-                40,
-                630_000_012,
-                490_012,
-                40,
-                40,
-                40,
-                40,
-                124,
-                280_000_012,
+                810_000_010,
+                46,
+                46,
+                810_000_010,
+                630_010,
+                46,
+                46,
+                46,
+                46,
+                154,
+                360_000_010,
             ])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn purge_inventory_preserves_repair_and_ordinary_query_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_kernel::{RecoveryWorkClaim, RecoveryWorkKind};
+        let root = std::env::temp_dir().join(format!(
+            "positron-purge-resource-sizing-test-{}-{}",
+            std::process::id(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root)?;
+        let volume = PrimaryDataVolume::acquire(&root, MountQualification::LocalHost)?;
+        let tenant = TenantId::from_bytes([0x93; 16])?;
+        let observed = ObservedResourceEnvironment::observe(
+            &volume,
+            registered_resource_bounds(resource_sizing(2)?.raw)?,
+        )?;
+        let configuration = resource_configuration(tenant, resource_sizing(2)?, observed)?;
+        let authority = StorageKernelResourceAuthority::establish(volume, configuration)?;
+        let task = authority.recovery().reserve(RecoveryWorkClaim::tenant(
+            tenant,
+            RecoveryWorkKind::Purge,
+            ResourceAmounts::new([8_388_608, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384]),
+        )?)?;
+        let catalog_peak =
+            ResourceAmounts::new([70_000_000, 1, 1, 70_000_000, 65_540, 0, 1, 1, 1, 8, 0]);
+        let inventory = authority.recovery().reserve(RecoveryWorkClaim::tenant(
+            tenant,
+            RecoveryWorkKind::Purge,
+            catalog_peak,
+        )?)?;
+        let repair = authority.recovery().reserve(RecoveryWorkClaim::system(
+            RecoveryWorkKind::Repair,
+            catalog_peak,
+        )?)?;
+        let query = authority.governor().reserve(WorkClaim::authenticated(
+            tenant,
+            PrincipalId::from_bytes([0x94; 16])?,
+            WorkKind::InteractiveQueryTail,
+            ResourceAmounts::new([6_850_000, 0, 0, 0, 0, 1, 0, 0, 6, 0, 0]),
+        )?)?;
+        drop((query, repair, inventory, task));
+        drop(authority);
+        fs::remove_dir_all(&root)?;
         Ok(())
     }
 

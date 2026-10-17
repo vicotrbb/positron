@@ -80,9 +80,21 @@ fn system_administrator_inspects_default_and_provisioned_tenants_without_secret_
     assert_eq!(listed.len(), 2);
     let inspection = initialized.inspect_tenant(system, tenant)?;
     assert_eq!(inspection.slug(), "inspection-tenant");
-    assert_eq!(inspection.display_name(), "Inspection tenant");
-    assert_eq!(inspection.display_generation().get(), 1);
-    assert_eq!(inspection.retention_generation().get(), 1);
+    assert_eq!(inspection.display_name(), Some("Inspection tenant"));
+    assert_eq!(
+        inspection
+            .display_generation()
+            .expect("live tenant generation")
+            .get(),
+        1
+    );
+    assert_eq!(
+        inspection
+            .retention_generation()
+            .expect("live tenant generation")
+            .get(),
+        1
+    );
     Ok(())
 }
 
@@ -348,10 +360,22 @@ fn system_administrator_updates_a_provisioned_tenant_display_name_idempotently()
     assert_eq!(publication.code(), BootstrapFailureCode::CatalogUnavailable);
 
     let inspection = initialized.inspect_tenant(system, tenant)?;
-    assert_eq!(inspection.display_name(), "Second display name");
-    assert_eq!(inspection.display_generation().get(), 3);
-    assert_eq!(inspection.retention_seconds(), 2_592_000);
-    assert_eq!(inspection.retention_generation().get(), 1);
+    assert_eq!(inspection.display_name(), Some("Second display name"));
+    assert_eq!(
+        inspection
+            .display_generation()
+            .expect("live tenant generation")
+            .get(),
+        3
+    );
+    assert_eq!(inspection.retention_seconds(), Some(2_592_000));
+    assert_eq!(
+        inspection
+            .retention_generation()
+            .expect("live tenant generation")
+            .get(),
+        1
+    );
     drop(initialized);
 
     let reopened = fixture.reopen()?;
@@ -361,9 +385,21 @@ fn system_administrator_updates_a_provisioned_tenant_display_name_idempotently()
         CompatibilityHints::none(),
     )?;
     let inspection = reopened.inspect_tenant(system, tenant)?;
-    assert_eq!(inspection.display_name(), "Second display name");
-    assert_eq!(inspection.display_generation().get(), 3);
-    assert_eq!(inspection.retention_generation().get(), 1);
+    assert_eq!(inspection.display_name(), Some("Second display name"));
+    assert_eq!(
+        inspection
+            .display_generation()
+            .expect("live tenant generation")
+            .get(),
+        3
+    );
+    assert_eq!(
+        inspection
+            .retention_generation()
+            .expect("live tenant generation")
+            .get(),
+        1
+    );
     Ok(())
 }
 
@@ -387,9 +423,21 @@ fn system_administrator_updates_default_tenant_display_without_changing_retentio
     )?;
     assert_eq!(updated.resource_generation().get(), 2);
     let inspection = initialized.inspect_tenant(system, tenant)?;
-    assert_eq!(inspection.display_name(), "Renamed default tenant");
-    assert_eq!(inspection.display_generation().get(), 2);
-    assert_eq!(inspection.retention_generation().get(), 1);
+    assert_eq!(inspection.display_name(), Some("Renamed default tenant"));
+    assert_eq!(
+        inspection
+            .display_generation()
+            .expect("live tenant generation")
+            .get(),
+        2
+    );
+    assert_eq!(
+        inspection
+            .retention_generation()
+            .expect("live tenant generation")
+            .get(),
+        1
+    );
     Ok(())
 }
 

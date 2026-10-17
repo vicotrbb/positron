@@ -197,7 +197,8 @@ impl TenantProfileAdministration {
         let (governance_id, governance) = snapshot.governance_object().map_err(map_catalog)?;
         let objects = if governance.tenant() == request.tenant {
             let current =
-                ResourceGeneration::new(governance.display_generation()).map_err(|_| {
+                ResourceGeneration::new(governance.display_generation().ok_or_else(unavailable)?)
+                    .map_err(|_| {
                     TenantProfileAdministrationFailure::new(
                         TenantProfileAdministrationFailureCode::PersistenceUnavailable,
                     )
@@ -205,7 +206,7 @@ impl TenantProfileAdministration {
             if current != request.expected {
                 return Err(TenantProfileAdministrationFailure::stale(
                     current,
-                    governance.display_name(),
+                    governance.display_name().ok_or_else(unavailable)?,
                     &request.display_name,
                 ));
             }

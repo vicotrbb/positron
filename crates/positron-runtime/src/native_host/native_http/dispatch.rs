@@ -426,6 +426,27 @@ fn route_inner<S: Read + Write>(
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
         },
+        (ListenerRole::Api, "POST", positron_api::tenant_purge::HTTP_PATH) => {
+            let services = services.ok_or_else(|| Response::empty(503))?;
+            let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
+                Response::json(401, "{\"code\":\"authentication_rejected\"}".to_owned())
+            })?);
+            let body = read_body(
+                stream,
+                head.content_length,
+                positron_api::tenant_purge::MAX_REQUEST_BYTES,
+            )?;
+            match services.manage_tenant_purge(&bearer, &body) {
+                Ok(response) => Ok(Response {
+                    status: 200,
+                    content_type: "application/json",
+                    body: response.encode().map_err(|_| Response::empty(503))?,
+                    retry_after_seconds: None,
+                    diagnostics_reservation: None,
+                }),
+                Err(failure) => Ok(maintenance_failure_response(failure)),
+            }
+        },
         (ListenerRole::Api, "POST", positron_api::backup::LIST_HTTP_PATH) => {
             let services = services.ok_or_else(|| Response::empty(503))?;
             let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {

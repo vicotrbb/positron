@@ -12,6 +12,7 @@ pub struct RestorePurgeExclusion {
     tenant: TenantId,
     slug: TenantSlug,
     proof: [u8; 32],
+    authorization: Option<([u8; 16], u64)>,
 }
 impl RestorePurgeExclusion {
     pub fn new(
@@ -26,7 +27,28 @@ impl RestorePurgeExclusion {
             tenant,
             slug,
             proof,
+            authorization: None,
         })
+    }
+    pub fn with_authorization(
+        mut self,
+        operation: [u8; 16],
+        accepted_at: u64,
+    ) -> Result<Self, TenantAdministrationFailure> {
+        if operation == [0; 16] || accepted_at == 0 {
+            return Err(TenantAdministrationFailure::InvalidInput);
+        }
+        self.authorization = Some((operation, accepted_at));
+        Ok(self)
+    }
+    pub fn operation_id(&self) -> Option<[u8; 16]> {
+        self.authorization.map(|value| value.0)
+    }
+    pub fn accepted_at_unix_seconds(&self) -> Option<u64> {
+        self.authorization.map(|value| value.1)
+    }
+    pub const fn proof_digest(&self) -> [u8; 32] {
+        self.proof
     }
     pub const fn tenant_id(&self) -> TenantId {
         self.tenant
@@ -74,11 +96,14 @@ impl TenantAdministration {
             }) {
                 return Err(TenantAdministrationFailure::InvalidInput);
             }
-            if let Some(existing) = registry.reserved.iter().find(|existing| {
+            if let Some(existing) = registry.reserved.iter_mut().find(|existing| {
                 existing.tenant == exclusion.tenant || existing.slug == exclusion.slug
             }) {
-                if existing != exclusion {
+                if existing.tenant != exclusion.tenant || existing.slug != exclusion.slug {
                     return Err(TenantAdministrationFailure::InvalidInput);
+                }
+                if existing.authorization.is_none() {
+                    existing.authorization = exclusion.authorization;
                 }
             } else {
                 if registry.reserved.len() >= MAX_EXCLUSIONS {
@@ -132,7 +157,13 @@ impl TenantAdministration {
                 let mut marker = b"POSBPD01".to_vec();
                 marker.extend_from_slice(&exclusion.tenant.to_bytes());
                 marker.extend_from_slice(&exclusion.proof);
-                if id == governance_id {
+                if id == governance_id
+                    && governance.lifecycle()
+                        == positron_domain::lifecycle::TenantLifecycleState::Purged
+                    && governance.tenant_key_envelope().is_empty()
+                {
+                    bytes.to_vec()
+                } else if id == governance_id {
                     let state = if governance.lifecycle()
                         == positron_domain::lifecycle::TenantLifecycleState::Purged
                     {
@@ -175,6 +206,7 @@ impl TenantAdministration {
 pub(super) fn encode_reservations(
     values: &[RestorePurgeExclusion],
     bytes: &mut Vec<u8>,
+    authorization: bool,
 ) -> Result<(), TenantAdministrationFailure> {
     if values.len() > MAX_EXCLUSIONS {
         return Err(TenantAdministrationFailure::InvalidInput);
@@ -185,6 +217,16 @@ pub(super) fn encode_reservations(
         bytes.push(value.slug().len() as u8);
         bytes.extend_from_slice(value.slug().as_bytes());
         bytes.extend_from_slice(&value.proof);
+        if authorization {
+            match value.authorization {
+                Some((operation, accepted)) => {
+                    bytes.push(1);
+                    bytes.extend_from_slice(&operation);
+                    bytes.extend_from_slice(&accepted.to_be_bytes());
+                },
+                None => bytes.push(0),
+            }
+        }
     }
     Ok(())
 }
@@ -217,6 +259,9 @@ pub(super) fn reservation_tail(
         .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?;
         if cursor.array::<32>()? == [0; 32] {
             return Err(TenantAdministrationFailure::PersistenceUnavailable);
+        }
+        if bytes.starts_with(b"POSTRG04") {
+            cursor.authorization()?;
         }
     }
     if !cursor.0.is_empty() {
@@ -253,6 +298,11 @@ pub(super) fn decode_reservations(
         )
         .map_err(|_| TenantAdministrationFailure::PersistenceUnavailable)?;
         let proof = cursor.array()?;
+        let authorization = if bytes.starts_with(b"POSTRG04") {
+            cursor.authorization()?
+        } else {
+            None
+        };
         if values
             .last()
             .is_some_and(|last: &RestorePurgeExclusion| last.tenant >= tenant)
@@ -266,6 +316,7 @@ pub(super) fn decode_reservations(
             tenant,
             slug,
             proof,
+            authorization,
         });
     }
     Ok(values)
@@ -279,6 +330,20 @@ impl<'a> Cursor<'a> {
             .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
         self.0 = rest;
         Ok(value)
+    }
+    fn authorization(&mut self) -> Result<Option<([u8; 16], u64)>, TenantAdministrationFailure> {
+        match self.array::<1>()? {
+            [0] => Ok(None),
+            [1] => {
+                let operation = self.array()?;
+                let accepted = u64::from_be_bytes(self.array()?);
+                if operation == [0; 16] || accepted == 0 {
+                    return Err(TenantAdministrationFailure::PersistenceUnavailable);
+                }
+                Ok(Some((operation, accepted)))
+            },
+            _ => Err(TenantAdministrationFailure::PersistenceUnavailable),
+        }
     }
     fn array<const N: usize>(&mut self) -> Result<[u8; N], TenantAdministrationFailure> {
         self.take(N)?

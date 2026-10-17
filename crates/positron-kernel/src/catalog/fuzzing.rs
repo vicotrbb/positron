@@ -42,6 +42,7 @@ impl Drop for FuzzRoot {
 }
 
 pub(super) fn fuzz_catalog_stateful(data: &[u8]) {
+    super::tenant_purge::fuzz_purge_descriptor(data);
     if data.len() > 128 {
         return;
     }

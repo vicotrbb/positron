@@ -249,6 +249,7 @@ pub(super) fn restore(instance: &crate::InitializedInstance) -> Result<(), Servi
 }
 
 const INSTALLED_TASK_CLASSES: &[MaintenanceTaskClass] = &[
+    MaintenanceTaskClass::TenantPurge,
     MaintenanceTaskClass::BackupSnapshot,
     MaintenanceTaskClass::RepositoryCleanup,
     MaintenanceTaskClass::RepositoryVerification,
@@ -324,6 +325,10 @@ enum InstalledMaintenanceExecution<'authority> {
     RepositoryOperation {
         execution: MaintenanceExecution<'authority>,
     },
+    TenantPurge {
+        execution: MaintenanceExecution<'authority>,
+        work: super::tenant_purge::PurgeWork,
+    },
     RootProviderMigration {
         execution: MaintenanceExecution<'authority>,
     },
@@ -363,6 +368,7 @@ fn installed_task_class(execution: &InstalledMaintenanceExecution<'_>) -> Mainte
     match execution {
         InstalledMaintenanceExecution::BackupSnapshot { execution, .. }
         | InstalledMaintenanceExecution::RepositoryOperation { execution }
+        | InstalledMaintenanceExecution::TenantPurge { execution, .. }
         | InstalledMaintenanceExecution::RootProviderMigration { execution }
         | InstalledMaintenanceExecution::EnvelopeVerification { execution }
         | InstalledMaintenanceExecution::Compaction { execution, .. }
@@ -384,6 +390,7 @@ fn start_installed_maintenance<'authority>(
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
         return Err(ServiceFailure::Cancelled);
     }
+    super::tenant_purge::recover_accepted_task(services)?;
     super::provider_migration::recover_accepted_task(services)?;
     super::repository_administration::recover_accepted_task(services)?;
     super::backup_administration::recover_accepted_task(services)?;
@@ -427,22 +434,25 @@ fn start_installed_maintenance<'authority>(
             &catalog,
             instance.instance.to_bytes(),
         )?;
+    // A restarted capture owns copied key material until its Backup handler
+    // releases it. Let that existing owner finish before the urgent purge.
+    let drain_capture = catalog
+        .has_backup_capture_references()
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     let mut eligible_classes = Vec::new();
-    if drain_retention {
+    if drain_retention || drain_capture {
         eligible_classes
             .try_reserve_exact(INSTALLED_TASK_CLASSES.len())
             .map_err(|_| ServiceFailure::CapacityUnavailable)?;
-        eligible_classes.extend(
-            INSTALLED_TASK_CLASSES
-                .iter()
-                .copied()
-                .filter(|class| *class != MaintenanceTaskClass::Migration),
-        );
+        eligible_classes.extend(INSTALLED_TASK_CLASSES.iter().copied().filter(|class| {
+            (!drain_retention || *class != MaintenanceTaskClass::Migration)
+                && (!drain_capture || *class != MaintenanceTaskClass::TenantPurge)
+        }));
     }
     // Retention owns real checkpoint references. Let its existing handlers
     // release them before a root phase attempts its unchanged retirement proof.
     // Other installed work retains its ordinary scheduler eligibility.
-    let classes = if drain_retention {
+    let classes = if drain_retention || drain_capture {
         eligible_classes.as_slice()
     } else {
         INSTALLED_TASK_CLASSES
@@ -469,6 +479,10 @@ fn start_installed_maintenance<'authority>(
         return Err(ServiceFailure::Cancelled);
     }
     let execution = match execution.task().class() {
+        MaintenanceTaskClass::TenantPurge => InstalledMaintenanceExecution::TenantPurge {
+            execution,
+            work: super::tenant_purge::PurgeWork::default(),
+        },
         MaintenanceTaskClass::BackupSnapshot | MaintenanceTaskClass::RepositoryCleanup => {
             InstalledMaintenanceExecution::BackupSnapshot {
                 execution,
@@ -628,6 +642,9 @@ fn complete_installed_maintenance(
     if let InstalledMaintenanceExecution::RepositoryOperation { execution } = execution {
         return super::repository_administration::complete(services, execution);
     }
+    if let InstalledMaintenanceExecution::TenantPurge { execution, work } = execution {
+        return super::tenant_purge::complete(services, execution, work, cancellation);
+    }
     if let InstalledMaintenanceExecution::RootProviderMigration { execution } = execution {
         return super::provider_migration::complete(services, execution, cancellation);
     }
@@ -680,6 +697,7 @@ fn complete_installed_maintenance(
         | InstalledMaintenanceExecution::RetentionReclamation { scope, .. } => *scope,
         InstalledMaintenanceExecution::BackupSnapshot { .. }
         | InstalledMaintenanceExecution::RepositoryOperation { .. }
+        | InstalledMaintenanceExecution::TenantPurge { .. }
         | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. }
@@ -717,6 +735,7 @@ fn complete_installed_maintenance(
         },
         InstalledMaintenanceExecution::BackupSnapshot { .. }
         | InstalledMaintenanceExecution::RepositoryOperation { .. }
+        | InstalledMaintenanceExecution::TenantPurge { .. }
         | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. }
         | InstalledMaintenanceExecution::GovernanceAuditCheckpoint { .. } => {
@@ -777,6 +796,7 @@ fn complete_installed_maintenance(
     let completed = match execution {
         InstalledMaintenanceExecution::BackupSnapshot { .. }
         | InstalledMaintenanceExecution::RepositoryOperation { .. }
+        | InstalledMaintenanceExecution::TenantPurge { .. }
         | InstalledMaintenanceExecution::RootProviderMigration { .. }
         | InstalledMaintenanceExecution::EnvelopeVerification { .. } => {
             return Err(ServiceFailure::Internal);
@@ -1444,6 +1464,7 @@ pub(super) fn run_runtime_maintenance_worker(
                         let continues_owned_work = match &execution {
                             InstalledMaintenanceExecution::IntegrityScrub { execution, .. }
                             | InstalledMaintenanceExecution::BackupSnapshot { execution, .. }
+                            | InstalledMaintenanceExecution::TenantPurge { execution, .. }
                             | InstalledMaintenanceExecution::RootProviderMigration { execution } => {
                                 match services
                                     .instance

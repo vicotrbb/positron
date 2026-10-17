@@ -251,7 +251,10 @@ pub(super) fn finish_direct(
         crate::services::maintenance_verification::decode_fixed_hex(id).ok_or("task identity")?,
     )
     .map_err(|failure| format!("task identity: {failure:?}"))?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Match the long-work fixture policy in finish_root. ADR-0071 gives
+    // admitted work a 60-second no-progress SLO, not a 30-second completion
+    // deadline. Status reads share the Catalog gate with worker checkpoints.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
     loop {
         let status = services
             .manage_backup(bearer, &request.encode()?)
@@ -273,8 +276,12 @@ pub(super) fn finish_direct(
             return Ok(status);
         }
         if std::time::Instant::now() >= deadline {
-            return Err(format!("backup deadline: {status:?}").into());
+            return Err(format!(
+                "backup deadline: {status:?}; maintenance={:?}",
+                services.maintenance_status(bearer, br"{}")
+            )
+            .into());
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }

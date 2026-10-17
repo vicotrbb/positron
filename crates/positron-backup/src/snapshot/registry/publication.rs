@@ -83,7 +83,7 @@ impl BackupPublisher<'_> {
                 .filter(|key| key.context == manifest.key_context)
                 .copied()
                 .collect::<Vec<_>>();
-            if keys.is_empty() || context_digest(&keys) != manifest.key_context {
+            if context_digest(&keys) != manifest.key_context {
                 return Err(RepositoryFailure::CorruptState);
             }
             Some(BackupPublication {
@@ -136,7 +136,7 @@ impl BackupPublisher<'_> {
             .into_iter()
             .filter(|key| key.context == manifest.key_context)
             .collect::<Vec<_>>();
-        if keys.is_empty() || context_digest(&keys) != manifest.key_context {
+        if context_digest(&keys) != manifest.key_context {
             return Err(RepositoryFailure::CorruptState);
         }
         Ok(BackupPublicationCheck::start(

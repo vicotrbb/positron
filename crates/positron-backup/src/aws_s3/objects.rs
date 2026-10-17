@@ -49,6 +49,10 @@ impl AwsS3Repository {
         let length = response.content_length();
         let bytes =
             crate::aws_s3::http::read_bytes(response.body, length, MAX_OBJECT_BYTES).await?;
+        if validate_object(id, &bytes).is_err() && crate::TenantKeyPurgeFence::is_frame(&bytes) {
+            crate::TenantKeyPurgeFence::verify(&bytes, &self.identity, id)?;
+            return Err(RepositoryFailure::NotFound);
+        }
         validate_object(id, &bytes)?;
         Ok((bytes, protection))
     }
@@ -154,6 +158,17 @@ impl AwsS3Repository {
             .map_err(|_| RepositoryFailure::StorageUnavailable)?;
         if selected.len() as u64 != range.length {
             return Err(RepositoryFailure::CorruptState);
+        }
+        // A range authenticates a purge fence only when it contains the whole
+        // signed frame; an ordinary partial prefix is not an absence proof.
+        if range.offset == 0
+            && range.length == size
+            && validate_object(range.object, &selected).is_err()
+            && crate::TenantKeyPurgeFence::is_frame(&selected)
+        {
+            crate::TenantKeyPurgeFence::verify(&selected, &self.identity, range.object)
+                .map_err(|_| RepositoryFailure::CorruptState)?;
+            return Err(RepositoryFailure::NotFound);
         }
         Ok(ChecksummedBytes {
             checksum: Sha256::digest(&selected).into(),

@@ -106,6 +106,7 @@ fn backup_acceptance_progress_cancellation_and_publication_are_durable()
         actor,
         request,
         parameters,
+        parameters.registration_identity(),
         registration,
     )?;
     assert_eq!(accepted.kind(), DurableOperationKind::BackupSnapshot);
@@ -115,6 +116,7 @@ fn backup_acceptance_progress_cancellation_and_publication_are_durable()
         actor,
         request,
         parameters,
+        parameters.registration_identity(),
         CatalogObject::new(b"bound backup repository fixture".to_vec())?,
     )?;
     assert_eq!(accepted, replay);
@@ -190,6 +192,7 @@ fn backup_acceptance_progress_cancellation_and_publication_are_durable()
         actor,
         request2,
         parameters,
+        parameters.registration_identity(),
         CatalogObject::new(b"bound backup repository fixture".to_vec())?,
     )?;
     let id2 = accepted2.operation_id();

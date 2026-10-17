@@ -881,9 +881,14 @@ fuzz_target!(|data: &[u8]| {
                             .expect("canonical profile-bearing tenant record is readable");
                         assert_eq!(inspection.tenant_id(), tenant);
                         assert_eq!(inspection.slug(), "fuzz-secondary");
-                        assert_eq!(inspection.display_name(), "Fuzz secondary tenant");
-                        assert_eq!(inspection.retention_seconds(), 2_592_000);
-                        assert_eq!(inspection.retention_generation().get(), 1);
+                        assert_eq!(inspection.display_name(), Some("Fuzz secondary tenant"));
+                        assert_eq!(inspection.retention_seconds(), Some(2_592_000));
+                        assert_eq!(
+                            inspection
+                                .retention_generation()
+                                .map(ResourceGeneration::get),
+                            Some(1)
+                        );
                         secondary_tenant = Some(tenant);
                     }
                 }

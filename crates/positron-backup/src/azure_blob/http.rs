@@ -168,6 +168,20 @@ impl AzureBlobRepository {
             .await?;
         protocol::etag(&reply.headers)
     }
+    pub(super) fn check_purge_fence(
+        &self,
+        id: ObjectId,
+        bytes: &[u8],
+    ) -> Result<(), RepositoryFailure> {
+        if <[u8; 32]>::from(Sha256::digest(bytes)) != id.checksum()
+            && TenantKeyPurgeFence::is_frame(bytes)
+        {
+            TenantKeyPurgeFence::verify(bytes, &self.identity, id)
+                .map_err(|_| RepositoryFailure::CorruptState)?;
+            return Err(RepositoryFailure::NotFound);
+        }
+        Ok(())
+    }
     pub(super) async fn read_object(
         &self,
         id: ObjectId,
@@ -175,6 +189,7 @@ impl AzureBlobRepository {
         let value = self
             .read_key(&self.key(&id.name()), "", MAX_OBJECT_BYTES as usize)
             .await?;
+        self.check_purge_fence(id, &value.0)?;
         if <[u8; 32]>::from(Sha256::digest(&value.0)) != id.checksum() {
             return Err(RepositoryFailure::ChecksumMismatch);
         }
@@ -250,5 +265,70 @@ impl AzureBlobRepository {
                 e
             }
         })
+    }
+}
+
+impl AzureBlobRepository {
+    pub(super) async fn verify_control_inventory(
+        &self,
+        allowed: &[crate::ObjectId],
+        head: &[u8],
+    ) -> Result<(), RepositoryFailure> {
+        let _guard = self.enter()?;
+        self.read_identity().await?;
+        let mut inventory = crate::control_inventory::ControlInventory::new(allowed)?;
+        let page = self.inventory(self.target.prefix(), None, 4, true).await?;
+        if page.next.is_some() {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        for item in &page.items {
+            if item.deleted {
+                return Err(RepositoryFailure::PreconditionFailed);
+            }
+            let name = item
+                .name
+                .strip_prefix(self.target.prefix())
+                .ok_or(RepositoryFailure::PreconditionFailed)?;
+            inventory.observe(name)?;
+            // Prefix inventory can merge a committed blob with unfinished
+            // blocks under that same name. Those blocks are also reachable.
+            let blocks = self
+                .checked(
+                    Method::GET,
+                    format!("{}?comp=blocklist&blocklisttype=all", self.url(&item.name)),
+                    HeaderMap::new(),
+                    Vec::new(),
+                    131072,
+                )
+                .await?;
+            let blocks = protocol::xml(&blocks.body)?;
+            if blocks.name != "BlockList"
+                || blocks
+                    .child("UncommittedBlocks")?
+                    .is_none_or(|group| !group.children.is_empty())
+                || blocks.children.iter().any(|group| {
+                    !matches!(group.name.as_str(), "CommittedBlocks" | "UncommittedBlocks")
+                        || group.name == "UncommittedBlocks" && !group.children.is_empty()
+                })
+            {
+                return Err(RepositoryFailure::PreconditionFailed);
+            }
+        }
+        inventory.finish()?;
+        for id in allowed {
+            if inventory.has_object(*id) {
+                self.read_object(*id).await?;
+            }
+        }
+        let actual = self
+            .read_head(crate::HeadSlot::registry())
+            .await?
+            .map(|(head, _)| head);
+        if actual.as_ref().is_some_and(|value| value.bytes() != head)
+            || inventory.has_head() && actual.is_none()
+        {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        Ok(())
     }
 }

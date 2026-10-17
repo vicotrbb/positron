@@ -28,6 +28,7 @@ pub enum DurableOperationKind {
     BackupRetention,
     BackupVerification,
     BackupRestore,
+    TenantPurge,
 }
 
 impl DurableOperationKind {
@@ -40,7 +41,9 @@ impl DurableOperationKind {
             Self::BackupSnapshot => DurableOperationBoundary::BackupRegistryPublished,
             Self::BackupRetention => DurableOperationBoundary::BackupRegistryExpired,
             Self::BackupVerification => DurableOperationBoundary::VerificationReportPublished,
-            Self::BackupRestore => DurableOperationBoundary::CatalogGenerationPublished,
+            Self::BackupRestore | Self::TenantPurge => {
+                DurableOperationBoundary::CatalogGenerationPublished
+            },
             Self::SegmentAbandonment => DurableOperationBoundary::CatalogGenerationPublished,
             Self::KeyProviderMigration | Self::RepositoryInspection => {
                 DurableOperationBoundary::CatalogGenerationPublished
@@ -59,6 +62,7 @@ impl DurableOperationKind {
             Self::BackupRetention => 7,
             Self::BackupVerification => 8,
             Self::BackupRestore => 9,
+            Self::TenantPurge => 10,
         }
     }
 
@@ -73,6 +77,7 @@ impl DurableOperationKind {
             7 => Ok(Self::BackupRetention),
             8 => Ok(Self::BackupVerification),
             9 => Ok(Self::BackupRestore),
+            10 => Ok(Self::TenantPurge),
             _ => Err(DurableOperationFailure::PersistenceUnavailable),
         }
     }
@@ -170,6 +175,16 @@ impl DurableOperationRequest {
                     return Err(DurableOperationFailure::InvalidInput);
                 }
                 hasher.update(target_identity.ok_or(DurableOperationFailure::InvalidInput)?);
+                hasher.update(accepted_generation.to_be_bytes());
+                hasher
+                    .update(operation_request_digest.ok_or(DurableOperationFailure::InvalidInput)?);
+            },
+            DurableOperationKind::TenantPurge => {
+                let tenant = applicable_tenant.ok_or(DurableOperationFailure::InvalidInput)?;
+                if target_identity != Some(tenant.to_bytes()) {
+                    return Err(DurableOperationFailure::InvalidInput);
+                }
+                hasher.update(tenant.to_bytes());
                 hasher.update(accepted_generation.to_be_bytes());
                 hasher
                     .update(operation_request_digest.ok_or(DurableOperationFailure::InvalidInput)?);
@@ -573,7 +588,8 @@ impl DurableOperationRequest {
             | DurableOperationKind::BackupSnapshot
             | DurableOperationKind::BackupRetention
             | DurableOperationKind::BackupVerification
-            | DurableOperationKind::BackupRestore => None,
+            | DurableOperationKind::BackupRestore
+            | DurableOperationKind::TenantPurge => None,
         }
     }
 
@@ -597,6 +613,20 @@ impl DurableOperationRequest {
 
     pub(super) fn is_valid_persisted_request(self) -> bool {
         match self.kind {
+            DurableOperationKind::TenantPurge => self
+                .applicable_tenant
+                .and_then(|tenant| {
+                    Self::tenant_purge(
+                        self.principal,
+                        tenant,
+                        self.idempotency,
+                        self.accepted_generation,
+                        self.accepted_at_unix_seconds,
+                        self.operation_request_digest?,
+                    )
+                    .ok()
+                })
+                .is_some_and(|canonical| canonical == self),
             DurableOperationKind::CatalogFormatMigration => self
                 .target_identity
                 .and_then(|target_identity| {
@@ -1662,6 +1692,12 @@ impl DurableOperation {
         if self.backup_parameters.is_some() || self.backup_evidence.is_some() {
             return false;
         }
+        let purge_boundary = self.kind() == DurableOperationKind::TenantPurge
+            && matches!(
+                self.phase,
+                DurableOperationPhase::Draining | DurableOperationPhase::CatalogPublication
+            )
+            && self.boundary == DurableOperationBoundary::CatalogGenerationPublished;
         let root_overlay_boundary = self.kind() == DurableOperationKind::KeyProviderMigration
             && self.phase == DurableOperationPhase::Draining
             && self.boundary == DurableOperationBoundary::BackupRegistryPublished
@@ -1703,7 +1739,8 @@ impl DurableOperation {
                         && self.retry == DurableOperationRetry::InspectByOperationId
                         && self.cancellation == cancellation
                         && (self.boundary == DurableOperationBoundary::NotCrossed
-                            || root_overlay_boundary)
+                            || root_overlay_boundary
+                            || purge_boundary)
                         && self.terminal_error.is_none()
                         && self.cancellation_idempotency.is_none()
                         && self.completed_at_unix_seconds.is_none()
@@ -1726,7 +1763,8 @@ impl DurableOperation {
                             && self.retry == DurableOperationRetry::Never
                             && self.cancellation == cancellation
                             && (self.boundary == DurableOperationBoundary::NotCrossed
-                                || root_overlay_boundary)
+                                || root_overlay_boundary
+                                || purge_boundary)
                     });
                 let failed_after_query_manifest = self.request.kind
                     == DurableOperationKind::QueryExport

@@ -90,6 +90,7 @@ impl FailureFixture {
             actor,
             request,
             parameters,
+            parameters.registration_identity(),
             registration,
         )?;
         assert_eq!(accepted.kind(), DurableOperationKind::BackupSnapshot);

@@ -74,15 +74,15 @@ fn governance_object_preserves_and_updates_the_independent_quota_generation() {
     .expect("encodable intent")
     .into_parts();
     let governance = CatalogGovernanceObject::decode(&object).expect("governance object");
-    assert_eq!(governance.quota_generation(), 1);
-    assert_eq!(governance.quota_weight(), 1);
-    assert_eq!(governance.quota_resources(), [10; 11]);
+    assert_eq!(governance.quota_generation(), Some(1));
+    assert_eq!(governance.quota_weight(), Some(1));
+    assert_eq!(governance.quota_resources(), Some([10; 11]));
 
     let updated = governance
         .with_quota(2, 2, [9; 11])
         .expect("quota successor");
     let decoded = CatalogGovernanceObject::decode(&updated).expect("quota successor decodes");
-    assert_eq!(decoded.quota_generation(), 2);
-    assert_eq!(decoded.quota_weight(), 2);
-    assert_eq!(decoded.quota_resources(), [9; 11]);
+    assert_eq!(decoded.quota_generation(), Some(2));
+    assert_eq!(decoded.quota_weight(), Some(2));
+    assert_eq!(decoded.quota_resources(), Some([9; 11]));
 }

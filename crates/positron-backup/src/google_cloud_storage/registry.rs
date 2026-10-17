@@ -1,7 +1,7 @@
 use super::{GoogleCloudStorageRepository, deletion::Proof};
 use crate::*;
 impl GoogleCloudStorageRepository {
-    async fn read_head(
+    pub(super) async fn read_head(
         &self,
         slot: HeadSlot,
     ) -> Result<Option<(RegistryHead, u64)>, RepositoryFailure> {

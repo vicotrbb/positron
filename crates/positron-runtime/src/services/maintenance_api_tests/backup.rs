@@ -545,3 +545,6 @@ mod envelope_migration;
 
 #[path = "backup_restore.rs"]
 mod restore;
+
+#[path = "backup_tenant_purge.rs"]
+mod tenant_purge;

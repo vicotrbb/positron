@@ -20,7 +20,11 @@ mod restore_origin;
 pub use restore_origin::BackupRestoreOrigin;
 mod rotation;
 mod storage;
+mod tenant_purge;
 mod types;
+pub use tenant_purge::{
+    TenantKeyInventory, TenantKeyInventoryStep, TenantKeyReclamationProof, TenantKeyReclamationStep,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;

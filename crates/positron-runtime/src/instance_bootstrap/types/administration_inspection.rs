@@ -547,7 +547,15 @@ impl InitializedInstance {
             ));
         }
         if let Some(anchor) = view.audit_retention_anchor() {
-            view.verify_retained_audit_suffix(view.governance_audit_records())
+            // Reclamation may not have removed the authenticated old prefix
+            // yet. The retained-chain verifier starts immediately after anchor.
+            let records = view.governance_audit_records();
+            let first_retained =
+                records.partition_point(|record| record.position() <= anchor.position());
+            let retained = records
+                .get(first_retained..)
+                .ok_or_else(|| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+            view.verify_retained_audit_suffix(retained)
                 .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
             if let Some(checkpoint) = trusted_checkpoint {
                 checkpoint
@@ -561,16 +569,10 @@ impl InitializedInstance {
                 let checkpoint_hash = if checkpoint.position() == anchor.position() {
                     Some(anchor.record_hash())
                 } else {
-                    checkpoint
-                        .position()
-                        .checked_sub(anchor.position())
-                        .and_then(|offset| offset.checked_sub(1))
-                        .and_then(|offset| usize::try_from(offset).ok())
-                        .and_then(|offset| {
-                            view.governance_audit_records()
-                                .get(offset)
-                                .map(positron_kernel::GovernanceAuditRecord::record_hash)
-                        })
+                    retained
+                        .iter()
+                        .find(|record| record.position() == checkpoint.position())
+                        .map(positron_kernel::GovernanceAuditRecord::record_hash)
                 };
                 if checkpoint_hash != Some(checkpoint.record_hash()) {
                     return Err(BootstrapFailure::new(

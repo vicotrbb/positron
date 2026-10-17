@@ -1755,3 +1755,60 @@ fn unreadable_prepublication_confirmation_resumes_prepared_custody() -> Result<(
     );
     Ok(())
 }
+
+#[test]
+fn audit_retention_exact_replay_keeps_history_verifiable_after_cold_reopen()
+-> Result<(), Box<dyn Error>> {
+    let roots = Roots::new()?;
+    let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    drop(InstanceBootstrap::reopen(&paths)?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let instance = InstanceBootstrap::reopen(&paths)?;
+    let actor = |instance: &crate::InitializedInstance| {
+        instance.attribute(
+            PresentedCredential::parse(claim.secret()).expect("claim syntax"),
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )
+    };
+    let key = AdministrativeIdempotencyKey::new([0x83; 16])?;
+    let limit = std::num::NonZeroU64::new(1).expect("nonzero");
+    let expected = ResourceGeneration::new(1)?;
+    let updated =
+        instance.update_system_audit_retention(actor(&instance)?, limit, expected, key)?;
+    drop(instance);
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    assert_eq!(
+        reopened.update_system_audit_retention(actor(&reopened)?, limit, expected, key)?,
+        updated
+    );
+    reopened.verify_governance_audit_history(actor(&reopened)?, None)?;
+    let checkpoint = reopened.publish_governance_audit_checkpoint(actor(&reopened)?)?;
+    reopened.verify_governance_audit_history(actor(&reopened)?, Some(&checkpoint))?;
+    let foreign_roots = Roots::new()?;
+    let foreign_paths = foreign_roots
+        .paths()
+        .map_err(|code| format!("paths: {code:?}"))?;
+    drop(InstanceBootstrap::initialize(
+        &foreign_paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let foreign_claim = InstanceBootstrap::claim(&foreign_paths)?;
+    let foreign = InstanceBootstrap::reopen(&foreign_paths)?;
+    let foreign_actor = foreign.attribute(
+        PresentedCredential::parse(foreign_claim.secret()).expect("claim syntax"),
+        RequestedIntent::SystemAdministration,
+        CompatibilityHints::none(),
+    )?;
+    let foreign_checkpoint = foreign.publish_governance_audit_checkpoint(foreign_actor)?;
+    assert!(
+        reopened
+            .verify_governance_audit_history(actor(&reopened)?, Some(&foreign_checkpoint))
+            .is_err()
+    );
+    Ok(())
+}

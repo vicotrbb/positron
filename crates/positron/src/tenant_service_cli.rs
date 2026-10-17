@@ -52,15 +52,19 @@ fn execute(arguments: impl Iterator<Item = String>) -> Result<(), &'static str> 
 
 fn print_descriptor(descriptor: &positron_api::tenant_service::TenantDescriptor) {
     println!(
-        "tenant={} slug={} display_name={} retention_seconds={} display_generation={} retention_generation={} lifecycle={:?}",
-        descriptor.tenant,
-        descriptor.slug,
-        descriptor.display_name,
+        "tenant={} slug={} lifecycle={:?}",
+        descriptor.tenant, descriptor.slug, descriptor.lifecycle
+    );
+    if let (Some(name), Some(retention), Some(display), Some(retention_generation)) = (
+        descriptor.display_name.as_deref(),
         descriptor.retention_seconds,
         descriptor.display_generation,
         descriptor.retention_generation,
-        descriptor.lifecycle
-    );
+    ) {
+        println!(
+            "display_name={name} retention_seconds={retention} display_generation={display} retention_generation={retention_generation}"
+        );
+    }
 }
 
 fn client_failure(failure: TenantServiceClientFailure) -> &'static str {

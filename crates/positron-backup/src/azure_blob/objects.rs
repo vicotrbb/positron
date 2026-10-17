@@ -34,9 +34,11 @@ impl AzureBlobRepository {
     pub async fn object_size_hint(&self, id: ObjectId) -> Result<u64, RepositoryFailure> {
         let _guard = self.enter()?;
         self.read_identity().await?;
-        self.metadata(&self.key(&id.name()), "")
-            .await
-            .map(|metadata| metadata.size)
+        let key = self.key(&id.name());
+        let metadata = self.metadata(&key, "").await?;
+        // This unauthenticated observation must remain metadata-only. Head
+        // and full-frame reads own signed-fence authentication.
+        Ok(metadata.size)
     }
     pub async fn head(&self, id: ObjectId) -> Result<ObjectMetadata, RepositoryFailure> {
         let _guard = self.enter()?;
@@ -110,6 +112,11 @@ impl AzureBlobRepository {
         }
         if protocol::md5(&reply.body) != protocol::header(&reply.headers, "content-md5")? {
             return Err(RepositoryFailure::ChecksumMismatch);
+        }
+        // Only a complete frame can authenticate an absence. Partial ranges
+        // retain their existing checksummed-prefix contract.
+        if range.offset == 0 && range.length == meta.size {
+            self.check_purge_fence(range.object, &reply.body)?;
         }
         Ok(ChecksummedBytes {
             checksum: Sha256::digest(&reply.body).into(),

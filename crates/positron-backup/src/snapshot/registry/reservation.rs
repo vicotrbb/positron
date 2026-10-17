@@ -33,6 +33,14 @@ impl BackupPublisher<'_> {
             overlays: Vec::new(),
             tombstones: Vec::new(),
         });
+        if keys.iter().any(|key| {
+            successor
+                .tombstones
+                .iter()
+                .any(|t| t.tenant() == key.tenant())
+        }) {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
         let mut referenced = manifest
             .objects
             .iter()
@@ -119,6 +127,18 @@ impl BackupPublisher<'_> {
         }
         self.require_identity().await?;
         self.require_reserved(manifest).await?;
+        let (_, generation, _) = self.current().await?;
+        if generation.is_some_and(|generation| {
+            keys.iter().any(|key| {
+                generation
+                    .tombstones
+                    .iter()
+                    .any(|t| t.tenant() == key.tenant())
+            })
+        }) {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+
         let Some(key) = keys.get(index) else {
             return Ok(next_key);
         };

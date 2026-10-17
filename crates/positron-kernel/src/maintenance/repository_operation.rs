@@ -121,10 +121,14 @@ impl RepositoryOperationBinding {
         if !matches!(
             task.class,
             MaintenanceTaskClass::RepositoryVerification
+                | MaintenanceTaskClass::TenantPurge
                 | MaintenanceTaskClass::BackupSnapshot
                 | MaintenanceTaskClass::RepositoryCleanup
-        ) || task.scope != MaintenanceScope::System
-            || !task.inputs.is_empty()
+        ) || if task.class == MaintenanceTaskClass::TenantPurge {
+            task.scope.tenant_id().is_none()
+        } else {
+            task.scope != MaintenanceScope::System
+        } || !task.inputs.is_empty()
             || !task.outputs.is_empty()
             || task.integrity_scrub_source.is_some()
         {
@@ -132,14 +136,16 @@ impl RepositoryOperationBinding {
         }
         let checkpoint = checkpoint.ok_or(MaintenanceFailure::PreconditionFailed)?;
         let bytes = checkpoint.opaque_progress();
-        let backup = matches!(
+        let checkpointed = matches!(
             task.class,
-            MaintenanceTaskClass::BackupSnapshot | MaintenanceTaskClass::RepositoryCleanup
+            MaintenanceTaskClass::BackupSnapshot
+                | MaintenanceTaskClass::RepositoryCleanup
+                | MaintenanceTaskClass::TenantPurge
         );
-        if (!backup && checkpoint.sequence() != 1)
+        if (!checkpointed && checkpoint.sequence() != 1)
             || checkpoint.completed_inputs() != 0
             || bytes.len() < 56
-            || (!backup && bytes.len() != 56)
+            || (!checkpointed && bytes.len() != 56)
             || !bytes.starts_with(MAGIC)
         {
             return Err(MaintenanceFailure::PreconditionFailed);
@@ -215,6 +221,46 @@ impl MaintenanceCoordinator {
     }
 
     /// Declares the provider's bounded peak on the same persisted task authority.
+    /// Tenant purge reuses the reference-free operation association and protected recovery dispatch.
+    pub fn submit_tenant_purge_and_persist(
+        &self,
+        catalog: &crate::Catalog<'_>,
+        binding: RepositoryOperationBinding,
+        preconditions: MaintenancePreconditions,
+        tenant: TenantId,
+        now: u64,
+    ) -> Result<MaintenanceTask, MaintenanceFailure> {
+        let task = MaintenanceTask::with_contract(
+            MaintenanceTaskId::new(binding.operation)?,
+            MaintenanceTaskClass::TenantPurge,
+            MaintenanceScope::tenant(tenant),
+            MaintenanceTrigger::Event,
+            preconditions,
+            Vec::new(),
+            Vec::new(),
+            ResourceAmounts::new([8_388_608, 1, 1, 0, 1, 0, 1, 1, 1, 4, 16_384]),
+        )?;
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| MaintenanceFailure::ConcurrentAccess)?;
+            if let Some(existing) = state.tasks.get(&task.identity) {
+                if existing.task != task
+                    || RepositoryOperationBinding::from_task(
+                        &existing.task,
+                        existing.checkpoint.as_ref(),
+                    )? != binding
+                {
+                    return Err(MaintenanceFailure::PreconditionFailed);
+                }
+                // An exact API replay must retain the progressed owner's
+                // checkpoint rather than compare it to a new sequence-one seed.
+                return Ok(existing.task.clone());
+            }
+        }
+        self.submit_bound_operation(catalog, task, binding.checkpoint()?, now)
+    }
     pub fn submit_repository_operation_with_resources_and_persist(
         &self,
         catalog: &crate::Catalog<'_>,

@@ -130,3 +130,15 @@ fn load_schema(
     }
     Ok(found)
 }
+
+#[test]
+fn schema_purge_identity_preflights_without_rebuilding_tenant_contents()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = TenantId::from_bytes([0xa7; 16])?;
+    let schema = SchemaCatalog::new(tenant, SchemaBudget::release_1()?)?;
+    let bytes = schema.encode_catalog_object()?;
+    assert_eq!(SchemaCatalog::catalog_tenant(&bytes)?, Some(tenant));
+    assert_eq!(SchemaCatalog::catalog_tenant(b"unrelated object")?, None);
+    assert!(SchemaCatalog::catalog_tenant(b"PSCHEMA1").is_err());
+    Ok(())
+}

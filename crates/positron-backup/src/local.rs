@@ -122,6 +122,105 @@ impl LocalRepository {
 }
 #[async_trait::async_trait]
 impl Repository for LocalRepository {
+    async fn verify_control_inventory(
+        &self,
+        allowed: &[ObjectId],
+        head: &[u8],
+        pending: Option<&ImmutableObject>,
+    ) -> Result<(), RepositoryFailure> {
+        let root = Arc::clone(&self.root);
+        let identity = self.identity.clone();
+        let allowed = allowed.to_vec();
+        let pending = pending.cloned();
+        let expected = crate::RegistryHeadChange::new(None, head.to_vec())?
+            .successor
+            .encode_frame();
+        tokio::task::spawn_blocking(move || {
+            let _lock = DirectoryLock::new(&root)?;
+            verify_identity(&root, &identity)?;
+            let mut inventory = crate::control_inventory::ControlInventory::new(&allowed)?;
+            let mut stages = crate::control_inventory::ControlInventory::new(&allowed)?;
+            let mut entries = fs::Dir::read_from(&root).map_err(storage)?;
+            // identity + head + one generation + their two owned stages,
+            // plus dot entries. Anything larger is not a fresh candidate.
+            for _ in 0..8 {
+                let Some(entry) = entries.next() else {
+                    return Ok(());
+                };
+                let entry = entry.map_err(storage)?;
+                let bytes = entry.file_name().to_bytes();
+                if matches!(bytes, b"." | b"..") {
+                    continue;
+                }
+                let name = std::str::from_utf8(bytes)
+                    .map_err(|_| RepositoryFailure::PreconditionFailed)?;
+                let canonical = name.strip_prefix("p-").unwrap_or(name);
+                if name.starts_with("p-") {
+                    stages.observe(canonical)?;
+                } else {
+                    inventory.observe(canonical)?;
+                }
+                if canonical == "identity" {
+                    if name != "identity" {
+                        return Err(RepositoryFailure::PreconditionFailed);
+                    }
+                    continue;
+                }
+                let mut file = File::from(
+                    fs::openat(
+                        &root,
+                        name,
+                        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(storage)?,
+                );
+                let metadata = file.metadata().map_err(io_failure)?;
+                if !metadata.is_file() || metadata.nlink() != 1 || metadata.mode() & 0o7777 != 0o600
+                {
+                    return Err(RepositoryFailure::PreconditionFailed);
+                }
+                if canonical == crate::HeadSlot::registry().name() {
+                    let mut bytes = Vec::new();
+                    file.take((crate::MAX_REGISTRY_HEAD_BYTES + 41) as u64)
+                        .read_to_end(&mut bytes)
+                        .map_err(io_failure)?;
+                    if if name.starts_with("p-") {
+                        !expected.starts_with(&bytes)
+                    } else {
+                        bytes != expected
+                    } {
+                        return Err(RepositoryFailure::PreconditionFailed);
+                    }
+                } else {
+                    let checksum = canonical
+                        .strip_prefix("o-")
+                        .ok_or(RepositoryFailure::PreconditionFailed)?;
+                    let object = ObjectId::from_checksum(
+                        crate::listing::native_cursor::checksum_name(checksum)?,
+                    );
+                    if name.starts_with("p-") {
+                        let expected = pending
+                            .as_ref()
+                            .filter(|value| value.id() == object)
+                            .ok_or(RepositoryFailure::PreconditionFailed)?;
+                        let mut bytes = Vec::new();
+                        file.take(expected.bytes().len() as u64 + 1)
+                            .read_to_end(&mut bytes)
+                            .map_err(io_failure)?;
+                        if !expected.bytes().starts_with(&bytes) {
+                            return Err(RepositoryFailure::PreconditionFailed);
+                        }
+                    } else {
+                        super::local::metadata(&mut file, object)?;
+                    }
+                }
+            }
+            Err(RepositoryFailure::PreconditionFailed)
+        })
+        .await
+        .map_err(|_| RepositoryFailure::Interrupted)?
+    }
     async fn storage_policy(&self) -> Result<crate::RepositoryPolicy, RepositoryFailure> {
         self.identify().await?;
         Ok(crate::RepositoryPolicy::local())
@@ -246,6 +345,14 @@ impl Repository for LocalRepository {
         .await
         .map_err(|_| RepositoryFailure::Interrupted)?
     }
+    async fn delete_tenant_key(
+        &self,
+        object: ObjectId,
+        fence: &crate::TenantKeyPurgeFence,
+    ) -> Result<DeleteOutcome, RepositoryFailure> {
+        crate::TenantKeyPurgeFence::verify(fence.bytes(), &self.identity, object)?;
+        self.delete(object).await
+    }
     async fn delete(&self, object: ObjectId) -> Result<DeleteOutcome, RepositoryFailure> {
         let root = Arc::clone(&self.root);
         let expected = self.identity.clone();
@@ -253,15 +360,34 @@ impl Repository for LocalRepository {
         tokio::task::spawn_blocking(move || {
             let _lock = DirectoryLock::new(&root)?;
             verify_identity(&root, &expected)?;
-            match open_object(&root, object) {
+            let published = match open_object(&root, object) {
                 Ok(mut file) => {
                     metadata(&mut file, object)?;
+                    true
                 },
-                Err(RepositoryFailure::NotFound) => return Ok(DeleteOutcome::AlreadyAbsent),
+                Err(RepositoryFailure::NotFound) => false,
                 Err(failure) => return Err(failure),
+            };
+            // A failed immutable Put may retain the exact object's durable
+            // unpublished bytes. Absence of the published name is insufficient
+            // for key destruction; the same directory lock also fences Put.
+            let pending = format!("p-{}", object.name());
+            let staged = match fs::statat(&root, pending.as_str(), fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => true,
+                Err(rustix::io::Errno::NOENT) => false,
+                Err(error) => return Err(storage(error)),
+            };
+            if !published && !staged {
+                return Ok(DeleteOutcome::AlreadyAbsent);
             }
             faults.at(fault::LocalFaultPoint::BeforeDeletion)?;
-            fs::unlinkat(&root, object.name().as_str(), fs::AtFlags::empty()).map_err(storage)?;
+            if published {
+                fs::unlinkat(&root, object.name().as_str(), fs::AtFlags::empty())
+                    .map_err(storage)?;
+            }
+            if staged {
+                fs::unlinkat(&root, pending.as_str(), fs::AtFlags::empty()).map_err(storage)?;
+            }
             root.sync_all()
                 .map_err(|_| RepositoryFailure::OutcomeUnknown)?;
             faults.at(fault::LocalFaultPoint::AfterDeletion)?;

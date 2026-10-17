@@ -7,12 +7,27 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     thread,
     time::Duration,
 };
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+#[derive(Clone, Default)]
+pub struct DelayedPut {
+    pub target: Arc<Mutex<Option<String>>>,
+    pub waiting: Arc<AtomicBool>,
+    pub release: Arc<AtomicBool>,
+    pub status: Arc<AtomicU16>,
+}
+struct PendingPut {
+    stream: TcpStream,
+    method: String,
+    path: String,
+    query: BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
+    bytes: Vec<u8>,
+}
 #[derive(Clone)]
 struct Object {
     etag: u64,
@@ -20,6 +35,7 @@ struct Object {
 }
 #[derive(Default)]
 struct State {
+    delayed: Option<PendingPut>,
     next: u64,
     objects: BTreeMap<String, Object>,
     history: BTreeMap<String, Vec<Object>>,
@@ -34,6 +50,8 @@ pub enum Action {
 }
 type Rules = Arc<Mutex<VecDeque<(String, String, Action)>>>;
 pub struct Server {
+    #[allow(dead_code)] // Optional concurrency hook used by provider conformance tests.
+    pub delayed: DelayedPut,
     pub address: SocketAddr,
     pub rules: Rules,
     stop: Arc<AtomicBool>,
@@ -48,11 +66,49 @@ impl Server {
         let stopping = stop.clone();
         let rules: Rules = Default::default();
         let injected = rules.clone();
+        let delayed = DelayedPut::default();
+        let delay_control = delayed.clone();
         let worker = thread::spawn(move || {
             let mut state = State::default();
             while !stopping.load(Ordering::Acquire) {
+                if delay_control.release.load(Ordering::Acquire)
+                    && let Some(mut pending) = state.delayed.take()
+                {
+                    let result = dispatch(
+                        &mut state,
+                        &pending.method,
+                        &pending.path,
+                        &pending.query,
+                        &pending.headers,
+                        &pending.bytes,
+                    )?;
+                    delay_control.status.store(result.0, Ordering::Release);
+                    let (status, extra, reply) = (result.0, result.1, result.2);
+                    // The accepted request can outlive its client deadline.
+                    // Its conditional decision above is independent of whether
+                    // the old client can still receive the response.
+                    let delivery = (|| -> std::io::Result<()> {
+                        write!(
+                            pending.stream,
+                            "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
+                            reply.len()
+                        )?;
+                        pending.stream.write_all(&reply)?;
+                        Ok(())
+                    })();
+                    if let Err(error) = delivery
+                        && !matches!(
+                            error.kind(),
+                            std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        )
+                    {
+                        return Err(error.into());
+                    }
+                }
                 match listener.accept() {
-                    Ok((stream, _)) => serve(stream, &mut state, &injected)?,
+                    Ok((stream, _)) => serve(stream, &mut state, &injected, &delay_control)?,
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(1))
                     },
@@ -62,6 +118,7 @@ impl Server {
             Ok(())
         });
         Ok(Self {
+            delayed,
             address,
             rules,
             stop,
@@ -98,7 +155,12 @@ fn decode(input: &str) -> Result<String> {
 fn md5(bytes: &[u8]) -> String {
     STANDARD.encode(md5::Md5::digest(bytes))
 }
-fn serve(mut stream: TcpStream, state: &mut State, rules: &Rules) -> Result<()> {
+fn serve(
+    mut stream: TcpStream,
+    state: &mut State,
+    rules: &Rules,
+    delayed: &DelayedPut,
+) -> Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -154,6 +216,31 @@ fn serve(mut stream: TcpStream, state: &mut State, rules: &Rules) -> Result<()> 
         .map(|(k, v)| Ok((k.to_owned(), decode(v)?)))
         .collect::<Result<_>>()?;
     let body = raw.get(end..end + length).ok_or("body")?;
+    let should_delay = {
+        let mut target = delayed.target.lock().map_err(|_| "fixture delayed lock")?;
+        if target.as_deref() == Some(url) {
+            target.take();
+            true
+        } else {
+            false
+        }
+    };
+    if should_delay {
+        if state.delayed.is_some() {
+            return Err("one delayed request bound".into());
+        }
+        state.delayed = Some(PendingPut {
+            stream,
+            method: method.into(),
+            path: path.into(),
+            query,
+            headers,
+            bytes: body.to_vec(),
+        });
+        delayed.waiting.store(true, Ordering::Release);
+        return Ok(());
+    }
+
     if headers.get("x-ms-version").map(String::as_str) != Some("2023-11-03") {
         return Err("service pin".into());
     }
@@ -374,6 +461,7 @@ fn dispatch(
         return response(201, format!("ETag: \"{}\"\r\n", state.next), Vec::new());
     }
     if method == "PUT" {
+        state.blocks.remove(key);
         if h.get("content-md5").map(String::as_str) != Some(md5(body).as_str()) {
             return response(400, "x-ms-error-code: Md5Mismatch\r\n".into(), Vec::new());
         }

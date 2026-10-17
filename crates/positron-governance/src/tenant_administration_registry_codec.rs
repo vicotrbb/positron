@@ -7,6 +7,7 @@ use super::{TenantAdministrationFailure, generation_at, map_catalog};
 use crate::ResourceGeneration;
 
 const TENANT_REGISTRY_V1_MAGIC: [u8; 8] = *b"POSTRG01";
+const TENANT_REGISTRY_V4_MAGIC: [u8; 8] = *b"POSTRG04";
 const TENANT_REGISTRY_V3_MAGIC: [u8; 8] = *b"POSTRG03";
 pub(super) const TENANT_REGISTRY_V2_MAGIC: [u8; 8] = *b"POSTRG02";
 
@@ -20,6 +21,7 @@ pub(crate) fn is_registry(bytes: &[u8]) -> bool {
     bytes.starts_with(&TENANT_REGISTRY_V1_MAGIC)
         || bytes.starts_with(&TENANT_REGISTRY_V2_MAGIC)
         || bytes.starts_with(&TENANT_REGISTRY_V3_MAGIC)
+        || bytes.starts_with(&TENANT_REGISTRY_V4_MAGIC)
 }
 
 pub(super) fn registry(
@@ -55,6 +57,7 @@ pub(crate) fn registry_count(
     }
     if !bytes.starts_with(&TENANT_REGISTRY_V2_MAGIC)
         && !bytes.starts_with(&TENANT_REGISTRY_V3_MAGIC)
+        && !bytes.starts_with(&TENANT_REGISTRY_V4_MAGIC)
     {
         return Err(TenantAdministrationFailure::PersistenceUnavailable);
     }
@@ -69,7 +72,9 @@ pub(crate) fn registry_count(
         .checked_mul(16)
         .and_then(|n| n.checked_add(34))
         .ok_or(TenantAdministrationFailure::PersistenceUnavailable)?;
-    let valid_length = if bytes.starts_with(&TENANT_REGISTRY_V3_MAGIC) {
+    let valid_length = if bytes.starts_with(&TENANT_REGISTRY_V3_MAGIC)
+        || bytes.starts_with(&TENANT_REGISTRY_V4_MAGIC)
+    {
         super::tenant_restore::reservation_tail(bytes, expected).is_ok()
     } else {
         bytes.len() == expected
@@ -119,7 +124,9 @@ pub(super) fn decode_registry(bytes: &[u8]) -> Result<TenantRegistry, TenantAdmi
         }
         tenants.push(tenant);
     }
-    let reserved = if bytes.starts_with(&TENANT_REGISTRY_V3_MAGIC) {
+    let reserved = if bytes.starts_with(&TENANT_REGISTRY_V3_MAGIC)
+        || bytes.starts_with(&TENANT_REGISTRY_V4_MAGIC)
+    {
         super::tenant_restore::decode_reservations(bytes, 34 + count * 16)?
     } else {
         Vec::new()
@@ -149,8 +156,11 @@ pub(super) fn registry_object_with_reservations(
         return Err(TenantAdministrationFailure::InvalidInput);
     }
     let mut encoded = Vec::with_capacity(34 + tenants.len() * 16);
+    let authorization = reserved.iter().any(|value| value.operation_id().is_some());
     encoded.extend_from_slice(if reserved.is_empty() {
         &TENANT_REGISTRY_V2_MAGIC
+    } else if authorization {
+        &TENANT_REGISTRY_V4_MAGIC
     } else {
         &TENANT_REGISTRY_V3_MAGIC
     });
@@ -161,12 +171,12 @@ pub(super) fn registry_object_with_reservations(
         encoded.extend_from_slice(&tenant.to_bytes());
     }
     if !reserved.is_empty() {
-        super::tenant_restore::encode_reservations(reserved, &mut encoded)?;
+        super::tenant_restore::encode_reservations(reserved, &mut encoded, authorization)?;
     }
     CatalogObject::new(encoded).map_err(map_catalog)
 }
 
-/// Valid v3 reservations reach bounded decoding before hostile mutations.
+/// Valid v4 authorized reservations reach bounded decoding before hostile mutations.
 #[cfg(fuzzing)]
 pub(crate) fn fuzz_registry(data: &[u8]) {
     let _ = decode_registry(data);
@@ -176,15 +186,17 @@ pub(crate) fn fuzz_registry(data: &[u8]) {
         positron_domain::identity::TenantSlug::parse_canonical("purged").expect("slug"),
         [0x42; 32],
     )
-    .expect("exclusion");
-    let mut bytes = TENANT_REGISTRY_V3_MAGIC.to_vec();
+    .expect("exclusion")
+    .with_authorization([0x44; 16], 17)
+    .expect("authorization");
+    let mut bytes = TENANT_REGISTRY_V4_MAGIC.to_vec();
     bytes.extend_from_slice(&[0x43; 16]);
     bytes.extend_from_slice(&1u64.to_be_bytes());
     bytes.extend_from_slice(&1u16.to_be_bytes());
     bytes.extend_from_slice(&tenant.to_bytes());
-    super::tenant_restore::encode_reservations(&[exclusion], &mut bytes)
-        .expect("v3 reservation seed");
-    let decoded = decode_registry(&bytes).expect("valid v3 registry");
+    super::tenant_restore::encode_reservations(&[exclusion], &mut bytes, true)
+        .expect("v4 reservation seed");
+    let decoded = decode_registry(&bytes).expect("valid v4 registry");
     assert_eq!(decoded.reserved.len(), 1);
     for mutation in data.chunks(3).take(64) {
         if let [high, low, value] = mutation {

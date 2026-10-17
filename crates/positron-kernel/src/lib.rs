@@ -110,7 +110,8 @@ pub use catalog::{
     CatalogSnapshot, CatalogWrappingKey, FormatEpoch, GovernanceAuditCheckpoint,
     GovernanceAuditRecord, InstanceId, PreparedTransactionInspection,
     PreparedTransactionResolution, SystemAuditRetentionPolicy, SystemAuditRetentionPublication,
-    TransactionId,
+    TenantKeyInventory, TenantKeyInventoryStep, TenantKeyReclamationProof,
+    TenantKeyReclamationStep, TransactionId,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use catalog::{

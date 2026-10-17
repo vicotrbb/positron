@@ -6,6 +6,11 @@ mod codec;
 mod expiry;
 use expiry::DeletionClaim;
 pub use expiry::{BackupCleanupPlan, BackupCleanupProgress, BackupCleanupReason};
+mod barrier;
+mod purge;
+mod purge_fence;
+pub use purge::BackupTenantPurge;
+pub use purge_fence::TenantKeyPurgeFence;
 mod tombstone;
 pub use tombstone::BackupPurgeTombstone;
 mod overlay;
@@ -381,10 +386,10 @@ impl<'a> BackupPublisher<'a> {
         Ok(())
     }
     pub fn key_context(keys: &[BackupKeyEnvelope]) -> Result<[u8; 32], RepositoryFailure> {
-        key_references(keys)?
-            .first()
-            .map(|key| key.context)
-            .ok_or(RepositoryFailure::InvalidInput)
+        // The independently authenticated source Catalog may contain no
+        // recoverable tenant keys after purge. Its signed empty identity digest
+        // remains distinct from every nonempty manifest context.
+        Ok(context_digest(&key_references(keys)?))
     }
     /// Publishes only after every encrypted object and independent key binding
     /// has been verified. The immutable generation is durable before head CAS.
@@ -437,7 +442,7 @@ impl<'a> BackupPublisher<'a> {
             .filter(|key| key.context == manifest.key_context)
             .copied()
             .collect::<Vec<_>>();
-        if matching.is_empty() || context_digest(&matching) != manifest.key_context {
+        if context_digest(&matching) != manifest.key_context {
             return Err(RepositoryFailure::CorruptState);
         }
         // Key references are verified independently of the immutable ciphertext.
@@ -603,7 +608,7 @@ impl<'a> BackupPublisher<'a> {
     }
 }
 fn key_references(keys: &[BackupKeyEnvelope]) -> Result<Vec<KeyReference>, RepositoryFailure> {
-    if keys.is_empty() || keys.len() > MAX_KEY_ENVELOPES {
+    if keys.len() > MAX_KEY_ENVELOPES {
         return Err(RepositoryFailure::InvalidInput);
     }
     let mut references = Vec::new();

@@ -44,6 +44,7 @@ pub(super) fn decode(encoded: &[u8]) -> Result<CatalogGovernanceObject, CatalogF
         CatalogGovernanceVersion::V1
         | CatalogGovernanceVersion::V2
         | CatalogGovernanceVersion::V3 => (None, false),
+        CatalogGovernanceVersion::V9 => return Err(corrupt()),
     };
     let display_name = cursor.take_text_u8(128)?;
     if display_name.is_empty() {
@@ -468,6 +469,7 @@ pub(super) fn is_governance(bytes: &[u8]) -> bool {
         || bytes.starts_with(&MAGIC_V6)
         || bytes.starts_with(&MAGIC_V7)
         || bytes.starts_with(&MAGIC_V8)
+        || bytes.starts_with(b"POSGOV09")
 }
 
 pub(super) const fn lifecycle_code(lifecycle: TenantLifecycleState) -> u8 {
@@ -480,7 +482,7 @@ pub(super) const fn lifecycle_code(lifecycle: TenantLifecycleState) -> u8 {
     }
 }
 
-fn require_nonzero<const N: usize>(bytes: [u8; N]) -> Result<(), CatalogFailure> {
+pub(super) fn require_nonzero<const N: usize>(bytes: [u8; N]) -> Result<(), CatalogFailure> {
     if bytes.iter().all(|byte| *byte == 0) {
         Err(corrupt())
     } else {
@@ -492,38 +494,38 @@ pub(super) const fn corrupt() -> CatalogFailure {
     CatalogFailure::new(CatalogFailureCode::IntegrityCorruption)
 }
 
-struct Cursor<'encoded> {
-    remaining: &'encoded [u8],
+pub(super) struct Cursor<'encoded> {
+    pub(super) remaining: &'encoded [u8],
 }
 
 impl<'encoded> Cursor<'encoded> {
-    const fn new(encoded: &'encoded [u8]) -> Self {
+    pub(super) const fn new(encoded: &'encoded [u8]) -> Self {
         Self { remaining: encoded }
     }
 
-    fn take_array<const N: usize>(&mut self) -> Result<[u8; N], CatalogFailure> {
+    pub(super) fn take_array<const N: usize>(&mut self) -> Result<[u8; N], CatalogFailure> {
         let (value, remaining) = self.remaining.split_at_checked(N).ok_or_else(corrupt)?;
         self.remaining = remaining;
         value.try_into().map_err(|_| corrupt())
     }
 
-    fn take_u32(&mut self) -> Result<u32, CatalogFailure> {
+    pub(super) fn take_u32(&mut self) -> Result<u32, CatalogFailure> {
         self.take_array().map(u32::from_be_bytes)
     }
 
-    fn take_u8(&mut self) -> Result<u8, CatalogFailure> {
+    pub(super) fn take_u8(&mut self) -> Result<u8, CatalogFailure> {
         self.take_array::<1>().map(|bytes| bytes[0])
     }
 
-    fn take_u16(&mut self) -> Result<u16, CatalogFailure> {
+    pub(super) fn take_u16(&mut self) -> Result<u16, CatalogFailure> {
         self.take_array().map(u16::from_be_bytes)
     }
 
-    fn take_u64(&mut self) -> Result<u64, CatalogFailure> {
+    pub(super) fn take_u64(&mut self) -> Result<u64, CatalogFailure> {
         self.take_array().map(u64::from_be_bytes)
     }
 
-    fn take_text_u8(&mut self, maximum: usize) -> Result<&'encoded str, CatalogFailure> {
+    pub(super) fn take_text_u8(&mut self, maximum: usize) -> Result<&'encoded str, CatalogFailure> {
         let length = usize::from(self.take_array::<1>()?[0]);
         if length > maximum {
             return Err(corrupt());
@@ -536,7 +538,7 @@ impl<'encoded> Cursor<'encoded> {
         std::str::from_utf8(value).map_err(|_| corrupt())
     }
 
-    fn take_credential(&mut self) -> Result<CredentialRecord, CatalogFailure> {
+    pub(super) fn take_credential(&mut self) -> Result<CredentialRecord, CatalogFailure> {
         let principal = PrincipalId::from_bytes(self.take_array::<16>()?).map_err(|_| corrupt())?;
         let salt = self.take_array::<32>()?;
         let hash = self.take_array::<32>()?;
@@ -549,7 +551,7 @@ impl<'encoded> Cursor<'encoded> {
         })
     }
 
-    fn take_u16_bytes(&mut self) -> Result<&'encoded [u8], CatalogFailure> {
+    pub(super) fn take_u16_bytes(&mut self) -> Result<&'encoded [u8], CatalogFailure> {
         let length = usize::from(u16::from_be_bytes(self.take_array()?));
         if length == 0 {
             return Err(corrupt());
@@ -562,7 +564,7 @@ impl<'encoded> Cursor<'encoded> {
         Ok(value)
     }
 
-    const fn is_empty(&self) -> bool {
+    pub(super) const fn is_empty(&self) -> bool {
         self.remaining.is_empty()
     }
 }

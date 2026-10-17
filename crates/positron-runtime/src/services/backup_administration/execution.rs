@@ -463,6 +463,8 @@ pub(in crate::services) fn complete(
                 if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
                     return Err(ServiceFailure::Cancelled);
                 }
+                #[cfg(test)]
+                test_stops::hit(test_stops::StopPoint::BeforeKeyUpload, cancellation)?;
                 work.next_key = work
                     .owner
                     .runtime
