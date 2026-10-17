@@ -6,11 +6,10 @@ pub(super) fn drain_source_case(
     http: bool,
     suspended: bool,
     crash_before_drain: bool,
-    installed: bool,
     queued_lookup: bool,
 ) -> Result<DrainedFixture, Box<dyn std::error::Error>> {
     let fixture = Fixture::new()?;
-    let configuration = Arc::new(super::upgrade_offline::configuration(&fixture)?);
+    let _base_configuration = super::upgrade_offline::configuration(&fixture)?;
     let (instance, ingest, query, administrator) = fixture.initialized_with_admin()?;
     let export = fixture.recovery_export_directory()?;
     let identity = age::x25519::Identity::generate();
@@ -76,20 +75,17 @@ pub(super) fn drain_source_case(
         minor: 0,
         patch: 1,
     };
-    let target = fixture_release(epoch, version, digest, bytes.len() as u64)?;
+    // Retire A from release signing while retaining source-only authorization.
+    let target = successor_release(fixture_release(epoch, version, digest, bytes.len() as u64)?)?;
     drop(bytes);
-    let configuration = if http || crash_before_drain || installed {
-        Arc::new(installed_configuration(
-            &fixture,
-            &export,
-            &source,
-            &target,
-            &executable,
-            Some(&query),
-        )?)
-    } else {
-        configuration
-    };
+    let configuration = Arc::new(installed_configuration(
+        &fixture,
+        &export,
+        &source,
+        &target,
+        &executable,
+        Some(&query),
+    )?);
     let loopback = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
     let native = Box::new(NativeHost::new(NativeBindings::new(
         fixture.control_socket_path(),
@@ -125,24 +121,36 @@ pub(super) fn drain_source_case(
     );
     drop(gate);
     drop(services);
+    let qualified = crate::upgrade::qualified_fixture_target(&target)?;
+    let paths =
+        crate::upgrade::fixture_metadata::artifact_paths(target.manifest(), &executable, &export)?;
     let artifacts = target
         .manifest()
         .artifacts
         .iter()
-        .map(|artifact| UpgradeArtifactInput {
+        .zip(paths)
+        .map(|(artifact, path)| UpgradeArtifactInput {
             role: artifact.role,
             platform: artifact.platform.clone(),
-            path: executable.clone(),
+            path,
         })
         .collect();
     let admission = UpgradeRequest::new(
-        (source.clone(), target.clone()),
+        (source.clone(), qualified),
         artifacts,
         [44; 16],
         3600,
         generation,
         AdministrativeIdempotencyKey::new([0xe1; 16])?,
     )?;
+    if !http {
+        super::refuse_revoked_retained_target(
+            &process,
+            &configuration,
+            &administrator,
+            &admission,
+        )?;
+    }
     let accepted = if http {
         let endpoint = process
             .bound_endpoints()

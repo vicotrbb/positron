@@ -50,6 +50,8 @@ pub enum ArtifactRole {
     CompatibilityManifest,
     Sbom,
     Provenance,
+    /// Full distribution inventory authenticated by this canonical manifest.
+    ReleaseInventory,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +106,15 @@ impl ProjectTrustRoot {
         Self(key)
     }
 }
+/// A signature verification key, with no claim that it is a Project Trust Root.
+/// Release Trust owns delegated authorization, expiry, and revocation before use.
+#[derive(Clone, Copy, Debug)]
+pub struct ReleaseSigningPublicKey([u8; 32]);
+impl ReleaseSigningPublicKey {
+    pub const fn new(key: [u8; 32]) -> Self {
+        Self(key)
+    }
+}
 #[derive(Clone, Debug)]
 pub struct SignedReleaseManifest {
     manifest: ReleaseManifest,
@@ -128,6 +139,12 @@ impl std::fmt::Display for ReleaseManifestError {
 }
 impl std::error::Error for ReleaseManifestError {}
 impl ReleaseManifest {
+    /// Exact domain-separated message for detached Ed25519 signing.
+    pub fn signing_message(&self) -> Result<Vec<u8>, ReleaseManifestError> {
+        let mut message = DOMAIN.to_vec();
+        message.extend(self.canonical_bytes()?);
+        Ok(message)
+    }
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ReleaseManifestError> {
         self.validate()?;
         let bytes = serde_json::to_vec(self).map_err(|_| ReleaseManifestError::Invalid)?;
@@ -288,10 +305,16 @@ impl SignedReleaseManifest {
         &self,
         root: &ProjectTrustRoot,
     ) -> Result<VerifiedReleaseManifest, ReleaseManifestError> {
+        self.verify_signature(&ReleaseSigningPublicKey::new(root.0))
+    }
+    /// Verify the canonical signature only. The caller must first authorize this signing identity.
+    pub fn verify_signature(
+        &self,
+        signer: &ReleaseSigningPublicKey,
+    ) -> Result<VerifiedReleaseManifest, ReleaseManifestError> {
         let payload = self.manifest.canonical_bytes()?;
-        let mut message = DOMAIN.to_vec();
-        message.extend(&payload);
-        UnparsedPublicKey::new(&ED25519, root.0)
+        let message = self.manifest.signing_message()?;
+        UnparsedPublicKey::new(&ED25519, signer.0)
             .verify(&message, &self.signature)
             .map_err(|_| ReleaseManifestError::AuthenticationFailed)?;
         Ok(VerifiedReleaseManifest {

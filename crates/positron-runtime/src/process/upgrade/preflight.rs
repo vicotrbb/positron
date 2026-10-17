@@ -15,9 +15,26 @@ pub(crate) fn accept_preflight(
     let _gate = services
         .catalog_operation()
         .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-    if configuration.installed_release().is_some() {
-        let verification = crate::upgrade::installed_upgrade_startup(configuration)?
-            .ok_or(UpgradeFailure::UnsafeState)?;
+    if configuration.installed_release().is_none() {
+        return Err(UpgradeFailure::AuthenticationFailed);
+    }
+    let refreshed = crate::upgrade::installed_upgrade_request(
+        configuration,
+        request.target.digest(),
+        request.repository,
+        request.retention_seconds,
+        request.idempotency,
+        request.expected_generation,
+        &instance.retention_time,
+    )?;
+    if refreshed.source.digest() != request.source.digest() {
+        return Err(UpgradeFailure::AuthenticationFailed);
+    }
+    let request = refreshed;
+    {
+        let verification =
+            crate::upgrade::installed_upgrade_startup(configuration, &instance.retention_time)?
+                .ok_or(UpgradeFailure::UnsafeState)?;
         verification
             .query_context(instance)
             .map_err(|failure| match failure {

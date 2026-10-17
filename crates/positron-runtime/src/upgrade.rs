@@ -1,10 +1,15 @@
 //! Declarative upgrades compose the existing Drain, Catalog and Backup owners.
 mod artifact;
+#[cfg(test)]
+#[path = "../../positron-release/tests/support/upgrade_metadata.rs"]
+pub(crate) mod fixture_metadata;
 pub(crate) mod startup;
 pub use startup::UpgradeStartupVerification;
 mod offline;
 pub use offline::OfflineUpgradeSession;
 mod request;
+#[cfg(test)]
+pub(crate) use request::tests::{installed_trust, qualified_target as qualified_fixture_target};
 pub use request::{UpgradeArtifactInput, UpgradeRequest};
 mod release_plan;
 pub use artifact::UpgradeArtifactIdentity;

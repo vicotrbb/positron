@@ -1,0 +1,74 @@
+//! Error types for sigstore-tsa
+
+use thiserror::Error;
+
+/// Errors that can occur in TSA operations
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum Error {
+    /// HTTP request error
+    #[error("HTTP error: {0}")]
+    Http(String),
+
+    /// ASN.1 encoding/decoding error
+    #[error("ASN.1 error: {0}")]
+    Asn1(String),
+
+    /// Timestamp verification error
+    #[error("Timestamp verification error: {0}")]
+    Verification(String),
+
+    /// Invalid timestamp response
+    #[error("Invalid timestamp response: {0}")]
+    InvalidResponse(String),
+
+    /// Failed to verify timestamp signature
+    #[error("Failed to verify timestamp signature: {0}")]
+    SignatureVerificationError(String),
+
+    /// Timestamp message hash does not match signature
+    #[error("Timestamp message hash mismatch: expected {expected}, got {actual}")]
+    HashMismatch {
+        /// The hex-encoded digest the token commits to
+        expected: String,
+        /// The hex-encoded digest computed locally
+        actual: String,
+    },
+
+    /// Timestamp response indicates failure status
+    #[error("Timestamp response indicates failure status")]
+    ResponseFailure,
+
+    /// No timestamp token in response
+    #[error("No timestamp token in response")]
+    NoToken,
+
+    /// No TSTInfo in timestamp token
+    #[error("No TSTInfo in timestamp token")]
+    NoTstInfo,
+
+    /// Leaf certificate does not have TimeStamping EKU
+    #[error("Leaf certificate does not have TimeStamping Extended Key Usage")]
+    InvalidEKU,
+
+    /// TSA certificate validation failed
+    #[error("TSA certificate validation failed: {0}")]
+    CertificateValidationError(String),
+
+    /// The timestamp response or token could not be parsed
+    #[error("Failed to parse timestamp response: {0}")]
+    Parse(String),
+
+    /// The token is authentic, but its signed time falls outside the
+    /// validity window of the timestamp authority that signed it
+    #[error(
+        "timestamp {time} is outside the validity period of the timestamp authority that signed it"
+    )]
+    TimestampOutsideValidity {
+        /// The authenticated signed time of the token
+        time: jiff::Timestamp,
+    },
+}
+
+/// Result type for TSA operations
+pub type Result<T> = std::result::Result<T, Error>;

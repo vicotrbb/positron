@@ -15,7 +15,7 @@ pub struct UpgradeArtifactInput {
 #[derive(Clone, Debug)]
 pub struct UpgradeRequest {
     pub(crate) source: VerifiedReleaseManifest,
-    pub(crate) target: VerifiedReleaseManifest,
+    pub(crate) target: positron_release::VerifiedReleaseTarget,
     pub(crate) artifacts: Vec<UpgradeArtifactInput>,
     pub(crate) repository: [u8; 16],
     pub(crate) retention_seconds: u64,
@@ -44,9 +44,17 @@ impl UpgradeRequest {
         deadline: Option<std::time::Instant>,
     ) -> Result<UpgradeReleasePlan, UpgradeFailure> {
         super::check_admission_deadline(deadline)?;
+        self.target
+            .revalidate_at(
+                instance
+                    .retention_time
+                    .security_time_seconds()
+                    .map_err(|_| UpgradeFailure::CapacityUnavailable)?,
+            )
+            .map_err(|_| UpgradeFailure::AuthenticationFailed)?;
         let plan = UpgradeReleasePlan::new(
             self.source.clone(),
-            self.target.clone(),
+            self.target.verified_manifest().clone(),
             config_schema,
             current_epoch,
         )?;
@@ -103,7 +111,10 @@ impl UpgradeRequest {
     }
 
     pub fn new(
-        releases: (VerifiedReleaseManifest, VerifiedReleaseManifest),
+        releases: (
+            VerifiedReleaseManifest,
+            positron_release::VerifiedReleaseTarget,
+        ),
         artifacts: Vec<UpgradeArtifactInput>,
         repository: [u8; 16],
         retention_seconds: u64,
@@ -138,6 +149,49 @@ pub(crate) mod tests {
     use positron_kernel::release_manifest::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use sha2::{Digest, Sha256};
+    pub(crate) fn installed_trust(
+        key: &Ed25519KeyPair,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        use positron_release::{
+            InstalledProjectTrustRoot, InstalledReleaseTrust, KeyPurpose, SigningIdentity,
+            TrustSnapshot,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let public_key = key.public_key().as_ref().try_into()?;
+        let snapshot = TrustSnapshot {
+            format: 1,
+            sequence: 1,
+            current_version: ProductVersion {
+                major: 0,
+                minor: 0,
+                patch: 1,
+            },
+            issued_unix: now - 60,
+            expires_unix: now + 3600,
+            identities: vec![SigningIdentity {
+                public_key,
+                purpose: KeyPurpose::Release,
+                not_before_unix: now - 60,
+                expires_unix: now + 3600,
+            }],
+            native_publishers: vec![],
+            revoked_keys: vec![],
+            revoked_manifests: vec![],
+            revoked_artifacts: vec![],
+        };
+        Ok(InstalledReleaseTrust {
+            format: 1,
+            root: InstalledProjectTrustRoot {
+                public_key,
+                minimum_sequence: 1,
+            },
+            release_signer: public_key,
+            signed_snapshot: snapshot.sign(key)?,
+        }
+        .canonical_bytes()?)
+    }
     pub(crate) fn signed(
         version: ProductVersion,
         artifact: [u8; 32],
@@ -202,6 +256,26 @@ pub(crate) mod tests {
             ))?,
         )
     }
+    pub(crate) fn qualified_target(
+        base: &VerifiedReleaseManifest,
+    ) -> Result<positron_release::VerifiedReleaseTarget, Box<dyn std::error::Error>> {
+        let key = Ed25519KeyPair::from_seed_unchecked(&[0x91; 32]).map_err(|_| "key")?;
+        let (manifest, inventory) =
+            crate::upgrade::fixture_metadata::complete_metadata(base.manifest())?;
+        let signature = key.sign(&manifest.signing_message()?).as_ref().try_into()?;
+        let signed = SignedReleaseManifest::new(manifest, signature)?.to_bytes()?;
+        let installed =
+            positron_release::InstalledReleaseTrust::from_bytes(&installed_trust(&key)?)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        Ok(positron_release::verify_target_metadata(
+            &signed,
+            &inventory,
+            installed.release_signer,
+            &installed.verify(now)?,
+        )?)
+    }
     #[test]
     fn preflight_measures_the_complete_target_inventory_before_any_catalog_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -231,18 +305,26 @@ pub(crate) mod tests {
             digest,
             15,
         )?;
+        let qualified = qualified_target(&target)?;
+        let target = qualified.verified_manifest().clone();
+        let paths = crate::upgrade::fixture_metadata::artifact_paths(
+            target.manifest(),
+            &path,
+            &roots.data,
+        )?;
         let artifacts = target
             .manifest()
             .artifacts
             .iter()
-            .map(|artifact| UpgradeArtifactInput {
+            .zip(paths)
+            .map(|(artifact, path)| UpgradeArtifactInput {
                 role: artifact.role,
                 platform: artifact.platform.clone(),
-                path: path.clone(),
+                path,
             })
             .collect();
         let mut request = UpgradeRequest::new(
-            (source, target),
+            (source, qualified),
             artifacts,
             [0x51; 16],
             3600,

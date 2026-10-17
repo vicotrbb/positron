@@ -3,8 +3,9 @@ use super::{UpgradeArtifactInput, UpgradeFailure, UpgradeRequest, UpgradeStartup
 use positron_config::EffectiveConfiguration;
 use positron_governance::AdministrativeIdempotencyKey;
 use positron_kernel::release_manifest::{
-    MAX_RELEASE_MANIFEST_BYTES, ProjectTrustRoot, SignedReleaseManifest, VerifiedReleaseManifest,
+    ArtifactRole, MAX_RELEASE_MANIFEST_BYTES, VerifiedReleaseManifest,
 };
+use positron_release::{InstalledReleaseTrust, MAX_INSTALLED_TRUST_BYTES};
 use rustix::fs::{Mode, OFlags};
 use std::os::unix::fs::MetadataExt;
 use std::{
@@ -20,19 +21,56 @@ pub fn installed_upgrade_request(
     retention_seconds: u64,
     key: AdministrativeIdempotencyKey,
     expected_generation: u64,
+    clock: &positron_kernel::RetentionTimeAuthority,
 ) -> Result<UpgradeRequest, UpgradeFailure> {
     let installation = configuration
         .installed_release()
         .ok_or(UpgradeFailure::InvalidRequest)?;
+    let now = clock
+        .security_time_seconds()
+        .map_err(|_| UpgradeFailure::CapacityUnavailable)?;
     let root = trust_root(installation.project_trust_root_file().as_path())?;
-    let source = manifest(installation.current_manifest_file().as_path(), &root)?;
+    let source = source_manifest(installation.current_manifest_file().as_path(), &root, now)?;
+    verify_inventory(
+        &source,
+        &root,
+        installation
+            .current_inventory_file()
+            .map(|path| path.as_path()),
+        now,
+    )?;
     let target = manifest(
         installation
             .candidate_manifest_file()
             .ok_or(UpgradeFailure::InvalidRequest)?
             .as_path(),
         &root,
+        now,
     )?;
+    root.verify(now)
+        .and_then(|trust| trust.require_supported_version(target.manifest().version))
+        .map_err(|_| UpgradeFailure::UnsupportedTransition)?;
+    let inventory = target
+        .manifest()
+        .artifacts
+        .iter()
+        .position(|artifact| artifact.role == ArtifactRole::ReleaseInventory)
+        .and_then(|index| installation.candidate_artifact_files().get(index))
+        .map(|path| path.as_path());
+    let bytes = read_file(
+        inventory.ok_or(UpgradeFailure::AuthenticationFailed)?,
+        positron_release::MAX_INVENTORY_BYTES,
+        false,
+    )?;
+    let qualified = positron_release::verify_target_metadata(
+        target.signed_bytes(),
+        &bytes,
+        root.release_signer,
+        &root
+            .verify(now)
+            .map_err(|_| UpgradeFailure::AuthenticationFailed)?,
+    )
+    .map_err(|_| UpgradeFailure::AuthenticationFailed)?;
     if target.digest() != target_manifest_digest {
         return Err(UpgradeFailure::ArtifactMismatch);
     }
@@ -51,7 +89,7 @@ pub fn installed_upgrade_request(
         })
         .collect();
     UpgradeRequest::new(
-        (source, target),
+        (source, qualified),
         artifacts,
         repository,
         retention_seconds,
@@ -61,12 +99,24 @@ pub fn installed_upgrade_request(
 }
 pub fn installed_upgrade_startup(
     configuration: &EffectiveConfiguration,
+    clock: &positron_kernel::RetentionTimeAuthority,
 ) -> Result<Option<UpgradeStartupVerification>, UpgradeFailure> {
     let Some(installation) = configuration.installed_release() else {
         return Ok(None);
     };
+    let now = clock
+        .security_time_seconds()
+        .map_err(|_| UpgradeFailure::CapacityUnavailable)?;
     let root = trust_root(installation.project_trust_root_file().as_path())?;
-    let release = manifest(installation.current_manifest_file().as_path(), &root)?;
+    let release = source_manifest(installation.current_manifest_file().as_path(), &root, now)?;
+    verify_inventory(
+        &release,
+        &root,
+        installation
+            .current_inventory_file()
+            .map(|path| path.as_path()),
+        now,
+    )?;
     let credential = installation
         .query_credential_file()
         .map(|path| {
@@ -78,21 +128,63 @@ pub fn installed_upgrade_startup(
         .transpose()?;
     UpgradeStartupVerification::new(release, credential).map(Some)
 }
-fn trust_root(path: &Path) -> Result<ProjectTrustRoot, UpgradeFailure> {
-    let bytes = read_file(path, 32, false)?;
-    let key = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| UpgradeFailure::AuthenticationFailed)?;
-    Ok(ProjectTrustRoot::new(key))
+fn trust_root(path: &Path) -> Result<InstalledReleaseTrust, UpgradeFailure> {
+    InstalledReleaseTrust::from_bytes(&read_file(path, MAX_INSTALLED_TRUST_BYTES, false)?)
+        .map_err(|_| UpgradeFailure::AuthenticationFailed)
+}
+fn source_manifest(
+    path: &Path,
+    trust: &InstalledReleaseTrust,
+    now: u64,
+) -> Result<VerifiedReleaseManifest, UpgradeFailure> {
+    trust
+        .verify_installed_manifest(
+            &read_file(path, MAX_RELEASE_MANIFEST_BYTES + 64, false)?,
+            now,
+        )
+        .map_err(|_| UpgradeFailure::AuthenticationFailed)
 }
 fn manifest(
     path: &Path,
-    root: &ProjectTrustRoot,
+    trust: &InstalledReleaseTrust,
+    now: u64,
 ) -> Result<VerifiedReleaseManifest, UpgradeFailure> {
-    SignedReleaseManifest::from_bytes(&read_file(path, MAX_RELEASE_MANIFEST_BYTES + 64, false)?)
-        .and_then(|signed| signed.verify(root))
+    trust
+        .verify_manifest(
+            &read_file(path, MAX_RELEASE_MANIFEST_BYTES + 64, false)?,
+            now,
+        )
         .map_err(|_| UpgradeFailure::AuthenticationFailed)
+}
+fn verify_inventory(
+    manifest: &VerifiedReleaseManifest,
+    installed: &InstalledReleaseTrust,
+    path: Option<&Path>,
+    now: u64,
+) -> Result<(), UpgradeFailure> {
+    if manifest
+        .manifest()
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.role == ArtifactRole::ReleaseInventory)
+    {
+        let bytes = read_file(
+            path.ok_or(UpgradeFailure::AuthenticationFailed)?,
+            positron_release::MAX_INVENTORY_BYTES,
+            false,
+        )?;
+        positron_release::verify_manifest_inventory(
+            manifest,
+            &bytes,
+            &installed
+                .verify(now)
+                .map_err(|_| UpgradeFailure::AuthenticationFailed)?,
+        )
+        .map_err(|_| UpgradeFailure::AuthenticationFailed)?;
+    } else if path.is_some() {
+        return Err(UpgradeFailure::AuthenticationFailed);
+    }
+    Ok(())
 }
 fn read_file(path: &Path, maximum: usize, secret: bool) -> Result<Vec<u8>, UpgradeFailure> {
     // Hold each ancestor instead of following a substituted symlink; nonblocking

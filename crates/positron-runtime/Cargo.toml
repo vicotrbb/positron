@@ -20,7 +20,7 @@ test-support = [
 [dependencies]
 age = { version = "=0.11.5", default-features = false }
 bytes = "=1.12.1"
-flate2 = { version = "=1.0.24", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 http-body = "=1.1.0"
 http = { version = "=1.5.0", default-features = false }
 hyper = { version = "=1.11.1", default-features = false, features = ["http1", "http2", "server"] }
@@ -35,6 +35,7 @@ positron-ingest = { path = "../positron-ingest" }
 positron-kernel = { path = "../positron-kernel" }
 positron-policy = { path = "../positron-policy" }
 positron-query = { path = "../positron-query" }
+positron-release = { path = "../positron-release" }
 positron-signals = { path = "../positron-signals" }
 prost = "=0.14.3"
 serde_json = "=1.0.150"
