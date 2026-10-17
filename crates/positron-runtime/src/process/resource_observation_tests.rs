@@ -55,6 +55,30 @@ fn contended_resource_observation_preserves_serving_admission_after_control_comp
         .as_ref()
         .ok_or("instance authority")?
         .clone();
+    let operations = process
+        .bound_endpoints()
+        .into_iter()
+        .find_map(|endpoint| match endpoint {
+            BoundEndpoint::Tcp {
+                role: ListenerRole::Operations,
+                address,
+            } => Some(address),
+            _ => None,
+        })
+        .ok_or("operations listener")?;
+    let unavailable = instance
+        ._authority
+        .with_control_contention_for_test(|| status(operations, claim.secret()))??;
+    assert!(
+        unavailable.starts_with("HTTP/1.1 503 "),
+        "temporarily unavailable credential authority must not reject valid credentials: {unavailable}"
+    );
+    let restored = status(operations, claim.secret())?;
+    assert!(
+        restored.starts_with("HTTP/1.1 200 "),
+        "restored status: {restored}"
+    );
+    assert!(status(operations, "invalid-credential")?.starts_with("HTTP/1.1 401 "));
     let observed = instance._authority.with_control_contention_for_test(|| {
         assert!(matches!(
             instance._authority.observe_disk(),
@@ -183,5 +207,17 @@ fn ingest(address: std::net::SocketAddr, credential: &str) -> Result<String, std
     stream.write_all(body)?;
     let mut response = String::new();
     stream.take(8192).read_to_string(&mut response)?;
+    Ok(response)
+}
+
+fn status(address: std::net::SocketAddr, credential: &str) -> Result<String, std::io::Error> {
+    let mut stream = std::net::TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.take(65_536).read_to_string(&mut response)?;
     Ok(response)
 }

@@ -716,25 +716,6 @@ impl HealthState {
             .transpose()
     }
 
-    /// Authorizes inspection through the immutable governance authority shared
-    /// with runtime services.
-    pub(crate) fn authorize_configuration_status(&self, bearer: &str) -> Result<(), ()> {
-        if let Some(authority) = self.inspection_authority.get().and_then(Weak::upgrade) {
-            return authority
-                .attribute_read_only(
-                    PresentedCredential::parse(bearer).map_err(|_| ())?,
-                    RequestedIntent::SystemAdministration,
-                    CompatibilityHints::none(),
-                )
-                .map(|_| ())
-                .map_err(|_| ());
-        }
-        if self.phase() != ProcessPhase::Fenced {
-            return Err(());
-        }
-        self.fenced_inspection.get().ok_or(())?.authorize(bearer)
-    }
-
     pub(crate) fn set_fenced_inspection(
         &self,
         paths: BootstrapPaths,
@@ -746,26 +727,6 @@ impl HealthState {
                 max_registered_tenants,
             })
             .map_err(|_| ConfigurationRuntimeFailure::Unavailable)
-    }
-
-    /// Reopens only for the duration of a restricted inspection
-    /// authorization, so Fenced keeps current durable authentication without
-    /// retaining mutable runtime ownership between requests.
-    fn authorize_fenced_inspection(
-        paths: &BootstrapPaths,
-        max_registered_tenants: u16,
-        bearer: &str,
-    ) -> Result<(), ()> {
-        let authority =
-            InstanceBootstrap::reopen_read_only(paths, max_registered_tenants).map_err(|_| ())?;
-        authority
-            .attribute_read_only(
-                PresentedCredential::parse(bearer).map_err(|_| ())?,
-                RequestedIntent::SystemAdministration,
-                CompatibilityHints::none(),
-            )
-            .map(|_| ())
-            .map_err(|_| ())
     }
 
     pub(crate) fn authorized_fenced_doctor_status(
@@ -802,8 +763,6 @@ impl HealthState {
         let _catalog_operation = catalog_operation
             .lock()
             .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
-        self.authorize_configuration_status(bearer)
-            .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?;
         let authority = self
             .inspection_authority
             .get()
@@ -816,7 +775,12 @@ impl HealthState {
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
             )
-            .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?;
+            .map_err(|failure| match failure {
+                ServingDiagnosticsFailure::AuthenticationRejected => {
+                    ConfigurationStatusFailure::AuthenticationRejected
+                },
+                ServingDiagnosticsFailure::Unavailable => ConfigurationStatusFailure::Unavailable,
+            })?;
         let doctor = authority
             .doctor_runtime_facts(actor)
             .map_err(|_| ConfigurationStatusFailure::Unavailable)?;
@@ -1228,12 +1192,6 @@ impl ProcessState {
 struct FencedInspection {
     paths: BootstrapPaths,
     max_registered_tenants: u16,
-}
-
-impl FencedInspection {
-    fn authorize(&self, bearer: &str) -> Result<(), ()> {
-        HealthState::authorize_fenced_inspection(&self.paths, self.max_registered_tenants, bearer)
-    }
 }
 
 fn plaintext_role_bit(role: ListenerRole) -> Option<u8> {
