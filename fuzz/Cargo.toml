@@ -436,3 +436,24 @@ path = "fuzz_targets/azure_blob_repository.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "release_manifest"
+path = "fuzz_targets/release_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upgrade_verification"
+path = "fuzz_targets/upgrade_verification.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upgrade_api"
+path = "fuzz_targets/upgrade_api.rs"
+test = false
+doc = false
+bench = false

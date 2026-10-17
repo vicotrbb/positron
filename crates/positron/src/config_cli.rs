@@ -150,6 +150,9 @@ fn render_explanation(output: &mut String, definition: SettingDefinition) {
 
 fn domain_description(domain: ValueDomain) -> String {
     match domain {
+        ValueDomain::ReleaseInstallation(maximum, path) => format!(
+            "closed installed release references; at most {maximum} candidate files in manifest order, paths at most {path} bytes; independently installed project trust"
+        ),
         ValueDomain::ProviderAccess(uri, version, path) => format!(
             "closed native access table; uri <= {uri} bytes; version <= {version} bytes; protected file selectors <= {path} bytes; no credential values"
         ),

@@ -62,7 +62,7 @@ async fn saturated_trace_worker_reports_capacity_before_decode_and_recovers()
     )
     .await?
     .expect_err("a full trace worker queue must refuse admission");
-    assert_eq!(saturated.code(), Code::ResourceExhausted);
+    assert_eq!(saturated.code(), Code::Unavailable);
     assert_eq!(
         saturated.message(),
         "OTLP Traces ingest capacity is unavailable"

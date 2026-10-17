@@ -39,6 +39,8 @@ mod tenant_purge_cli;
 mod tenant_quotas;
 mod tenant_retention;
 mod tenant_service_cli;
+mod upgrade_cli;
+mod upgrade_offline_cli;
 mod verify_cli;
 
 #[doc(hidden)]
@@ -85,6 +87,13 @@ pub fn run_native(
     {
         arguments.next();
         return repository_cli::run(arguments);
+    }
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "upgrade")
+    {
+        arguments.next();
+        return upgrade_cli::run(arguments);
     }
     if arguments.peek().is_some_and(|argument| argument == "keys") {
         arguments.next();
@@ -372,6 +381,27 @@ fn wait_for_shutdown(
     _crash_data_directory: PathBuf,
 ) -> Result<ExitOutcome, LaunchFailure> {
     let second_termination_seen = loop {
+        if process
+            .pending_upgrade_operation()
+            .is_ok_and(|operation| operation.is_some())
+        {
+            // Only the Process owner consumes the live lifetime. The API has
+            // already committed intent; replacement remains an operator step.
+            if let Ok(configuration) = reload.resolve()
+                && let Ok(Some(accepted)) = process.resume_configured_upgrade_drain(&configuration)
+            {
+                return Ok(match process.begin_upgrade(accepted) {
+                    Ok(draining) => match draining
+                        .finish_with_termination_probe(ShutdownTrigger::FirstSignal, || {
+                            pending_termination_trigger(&mut signals).is_some()
+                        }) {
+                        Ok(_) => ExitOutcome::Graceful,
+                        Err(outcome) => outcome,
+                    },
+                    Err(outcome) => outcome,
+                });
+            }
+        }
         // `Signals::forever` would prevent the process owner from consuming a
         // verified integrity-fence request until a later operating-system
         // signal. Polling remains bounded and preserves first/second signal

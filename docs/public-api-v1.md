@@ -41,6 +41,20 @@ non-secret configuration warning, remains ready with a persistent health
 warning, and records the selected profile once in the governance audit chain.
 SDK publication and a public query transport remain unavailable.
 
+`UpgradeService` selects the independently trusted, operator-staged candidate
+through `POST /v1/upgrades:manage` and the generated HTTP client. The
+`positron upgrade` CLI uses the same authenticated transport. Requests contain
+the configured candidate digest, registered repository, retention, exact Catalog
+generation, and idempotency key; they do not supply trust roots or server paths.
+Status binds the detailed Upgrade phase, source and target artifacts, configuration,
+format, snapshot, and explicit cancellation/rollback boundaries. See the
+[Upgrade procedure](operations/upgrades.md) for live Drain, offline snapshot
+verification and publication, deployment replacement, and target verification.
+
+The native administration transport delivered here is HTTP. The shared native
+gRPC administration adapter gap remains tracked by issue #219; canonical
+Protobuf definitions and generated clients do not establish native gRPC delivery.
+
 ## Compatibility and capability behavior
 
 The v1 package evolves additively. An older v1 capability request that omits

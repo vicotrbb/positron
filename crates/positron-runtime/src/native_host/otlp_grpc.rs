@@ -496,7 +496,7 @@ fn authentication_rejected() -> Status {
 }
 
 fn preauthentication_rate_rejected() -> Status {
-    Status::resource_exhausted("OTLP preauthentication admission rate exceeded")
+    Status::unavailable("OTLP preauthentication admission rate exceeded")
 }
 
 fn authenticate_traces(

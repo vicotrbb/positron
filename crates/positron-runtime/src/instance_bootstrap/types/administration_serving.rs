@@ -154,14 +154,26 @@ impl InitializedInstance {
         credential: positron_governance::PresentedCredential,
         intent: positron_governance::RequestedIntent,
         hints: positron_governance::CompatibilityHints,
-    ) -> Result<positron_governance::AuthorizedContext, positron_governance::AttributionFailure>
-    {
-        self.durable_identity()
-            .map_err(|_| positron_governance::AttributionFailure)?
+    ) -> Result<positron_governance::AuthorizedContext, crate::ServingDiagnosticsFailure> {
+        let identity = self
+            .durable_identity()
+            .map_err(|_| crate::ServingDiagnosticsFailure::Unavailable)?;
+        let mut time_unavailable = false;
+        identity
             .attribute_with_expiry_time(&self.key, credential, intent, hints, || {
                 self.retention_time
                     .inspect_security_time_seconds()
-                    .map_err(|_| positron_governance::AttributionFailure)
+                    .map_err(|_| {
+                        time_unavailable = true;
+                        positron_governance::AttributionFailure
+                    })
+            })
+            .map_err(|_| {
+                if time_unavailable {
+                    crate::ServingDiagnosticsFailure::Unavailable
+                } else {
+                    crate::ServingDiagnosticsFailure::AuthenticationRejected
+                }
             })
     }
 

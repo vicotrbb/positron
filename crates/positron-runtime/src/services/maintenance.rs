@@ -1819,3 +1819,136 @@ mod tests {
         );
     }
 }
+
+/// Drives only one already accepted Backup owner without ordinary discovery.
+pub(super) fn drive_upgrade_backup(
+    services: &super::ServiceHandle,
+    id: positron_governance::OperationId,
+    deadline: std::time::Instant,
+) -> Result<positron_governance::DurableOperation, crate::upgrade::UpgradeFailure> {
+    use crate::upgrade::UpgradeFailure;
+    use positron_governance::{DurableOperationAdministration, DurableOperationKind};
+    let inspect = || {
+        let _gate = services
+            .catalog_operation()
+            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+        let catalog = services
+            .open_maintenance_catalog()
+            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+        DurableOperationAdministration::inspect(&catalog, id)
+            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?
+            .ok_or(UpgradeFailure::InvalidRequest)
+    };
+    let operation = inspect()?;
+    if !matches!(
+        operation.kind(),
+        DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupVerification
+    ) {
+        return Err(UpgradeFailure::InvalidRequest);
+    }
+    if operation.status().is_terminal() || std::time::Instant::now() >= deadline {
+        return Ok(operation);
+    }
+    // Recovery intentionally retains the authenticated lifecycle anchor. An
+    // accepted operation may be ahead of that conservative clock after restart;
+    // only the clock owner can make its next transition eligible.
+    crate::upgrade::await_lifecycle_time(
+        &services.instance,
+        operation.updated_at_unix_seconds(),
+        deadline,
+    )?;
+    let instance = &services.instance;
+    let coordinator = instance.maintenance_coordinator();
+    let initial_progress = coordinator
+        .status(
+            positron_kernel::MaintenanceTaskId::new(id.to_bytes())
+                .map_err(|_| UpgradeFailure::InvalidRequest)?,
+        )
+        .map_err(|_| UpgradeFailure::PersistenceUnavailable)?
+        .checkpoint()
+        .map(|checkpoint| checkpoint.opaque_progress().to_vec());
+    let execution = {
+        let _gate = services
+            .catalog_operation()
+            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+        let catalog = services
+            .open_maintenance_catalog()
+            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+        coordinator
+            .start_backup_operation_with_reservation_and_persist(
+                &catalog,
+                &instance._authority,
+                services
+                    .maintenance_status_now()
+                    .map_err(|_| UpgradeFailure::PersistenceUnavailable)?,
+                instance.retention_time.status().state()
+                    == positron_kernel::LifecycleClockState::ClockUncertain,
+                positron_kernel::MaintenanceTaskId::new(id.to_bytes())
+                    .map_err(|_| UpgradeFailure::InvalidRequest)?,
+            )
+            .map_err(|_| UpgradeFailure::CapacityUnavailable)?
+    };
+    let Some(execution) = execution else {
+        return inspect();
+    };
+    let mut execution = InstalledMaintenanceExecution::BackupSnapshot {
+        execution,
+        work: None,
+    };
+    loop {
+        complete_installed_maintenance(services, None, &mut execution)
+            .map_err(|_| UpgradeFailure::SnapshotUnavailable)?;
+        let InstalledMaintenanceExecution::BackupSnapshot {
+            execution: owner,
+            work,
+        } = &mut execution
+        else {
+            return Err(UpgradeFailure::UnsafeState);
+        };
+        let status = coordinator
+            .status(owner.task().identity())
+            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+        if status.phase() != MaintenanceTaskPhase::Running {
+            return inspect();
+        }
+        if std::time::Instant::now() >= deadline {
+            *work = None;
+            let binding = positron_kernel::RepositoryOperationBinding::from_execution(owner)
+                .map_err(|_| UpgradeFailure::UnsafeState)?;
+            let resources = owner.task().reservations();
+            let _gate = services
+                .catalog_operation()
+                .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+            let catalog = services
+                .open_maintenance_catalog()
+                .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+            owner
+                .requeue_backup_with_resources_and_persist(
+                    coordinator,
+                    &catalog,
+                    binding,
+                    resources,
+                    services
+                        .maintenance_status_now()
+                        .map_err(|_| UpgradeFailure::PersistenceUnavailable)?,
+                )
+                .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+            drop(catalog);
+            drop(_gate);
+            let current = inspect()?;
+            if !current.status().is_terminal()
+                && current.revision() == operation.revision()
+                && status
+                    .checkpoint()
+                    .map(|checkpoint| checkpoint.opaque_progress())
+                    == initial_progress.as_deref()
+            {
+                // Requeue bookkeeping alone is not recoverable progress. A
+                // shorter turn cannot retain the private semantic accumulator;
+                // report the retryable limit rather than loop without progress.
+                return Err(UpgradeFailure::CapacityUnavailable);
+            }
+            return Ok(current);
+        }
+    }
+}

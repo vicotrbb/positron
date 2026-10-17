@@ -17,6 +17,7 @@ impl From<BootstrapFailure> for ShutdownPublicationFailure {
 /// Later Catalog publications do not make this a clean-startup assertion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GracefulShutdownRecord {
+    marker_identity: [u8; 32],
     transaction: TransactionId,
     catalog_generation: u64,
     predecessor: [u8; 32],
@@ -27,6 +28,16 @@ pub struct GracefulShutdownRecord {
 }
 
 impl GracefulShutdownRecord {
+    pub const fn transaction(&self) -> [u8; 16] {
+        self.transaction.to_bytes()
+    }
+    pub const fn marker_identity(&self) -> [u8; 32] {
+        self.marker_identity
+    }
+    pub const fn predecessor(&self) -> [u8; 32] {
+        self.predecessor
+    }
+
     #[must_use]
     pub const fn catalog_generation(&self) -> u64 {
         self.catalog_generation
@@ -42,6 +53,24 @@ impl GracefulShutdownRecord {
 }
 
 impl InitializedInstance {
+    /// Historical Drain evidence does not authorize data written afterward.
+    pub(crate) fn verify_graceful_shutdown_frontiers(
+        &self,
+        record: &GracefulShutdownRecord,
+    ) -> Result<(), BootstrapFailure> {
+        let secret = self
+            .key
+            .catalog_secret(self.instance)
+            .map_err(|_| unavailable())?;
+        let view = Catalog::read_current_view(&self._authority, self.instance, secret)
+            .map_err(|_| unavailable())?;
+        let (digest, scopes) = final_frontier_binding(view.snapshot())?;
+        if digest != record.frontier_digest || scopes != record.sealed_scopes {
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+
     pub(crate) fn publish_graceful_shutdown(
         &self,
         cancelled: &mut dyn FnMut() -> bool,
@@ -174,6 +203,7 @@ impl InitializedInstance {
                 return Err(unavailable());
             }
             record = Some(GracefulShutdownRecord {
+                marker_identity: object.to_bytes(),
                 transaction: TransactionId::new(decode_array(bytes, 24)?)
                     .map_err(|_| unavailable())?,
                 catalog_generation: generation,

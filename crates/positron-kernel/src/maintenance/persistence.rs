@@ -194,6 +194,25 @@ impl MaintenanceCoordinator {
         )
     }
 
+    /// Starts only the exact Backup task selected by an offline upgrade.
+    pub fn start_backup_operation_with_reservation_and_persist<'authority>(
+        &self,
+        catalog: &Catalog<'_>,
+        authority: &'authority StorageKernelResourceAuthority,
+        now: u64,
+        clock_uncertain: bool,
+        identity: MaintenanceTaskId,
+    ) -> Result<Option<MaintenanceExecution<'authority>>, MaintenanceFailure> {
+        self.start_next_with_reservation_and_persist_matching(
+            catalog,
+            authority,
+            now,
+            clock_uncertain,
+            &[MaintenanceTaskClass::BackupSnapshot],
+            Some(identity),
+        )
+    }
+
     /// Starts one exact durable Compaction descriptor. Other task classes
     /// cannot enter this handler path.
     pub fn start_compaction_task_with_reservation_and_persist<'authority>(

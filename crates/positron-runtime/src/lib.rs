@@ -29,6 +29,11 @@ mod tail_fuzz;
 #[cfg(fuzzing)]
 mod tail_fuzz_support;
 mod task;
+mod upgrade;
+pub use upgrade::{
+    OfflineUpgradeSession, UpgradeArtifactIdentity, UpgradeArtifactInput, UpgradeFailure,
+    UpgradeReleasePlan, UpgradeRequest, UpgradeStartupVerification,
+};
 
 pub use configuration::{
     ConfigurationObservation, ConfigurationPublication, ConfigurationPublicationDisposition,
@@ -74,10 +79,10 @@ pub use operational::{
     OperationalReloadRejection, render_operational_diagnostic, write_operational_diagnostic,
 };
 pub use process::{
-    ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole, CrashInspection,
-    DrainingProcess, ExitOutcome, HostInputs, InitializationMode, PublicPlaintextApiStartupIntent,
-    RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision, RunningProcess, ServeConfiguration,
-    ShutdownTrigger, native_root_configuration,
+    AcceptedUpgrade, ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole,
+    CrashInspection, DrainingProcess, DrainingUpgrade, ExitOutcome, HostInputs, InitializationMode,
+    PublicPlaintextApiStartupIntent, RecoveryAttempt, RecoveryAttemptHost, RecoveryDecision,
+    RunningProcess, ServeConfiguration, ShutdownTrigger, native_root_configuration,
 };
 pub use services::{
     ConfiguredExportDestinationResolver, ServiceFailure, ServiceHandle, durable_operation_response,

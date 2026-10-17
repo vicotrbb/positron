@@ -53,6 +53,7 @@ pub fn render_json_schema() -> String {
         "listener",
         "runtime",
         "security",
+        "release",
         "export",
         "storage",
     ] {
@@ -152,6 +153,9 @@ fn render_schema_value(definition: SettingDefinition) -> String {
         ValueDomain::ProtectedAbsolutePath(maximum) => {
             render_path_schema(definition, maximum, true)
         },
+        ValueDomain::ReleaseInstallation(maximum, path) => {
+            super::installed_release::schema(maximum, path)
+        },
         ValueDomain::ProviderAccess(uri, version, path) => {
             super::provider_access::schema(uri, version, path)
         },
@@ -249,6 +253,7 @@ pub fn render_reference() -> String {
     output.push_str(
         "\n## Durable export destinations\n\nDurable export is disabled unless the selected TOML file includes one or more\n`[[export.destination]]` entries. Environment and command-line overrides are\nrejected. A destination may be selected only by an authenticated tenant named\nin its `allowed_tenants`; its opaque `identity` is passed internally to the\nprotected Kernel output directory and is not supplied by an API caller.\n\n```toml\n[[export.destination]]\nname = \"regulated-archive\"\nidentity = \"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\"\nallowed_tenants = [\"11111111-1111-1111-1111-111111111111\"]\n```\n\nDestination names and identities must be unique. The complete candidate is\nvalidated before publication; changing this immutable setting requires the\nexplicit initialization or restore workflow rather than live reload.\n\n## Operator commands\n\nThe native binary resolves this same contract without starting the database:\n\n```console\npositron config validate [--config PATH] [--set PATH=VALUE]\npositron config explain [--setting PATH]\npositron config effective --redacted [--config PATH] [--set PATH=VALUE]\npositron config diff --current PATH --candidate PATH\npositron config migrate --config PATH --output PATH\n```\n\n`validate` resolves the complete candidate and reports only its schema version\nand warning count. `explain` reports each setting's canonical type, redacted\ndefault where required, value domain, secrecy, provenance policy, and\nmutability. `effective --redacted` renders the complete redacted effective\nstate followed by the source of every setting. `diff` resolves both canonical\ndocuments without environment or command-line overrides, reports only redacted\nsemantic values and provenance, and derives one no-mutation lifecycle plan.\n\nThe current contract supports schema version 1 only. `migrate` validates its\nsource without environment or command-line overrides, then writes the validated\nsource bytes to the explicitly named output candidate. The output is created\nwith restrictive permissions and is never overwritten. This preserves protected\nfile references and avoids materializing defaults or overrides. The command\nreports the deterministic zero semantic diff for version 1; unsupported\nversions are rejected without coercion or an invented transformation.\n",
     );
+    output.push_str("\n## Installed release authority\n\nThe operator installs release trust through one protected, file-only table.\nIt is disabled when omitted; changing references requires restart.\n\n```toml\n[release.installation]\nproject_trust_root_file = \"/opt/positron/trust/project-ed25519.pub\"\ncurrent_manifest_file = \"/opt/positron/releases/current.manifest\"\n```\n\nThe root file contains exactly 32 raw Ed25519 public-key bytes. The current\nmanifest uses the canonical signed Release Manifest encoding. Paths name\nregular files through real directory ancestors; symbolic links and files\nwritable by another group or any user are refused.\n\nTo authorize one staged candidate, also provide `candidate_manifest_file` and\n`candidate_artifact_files`. The latter lists every artifact file in exact\nsigned manifest order, including all required roles and target platforms.\nRemote requests select the configured manifest digest and cannot provide a\ntrust root or server file path. This does not download or install releases.\n\n`query_credential_file` optionally references a private, single-link file with\na live tenant Query credential for target startup verification. Its contents\nare loaded into zeroized memory only and are never persisted as operation\nparameters or rendered in configuration output.\n");
     output
 }
 
@@ -299,7 +304,8 @@ fn append_example_setting(output: &mut String, definition: SettingDefinition) {
     let value = match definition.kind() {
         SettingKind::Integer => definition.default_value().to_owned(),
         SettingKind::String => render_toml_basic_string(definition.default_value()),
-        SettingKind::ProviderAccess
+        SettingKind::ReleaseInstallation
+        | SettingKind::ProviderAccess
         | SettingKind::ExportDestinations
         | SettingKind::TrustedProxyCidrs
         | SettingKind::CorsAllowedOrigins => return,
@@ -399,6 +405,7 @@ fn reference_domain(definition: SettingDefinition) -> String {
             ValueDomain::OptionalSocketAddress(maximum) => format!("disabled or explicit external numeric OTLP gRPC address; at most {maximum} bytes"),
             ValueDomain::AbsolutePath(maximum) => format!("absolute path; at most {maximum} bytes"),
             ValueDomain::ProtectedAbsolutePath(maximum) => format!("protected absolute path; at most {maximum} bytes"),
+            ValueDomain::ReleaseInstallation(maximum,path) => format!("closed installed-release references: independently installed Project Trust Root and current signed manifest; optional candidate manifest with one to {maximum} artifact paths in exact manifest order; optional protected Query credential file; absolute paths at most {path} bytes; never requester-selected trust"),
             ValueDomain::ProviderAccess(uri, version, path) => format!("closed native access table; immutable `uri` at most {uri} bytes, pinned `version` at most {version} bytes; provider-native authentication selector and protected absolute file references at most {path} bytes; never credential values; must match the authenticated active migration route"),
             ValueDomain::ExportDestinations(maximum, name, tenants) => format!("at most {maximum} named destinations; each has a lowercase `name` of at most {name} bytes, a nonzero 16-byte lowercase hexadecimal `identity`, and one to {tenants} unique canonical `allowed_tenants`"),
             ValueDomain::TrustedProxyCidrs(maximum, maximum_bytes) => format!("at most {maximum} literal IPv4 or IPv6 CIDRs, each at most {maximum_bytes} bytes; forwarded headers remain ignored unless this list and the matching nonzero fixed hop count are both configured"),

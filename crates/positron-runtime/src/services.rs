@@ -15,6 +15,7 @@ use crate::InitializedInstance;
 
 mod api_keys;
 mod backup_administration;
+pub(crate) use backup_administration::readiness_under_gate as backup_recovery_readiness_under_gate;
 mod export_destinations;
 mod failure;
 mod ingest;
@@ -29,6 +30,7 @@ mod maintenance_window;
 mod otlp;
 pub(crate) mod policy;
 mod provider_migration;
+mod upgrade_backup;
 pub use provider_migration::operation_response as durable_operation_response;
 mod query;
 pub(crate) mod repository_administration;
@@ -42,6 +44,7 @@ pub(crate) mod tenant_quotas;
 pub(crate) mod tenant_retention;
 mod tenant_rotation;
 pub(crate) mod tenant_service;
+mod upgrade;
 
 pub(super) fn tenant_segment_key(
     instance: &InitializedInstance,
@@ -129,6 +132,7 @@ pub struct ServiceHandle {
     catalog_operation: Arc<Mutex<()>>,
     maintenance_wake: maintenance::MaintenanceWake,
     integrity_health: Arc<Mutex<Option<crate::HealthState>>>,
+    upgrade_configuration: Arc<std::sync::OnceLock<Arc<crate::RuntimeConfiguration>>>,
     export_destination_resolver: Option<Arc<dyn positron_query::ExportDestinationResolver>>,
     #[cfg(test)]
     receiver_test_backend: Arc<Mutex<Option<Arc<dyn ReceiverTestBackend>>>>,
@@ -352,6 +356,7 @@ impl ServiceHandle {
             catalog_operation: Arc::new(Mutex::new(())),
             maintenance_wake: maintenance::MaintenanceWake::for_instance(instance.instance),
             integrity_health: Arc::new(Mutex::new(None)),
+            upgrade_configuration: Arc::new(std::sync::OnceLock::new()),
             export_destination_resolver,
             #[cfg(test)]
             receiver_test_backend: Arc::new(Mutex::new(None)),

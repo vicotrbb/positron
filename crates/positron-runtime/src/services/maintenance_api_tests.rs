@@ -107,3 +107,37 @@ mod backup;
 
 #[path = "maintenance_api_tests/tenant_purge.rs"]
 mod tenant_purge;
+
+#[path = "maintenance_api_tests/upgrade_offline.rs"]
+mod upgrade_offline;
+#[path = "maintenance_api_tests/upgrade_offline_clock.rs"]
+mod upgrade_offline_clock;
+
+#[path = "maintenance_api_tests/upgrade_startup.rs"]
+mod upgrade_startup;
+
+#[path = "maintenance_api_tests/upgrade_online.rs"]
+mod upgrade_online;
+#[path = "maintenance_api_tests/upgrade_rejected_shutdown.rs"]
+mod upgrade_rejected_shutdown;
+
+#[path = "maintenance_api_tests/upgrade_end_to_end.rs"]
+mod upgrade_end_to_end;
+
+#[path = "maintenance_api_tests/upgrade_query_credentials.rs"]
+mod upgrade_query_credentials;
+
+#[path = "maintenance_api_tests/upgrade_startup_recovery.rs"]
+mod upgrade_startup_recovery;
+
+#[path = "maintenance_api_tests/upgrade_native_bounds.rs"]
+mod upgrade_native_bounds;
+
+#[path = "maintenance_api_tests/upgrade_no_queryable.rs"]
+mod upgrade_no_queryable;
+
+#[path = "maintenance_api_tests/upgrade_crash_resume.rs"]
+mod upgrade_crash_resume;
+
+#[path = "maintenance_api_tests/upgrade_rollback.rs"]
+mod upgrade_rollback;

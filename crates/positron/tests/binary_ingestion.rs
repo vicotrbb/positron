@@ -35,6 +35,37 @@ fn request(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Test
     request_with_method("POST", port, path, headers, body)
 }
 
+// Retry only the native protocol's explicit transient capacity response.
+// Each attempt sends the identical payload; the caller still requires success.
+fn request_with_capacity_retry(
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    admission_budget: Duration,
+) -> TestResult<String> {
+    // The canonical listener request deadline bounds this correctness flow.
+    // Each transport attempt retains its existing five-second socket budget.
+    // Explicit Retry-After backpressure makes an attempt count no guarantee.
+    let deadline = Instant::now() + admission_budget;
+    let mut response = request_before("POST", port, path, headers, body, deadline)?;
+    loop {
+        let retry_after_one_second = response.split_once("\r\n\r\n").is_some_and(|(head, _)| {
+            head.lines()
+                .any(|line| line.eq_ignore_ascii_case("Retry-After: 1"))
+        });
+        if !response.starts_with("HTTP/1.1 429 ") || !retry_after_one_second {
+            break;
+        }
+        if Instant::now() + Duration::from_secs(1) >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        response = request_before("POST", port, path, headers, body, deadline)?;
+    }
+    Ok(response)
+}
+
 fn request_with_method(
     method: &str,
     port: u16,
@@ -42,8 +73,37 @@ fn request_with_method(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> TestResult<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    request_before(
+        method,
+        port,
+        path,
+        headers,
+        body,
+        Instant::now() + Duration::from_secs(5),
+    )
+}
+
+fn request_before(
+    method: &str,
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+    deadline: Instant,
+) -> TestResult<String> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or("binary HTTP deadline expired")?
+        .min(Duration::from_secs(5));
+    let mut stream = TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse()?, remaining)?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or("binary HTTP deadline expired")?
+        .min(Duration::from_secs(5));
+    stream.set_read_timeout(Some(remaining))?;
+    stream.set_write_timeout(Some(remaining))?;
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n",
         body.len()
@@ -141,6 +201,20 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     settings.push_str(&format!("[storage]\ndata_directory = \"{}\"\nsecrets_directory = \"{}\"\n[security]\nlocal_key_file = \"{}\"\n", data.display(), secrets.display(), secrets.join("local-root-key.v1").display()));
     let config = fixture.root.join("positron.toml");
     fs::write(&config, settings)?;
+    let effective = positron_config::resolve(
+        positron_config::ConfigurationInputs::try_from_sources(
+            Some(&config),
+            [] as [(&str, &str); 0],
+            [] as [(&str, &str); 0],
+        )
+        .map_err(|error| format!("fixture configuration: {error:?}"))?,
+    )?;
+    let admission_budget = effective
+        .network_listener_profile(positron_config::NetworkListenerRole::OtlpHttp)
+        .ok_or("OTLP HTTP listener profile")?
+        .connection_protection()
+        .request_deadline();
+
     for arguments in [
         vec!["config", "validate", "--config"],
         vec!["config", "effective", "--redacted", "--config"],
@@ -166,28 +240,39 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     let loki = *ports.get(4).ok_or("missing Loki port")?;
     ready(operations)?;
 
-    let mut doctor = Command::new(env!("CARGO_BIN_EXE_positron"))
-        .args(["doctor", "--online", "--endpoint"])
-        .arg(format!("127.0.0.1:{operations}"))
-        .arg("--allow-plaintext")
-        .arg("--credential-stdin")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let mut input = doctor.stdin.take().ok_or("missing doctor stdin")?;
-    writeln!(input, "{}", claim.secret())?;
-    drop(input);
     let doctor_deadline = Instant::now() + Duration::from_secs(10);
-    while doctor.try_wait()?.is_none() {
-        if Instant::now() >= doctor_deadline {
-            doctor.kill()?;
-            doctor.wait()?;
-            return Err("doctor deadline expired".into());
+    let output = loop {
+        let mut doctor = Command::new(env!("CARGO_BIN_EXE_positron"))
+            .args(["doctor", "--online", "--endpoint"])
+            .arg(format!("127.0.0.1:{operations}"))
+            .arg("--allow-plaintext")
+            .arg("--credential-stdin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let mut input = doctor.stdin.take().ok_or("missing doctor stdin")?;
+        writeln!(input, "{}", claim.secret())?;
+        drop(input);
+        while doctor.try_wait()?.is_none() {
+            if Instant::now() >= doctor_deadline {
+                doctor.kill()?;
+                doctor.wait()?;
+                return Err("doctor deadline expired".into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let output = doctor.wait_with_output()?;
+        let output = doctor.wait_with_output()?;
+        if String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == "finding_code=DOCTOR_ONLINE_INSPECTION_UNAVAILABLE")
+            && Instant::now() < doctor_deadline
+        {
+            std::thread::sleep(Duration::from_millis(25));
+            continue;
+        }
+        break output;
+    };
     let report = String::from_utf8(output.stdout)?;
     assert!(
         report.contains("process_phase=serving"),
@@ -229,13 +314,29 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         ("Authorization", bearer.as_str()),
         ("Content-Type", "application/json"),
     ];
-    assert!(request(otlp, "/v1/logs", &headers, body)?.starts_with("HTTP/1.1 200 "));
+    let response = request_with_capacity_retry(otlp, "/v1/logs", &headers, body, admission_budget)?;
+    let diagnostic = if response.starts_with("HTTP/1.1 200 ") {
+        String::new()
+    } else {
+        request_with_method(
+            "GET",
+            operations,
+            "/metrics",
+            &[("Authorization", admin.as_str())],
+            b"",
+        )?
+    };
     assert!(
-        request(
+        response.starts_with("HTTP/1.1 200 "),
+        "initial Log response: {response}; public resource metrics: {diagnostic}"
+    );
+    assert!(
+        request_with_capacity_retry(
             loki,
             "/loki/api/v1/push",
             &headers,
-            br#"{"streams":[{"stream":{"app":"audit"},"values":[["43","binary-loki"]]}]}"#
+            br#"{"streams":[{"stream":{"app":"audit"},"values":[["43","binary-loki"]]}]}"#,
+            admission_budget,
         )?
         .starts_with("HTTP/1.1 204 No Content")
     );
@@ -262,7 +363,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         .await?
         .expect_err("anonymous gRPC ingest must fail");
         assert_eq!(denied.code(), tonic::Code::Unauthenticated);
-        let mut request = tonic::Request::new(ExportLogsServiceRequest {
+        let payload = ExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
                 scope_logs: vec![ScopeLogs {
                     log_records: vec![LogRecord {
@@ -276,17 +377,32 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
                 }],
                 ..ResourceLogs::default()
             }],
-        });
-        request
-            .metadata_mut()
-            .insert("authorization", bearer.parse()?);
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), client.export(request))
-                .await??
-                .into_inner()
-                .partial_success
-                .is_none()
-        );
+        };
+        let deadline = tokio::time::Instant::now() + admission_budget;
+        let mut backoff = Duration::from_millis(100);
+        let response = loop {
+            let mut request = tonic::Request::new(payload.clone());
+            request
+                .metadata_mut()
+                .insert("authorization", bearer.parse()?);
+            let attempt_deadline =
+                deadline.min(tokio::time::Instant::now() + Duration::from_secs(5));
+            match tokio::time::timeout_at(attempt_deadline, client.export(request)).await? {
+                Ok(response) => break response,
+                Err(status)
+                    if status.code() == tonic::Code::Unavailable
+                        && status.message() == "OTLP Logs ingest capacity is unavailable"
+                        && tokio::time::Instant::now() + backoff < deadline =>
+                {
+                    // This explicit precommit refusal admits no records. Never retry
+                    // ambiguous outcomes, authentication, hard limits, or timeouts.
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2).min(Duration::from_secs(1));
+                },
+                Err(status) => return Err(status.into()),
+            }
+        };
+        assert!(response.into_inner().partial_success.is_none());
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     let traces = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"01010101010101010101010101010101","spanId":"0202020202020202","name":"audit-span","startTimeUnixNano":"42","endTimeUnixNano":"84"}]}]}]}"#;
@@ -298,7 +414,23 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             .replace("audit-span", "conflict-span")
             .into_bytes(),
     ] {
-        assert!(request(otlp, "/v1/traces", &headers, &payload)?.starts_with("HTTP/1.1 200 "));
+        let response =
+            request_with_capacity_retry(otlp, "/v1/traces", &headers, &payload, admission_budget)?;
+        let diagnostic = if response.starts_with("HTTP/1.1 200 ") {
+            String::new()
+        } else {
+            request_with_method(
+                "GET",
+                operations,
+                "/metrics",
+                &[("Authorization", admin.as_str())],
+                b"",
+            )?
+        };
+        assert!(
+            response.starts_with("HTTP/1.1 200 "),
+            "trace observation response: {response}; public resource metrics: {diagnostic}"
+        );
     }
 
     let started = Instant::now();
@@ -309,21 +441,27 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             &serde_json::json!({"resourceLogs":[{"scopeLogs":[{"logRecords":vec![record;4]}]}]}),
         )?;
         encoded_bytes += batch.len();
-        let mut response = request(otlp, "/v1/logs", &headers, &batch)?;
-        // Capacity rejection explicitly permits retry. Keep the exact payload
-        // and retain the final acknowledgement assertion after bounded retries.
-        for _ in 0..2 {
-            let retry_after_one_second =
-                response.split_once("\r\n\r\n").is_some_and(|(head, _)| {
-                    head.lines()
-                        .any(|line| line.eq_ignore_ascii_case("Retry-After: 1"))
-                });
-            if !response.starts_with("HTTP/1.1 429 ") || !retry_after_one_second {
-                break;
-            }
-            std::thread::sleep(Duration::from_secs(1));
-            response = request(otlp, "/v1/logs", &headers, &batch)?;
-        }
+        let response = match request_with_capacity_retry(
+            otlp,
+            "/v1/logs",
+            &headers,
+            &batch,
+            admission_budget,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                let diagnostic = request_with_method(
+                    "GET",
+                    operations,
+                    "/metrics",
+                    &[("Authorization", admin.as_str())],
+                    b"",
+                );
+                panic!(
+                    "workload batch {batch_index} request budget failed: {error}; metrics: {diagnostic:?}"
+                );
+            },
+        };
         let diagnostic = if response.starts_with("HTTP/1.1 200 ") {
             String::new()
         } else {

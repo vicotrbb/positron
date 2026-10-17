@@ -644,6 +644,20 @@ impl Identity {
         Ok(())
     }
 
+    /// Lists tenant identities for which the same lifecycle policy used by
+    /// ordinary Query attribution permits retained-data access. Credentials
+    /// remain independently required; this grants no tenant authority.
+    pub fn query_readable_tenant_ids(&self) -> impl Iterator<Item = TenantId> + '_ {
+        std::iter::once((self.tenant, self.lifecycle))
+            .chain(
+                self.additional_tenants
+                    .iter()
+                    .map(|identity| (identity.tenant, identity.lifecycle)),
+            )
+            .filter(|(_, lifecycle)| is_query_readable(*lifecycle))
+            .map(|(tenant, _)| tenant)
+    }
+
     /// Revalidates a previously attributed query context against the current
     /// durable identity and lifecycle authority.
     pub fn revalidate_query_context(

@@ -14,6 +14,8 @@ use super::ControlDiagnosticsHandler;
 
 mod dispatch;
 mod io;
+#[cfg(test)]
+mod upgrade_deadline_tests;
 mod adapters {
     pub(in crate::native_host::native_http) mod policy;
     pub(in crate::native_host::native_http) mod tenant;
@@ -26,6 +28,7 @@ pub(super) const MAX_API_BODY_BYTES: usize = positron_api::generated::MAX_PUBLIC
 #[derive(Clone, Copy)]
 pub(super) struct RouteDependencies<'a> {
     services: Option<&'a ServiceHandle>,
+    upgrade_deadline: Option<std::time::Instant>,
     control_diagnostics: Option<&'a dyn ControlDiagnosticsHandler>,
 }
 
@@ -36,6 +39,7 @@ impl<'a> RouteDependencies<'a> {
     ) -> Self {
         Self {
             services,
+            upgrade_deadline: None,
             control_diagnostics,
         }
     }
@@ -56,6 +60,7 @@ pub(super) fn route_buffered_api(
     trusted_proxy: Option<TrustedProxy>,
     health: &HealthState,
     services: Option<&ServiceHandle>,
+    deadline: std::time::Instant,
 ) -> Response {
     let mut stream = Cursor::new(body);
     match dispatch::route(
@@ -65,7 +70,10 @@ pub(super) fn route_buffered_api(
         trusted_proxy,
         head,
         health,
-        RouteDependencies::new(services, None),
+        RouteDependencies {
+            upgrade_deadline: Some(deadline),
+            ..RouteDependencies::new(services, None)
+        },
     ) {
         Ok(response) | Err(response) => response,
     }

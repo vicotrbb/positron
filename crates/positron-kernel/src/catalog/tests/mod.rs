@@ -2,6 +2,7 @@
 
 mod codec;
 mod faults;
+mod lifecycle_clock;
 mod limits;
 pub(crate) mod support;
 

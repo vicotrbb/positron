@@ -109,6 +109,7 @@ Precedence: compiled defaults, TOML file, non-secret POSITRON__ overrides, then 
 | `security.provider_access` | table | `<redacted protected-file reference>` | closed native access table; immutable `uri` at most 512 bytes, pinned `version` at most 128 bytes; provider-native authentication selector and protected absolute file references at most 256 bytes; never credential values; must match the authenticated active migration route | secret-bearing (redacted) | compiled default, protected configuration-file reference | restart-required |
 | `export.destination` | array of tables | disabled | at most 8 named destinations; each has a lowercase `name` of at most 63 bytes, a nonzero 16-byte lowercase hexadecimal `identity`, and one to 8 unique canonical `allowed_tenants` | public | compiled default, configuration file | immutable after initialization |
 | `diagnostics.trace_otlp_grpc_address` | string | `disabled` | disabled or explicit external numeric OTLP gRPC address; at most 64 bytes | public | compiled default, configuration file | restart-required |
+| `release.installation` | table | `<redacted protected-file reference>` | closed installed-release references: independently installed Project Trust Root and current signed manifest; optional candidate manifest with one to 64 artifact paths in exact manifest order; optional protected Query credential file; absolute paths at most 256 bytes; never requester-selected trust | secret-bearing (redacted) | compiled default, protected configuration-file reference | restart-required |
 
 ## Durable export destinations
 
@@ -156,3 +157,30 @@ with restrictive permissions and is never overwritten. This preserves protected
 file references and avoids materializing defaults or overrides. The command
 reports the deterministic zero semantic diff for version 1; unsupported
 versions are rejected without coercion or an invented transformation.
+
+## Installed release authority
+
+The operator installs release trust through one protected, file-only table.
+It is disabled when omitted; changing references requires restart.
+
+```toml
+[release.installation]
+project_trust_root_file = "/opt/positron/trust/project-ed25519.pub"
+current_manifest_file = "/opt/positron/releases/current.manifest"
+```
+
+The root file contains exactly 32 raw Ed25519 public-key bytes. The current
+manifest uses the canonical signed Release Manifest encoding. Paths name
+regular files through real directory ancestors; symbolic links and files
+writable by another group or any user are refused.
+
+To authorize one staged candidate, also provide `candidate_manifest_file` and
+`candidate_artifact_files`. The latter lists every artifact file in exact
+signed manifest order, including all required roles and target platforms.
+Remote requests select the configured manifest digest and cannot provide a
+trust root or server file path. This does not download or install releases.
+
+`query_credential_file` optionally references a private, single-link file with
+a live tenant Query credential for target startup verification. Its contents
+are loaded into zeroized memory only and are never persisted as operation
+parameters or rendered in configuration output.

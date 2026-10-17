@@ -16,6 +16,22 @@ The report binds the exact repository, snapshot, manifest, Registry Generation,
 Catalog Generation, key context, examined counts, and completion scope. It does
 not substitute for fresh-target restore publication and query execution.
 
+The signed `POSBSV02` verification checkpoint binds completed native-file
+checksum checks to the exact authenticated inventory and its file order. A cold
+resume restarts any partial file and revalidates the inventory before using the
+completed-file count. `POSBSV01` checkpoints remain readable and restart that
+native checksum pass. This operation checkpoint version does not change the
+Backup Format Epoch or snapshot format. Native Catalog and audit verification
+still authenticates every required file and reconstructs its semantic state.
+When a bounded offline turn ends without changing the durable operation or its
+verification checkpoint, it safely requeues the owner and reports retryable
+capacity unavailability; it does not present volatile work as durable progress.
+If a recovered lifecycle clock has not yet reached an authenticated operation
+timestamp, the same offline owner waits for genuine trusted elapsed time within
+the caller's original deadline. Expiry reports retryable capacity unavailability
+without changing the operation; a cold retry does not substitute wall time or
+advance the authenticated timestamp.
+
 Fresh restore holds the target Primary Data Volume lock while proving that both
 roots contain no instance artifacts. The lock file alone is permitted. A retry
 must authenticate the existing restore origin and the exact physical roots,

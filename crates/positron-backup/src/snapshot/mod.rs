@@ -148,6 +148,14 @@ pub struct BackupManifest {
     pub(crate) objects: Vec<BackupObject>,
 }
 impl BackupManifest {
+    /// Independent Backup envelope format, not the captured Catalog epoch.
+    pub const fn backup_format_epoch(&self) -> crate::BackupFormatEpoch {
+        if self.capture_binding.is_some() {
+            crate::BackupFormatEpoch::CaptureBound
+        } else {
+            crate::BackupFormatEpoch::LegacyPublication
+        }
+    }
     /// Heap retained by this immutable inventory outside a Publisher call.
     pub fn retained_memory_bytes(&self) -> Result<u64, RepositoryFailure> {
         self.objects
@@ -214,6 +222,8 @@ impl BackupManifest {
     pub const fn snapshot_id(&self) -> [u8; 16] {
         self.snapshot
     }
+    /// Persistent Catalog epoch captured inside this snapshot.
+    /// See `backup_format_epoch` for the independent Backup envelope contract.
     pub const fn format_epoch(&self) -> u32 {
         self.format_epoch
     }

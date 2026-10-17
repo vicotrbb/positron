@@ -25,7 +25,7 @@ fn retryable_outcomes_have_stable_public_statuses() {
         IngestFailureCode::CapacityUnavailable,
     )))
     .expect_err("capacity refusal must remain retryable");
-    assert_eq!(capacity.code(), Code::ResourceExhausted);
+    assert_eq!(capacity.code(), Code::Unavailable);
     assert_eq!(
         capacity.message(),
         "OTLP Logs ingest capacity is unavailable"
@@ -85,7 +85,7 @@ fn runtime_service_failures_keep_one_stable_public_taxonomy() {
         ),
         (
             ServiceFailure::CapacityUnavailable,
-            Code::ResourceExhausted,
+            Code::Unavailable,
             "OTLP Logs ingest capacity is unavailable",
         ),
         (
@@ -121,7 +121,7 @@ fn trace_outcomes_keep_retry_permanent_and_ambiguous_classes() {
         IngestFailureCode::CapacityUnavailable,
     )))
     .expect_err("trace capacity refusal must remain retryable");
-    assert_eq!(capacity.code(), Code::ResourceExhausted);
+    assert_eq!(capacity.code(), Code::Unavailable);
     assert_eq!(
         capacity.message(),
         "OTLP Traces ingest capacity is unavailable"
@@ -162,7 +162,7 @@ fn trace_service_failures_keep_stable_protocol_statuses() {
         ),
         (
             ServiceFailure::CapacityUnavailable,
-            Code::ResourceExhausted,
+            Code::Unavailable,
             "OTLP Traces ingest capacity is unavailable",
         ),
         (
@@ -257,5 +257,27 @@ fn trace_protobuf_wire_decode_failure_is_mapped_to_invalid_argument() {
         Some(&http::HeaderValue::from_static(
             "OTLP%20Traces%20request%20was%20malformed"
         ))
+    );
+}
+
+#[test]
+fn transient_grpc_admission_is_retryable_without_reclassifying_hard_limits() {
+    assert_eq!(
+        super::preauthentication_rate_rejected().code(),
+        Code::Unavailable
+    );
+    for status in [
+        service_status(ServiceFailure::CapacityUnavailable),
+        trace_service_status(ServiceFailure::CapacityUnavailable),
+    ] {
+        assert_eq!(status.code(), Code::Unavailable);
+    }
+    assert_eq!(
+        service_status(ServiceFailure::RequestTooLarge).code(),
+        Code::ResourceExhausted
+    );
+    assert_eq!(
+        service_status(ServiceFailure::Unauthorized).code(),
+        Code::Unauthenticated
     );
 }

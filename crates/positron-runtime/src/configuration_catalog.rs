@@ -7,7 +7,7 @@ use positron_governance::{
     ConfigurationWithPlaintextAuditRequest, ListenerTransportAuditRequest,
 };
 use positron_kernel::{
-    AuditIntent, Catalog, CatalogObject, CatalogProposal, CatalogSecret, FormatEpoch, TransactionId,
+    AuditIntent, Catalog, CatalogObject, CatalogProposal, CatalogSecret, TransactionId,
 };
 use sha2::{Digest, Sha256};
 
@@ -208,8 +208,14 @@ impl InitializedInstance {
                     .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
                 let objects = successor_objects(&basis, transaction, None)
                     .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
-                let proposal = CatalogProposal::new(transaction, FormatEpoch::CATALOG_V1, objects)
-                    .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
+                let proposal = CatalogProposal::new(
+                    transaction,
+                    basis
+                        .format_epoch()
+                        .ok_or(ConfigurationEstablishFailure::Unavailable)?,
+                    objects,
+                )
+                .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
                 let audit = AuditIntent::new(request.encode())
                     .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
                 let committed_generation = catalog
@@ -246,8 +252,14 @@ impl InitializedInstance {
             )),
         )
         .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
-        let proposal = CatalogProposal::new(transaction, FormatEpoch::CATALOG_V1, objects)
-            .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
+        let proposal = CatalogProposal::new(
+            transaction,
+            basis
+                .format_epoch()
+                .ok_or(ConfigurationEstablishFailure::Unavailable)?,
+            objects,
+        )
+        .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
         let audit = AuditIntent::new(request.encode())
             .map_err(|_| ConfigurationEstablishFailure::Unavailable)?;
         let committed_generation = catalog
@@ -354,16 +366,28 @@ impl InitializedInstance {
             }
             let audit = AuditIntent::new(composite.encode())
                 .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
-            let proposal = CatalogProposal::new(transaction, FormatEpoch::CATALOG_V1, objects)
-                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+            let proposal = CatalogProposal::new(
+                transaction,
+                basis.format_epoch().ok_or_else(|| {
+                    BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable)
+                })?,
+                objects,
+            )
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
             let committed_generation = catalog
                 .commit(basis.identity(), proposal, Some(audit))
                 .map(|commit| commit.number())
                 .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
             return exact_catalog_generation(committed_generation, catalog_generation);
         }
-        let proposal = CatalogProposal::new(transaction, FormatEpoch::CATALOG_V1, objects)
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let proposal = CatalogProposal::new(
+            transaction,
+            basis
+                .format_epoch()
+                .ok_or_else(|| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?,
+            objects,
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         let audit = AuditIntent::new(request.encode())
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         let committed_generation = catalog
@@ -408,8 +432,14 @@ impl InitializedInstance {
         let transaction = TransactionId::new(request.transaction_id())
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         let objects = successor_objects(&basis, transaction, None)?;
-        let proposal = CatalogProposal::new(transaction, FormatEpoch::CATALOG_V1, objects)
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+        let proposal = CatalogProposal::new(
+            transaction,
+            basis
+                .format_epoch()
+                .ok_or_else(|| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?,
+            objects,
+        )
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         let audit = AuditIntent::new(request.encode())
             .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
         catalog

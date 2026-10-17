@@ -5,7 +5,6 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
@@ -129,15 +128,24 @@ impl HttpHarness {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let roots = TestRoots::new()?;
         let paths = roots.paths()?;
-        drop(InstanceBootstrap::initialize(
-            &paths,
-            InitializationPlan::non_interactive(),
-        )?);
-        let bearer = InstanceBootstrap::claim(&paths)?
+        drop(
+            InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive()).map_err(
+                |failure| {
+                    format!(
+                        "HTTP fixture initialize root={:?}: {failure:?}",
+                        roots.parent
+                    )
+                },
+            )?,
+        );
+        let bearer = InstanceBootstrap::claim(&paths)
+            .map_err(|failure| format!("HTTP fixture claim root={:?}: {failure:?}", roots.parent))?
             .ingest_secret()
             .ok_or("ingest secret missing")?
             .to_owned();
-        let mut initialized = InstanceBootstrap::reopen(&paths)?;
+        let mut initialized = InstanceBootstrap::reopen(&paths).map_err(|failure| {
+            format!("HTTP fixture reopen root={:?}: {failure:?}", roots.parent)
+        })?;
         initialized.value_limit_profile = profile;
         let initialized = Arc::new(initialized);
         let services = ServiceHandle::new(Arc::clone(&initialized))?;
@@ -342,12 +350,10 @@ struct TestRoots {
 
 impl TestRoots {
     fn new() -> Result<Self, std::io::Error> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(std::io::Error::other)?
-            .as_nanos();
+        static NEXT_ROOT: AtomicUsize = AtomicUsize::new(0);
+        let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
         let parent = PathBuf::from("/tmp").join(format!(
-            "p-http-trace-outcomes-{}-{nonce}",
+            "p-http-trace-outcomes-{}-{sequence}",
             std::process::id()
         ));
         let data = parent.join("data");

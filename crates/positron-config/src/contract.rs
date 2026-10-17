@@ -31,7 +31,7 @@ macro_rules! define_settings {
     };
 }
 
-pub(crate) const SETTING_DEFINITIONS: [SettingDefinition; 103] = define_settings! {
+pub(crate) const SETTING_DEFINITIONS: [SettingDefinition; 104] = define_settings! {
     SchemaVersion | "schema_version" | Integer | "1" | ExactUnsignedInteger(1) | Public | ConfigurationFileOnly | ImmutableAfterInitialization;
     DiagnosticsLogLevel | "diagnostics.log_level" | String | "info" | StringEnumeration(&["error", "warn", "info", "debug"]) | Public | NonSecretOverrides | LiveReloadable;
     RuntimeShutdownGraceSeconds | "runtime.shutdown_grace_seconds" | Integer | "30" | UnsignedIntegerRange(1, 3600) | Public | NonSecretOverrides | RestartRequired;
@@ -135,4 +135,5 @@ pub(crate) const SETTING_DEFINITIONS: [SettingDefinition; 103] = define_settings
     SecurityProviderAccess | "security.provider_access" | ProviderAccess | "disabled" | ProviderAccess(512, 128, 256) | SecretBearing | ProtectedConfigurationFileOnly | RestartRequired;
     ExportDestinations | "export.destination" | ExportDestinations | "disabled" | ExportDestinations(8, 63, 8) | Public | ConfigurationFileOnly | ImmutableAfterInitialization;
     DiagnosticsTraceOtlpGrpcAddress | "diagnostics.trace_otlp_grpc_address" | String | "disabled" | OptionalSocketAddress(64) | Public | ConfigurationFileOnly | RestartRequired;
+    ReleaseInstallation | "release.installation" | ReleaseInstallation | "disabled" | ReleaseInstallation(64, 256) | SecretBearing | ProtectedConfigurationFileOnly | RestartRequired;
 };

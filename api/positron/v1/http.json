@@ -1,5 +1,5 @@
 {
-  "schema_digest": "45230ec5ced4d227cb563a9c9da84460d0a3c2044dd834b28968a7dbcc5d865f",
+  "schema_digest": "864737f586fbeb845c8d167de3569dbf784df08888ace435caccd7c243da855c",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -196,6 +196,48 @@
       {
         "name": "SAFE_DETAIL_FIELD_NOT_RECOGNIZED",
         "number": 6,
+        "deprecated": false
+      }
+    ],
+    "UpgradePhase": [
+      {
+        "name": "UPGRADE_PHASE_UNSPECIFIED",
+        "number": 0,
+        "deprecated": false
+      },
+      {
+        "name": "UPGRADE_PHASE_PREFLIGHT",
+        "number": 1,
+        "deprecated": false
+      },
+      {
+        "name": "UPGRADE_PHASE_DRAINING",
+        "number": 2,
+        "deprecated": false
+      },
+      {
+        "name": "UPGRADE_PHASE_SNAPSHOT",
+        "number": 3,
+        "deprecated": false
+      },
+      {
+        "name": "UPGRADE_PHASE_PUBLISHING",
+        "number": 4,
+        "deprecated": false
+      },
+      {
+        "name": "UPGRADE_PHASE_AWAITING_RESTART",
+        "number": 5,
+        "deprecated": false
+      },
+      {
+        "name": "UPGRADE_PHASE_VERIFYING",
+        "number": 6,
+        "deprecated": false
+      },
+      {
+        "name": "UPGRADE_PHASE_SUCCEEDED",
+        "number": 7,
         "deprecated": false
       }
     ]
@@ -2980,6 +3022,107 @@
       ],
       "responses": {
         "200": "TenantPurgeResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
+      }
+    },
+    {
+      "rpc": "positron.v1.UpgradeService/Manage",
+      "method": "POST",
+      "path": "/v1/upgrades:manage",
+      "request": "UpgradeRequest",
+      "response": "UpgradeResponse",
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "unknown_fields": "reject",
+      "request_fields": [
+        {
+          "proto": "action",
+          "json": "action",
+          "type": "string",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "candidate_manifest",
+          "json": "candidate_manifest",
+          "type": "string",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "repository_id",
+          "json": "repository_id",
+          "type": "string",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "retention_seconds",
+          "json": "retention_seconds",
+          "type": "uint64",
+          "number": 4,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "expected_catalog_generation",
+          "json": "expected_catalog_generation",
+          "type": "uint64",
+          "number": 5,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "idempotency_key",
+          "json": "idempotency_key",
+          "type": "string",
+          "number": 6,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "operation_id",
+          "json": "operation_id",
+          "type": "string",
+          "number": 7,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "response_fields": [
+        {
+          "proto": "catalog_generation",
+          "json": "catalog_generation",
+          "type": "uint64",
+          "number": 1,
+          "deprecated": false
+        },
+        {
+          "proto": "operation",
+          "json": "operation",
+          "type": "UpgradeOperation",
+          "number": 2,
+          "deprecated": false,
+          "optional": true
+        },
+        {
+          "proto": "details",
+          "json": "details",
+          "type": "UpgradeDetails",
+          "number": 3,
+          "deprecated": false,
+          "optional": true
+        }
+      ],
+      "responses": {
+        "200": "UpgradeResponse",
         "400": "invalid_request",
         "401": "authentication_rejected",
         "404": "source_unavailable",

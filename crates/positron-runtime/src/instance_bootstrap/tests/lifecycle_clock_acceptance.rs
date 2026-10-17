@@ -745,6 +745,33 @@ fn uncertain_lifecycle_anchor_cannot_extend_expiring_credentials()
         instance.retention_time.security_time_seconds(),
         Err(LifecycleClockFailure::ClockUncertain)
     );
+    assert!(matches!(
+        instance.attribute_read_only(
+            PresentedCredential::parse(&expiring_secret)?,
+            RequestedIntent::Query,
+            CompatibilityHints::none(),
+        ),
+        Err(crate::ServingDiagnosticsFailure::Unavailable)
+    ));
+    assert!(matches!(
+        instance.attribute_read_only(
+            PresentedCredential::parse(claim.ingest_secret().ok_or("ingest credential")?)?,
+            RequestedIntent::Query,
+            CompatibilityHints::none(),
+        ),
+        Err(crate::ServingDiagnosticsFailure::AuthenticationRejected)
+    ));
+    instance
+        .attribute_read_only(
+            PresentedCredential::parse(
+                claim
+                    .query_secret()
+                    .ok_or("non-expiring query credential")?,
+            )?,
+            RequestedIntent::Query,
+            CompatibilityHints::none(),
+        )
+        .map_err(|failure| format!("uncertain read-only attribution: {failure:?}"))?;
     instance.attribute(
         PresentedCredential::parse(
             claim

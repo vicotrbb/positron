@@ -167,7 +167,7 @@ fn restore_authorized(
     }
     Ok((snapshot, operation))
 }
-pub(super) fn legal_state(operation: DurableOperation) -> bool {
+pub(super) fn legal_state(operation: &DurableOperation) -> bool {
     let Some(parameters) = operation.backup_restore_parameters() else {
         return false;
     };

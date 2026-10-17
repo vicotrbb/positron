@@ -1213,3 +1213,36 @@ fn security_or_storage_drift_is_durably_reported_before_the_process_fences_data_
     ));
     Ok(())
 }
+
+#[test]
+fn configuration_publication_preserves_pinned_catalog_format_across_reopen()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new("configuration-format")?;
+    let paths = roots.bootstrap_paths()?;
+    let instance = Arc::new(InstanceBootstrap::initialize(
+        &paths,
+        positron_runtime::InitializationPlan::non_interactive(),
+    )?);
+    let epoch = instance.catalog_format_epoch()?.ok_or("epoch")?;
+    assert_eq!(epoch, positron_kernel::FormatEpoch::CATALOG_V2);
+    let active = configuration(None)?;
+    let publication = positron_runtime::CatalogConfigurationPublication::new(Arc::clone(&instance));
+    publication.establish(&active)?;
+    assert_eq!(instance.catalog_format_epoch()?, Some(epoch));
+    let candidate = configuration(Some(
+        "schema_version = 1\n[diagnostics]\nlog_level = \"debug\"\n",
+    ))?;
+    publication.record_invalid(&active)?;
+    assert_eq!(instance.catalog_format_epoch()?, Some(epoch));
+    let runtime = RuntimeConfiguration::new(Arc::clone(&active));
+    assert!(matches!(
+        runtime.reload_with(candidate, &publication)?,
+        ConfigurationReloadOutcome::PublishedLive { .. }
+    ));
+    assert_eq!(instance.catalog_format_epoch()?, Some(epoch));
+    drop(publication);
+    drop(instance);
+    let reopened = InstanceBootstrap::reopen(&paths)?;
+    assert_eq!(reopened.catalog_format_epoch()?, Some(epoch));
+    Ok(())
+}

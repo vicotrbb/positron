@@ -18,6 +18,24 @@ mod client {
 }
 pub use client::{MaintenanceServiceClient, MaintenanceServiceClientFailure};
 
+/// Shared closed HTTP failure vocabulary for durable administration clients.
+pub(crate) fn administrative_failure(status: u16, bytes: &[u8]) -> MaintenanceServiceClientFailure {
+    use MaintenanceServiceClientFailure as F;
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok();
+    let code = value.as_ref().and_then(|value| value.get("code")?.as_str());
+    match (status, code) {
+        (400, Some("invalid_request")) => F::InvalidRequest,
+        (401, Some("authentication_rejected")) => F::AuthenticationRejected,
+        (404, Some("source_unavailable")) => F::SourceUnavailable,
+        (404, Some("task_unavailable")) => F::TaskUnavailable,
+        (409, Some("precondition_failed")) => F::PreconditionFailed,
+        (409, Some("idempotency_conflict")) => F::IdempotencyConflict,
+        (503, Some("administration_unavailable")) => F::AdministrationUnavailable,
+        (503, Some("capacity_unavailable")) => F::CapacityUnavailable,
+        _ => F::Transport,
+    }
+}
+
 pub const STATUS_HTTP_PATH: &str = "/v1/maintenance:status";
 pub const EXPLAIN_HTTP_PATH: &str = "/v1/maintenance:explain";
 pub const RUN_HTTP_PATH: &str = "/v1/maintenance:run";

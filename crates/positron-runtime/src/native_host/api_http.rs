@@ -169,14 +169,19 @@ where
             let context = request_context.clone();
             async move {
                 Ok::<_, Infallible>(
-                    match tokio::time::timeout(
-                        context.protection.request_deadline(),
-                        route_request(request, context),
-                    )
-                    .await
+                    match std::time::Instant::now()
+                        .checked_add(context.protection.request_deadline())
                     {
-                        Ok(response) => response,
-                        Err(_) => response_from_native(NativeResponse::empty(408)),
+                        None => response_from_native(NativeResponse::empty(408)),
+                        Some(deadline) => match tokio::time::timeout_at(
+                            tokio::time::Instant::from_std(deadline),
+                            route_request(request, context, deadline),
+                        )
+                        .await
+                        {
+                            Ok(response) => response,
+                            Err(_) => response_from_native(NativeResponse::empty(408)),
+                        },
                     },
                 )
             }
@@ -347,6 +352,7 @@ async fn wait_for_shutdown(admission: Arc<Admission>, cancellation: TaskCancella
 async fn route_request(
     request: Request<Incoming>,
     context: RequestContext,
+    deadline: std::time::Instant,
 ) -> Response<ApiResponseBody> {
     if context.is_http2
         && !context
@@ -392,6 +398,7 @@ async fn route_request(
                 context.trusted_proxy,
                 &context.health,
                 context.services.as_ref(),
+                deadline,
             ),
             Err(response) => response,
         },

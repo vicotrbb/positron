@@ -29,6 +29,8 @@ pub enum DurableOperationKind {
     BackupVerification,
     BackupRestore,
     TenantPurge,
+    /// Declarative signed-release transition, owned by the Upgrade handler.
+    Upgrade,
 }
 
 impl DurableOperationKind {
@@ -41,7 +43,7 @@ impl DurableOperationKind {
             Self::BackupSnapshot => DurableOperationBoundary::BackupRegistryPublished,
             Self::BackupRetention => DurableOperationBoundary::BackupRegistryExpired,
             Self::BackupVerification => DurableOperationBoundary::VerificationReportPublished,
-            Self::BackupRestore | Self::TenantPurge => {
+            Self::BackupRestore | Self::TenantPurge | Self::Upgrade => {
                 DurableOperationBoundary::CatalogGenerationPublished
             },
             Self::SegmentAbandonment => DurableOperationBoundary::CatalogGenerationPublished,
@@ -63,6 +65,7 @@ impl DurableOperationKind {
             Self::BackupVerification => 8,
             Self::BackupRestore => 9,
             Self::TenantPurge => 10,
+            Self::Upgrade => 11,
         }
     }
 
@@ -78,6 +81,7 @@ impl DurableOperationKind {
             8 => Ok(Self::BackupVerification),
             9 => Ok(Self::BackupRestore),
             10 => Ok(Self::TenantPurge),
+            11 => Ok(Self::Upgrade),
             _ => Err(DurableOperationFailure::PersistenceUnavailable),
         }
     }
@@ -170,7 +174,8 @@ impl DurableOperationRequest {
             | DurableOperationKind::BackupSnapshot
             | DurableOperationKind::BackupRetention
             | DurableOperationKind::BackupVerification
-            | DurableOperationKind::BackupRestore => {
+            | DurableOperationKind::BackupRestore
+            | DurableOperationKind::Upgrade => {
                 if applicable_tenant.is_some() {
                     return Err(DurableOperationFailure::InvalidInput);
                 }
@@ -505,6 +510,43 @@ impl DurableOperationRequest {
         })
     }
 
+    pub fn upgrade(
+        principal: PrincipalId,
+        idempotency: AdministrativeIdempotencyKey,
+        instance: [u8; 16],
+        accepted_generation: u64,
+        accepted_at_unix_seconds: u64,
+        intent: [u8; 32],
+    ) -> Result<Self, DurableOperationFailure> {
+        if accepted_generation == 0
+            || accepted_at_unix_seconds == 0
+            || instance.iter().all(|byte| *byte == 0)
+            || intent.iter().all(|byte| *byte == 0)
+        {
+            return Err(DurableOperationFailure::InvalidInput);
+        }
+        let kind = DurableOperationKind::Upgrade;
+        let mut hasher = Sha256::new();
+        hasher.update(REQUEST_DOMAIN);
+        hasher.update(principal.to_bytes());
+        hasher.update(idempotency.to_bytes());
+        hasher.update([kind.code()]);
+        hasher.update(instance);
+        hasher.update(accepted_generation.to_be_bytes());
+        hasher.update(intent);
+        Ok(Self {
+            principal,
+            idempotency,
+            kind,
+            target_identity: Some(instance),
+            applicable_tenant: None,
+            accepted_generation,
+            accepted_at_unix_seconds,
+            operation_request_digest: Some(intent),
+            digest: hasher.finalize().into(),
+        })
+    }
+
     pub fn backup_snapshot(
         principal: PrincipalId,
         idempotency: AdministrativeIdempotencyKey,
@@ -589,7 +631,8 @@ impl DurableOperationRequest {
             | DurableOperationKind::BackupRetention
             | DurableOperationKind::BackupVerification
             | DurableOperationKind::BackupRestore
-            | DurableOperationKind::TenantPurge => None,
+            | DurableOperationKind::TenantPurge
+            | DurableOperationKind::Upgrade => None,
         }
     }
 
@@ -694,6 +737,23 @@ impl DurableOperationRequest {
                         return None;
                     }
                     Self::repository(
+                        self.principal,
+                        self.idempotency,
+                        instance,
+                        self.accepted_generation,
+                        self.accepted_at_unix_seconds,
+                        self.operation_request_digest?,
+                    )
+                    .ok()
+                })
+                .is_some_and(|canonical| canonical == self),
+            DurableOperationKind::Upgrade => self
+                .target_identity
+                .and_then(|instance| {
+                    if self.applicable_tenant.is_some() {
+                        return None;
+                    }
+                    Self::upgrade(
                         self.principal,
                         self.idempotency,
                         instance,
@@ -1218,6 +1278,7 @@ impl DurableQueryBudgetDimension {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DurableOperation {
     pub(super) request: DurableOperationRequest,
+    pub(super) upgrade_progress: Option<super::upgrade_parameters::UpgradeProgress>,
     pub(super) backup_parameters: Option<super::BackupOperationParameters>,
     pub(super) backup_evidence: Option<super::backup_parameters::BackupOperationEvidence>,
     pub(super) key_provider_migration_parameters: Option<super::KeyProviderMigrationParameters>,
@@ -1237,13 +1298,63 @@ pub struct DurableOperation {
 }
 
 impl DurableOperation {
-    pub const fn backup_restore_parameters(self) -> Option<super::BackupRestoreParameters> {
+    /// Same-format recovery may explicitly reinstall the bound source artifact.
+    pub const fn upgrade_rollback_available(&self) -> bool {
+        self.upgrade_snapshot_evidence().is_some()
+            && self.upgrade_rollback_key().is_none()
+            && self.upgrade_parameters().is_some()
+            && matches!(
+                self.boundary,
+                DurableOperationBoundary::CatalogGenerationPublished
+            )
+            && matches!(
+                self.status,
+                DurableOperationStatus::Failed | DurableOperationStatus::Running
+            )
+    }
+    pub const fn upgrade_verification_report(&self) -> Option<[u8; 32]> {
+        match self.upgrade_progress {
+            Some(value) => value.report,
+            None => None,
+        }
+    }
+    pub const fn upgrade_rollback_key(&self) -> Option<AdministrativeIdempotencyKey> {
+        match self.upgrade_progress {
+            Some(value) => value.rollback,
+            None => None,
+        }
+    }
+    pub const fn upgrade_parameters(&self) -> Option<super::UpgradeParameters> {
+        match self.backup_parameters {
+            Some(super::BackupOperationParameters::Upgrade(value)) => Some(value),
+            _ => None,
+        }
+    }
+    pub const fn upgrade_stage(&self) -> Option<super::UpgradeStage> {
+        match self.upgrade_progress {
+            Some(value) => Some(value.stage),
+            None => None,
+        }
+    }
+    pub const fn upgrade_drain_evidence(&self) -> Option<super::UpgradeDrainEvidence> {
+        match self.upgrade_progress {
+            Some(value) => value.drain,
+            None => None,
+        }
+    }
+    pub const fn upgrade_snapshot_evidence(&self) -> Option<super::UpgradeSnapshotEvidence> {
+        match self.upgrade_progress {
+            Some(value) => value.snapshot,
+            None => None,
+        }
+    }
+    pub const fn backup_restore_parameters(&self) -> Option<super::BackupRestoreParameters> {
         match self.backup_parameters {
             Some(super::BackupOperationParameters::Restore(value)) => Some(value),
             _ => None,
         }
     }
-    pub const fn backup_restore_report(self) -> Option<[u8; 32]> {
+    pub const fn backup_restore_report(&self) -> Option<[u8; 32]> {
         match self.backup_evidence {
             Some(super::backup_parameters::BackupOperationEvidence::RestoreReport(value)) => {
                 Some(value)
@@ -1252,14 +1363,14 @@ impl DurableOperation {
         }
     }
     pub const fn backup_verification_parameters(
-        self,
+        &self,
     ) -> Option<super::BackupVerificationParameters> {
         match self.backup_parameters {
             Some(super::BackupOperationParameters::Verification(value)) => Some(value),
             _ => None,
         }
     }
-    pub const fn backup_verification_report(self) -> Option<[u8; 32]> {
+    pub const fn backup_verification_report(&self) -> Option<[u8; 32]> {
         match self.backup_evidence {
             Some(super::backup_parameters::BackupOperationEvidence::VerificationReport(value)) => {
                 Some(value)
@@ -1267,28 +1378,31 @@ impl DurableOperation {
             _ => None,
         }
     }
-    pub const fn backup_parameters(self) -> Option<super::BackupSnapshotParameters> {
+    pub const fn backup_parameters(&self) -> Option<super::BackupSnapshotParameters> {
         match self.backup_parameters {
             Some(super::BackupOperationParameters::Snapshot(value)) => Some(value),
             _ => None,
         }
     }
-    pub const fn backup_retention_parameters(self) -> Option<super::BackupRetentionParameters> {
+    pub const fn backup_retention_parameters(&self) -> Option<super::BackupRetentionParameters> {
         match self.backup_parameters {
             Some(super::BackupOperationParameters::Retention(value)) => Some(value),
             _ => None,
         }
     }
-    pub const fn backup_binding(self) -> Option<super::BackupOperationParameters> {
-        self.backup_parameters
+    pub const fn backup_binding(&self) -> Option<super::BackupOperationParameters> {
+        match self.backup_parameters {
+            Some(super::BackupOperationParameters::Upgrade(_)) => None,
+            value => value,
+        }
     }
-    pub const fn backup_cleanup_receipt(self) -> Option<super::BackupCleanupReceipt> {
+    pub const fn backup_cleanup_receipt(&self) -> Option<super::BackupCleanupReceipt> {
         match self.backup_evidence {
             Some(super::backup_parameters::BackupOperationEvidence::Cleanup(value)) => Some(value),
             _ => None,
         }
     }
-    pub const fn backup_retention_claim(self) -> Option<super::BackupRetentionClaimReceipt> {
+    pub const fn backup_retention_claim(&self) -> Option<super::BackupRetentionClaimReceipt> {
         match self.backup_evidence {
             Some(super::backup_parameters::BackupOperationEvidence::RetentionClaim(value)) => {
                 Some(value)
@@ -1298,86 +1412,86 @@ impl DurableOperation {
     }
     /// Generation of this operation's state, independent of Maintenance's
     /// progress checkpoint publications in the Catalog.
-    pub const fn revision(self) -> u64 {
+    pub const fn revision(&self) -> u64 {
         self.revision
     }
-    pub const fn backup_receipt(self) -> Option<super::BackupOperationReceipt> {
+    pub const fn backup_receipt(&self) -> Option<super::BackupOperationReceipt> {
         match self.backup_evidence {
             Some(super::backup_parameters::BackupOperationEvidence::Snapshot(value)) => Some(value),
             _ => None,
         }
     }
-    pub const fn repository_policy(self) -> Option<positron_domain::repository::RepositoryPolicy> {
+    pub const fn repository_policy(&self) -> Option<positron_domain::repository::RepositoryPolicy> {
         match self.repository_policy {
             Some(receipt) => Some(receipt.policy()),
             None => None,
         }
     }
-    pub const fn repository_parameters(self) -> Option<super::RepositoryOperationParameters> {
+    pub const fn repository_parameters(&self) -> Option<super::RepositoryOperationParameters> {
         self.repository_parameters
     }
 
     /// Handler-only non-secret parameters; public wire inspection redacts them.
     pub const fn key_provider_migration_parameters(
-        self,
+        &self,
     ) -> Option<super::KeyProviderMigrationParameters> {
         self.key_provider_migration_parameters
     }
     #[must_use]
-    pub fn operation_id(self) -> OperationId {
+    pub fn operation_id(&self) -> OperationId {
         self.request.operation_id()
     }
     #[must_use]
-    pub const fn kind(self) -> DurableOperationKind {
+    pub const fn kind(&self) -> DurableOperationKind {
         self.request.kind()
     }
     #[must_use]
-    pub const fn status(self) -> DurableOperationStatus {
+    pub const fn status(&self) -> DurableOperationStatus {
         self.status
     }
     #[must_use]
-    pub const fn phase(self) -> DurableOperationPhase {
+    pub const fn phase(&self) -> DurableOperationPhase {
         self.phase
     }
     #[must_use]
-    pub const fn progress_percent(self) -> u8 {
+    pub const fn progress_percent(&self) -> u8 {
         self.progress_percent
     }
     #[must_use]
-    pub const fn retry_guidance(self) -> DurableOperationRetry {
+    pub const fn retry_guidance(&self) -> DurableOperationRetry {
         self.retry
     }
     #[must_use]
-    pub const fn cancellation(self) -> DurableOperationCancellation {
+    pub const fn cancellation(&self) -> DurableOperationCancellation {
         self.cancellation
     }
     #[must_use]
-    pub const fn irreversible_boundary(self) -> DurableOperationBoundary {
+    pub const fn irreversible_boundary(&self) -> DurableOperationBoundary {
         self.boundary
     }
     /// Returns the boundary declared by this operation's handler.
     #[must_use]
-    pub const fn declared_irreversible_boundary(self) -> DurableOperationBoundary {
+    pub const fn declared_irreversible_boundary(&self) -> DurableOperationBoundary {
         self.request.kind().declared_irreversible_boundary()
     }
     #[must_use]
-    pub const fn terminal_error(self) -> Option<DurableOperationTerminalError> {
+    pub const fn terminal_error(&self) -> Option<DurableOperationTerminalError> {
         self.terminal_error
     }
     #[must_use]
-    pub const fn accepted_at_unix_seconds(self) -> u64 {
+    pub const fn accepted_at_unix_seconds(&self) -> u64 {
         self.request.accepted_at_unix_seconds
     }
     #[must_use]
-    pub const fn updated_at_unix_seconds(self) -> u64 {
+    pub const fn updated_at_unix_seconds(&self) -> u64 {
         self.updated_at_unix_seconds
     }
     #[must_use]
-    pub const fn completed_at_unix_seconds(self) -> Option<u64> {
+    pub const fn completed_at_unix_seconds(&self) -> Option<u64> {
         self.completed_at_unix_seconds
     }
     #[must_use]
-    pub const fn lookup_retention(self) -> DurableOperationLookupRetention {
+    pub const fn lookup_retention(&self) -> DurableOperationLookupRetention {
         match self.completed_at_unix_seconds {
             Some(completed) => DurableOperationLookupRetention::UntilUnixSeconds(
                 completed.saturating_add(COMPLETED_LOOKUP_RETENTION_SECONDS),
@@ -1386,28 +1500,29 @@ impl DurableOperation {
         }
     }
     #[must_use]
-    pub const fn earliest_lookup_expiry_unix_seconds(self) -> Option<u64> {
+    pub const fn earliest_lookup_expiry_unix_seconds(&self) -> Option<u64> {
         match self.lookup_retention() {
             DurableOperationLookupRetention::Indefinite => None,
             DurableOperationLookupRetention::UntilUnixSeconds(expiry) => Some(expiry),
         }
     }
     #[must_use]
-    pub const fn request(self) -> DurableOperationRequest {
+    pub const fn request(&self) -> DurableOperationRequest {
         self.request
     }
     #[must_use]
-    pub const fn target_identity(self) -> Option<[u8; 16]> {
+    pub const fn target_identity(&self) -> Option<[u8; 16]> {
         self.request.target_identity()
     }
     #[must_use]
-    pub const fn cancellation_idempotency_key(self) -> Option<AdministrativeIdempotencyKey> {
+    pub const fn cancellation_idempotency_key(&self) -> Option<AdministrativeIdempotencyKey> {
         self.cancellation_idempotency
     }
 
     pub(super) fn accepted(request: DurableOperationRequest) -> Self {
         Self {
             request,
+            upgrade_progress: None,
             backup_parameters: None,
             backup_evidence: None,
             key_provider_migration_parameters: None,
@@ -1631,7 +1746,7 @@ impl DurableOperation {
         Ok(self)
     }
 
-    pub(super) fn is_legal_persisted_state(self) -> bool {
+    pub(super) fn is_legal_persisted_state(&self) -> bool {
         if match self.key_provider_migration_parameters {
             Some(parameters) => {
                 self.request.kind != DurableOperationKind::KeyProviderMigration
@@ -1677,6 +1792,12 @@ impl DurableOperation {
             return false;
         }
 
+        if self.request.kind == DurableOperationKind::Upgrade {
+            return super::upgrade_state::legal_state(self);
+        }
+        if self.upgrade_parameters().is_some() || self.upgrade_progress.is_some() {
+            return false;
+        }
         if self.request.kind == DurableOperationKind::BackupRestore {
             return super::restore_administration::legal_state(self);
         }

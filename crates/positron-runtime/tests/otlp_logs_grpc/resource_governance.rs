@@ -52,7 +52,7 @@ async fn saturated_authenticated_stream_rejects_before_payload_decode_and_releas
         Ok(Ok(_)) => Code::Ok,
         Err(_) => Code::DeadlineExceeded,
     };
-    if competing_code == Code::ResourceExhausted {
+    if competing_code == Code::Unavailable {
         let retry = harness.authorize(tonic::Request::new(otlp_request("capacity-released")))?;
         assert!(
             tokio::time::timeout(Duration::from_secs(2), client.export(retry))
@@ -65,7 +65,7 @@ async fn saturated_authenticated_stream_rejects_before_payload_decode_and_releas
 
     drop(client);
     let shutdown = harness.shutdown(ShutdownTrigger::DeadlineExpired).await?;
-    assert_eq!(competing_code, Code::ResourceExhausted);
+    assert_eq!(competing_code, Code::Unavailable);
     assert_eq!(shutdown, positron_runtime::ExitOutcome::Forced);
     Ok(())
 }

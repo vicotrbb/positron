@@ -15,6 +15,22 @@ pub(in crate::services) fn registered(
     let _gate = services
         .catalog_operation()
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+    registered_under_gate(services, repository, &_gate)
+}
+
+pub(in crate::services) fn registered_under_gate(
+    services: &ServiceHandle,
+    repository: [u8; 16],
+    _gate: &std::sync::MutexGuard<'_, ()>,
+) -> Result<
+    (
+        positron_kernel::CatalogObjectId,
+        positron_backup::BackupRepositoryRegistration,
+        RepositoryOperationParameters,
+        positron_kernel::BackupControlSigner,
+    ),
+    MaintenanceServiceFailure,
+> {
     let catalog = services.open_maintenance_catalog()?;
     let basis = catalog
         .pin()

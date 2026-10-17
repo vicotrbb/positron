@@ -157,7 +157,7 @@ fn generated_schema_covers_every_canonical_setting_with_its_declared_constraints
                     Some(maximum as u64)
                 );
             },
-            ValueDomain::ProviderAccess(_, _, _) => {
+            ValueDomain::ProviderAccess(_, _, _) | ValueDomain::ReleaseInstallation(_, _) => {
                 assert_eq!(
                     property.get("type").and_then(serde_json::Value::as_str),
                     Some("object")

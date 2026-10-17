@@ -42,7 +42,7 @@ async fn trace_grpc_statuses_preserve_retry_classes_and_release_admission()
     )
     .await?
     .expect_err("capacity must be retryable");
-    assert_eq!(capacity.code(), Code::ResourceExhausted);
+    assert_eq!(capacity.code(), Code::Unavailable);
     assert_eq!(
         capacity.message(),
         "OTLP Traces ingest capacity is unavailable"
