@@ -26,6 +26,14 @@ pub struct UpgradeStartupVerification {
     pub(crate) fixture_executable: Option<std::path::PathBuf>,
     #[cfg(test)]
     pub(crate) fixture_version: Option<positron_kernel::release_manifest::ProductVersion>,
+    #[cfg(test)]
+    pub(crate) fixture_clock: std::sync::Mutex<
+        Option<(
+            positron_kernel::RetentionTimeAuthority,
+            positron_kernel::ManualRetentionTime,
+            u64,
+        )>,
+    >,
 }
 impl UpgradeStartupVerification {
     pub fn new(
@@ -43,7 +51,39 @@ impl UpgradeStartupVerification {
             fixture_executable: None,
             #[cfg(test)]
             fixture_version: None,
+            #[cfg(test)]
+            fixture_clock: std::sync::Mutex::new(None),
         })
+    }
+}
+#[cfg(test)]
+impl UpgradeStartupVerification {
+    pub(crate) fn install_fixture_clock(&self, instance: &mut crate::InitializedInstance) {
+        let Some((clock, elapsed, target)) =
+            self.fixture_clock.lock().expect("fixture clock").take()
+        else {
+            return;
+        };
+        let catalog = open(instance).expect("fixture recovered Catalog");
+        clock
+            .recover_catalog_anchor(&catalog.pin().expect("fixture snapshot"))
+            .expect("fixture clock recovery");
+        drop(catalog);
+        let now = clock
+            .governance_now_seconds()
+            .expect("fixture trusted time");
+        elapsed
+            .advance(
+                target
+                    .checked_sub(now)
+                    .expect("fixture target follows recovered time")
+                    .checked_mul(1_000_000_000)
+                    .expect("fixture elapsed range"),
+            )
+            .expect("fixture elapsed advance");
+        instance
+            .install_retention_time_for_test(clock)
+            .expect("fixture clock installation");
     }
 }
 impl UpgradeStartupVerification {

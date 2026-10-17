@@ -33,6 +33,16 @@ impl std::fmt::Display for UpgradeFailure {
 }
 impl std::error::Error for UpgradeFailure {}
 
+/// Cooperate with the native request's existing absolute admission deadline.
+pub(crate) fn check_admission_deadline(
+    deadline: Option<std::time::Instant>,
+) -> Result<(), UpgradeFailure> {
+    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        return Err(UpgradeFailure::CapacityUnavailable);
+    }
+    Ok(())
+}
+
 /// Keep exclusive cold ownership while the trusted elapsed clock catches up.
 /// Reopening instead would restart elapsed time at the same retained anchor.
 pub(crate) fn await_lifecycle_time(

@@ -158,13 +158,23 @@ impl InitializedInstance {
         let identity = self
             .durable_identity()
             .map_err(|_| crate::ServingDiagnosticsFailure::Unavailable)?;
-        let time = self
-            .retention_time
-            .inspect_security_time_seconds()
-            .map_err(|_| crate::ServingDiagnosticsFailure::Unavailable)?;
+        let mut time_unavailable = false;
         identity
-            .attribute_with_expiry_time(&self.key, credential, intent, hints, || Ok(time))
-            .map_err(|_| crate::ServingDiagnosticsFailure::AuthenticationRejected)
+            .attribute_with_expiry_time(&self.key, credential, intent, hints, || {
+                self.retention_time
+                    .inspect_security_time_seconds()
+                    .map_err(|_| {
+                        time_unavailable = true;
+                        positron_governance::AttributionFailure
+                    })
+            })
+            .map_err(|_| {
+                if time_unavailable {
+                    crate::ServingDiagnosticsFailure::Unavailable
+                } else {
+                    crate::ServingDiagnosticsFailure::AuthenticationRejected
+                }
+            })
     }
 
     /// Records the active explicit plaintext listener transport selection through

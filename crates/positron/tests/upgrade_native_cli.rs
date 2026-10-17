@@ -242,6 +242,12 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
     let client =
         RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint: address })?;
     let generation = generation(&client, claim.secret())?;
+    let admission_deadline = Instant::now()
+        + effective
+            .network_listener_profile(positron_config::NetworkListenerRole::Api)
+            .ok_or("API profile")?
+            .connection_protection()
+            .request_deadline();
     let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
         .args([
             "upgrade",
@@ -270,7 +276,32 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
         "{}",
         claim.secret()
     )?;
-    let output = child.wait_with_output()?;
+    let mut output = child.wait_with_output()?;
+    if !output.status.success() && String::from_utf8_lossy(&output.stderr).contains(
+        "transport outcome unknown; inspect the same operation or idempotency key before retrying"
+    ) {
+        // Resolve the ambiguous start through the actual CLI's same-key lookup.
+        // Never resend start or choose a different intent/key.
+        loop {
+            if Instant::now() >= admission_deadline {
+                return Err("ambiguous native acceptance exceeded original API budget".into());
+            }
+            let mut lookup = Command::new(env!("CARGO_BIN_EXE_positron"))
+                .args(["upgrade", "lookup", "--endpoint", &address.to_string(),
+                    "--allow-plaintext", "--credential-stdin", "--idempotency-key", KEY])
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+            writeln!(lookup.stdin.take().ok_or("lookup stdin")?, "{}", claim.secret())?;
+            output = lookup.wait_with_output()?;
+            if output.status.success() { break; }
+            let error = String::from_utf8_lossy(&output.stderr);
+            if !error.contains("upgrade operation unavailable")
+                && !error.contains("transport outcome unknown")
+                && !error.contains("capacity unavailable; retry the same idempotent request") {
+                return Err(format!("native acceptance lookup refused: {error}").into());
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     assert!(
         output.status.success(),
         "CLI refused native Upgrade: {}",
@@ -296,6 +327,12 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
             .manifest_digest(),
         candidate
     );
+    let parameters = pending.upgrade_parameters().ok_or("accepted parameters")?;
+    assert_eq!(
+        parameters.backup().repository().repository_id(),
+        positron_domain::identity::TenantId::parse_canonical(REPOSITORY)?.to_bytes()
+    );
+    assert_eq!(parameters.backup().retention_seconds(), 3600);
     let accepted = process
         .resume_configured_upgrade_drain(&effective)?
         .ok_or("native Drain handoff")?;

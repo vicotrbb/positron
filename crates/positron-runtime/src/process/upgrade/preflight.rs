@@ -5,9 +5,11 @@ pub(crate) fn accept_preflight(
     instance: &crate::InitializedInstance,
     services: &crate::ServiceHandle,
     configuration: &EffectiveConfiguration,
-    actor: AuthorizedContext,
+    bearer: &str,
     request: UpgradeRequest,
+    deadline: Option<std::time::Instant>,
 ) -> Result<DurableOperation, UpgradeFailure> {
+    crate::upgrade::check_admission_deadline(deadline)?;
     // Serialize the bounded physical qualification and intent publication with
     // existing Catalog writers. The caller's generation is never refreshed.
     let _gate = services
@@ -28,7 +30,8 @@ pub(crate) fn accept_preflight(
         .map_err(|_| UpgradeFailure::UnsafeState)?
         .ok_or(UpgradeFailure::UnsafeState)?
         .value();
-    let plan = request.verify_payload(instance, configuration.schema_version(), epoch)?;
+    let plan =
+        request.verify_payload_until(instance, configuration.schema_version(), epoch, deadline)?;
     if crate::services::backup_recovery_readiness_under_gate(services, &_gate).map_err(
         |failure| match failure {
             crate::ServiceFailure::CapacityUnavailable => UpgradeFailure::CapacityUnavailable,
@@ -60,6 +63,14 @@ pub(crate) fn accept_preflight(
         backup,
     )
     .map_err(|_| UpgradeFailure::InvalidRequest)?;
+    let actor = instance
+        .attribute(
+            PresentedCredential::parse(bearer).map_err(|_| UpgradeFailure::AuthenticationFailed)?,
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )
+        .map_err(|_| UpgradeFailure::AuthenticationFailed)?;
+    crate::upgrade::check_admission_deadline(deadline)?;
     let facts = instance
         .doctor_runtime_facts(actor)
         .map_err(|_| UpgradeFailure::UnsafeState)?;
@@ -125,6 +136,7 @@ pub(crate) fn accept_preflight(
         parameters.intent_digest(),
     )
     .map_err(|_| UpgradeFailure::InvalidRequest)?;
+    crate::upgrade::check_admission_deadline(deadline)?;
     let operation = DurableOperationAdministration::accept_upgrade(
         &catalog,
         actor,

@@ -33,6 +33,17 @@ impl UpgradeRequest {
         config_schema: u16,
         current_epoch: u32,
     ) -> Result<UpgradeReleasePlan, UpgradeFailure> {
+        self.verify_payload_until(instance, config_schema, current_epoch, None)
+    }
+
+    pub(crate) fn verify_payload_until(
+        &self,
+        instance: &crate::InitializedInstance,
+        config_schema: u16,
+        current_epoch: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<UpgradeReleasePlan, UpgradeFailure> {
+        super::check_admission_deadline(deadline)?;
         let plan = UpgradeReleasePlan::new(
             self.source.clone(),
             self.target.clone(),
@@ -50,11 +61,12 @@ impl UpgradeRequest {
         #[cfg(test)]
         let executable = self.fixture_executable.as_ref().unwrap_or(&executable);
         let source = UpgradeReleasePlan::native_artifact(&self.source)?;
-        UpgradeArtifactIdentity::measure(
+        UpgradeArtifactIdentity::measure_until(
             instance,
             executable.as_ref(),
             source.sha256,
             source.size,
+            deadline,
         )?;
         // The signed inventory has at most 64 entries, plus this source file.
         let mut measured = Vec::with_capacity(65);
@@ -76,15 +88,17 @@ impl UpgradeRequest {
                     && *digest == expected.sha256
                     && *size == expected.size
             }) {
-                UpgradeArtifactIdentity::measure(
+                UpgradeArtifactIdentity::measure_until(
                     instance,
                     &input.path,
                     expected.sha256,
                     expected.size,
+                    deadline,
                 )?;
                 measured.push((input.path.as_path(), expected.sha256, expected.size));
             }
         }
+        super::check_admission_deadline(deadline)?;
         Ok(plan)
     }
 

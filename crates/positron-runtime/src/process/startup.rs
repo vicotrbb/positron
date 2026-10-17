@@ -88,6 +88,10 @@ impl ApplicationRuntime {
                     if let Some(planner) = configuration.admission_group_planner.as_ref() {
                         candidate.admission_group_planner = Arc::clone(planner);
                     }
+                    #[cfg(test)]
+                    if let Some(verification) = configuration.upgrade_verification.as_ref() {
+                        verification.install_fixture_clock(&mut candidate);
+                    }
                     let candidate = Arc::new(candidate);
                     let upgrade_verification_token = match crate::upgrade::startup::authorize(
                         &candidate,

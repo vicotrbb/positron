@@ -55,7 +55,7 @@ fn upgrade_startup_trusted_time_uses_existing_recovery_budget_without_publicatio
         attempts: Cell::new(0),
     };
     let result = crate::ApplicationRuntime::start(
-        configuration(&prepared)?,
+        configuration(&prepared, ahead - 1)?,
         crate::HostInputs::with_recovery(&listeners, &tasks, &expired),
     );
     assert!(
@@ -65,7 +65,8 @@ fn upgrade_startup_trusted_time_uses_existing_recovery_budget_without_publicatio
                 crate::BootstrapFailureCode::ResourceUnavailable
             ))
         ),
-        "transient trusted-time lag must exhaust recovery, never become a permanent fence"
+        "transient trusted-time lag must exhaust recovery, never become a permanent fence; actual={:?}",
+        result.as_ref().map(|process| process.health().phase())
     );
     assert_eq!(expired.attempts.get(), 1);
     assert!(listeners.bound.borrow().iter().all(|role| matches!(
@@ -102,7 +103,7 @@ fn upgrade_startup_trusted_time_uses_existing_recovery_budget_without_publicatio
         attempts: Cell::new(0),
     };
     let process = crate::ApplicationRuntime::start(
-        configuration(&prepared)?,
+        configuration(&prepared, ahead + 1)?,
         crate::HostInputs::with_recovery(&listeners, &tasks, &resumed),
     )?;
     super::upgrade_end_to_end::verify_readiness(&process, prepared.id, &prepared.query)?;
@@ -114,12 +115,21 @@ fn upgrade_startup_trusted_time_uses_existing_recovery_budget_without_publicatio
 }
 fn configuration(
     prepared: &super::upgrade_end_to_end::DrainedFixture,
+    target_time: u64,
 ) -> Result<crate::ServeConfiguration, Box<dyn std::error::Error>> {
     let mut verification = crate::UpgradeStartupVerification::new(
         prepared.target.clone(),
         Some(prepared.query.clone()),
     )?;
     verification.fixture_version = Some(prepared.version);
+    let epoch = positron_domain::time::UnixNanoseconds::new(
+        i64::try_from(target_time)?
+            .checked_mul(1_000_000_000)
+            .ok_or("fixture epoch")?,
+    );
+    let (clock, elapsed) =
+        positron_kernel::RetentionTimeAuthority::establish_with_manual_elapsed(epoch);
+    verification.fixture_clock = std::sync::Mutex::new(Some((clock, elapsed, target_time)));
     Ok(crate::ServeConfiguration::new(
         prepared.fixture.paths()?,
         crate::InitializationMode::ExistingOnly,

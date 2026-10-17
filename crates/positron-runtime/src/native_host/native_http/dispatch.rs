@@ -459,7 +459,11 @@ fn route_inner<S: Read + Write>(
                 head.content_length,
                 positron_api::upgrade::MAX_REQUEST_BYTES,
             )?;
-            match services.manage_upgrade(&bearer, &body) {
+            let result = match dependencies.upgrade_deadline {
+                Some(deadline) => services.manage_upgrade_until(&bearer, &body, Some(deadline)),
+                None => services.manage_upgrade(&bearer, &body),
+            };
+            match result {
                 Ok(response) => Ok(Response {
                     status: 200,
                     content_type: "application/json",

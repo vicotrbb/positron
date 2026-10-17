@@ -98,13 +98,14 @@ pub(super) fn drain_source_case(
         loopback,
         loopback,
     )?));
+    let foreground = super::super::live_key_fencing::ForegroundTasks(native.as_ref());
     let listeners = crate::process_lifecycle::ObservingListeners::default();
     let tasks = crate::process_lifecycle::ObservingTasks::default();
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly)
             .with_effective_configuration(Arc::clone(&configuration)),
         if http {
-            HostInputs::new(native.as_ref(), native.as_ref())
+            HostInputs::new(native.as_ref(), &foreground)
         } else {
             HostInputs::new(&listeners, &tasks)
         },
@@ -176,9 +177,7 @@ pub(super) fn drain_source_case(
             attempts += 1;
             match client.manage(&administrator, &body) {
                 Ok(response) => break response,
-                Err(positron_api::upgrade::UpgradeServiceClientFailure::PreconditionFailed)
-                    if attempts < 4 && Instant::now() < deadline =>
-                {
+                Err(positron_api::upgrade::UpgradeServiceClientFailure::PreconditionFailed) => {
                     // An operator may resubmit the unchanged intent only after
                     // proving a stale basis, never after an ambiguous acceptance.
                     let services = process.services().ok_or("refresh services")?;
@@ -216,7 +215,41 @@ pub(super) fn drain_source_case(
                         unchanged, logical_request,
                         "logical intent changed during basis refresh"
                     );
+                    if attempts >= 4 || Instant::now() >= deadline {
+                        return Err(format!(
+                            "native admission PreconditionFailed after {attempts} attempts; proven advanced Catalog basis {generation}"
+                        ).into());
+                    }
                     body.expected_catalog_generation = Some(generation);
+                },
+                Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport) => {
+                    // Acceptance is ambiguous: inspect the same key, never send start again.
+                    let lookup = positron_api::upgrade::UpgradeRequest {
+                        action: "lookup".into(),
+                        candidate_manifest: None,
+                        repository_id: None,
+                        retention_seconds: None,
+                        expected_catalog_generation: None,
+                        idempotency_key: body.idempotency_key.clone(),
+                        operation_id: None,
+                    };
+                    break loop {
+                        match client.manage(&administrator, &lookup) {
+                            Ok(response) => {
+                                let details = response.details.as_ref().ok_or("lookup details")?;
+                                assert_eq!(details.target_manifest, super::hex(target.digest()));
+                                assert_eq!(details.repository_id, "2c2c2c2c-2c2c-2c2c-2c2c-2c2c2c2c2c2c");
+                                break response;
+                            },
+                            Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport
+                                | positron_api::upgrade::UpgradeServiceClientFailure::SourceUnavailable
+                                | positron_api::upgrade::UpgradeServiceClientFailure::CapacityUnavailable)
+                                if Instant::now() < deadline => {
+                                    std::thread::sleep(Duration::from_millis(100));
+                                },
+                            Err(error) => return Err(format!("ambiguous admission lookup: {error:?}").into()),
+                        }
+                    };
                 },
                 Err(error) => {
                     return Err(
@@ -226,11 +259,22 @@ pub(super) fn drain_source_case(
             }
         };
         assert!(response.details.is_some());
+        let wire_operation = response.operation.ok_or("native operation")?;
         assert_eq!(
-            response.operation.ok_or("native operation")?.phase,
+            wire_operation.phase,
             positron_api::upgrade::UpgradePhase::Preflight
         );
-        assert!(process.pending_upgrade_operation()?.is_some());
+        let durable = process
+            .pending_upgrade_operation()?
+            .ok_or("durable native intent")?;
+        assert_eq!(
+            wire_operation.id,
+            super::hex(durable.operation_id().to_bytes())
+        );
+        let parameters = durable.upgrade_parameters().ok_or("durable parameters")?;
+        assert_eq!(parameters.target().manifest_digest(), target.digest());
+        assert_eq!(parameters.backup().repository().repository_id(), [44; 16]);
+        assert_eq!(parameters.backup().retention_seconds(), 3600);
         process
             .resume_configured_upgrade_drain(&configuration)?
             .ok_or("native pending token")?

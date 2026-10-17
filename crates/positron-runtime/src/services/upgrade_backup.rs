@@ -259,10 +259,12 @@ pub(in crate::services) mod tests {
                 AdministrativeIdempotencyKey::new([22; 16])?,
             )
             .map_err(|failure| format!("initial backup: {failure:?}"))?;
-        let paused = services.drive_upgrade_backup_operation(
-            first.operation_id(),
-            std::time::Instant::now() + std::time::Duration::from_secs(1),
-        )?;
+        let paused = services
+            .drive_upgrade_backup_operation(
+                first.operation_id(),
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .map_err(|failure| format!("initial one-second backup pause: {failure:?}"))?;
         assert!(!paused.status().is_terminal());
         let task = positron_kernel::MaintenanceTaskId::new(first.operation_id().to_bytes())
             .map_err(|failure| format!("first task: {failure:?}"))?;
@@ -343,12 +345,38 @@ pub(in crate::services) mod tests {
             .map_err(|failure| format!("reopened actor: {failure:?}"))?;
 
         let before_generation = generation(&instance)?;
+        let before_task = instance
+            .maintenance_coordinator()
+            .status(task)
+            .map_err(|failure| format!("cold task before deadline: {failure:?}"))?;
         let delayed = services.drive_upgrade_backup_operation(
             pending.operation_id(),
             std::time::Instant::now() + std::time::Duration::from_secs(1),
-        )?;
-        assert!(delayed == pending);
-        assert_eq!(generation(&instance)?, before_generation);
+        );
+        assert!(
+            matches!(
+                delayed,
+                Err(crate::upgrade::UpgradeFailure::CapacityUnavailable)
+            ),
+            "ineligible cold driver: {delayed:?}"
+        );
+        let catalog = crate::services::tests::schema_maintenance::open_catalog(&instance)?;
+        assert_eq!(
+            positron_governance::DurableOperationAdministration::inspect(
+                &catalog,
+                pending.operation_id()
+            )?,
+            Some(pending)
+        );
+        assert_eq!(
+            instance
+                .maintenance_coordinator()
+                .status(task)
+                .map_err(|failure| format!("cold task after deadline: {failure:?}"))?,
+            before_task
+        );
+        assert_eq!(catalog.pin()?.number(), before_generation);
+        drop(catalog);
         assert!(trusted < pending.updated_at_unix_seconds());
         elapsed.advance(
             pending
@@ -371,7 +399,8 @@ pub(in crate::services) mod tests {
             AdministrativeIdempotencyKey::new([24; 16])?,
             generation(&instance)?,
         )?;
-        let verified = drive_to_terminal(&services, verify.operation_id())?;
+        let verified = drive_to_terminal(&services, verify.operation_id())
+            .map_err(|failure| format!("independent verification driver: {failure:?}"))?;
         assert_eq!(verified.status(), DurableOperationStatus::Succeeded);
         assert!(verified.backup_verification_report().is_some());
         assert_eq!(query_result(&services, &query)?, ["upgrade-preserved"]);

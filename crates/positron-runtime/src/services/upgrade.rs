@@ -17,6 +17,14 @@ impl ServiceHandle {
         bearer: &str,
         body: &[u8],
     ) -> Result<positron_api::upgrade::UpgradeResponse, Failure> {
+        self.manage_upgrade_until(bearer, body, None)
+    }
+    pub(crate) fn manage_upgrade_until(
+        &self,
+        bearer: &str,
+        body: &[u8],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<positron_api::upgrade::UpgradeResponse, Failure> {
         let actor = self.authorize_system_administration(bearer)?;
         let input = positron_api::upgrade::UpgradeRequest::decode(body)
             .map_err(|_| Failure::InvalidRequest)?;
@@ -41,6 +49,7 @@ impl ServiceHandle {
             .map_err(super::provider_migration::operation_failure)
         };
         if input.action == "start" {
+            crate::upgrade::check_admission_deadline(deadline).map_err(upgrade_failure)?;
             {
                 let _gate = self
                     .catalog_operation()
@@ -132,8 +141,9 @@ impl ServiceHandle {
                 &self.instance,
                 self,
                 configuration.effective(),
-                actor,
+                bearer,
                 request,
+                deadline,
             )
             .map_err(upgrade_failure)?;
             let catalog = self.open_maintenance_catalog()?;

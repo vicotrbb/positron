@@ -4,9 +4,9 @@ use crate::upgrade::{UpgradeFailure, UpgradeRequest};
 pub(crate) use preflight::accept_preflight;
 
 use positron_governance::{
-    AuthorizedContext, CompatibilityHints, DurableOperation, DurableOperationAdministration,
-    DurableOperationRequest, OperationId, PresentedCredential, RequestedIntent, UpgradeParameters,
-    UpgradeReleaseIdentity, UpgradeStage,
+    CompatibilityHints, DurableOperation, DurableOperationAdministration, DurableOperationRequest,
+    OperationId, PresentedCredential, RequestedIntent, UpgradeParameters, UpgradeReleaseIdentity,
+    UpgradeStage,
 };
 use positron_kernel::{Catalog, ResourceAmounts, ResourceDimension, WorkClaim};
 
@@ -57,7 +57,7 @@ impl RunningProcess {
         request: UpgradeRequest,
     ) -> Result<AcceptedUpgrade, UpgradeFailure> {
         let instance = self.instance.as_ref().ok_or(UpgradeFailure::UnsafeState)?;
-        let actor = instance
+        instance
             .attribute(
                 PresentedCredential::parse(bearer)
                     .map_err(|_| UpgradeFailure::AuthenticationFailed)?,
@@ -76,7 +76,7 @@ impl RunningProcess {
             .map_err(|_| UpgradeFailure::UnsafeState)?;
         let configuration = configuration.effective();
         let services = self.services.as_ref().ok_or(UpgradeFailure::UnsafeState)?;
-        let operation = accept_preflight(instance, services, configuration, actor, request)?;
+        let operation = accept_preflight(instance, services, configuration, bearer, request, None)?;
         Ok(AcceptedUpgrade { operation })
     }
 

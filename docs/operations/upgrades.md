@@ -64,6 +64,11 @@ positron upgrade start --endpoint HOST:PORT --server-name NAME --trust-file TLS_
 Retain the operation ID. If transport fails, use `positron upgrade lookup` with
 the same idempotency key before issuing another request. Exact replay returns
 the original accepted intent. A changed request under that key is refused.
+A client timeout leaves acceptance unknown: inspect that same key rather than
+starting a second operation. Physical artifact qualification cooperates with the
+configured native API request deadline, including checks between file chunks
+and before intent publication. Deadline exhaustion before publication returns
+retryable capacity unavailability and creates no Upgrade intent.
 
 Use `positron upgrade status --operation-id ID` with the same transport and
 credential options. Status includes exact release, artifact, configuration,
