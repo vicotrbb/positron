@@ -9,7 +9,6 @@ use positron_governance::{
 };
 use positron_kernel::release_manifest::VerifiedReleaseManifest;
 use positron_kernel::{Catalog, TransactionId};
-use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Instant};
 
 mod admission;
@@ -104,9 +103,12 @@ impl OfflineUpgradeSession {
         key: AdministrativeIdempotencyKey,
         revision: u64,
     ) -> Result<DurableOperation, UpgradeFailure> {
-        for stage in [b"snapshot".as_slice(), b"verification".as_slice()] {
+        for key in [
+            Administration::upgrade_snapshot_key(self.id).map_err(persistence)?,
+            Administration::upgrade_snapshot_verification_key(self.id).map_err(persistence)?,
+        ] {
             if self
-                .child(child_key(self.id, stage)?)?
+                .child(key)?
                 .is_some_and(|operation| !operation.status().is_terminal())
             {
                 return Err(UpgradeFailure::SnapshotUnavailable);
@@ -114,15 +116,17 @@ impl OfflineUpgradeSession {
         }
         let catalog = open(&self.instance)?;
         let actor = actor(&catalog, &self.instance, self.id)?;
-        Administration::cancel_upgrade(
-            &catalog,
-            actor,
-            self.id,
-            key,
-            revision,
-            now(&self.instance)?,
-        )
-        .map_err(persistence)
+        let operation = Administration::inspect(&catalog, self.id)
+            .map_err(persistence)?
+            .ok_or(UpgradeFailure::InvalidRequest)?;
+        let time = now(&self.instance)?;
+        if operation.cancellation_idempotency_key() != Some(key)
+            && time < operation.updated_at_unix_seconds()
+        {
+            return Err(UpgradeFailure::SnapshotUnavailable);
+        }
+        Administration::cancel_upgrade(&catalog, actor, self.id, key, revision, time)
+            .map_err(persistence)
     }
     pub fn fail(&mut self) -> Result<DurableOperation, UpgradeFailure> {
         let catalog = open(&self.instance)?;
@@ -263,20 +267,4 @@ fn persistence(failure: positron_governance::DurableOperationFailure) -> Upgrade
         DurableOperationFailure::PersistenceUnavailable
         | DurableOperationFailure::CompletedLookupExpired => UpgradeFailure::PersistenceUnavailable,
     }
-}
-fn child_key(
-    id: OperationId,
-    stage: &[u8],
-) -> Result<AdministrativeIdempotencyKey, UpgradeFailure> {
-    let mut hash = Sha256::new();
-    hash.update(b"positron.upgrade.child.v1\0");
-    hash.update(id.to_bytes());
-    hash.update(stage);
-    let digest = hash.finalize();
-    let bytes = digest
-        .get(..16)
-        .ok_or(UpgradeFailure::UnsafeState)?
-        .try_into()
-        .map_err(|_| UpgradeFailure::UnsafeState)?;
-    AdministrativeIdempotencyKey::new(bytes).map_err(|_| UpgradeFailure::InvalidRequest)
 }

@@ -1016,6 +1016,37 @@ fn retained_objects(
     objects
         .try_reserve(snapshot.object_count())
         .map_err(|_| DurableOperationFailure::CapacityExceeded)?;
+    let mut upgrade_children = Vec::new();
+    upgrade_children
+        .try_reserve(MAX_OPERATION_RECORDS.saturating_mul(2))
+        .map_err(|_| DurableOperationFailure::CapacityExceeded)?;
+    for identity in snapshot.object_identities() {
+        let bytes = snapshot
+            .object(identity)
+            .map_err(map_catalog)?
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        if let Some(operation) = decode_operation(bytes)?
+            && operation.kind() == DurableOperationKind::Upgrade
+            && !operation.status().is_terminal()
+            && operation.upgrade_snapshot_evidence().is_none()
+        {
+            if upgrade_children.len() >= MAX_OPERATION_RECORDS.saturating_mul(2) {
+                return Err(DurableOperationFailure::CapacityExceeded);
+            }
+            upgrade_children.push(
+                DurableOperationAdministration::upgrade_snapshot_key(operation.operation_id())?
+                    .to_bytes(),
+            );
+            upgrade_children.push(
+                DurableOperationAdministration::upgrade_snapshot_verification_key(
+                    operation.operation_id(),
+                )?
+                .to_bytes(),
+            );
+        }
+    }
+    upgrade_children.sort_unstable();
+    upgrade_children.dedup();
     let mut operation_count = 0_usize;
     for identity in snapshot.object_identities() {
         let bytes = snapshot
@@ -1039,7 +1070,10 @@ fn retained_objects(
                     .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?,
                     None => false,
                 };
-                if !live_backup_owner {
+                let live_upgrade_owner = upgrade_children
+                    .binary_search(&operation.request().idempotency_key().to_bytes())
+                    .is_ok();
+                if !live_backup_owner && !live_upgrade_owner {
                     objects.push(
                         CatalogObject::new(encode_expired_binding(operation.request))
                             .map_err(map_catalog)?,

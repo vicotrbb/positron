@@ -125,6 +125,21 @@ fn execute(
         .map_err(|_| "upgrade output unavailable")?;
         return Ok(());
     }
+    if options.action == "status" {
+        let operation = OfflineUpgradeSession::inspect(&paths, &configuration, options.id)
+            .map_err(upgrade_failure)?;
+        writeln!(
+            output,
+            "operation_id={} status={:?} stage={:?} revision={} rollback_available={}",
+            hex(operation.operation_id().to_bytes()),
+            operation.status(),
+            operation.upgrade_stage(),
+            operation.revision(),
+            operation.upgrade_rollback_available()
+        )
+        .map_err(|_| "upgrade output unavailable")?;
+        return Ok(());
+    }
     let mut session = match OfflineUpgradeSession::begin(&paths, &configuration, options.id) {
         Ok(session) => session,
         Err(

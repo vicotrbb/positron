@@ -3,6 +3,18 @@ use super::upgrade_parameters::UpgradeProgress;
 use super::*;
 
 impl DurableOperationAdministration {
+    /// Stable child identity owned by the durable Upgrade lifecycle.
+    pub fn upgrade_snapshot_key(
+        id: OperationId,
+    ) -> Result<AdministrativeIdempotencyKey, DurableOperationFailure> {
+        upgrade_child_key(id, b"snapshot")
+    }
+    /// Stable independent verification identity for an Upgrade snapshot.
+    pub fn upgrade_snapshot_verification_key(
+        id: OperationId,
+    ) -> Result<AdministrativeIdempotencyKey, DurableOperationFailure> {
+        upgrade_child_key(id, b"verification")
+    }
     /// The registration owner authenticates the stable binding in parameters;
     /// Governance requires its exact current Catalog row, as for Backup acceptance.
     pub fn accept_upgrade(
@@ -359,4 +371,21 @@ pub(super) fn update(
         .checked_add(1)
         .ok_or(DurableOperationFailure::CapacityExceeded)?;
     Ok(())
+}
+
+fn upgrade_child_key(
+    id: OperationId,
+    stage: &[u8],
+) -> Result<AdministrativeIdempotencyKey, DurableOperationFailure> {
+    let mut hash = Sha256::new();
+    hash.update(b"positron.upgrade.child.v1\0");
+    hash.update(id.to_bytes());
+    hash.update(stage);
+    let digest = hash.finalize();
+    let bytes = digest
+        .get(..16)
+        .ok_or(DurableOperationFailure::InvalidInput)?
+        .try_into()
+        .map_err(|_| DurableOperationFailure::InvalidInput)?;
+    AdministrativeIdempotencyKey::new(bytes).map_err(|_| DurableOperationFailure::InvalidInput)
 }

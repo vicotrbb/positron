@@ -182,3 +182,6 @@ mod registration_tests;
 
 #[path = "upgrade_publication_tests.rs"]
 mod publication_tests;
+
+#[path = "upgrade_retention_tests.rs"]
+mod retention_tests;

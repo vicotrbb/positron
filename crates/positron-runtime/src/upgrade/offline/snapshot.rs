@@ -9,7 +9,7 @@ impl OfflineUpgradeSession {
         let parameters = operation
             .upgrade_parameters()
             .ok_or(UpgradeFailure::UnsafeState)?;
-        let snapshot_key = child_key(self.id, b"snapshot")?;
+        let snapshot_key = Administration::upgrade_snapshot_key(self.id).map_err(persistence)?;
         let snapshot = match self.child(snapshot_key)? {
             Some(operation) => operation,
             None => {
@@ -47,7 +47,8 @@ impl OfflineUpgradeSession {
         let parameters = operation
             .upgrade_parameters()
             .ok_or(UpgradeFailure::UnsafeState)?;
-        let verification_key = child_key(self.id, b"verification")?;
+        let verification_key =
+            Administration::upgrade_snapshot_verification_key(self.id).map_err(persistence)?;
         let verification = match self.child(verification_key)? {
             Some(operation) => operation,
             None => {

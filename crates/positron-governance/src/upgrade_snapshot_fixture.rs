@@ -11,7 +11,7 @@ pub(super) fn verified_snapshot(
 ) -> Result<(OperationId, OperationId, BackupOperationReceipt), Box<dyn Error>> {
     let request = DurableOperationRequest::backup_snapshot(
         actor.principal_id(),
-        AdministrativeIdempotencyKey::new([14; 16])?,
+        DurableOperationAdministration::upgrade_snapshot_key(id)?,
         instance.to_bytes(),
         catalog.pin()?.number(),
         26,
@@ -61,7 +61,7 @@ pub(super) fn verified_snapshot(
     )?;
     let request = DurableOperationRequest::backup_verification(
         actor.principal_id(),
-        AdministrativeIdempotencyKey::new([15; 16])?,
+        DurableOperationAdministration::upgrade_snapshot_verification_key(id)?,
         instance.to_bytes(),
         catalog.pin()?.number(),
         30,

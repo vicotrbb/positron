@@ -304,16 +304,7 @@ fn verified_snapshot(
     case: &Case,
     id: positron_governance::OperationId,
 ) -> Result<positron_governance::BackupVerificationParameters> {
-    let begin_deadline = Instant::now() + Duration::from_secs(12);
-    let mut session = loop {
-        match OfflineUpgradeSession::begin(&case.paths, &case.effective, id) {
-            Ok(session) => break session,
-            Err(UpgradeFailure::SnapshotUnavailable) if Instant::now() < begin_deadline => {
-                std::thread::sleep(Duration::from_millis(50))
-            },
-            Err(error) => return Err(format!("offline snapshot admission {error:?}").into()),
-        }
-    };
+    let mut session = begin_session(case, id)?;
     let deadline = Instant::now() + Duration::from_secs(180);
     loop {
         let operation = session.advance(deadline)?;
@@ -353,5 +344,68 @@ fn ingest_before_upgrade(process: &RunningProcess, credential: &str) -> Result {
         response.starts_with("HTTP/1.1 200 "),
         "native Log ingestion refused"
     );
+    Ok(())
+}
+
+fn begin_session(
+    case: &Case,
+    id: positron_governance::OperationId,
+) -> Result<OfflineUpgradeSession> {
+    let begin_deadline = Instant::now() + Duration::from_secs(12);
+    let session = loop {
+        match OfflineUpgradeSession::begin(&case.paths, &case.effective, id) {
+            Ok(session) => break session,
+            Err(UpgradeFailure::SnapshotUnavailable) if Instant::now() < begin_deadline => {
+                std::thread::sleep(Duration::from_millis(50))
+            },
+            Err(error) => return Err(format!("offline snapshot admission {error:?}").into()),
+        }
+    };
+    Ok(session)
+}
+
+#[test]
+fn offline_cancelled_snapshot_replays_cancel_and_reads_status_without_publication() -> Result {
+    let Source {
+        process,
+        host,
+        accepted,
+        case,
+    } = source()?;
+    let id = process
+        .begin_upgrade(accepted)?
+        .finish(ShutdownTrigger::FirstSignal)?;
+    drop(host);
+    let mut session = begin_session(&case, id)?;
+    let revision = session.status()?.revision();
+    let cancelled = session.cancel(
+        positron_governance::AdministrativeIdempotencyKey::new([0x82; 16])?,
+        revision,
+    )?;
+    assert_eq!(
+        cancelled.status(),
+        positron_governance::DurableOperationStatus::Cancelled
+    );
+    drop(session);
+    let before = binding(&case)?;
+    for action in ["cancel", "status"] {
+        let replay = command(&case, action, id, (action == "cancel").then_some(revision))?;
+        assert!(
+            replay.status.success(),
+            "terminal {action} refused: {}",
+            String::from_utf8_lossy(&replay.stderr)
+        );
+        let output = String::from_utf8(replay.stdout)?;
+        assert!(output.contains(&format!(
+            "operation_id={} status=Cancelled",
+            hex(id.to_bytes().as_slice())
+        )));
+        assert!(output.contains(&format!("revision={}", cancelled.revision())));
+        assert_eq!(
+            binding(&case)?,
+            before,
+            "terminal {action} must not publish"
+        );
+    }
     Ok(())
 }

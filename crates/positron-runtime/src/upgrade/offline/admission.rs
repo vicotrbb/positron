@@ -2,7 +2,7 @@
 use super::*;
 
 impl OfflineUpgradeSession {
-    /// Cancels accepted pre-Drain intent without fabricating a final marker.
+    /// Cancels accepted pre-Drain intent or replays an authenticated cancellation.
     /// This owner never constructs ordinary services or admits mutable work.
     pub fn cancel_intent(
         paths: &BootstrapPaths,
@@ -22,7 +22,24 @@ impl OfflineUpgradeSession {
             || operation.upgrade_parameters().is_none_or(|parameters| {
                 parameters.configuration_digest() != configuration.audit_binding_digest()
             })
-            || operation.upgrade_drain_evidence().is_some()
+        {
+            return Err(UpgradeFailure::UnsafeState);
+        }
+        let actor = actor(&catalog, &instance, id)?;
+        if operation.status() == DurableOperationStatus::Cancelled
+            && operation.cancellation_idempotency_key() == Some(key)
+        {
+            return Administration::cancel_upgrade(
+                &catalog,
+                actor,
+                id,
+                key,
+                revision,
+                now(&instance)?,
+            )
+            .map_err(persistence);
+        }
+        if operation.upgrade_drain_evidence().is_some()
             || !matches!(
                 operation.upgrade_stage(),
                 Some(UpgradeStage::Preflight | UpgradeStage::Draining)
@@ -30,7 +47,6 @@ impl OfflineUpgradeSession {
         {
             return Err(UpgradeFailure::UnsafeState);
         }
-        let actor = actor(&catalog, &instance, id)?;
         let time = now(&instance)?;
         if time < operation.updated_at_unix_seconds() {
             return Err(UpgradeFailure::SnapshotUnavailable);

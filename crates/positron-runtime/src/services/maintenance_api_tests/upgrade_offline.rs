@@ -239,6 +239,62 @@ fn offline_upgrade_retains_exact_drain_when_trusted_time_is_behind()
     Ok(())
 }
 
+#[test]
+fn offline_upgrade_cold_cancel_reports_retryable_trusted_time_without_publication()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let configuration = configuration(&fixture)?;
+    let (instance, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&instance))?;
+    let id = accept(&instance, &services, &administrator, &configuration)?;
+    let actor = services
+        .authorize_system_administration(&administrator)
+        .map_err(|error| format!("actor: {error:?}"))?;
+    instance
+        .publish_graceful_shutdown(&mut || false)
+        .map_err(|_| "Drain")?;
+    drop(services);
+    drop(instance);
+    let instance = crate::InstanceBootstrap::reopen_configured(&fixture.paths()?, &configuration)?;
+    let record = instance
+        .graceful_shutdown_record()
+        .map_err(|e| format!("record: {e:?}"))?
+        .ok_or("record")?;
+    let catalog = open_catalog(&instance)?;
+    let committed = catalog
+        .confirm_committed_transaction(positron_kernel::TransactionId::new(record.transaction())?)?
+        .ok_or("committed Drain")?;
+    let evidence = positron_governance::UpgradeDrainEvidence::new(
+        committed.snapshot().identity().to_bytes(),
+        record.catalog_generation(),
+        record.marker_identity(),
+        record.transaction(),
+    )?;
+    let future = instance
+        .retention_time
+        .governance_now_seconds()?
+        .checked_add(3600)
+        .ok_or("fixture future")?;
+    DurableOperationAdministration::record_upgrade_drain(&catalog, actor, id, evidence, future)?;
+    let before = catalog.pin()?.identity();
+    drop(catalog);
+    drop(instance);
+    let mut session = OfflineUpgradeSession::begin(&fixture.paths()?, &configuration, id)?;
+    let operation = session.status()?;
+    assert!(matches!(
+        session.cancel(
+            AdministrativeIdempotencyKey::new([83; 16])?,
+            operation.revision()
+        ),
+        Err(UpgradeFailure::SnapshotUnavailable)
+    ));
+    assert_eq!(session.status()?, operation);
+    drop(session);
+    let instance = crate::InstanceBootstrap::reopen_configured(&fixture.paths()?, &configuration)?;
+    assert_eq!(open_catalog(&instance)?.pin()?.identity(), before);
+    Ok(())
+}
+
 pub(super) fn configuration(
     fixture: &Fixture,
 ) -> Result<positron_config::EffectiveConfiguration, Box<dyn std::error::Error>> {

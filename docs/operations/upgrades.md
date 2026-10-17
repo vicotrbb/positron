@@ -117,7 +117,16 @@ and a fresh hexadecimal 16-byte follow-up key:
 positron upgrade offline cancel --config /etc/positron/positron.toml --operation-id ID --idempotency-key HEX --expected-operation-revision REVISION
 ```
 
-Active child Backup work must finish through its owner before cancellation.
+Offline status reads the authenticated operation without starting mutable
+services, including after cancellation or success. An identical cancellation key
+replays the original result without another publication. If conservative trusted
+time precedes the last transition, a new cancellation remains resumable and must
+wait for trusted elapsed time.
+
+Active child Backup work must finish through its owner before cancellation. Completed snapshot and independent
+verification records remain reachable while an active Upgrade still needs to
+attach their receipt. Once the parent durably owns that evidence, ordinary
+completed-operation lookup retention applies to the children.
 Cancellation does not undo a published release.
 
 For a same-format failed target with valid quiescent proof, select the measured
