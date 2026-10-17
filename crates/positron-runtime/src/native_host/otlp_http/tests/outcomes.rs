@@ -57,7 +57,7 @@ fn service_failures_have_stable_protocol_statuses() {
             (
                 ServiceFailure::CapacityUnavailable,
                 429,
-                8,
+                14,
                 "OTLP Logs ingest capacity is unavailable",
                 Some(1),
             ),
@@ -117,7 +117,7 @@ fn service_failures_have_stable_protocol_statuses() {
     let wrapped =
         service_response_with_encoding(ServiceFailure::CapacityUnavailable, ResponseEncoding::Json);
     assert_eq!(wrapped.status(), 429);
-    assert_eq!(decode_status(&wrapped, ResponseEncoding::Json).code, 8);
+    assert_eq!(decode_status(&wrapped, ResponseEncoding::Json).code, 14);
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn retry_permanent_and_ambiguous_outcomes_have_stable_http_statuses() {
             (
                 IngestOutcome::Retryable(IngestFailureCode::CapacityUnavailable),
                 429,
-                8,
+                14,
                 "OTLP Logs ingest capacity is unavailable",
             ),
             (
@@ -205,7 +205,7 @@ fn trace_service_failures_keep_http_retry_classes_and_messages() {
         let capacity =
             trace_service_response_with_encoding(ServiceFailure::CapacityUnavailable, encoding);
         assert_eq!(capacity.status(), 429);
-        assert_eq!(decode_status(&capacity, encoding).code, 8);
+        assert_eq!(decode_status(&capacity, encoding).code, 14);
         assert_eq!(capacity.retry_after_seconds(), Some(1));
 
         let malformed =
@@ -226,7 +226,7 @@ fn trace_retry_permanent_and_ambiguous_outcomes_keep_their_public_classes() {
             (
                 IngestOutcome::Retryable(IngestFailureCode::CapacityUnavailable),
                 429,
-                8,
+                14,
                 "OTLP Traces ingest capacity is unavailable",
                 Some(1),
             ),

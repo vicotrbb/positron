@@ -36,7 +36,7 @@ fn live_http_trace_export_maps_retry_classes_and_releases_capacity()
             backend.calls()
         );
         assert_eq!(capacity.retry_after_seconds(), Some(1));
-        assert_eq!(decode_status(&capacity, encoding).code, 8);
+        assert_eq!(decode_status(&capacity, encoding).code, 14);
         assert_eq!(harness.governor_snapshot()?.outstanding_total(), baseline);
 
         let retryable = harness.request(
