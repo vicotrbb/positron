@@ -709,22 +709,19 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
         client.update(&administrator_secret, &stale_reduction),
         Err(positron_api::tenant_retention::TenantRetentionServiceClientFailure::InvalidConfirmation)
     );
-    const MAX_FRESH_CONFIRMATION_ATTEMPTS: usize = 3;
-    let mut completed = None;
-    let mut last_catalog_generation = 0;
-    for _ in 0..MAX_FRESH_CONFIRMATION_ATTEMPTS {
-        let refreshed_preview = client.preview(
-            &administrator_secret,
-            &positron_api::tenant_retention::TenantRetentionPreviewRequest::new(
-                tenant.to_canonical_text(),
-                86_400,
-            ),
-        )?;
-        last_catalog_generation = refreshed_preview.catalog_generation;
+    let preview_request = positron_api::tenant_retention::TenantRetentionPreviewRequest::new(
+        tenant.to_canonical_text(),
+        86_400,
+    );
+    let mut refreshed_preview = client.preview(&administrator_secret, &preview_request)?;
+    let expected_retention_generation = refreshed_preview.retention_generation;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let (updated, reduction) = loop {
+        let rejected_generation = refreshed_preview.catalog_generation;
         let reduction = positron_api::tenant_retention::TenantRetentionUpdateRequest::new(
             tenant.to_canonical_text(),
             86_400,
-            refreshed_preview.retention_generation,
+            expected_retention_generation,
             Some(refreshed_preview.confirmation_digest),
             "e1e1e1e1-e1e1-e1e1-e1e1-e1e1e1e1e1e1".to_owned(),
         )
@@ -732,19 +729,29 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
             refreshed_preview.confirmation_evaluated_at_unix_nanos,
         );
         match client.update(&administrator_secret, &reduction) {
-            Ok(updated) => {
-                completed = Some((updated, reduction));
-                break;
-            }
-            Err(positron_api::tenant_retention::TenantRetentionServiceClientFailure::InvalidConfirmation) => {}
+            Ok(updated) => break (updated, reduction),
+            Err(positron_api::tenant_retention::TenantRetentionServiceClientFailure::InvalidConfirmation) => {
+                refreshed_preview = client.preview(&administrator_secret, &preview_request)?;
+                let refreshed_generation = refreshed_preview.catalog_generation;
+                if refreshed_generation <= rejected_generation
+                    || refreshed_preview.retention_generation != expected_retention_generation
+                    || std::time::Instant::now() >= deadline
+                {
+                    return Err(std::io::Error::other(format!(
+                        "retention confirmation refused: rejected catalog generation {rejected_generation}, refreshed catalog generation {refreshed_generation}, expected retention generation {expected_retention_generation}, refreshed retention generation {}",
+                        refreshed_preview.retention_generation,
+                    ))
+                    .into());
+                }
+                // Native maintenance may publish between these TLS requests.
+                // Retry only a proven stale Catalog basis with a fresh preview.
+                eprintln!(
+                    "retention confirmation refresh: rejected catalog generation {rejected_generation}, refreshed catalog generation {refreshed_generation}"
+                );
+            },
             Err(failure) => return Err(Box::new(failure)),
         }
-    }
-    let (updated, reduction) = completed.ok_or_else(|| {
-        std::io::Error::other(format!(
-            "fresh retention confirmation remained invalid after {MAX_FRESH_CONFIRMATION_ATTEMPTS} attempts at catalog generation {last_catalog_generation}"
-        ))
-    })?;
+    };
     assert_eq!(updated.retention_generation, 2);
     assert_eq!(client.update(&administrator_secret, &reduction)?, updated);
     let stale_confirmation = tls_http(

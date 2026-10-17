@@ -86,13 +86,24 @@ fn root_phase_recovers_a_scrub_left_running_by_the_previous_fixture_worker()
             .map(|operation| operation.status.as_str()),
         Some("succeeded")
     );
-    assert!(matches!(
-        initialized
-            .maintenance_coordinator()
-            .status(scrub)
-            .map_err(|failure| format!("recovered scrub status: {failure:?}"))?
-            .phase(),
-        MaintenanceTaskPhase::Queued | MaintenanceTaskPhase::Succeeded
-    ));
+    let drained_scrub = initialized
+        .maintenance_coordinator()
+        .status(scrub)
+        .map_err(|failure| format!("drained scrub status: {failure:?}"))?;
+    // The joined replacement worker may have admitted this scrub again after
+    // completing the root operation. Inspect its state after service recovery.
+    services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let recovered_scrub = services
+        .instance
+        .maintenance_coordinator()
+        .status(scrub)
+        .map_err(|failure| format!("recovered scrub status: {failure:?}"))?;
+    assert!(
+        matches!(
+            recovered_scrub.phase(),
+            MaintenanceTaskPhase::Queued | MaintenanceTaskPhase::Succeeded
+        ),
+        "original scrub did not recover: before={drained_scrub:?}; after={recovered_scrub:?}"
+    );
     Ok(())
 }
