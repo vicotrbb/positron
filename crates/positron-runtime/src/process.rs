@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 
 use crate::health::ProcessState;
 mod provider_configuration;
+pub(crate) mod upgrade;
+mod upgrade_shutdown;
 pub use provider_configuration::native_root_configuration;
+pub use upgrade::{AcceptedUpgrade, DrainingUpgrade};
 #[cfg(test)]
 #[path = "process/candidate_cleanup_tests.rs"]
 mod candidate_cleanup_tests;
@@ -100,6 +103,7 @@ pub struct ServeConfiguration {
     export_destination_resolver: Option<Arc<dyn positron_query::ExportDestinationResolver>>,
     effective_configuration: Option<Arc<EffectiveConfiguration>>,
     admission_group_planner: Option<Arc<dyn positron_ingest::AdmissionGroupPlanner>>,
+    upgrade_verification: Option<Arc<crate::UpgradeStartupVerification>>,
 }
 
 impl ServeConfiguration {
@@ -113,7 +117,17 @@ impl ServeConfiguration {
             export_destination_resolver: None,
             effective_configuration: None,
             admission_group_planner: None,
+            upgrade_verification: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_upgrade_verification(
+        mut self,
+        verification: crate::UpgradeStartupVerification,
+    ) -> Self {
+        self.upgrade_verification = Some(Arc::new(verification));
+        self
     }
 
     /// Sets the configured ceiling for simultaneously registered governor tenant quotas.
@@ -1615,6 +1629,9 @@ impl DrainingProcess {
         if cancelled() {
             return self.0.abort_shutdown();
         }
+        let restricted_upgrade = self.0.services.is_none()
+            && self.0.health().integrity_fence_reason()
+                == Some(IntegrityFenceReason::UnsafeUpgradeState);
         if let Some(services) = self.0.services.as_ref() {
             match services.publish_prepared_shutdown_schema_checkpoint(&mut cancelled) {
                 Ok(()) => {},
@@ -1647,7 +1664,20 @@ impl DrainingProcess {
             },
             None => None,
         };
-        if let Some(instance) = owned_instance.as_ref()
+        let preserve_upgrade_drain =
+            if restricted_upgrade && let Some(instance) = owned_instance.as_ref() {
+                match upgrade_shutdown::preserve_drain(instance) {
+                    Ok(preserve) => preserve,
+                    Err(failure) => {
+                        self.0.cleanup.record_durable_shutdown(failure.code());
+                        return self.0.abort_shutdown();
+                    },
+                }
+            } else {
+                false
+            };
+        if !preserve_upgrade_drain
+            && let Some(instance) = owned_instance.as_ref()
             && let Err(failure) = instance.publish_graceful_shutdown(&mut cancelled)
         {
             match failure {

@@ -68,7 +68,7 @@ fn identity(
     Ok(identity)
 }
 impl ServiceHandle {
-    fn accept_backup(
+    pub(in crate::services) fn accept_backup(
         &self,
         actor: positron_governance::AuthorizedContext,
         parameters: RepositoryOperationParameters,
@@ -168,7 +168,7 @@ impl ServiceHandle {
     }
 }
 impl ServiceHandle {
-    fn accept_backup_snapshot_action(
+    pub(in crate::services) fn accept_backup_snapshot_action(
         &self,
         verification: bool,
         actor: positron_governance::AuthorizedContext,
@@ -368,10 +368,19 @@ fn submit(
     Ok(())
 }
 
-fn readiness(services: &ServiceHandle) -> Result<crate::RecoveryReadiness, ServiceFailure> {
+pub(crate) fn readiness(
+    services: &ServiceHandle,
+) -> Result<crate::RecoveryReadiness, ServiceFailure> {
     // Recovery opens its own Catalog. Hold only the existing Runtime gate,
     // never a second Catalog Writer, across strict owner revalidation.
     let _gate = services.catalog_operation()?;
+    readiness_under_gate(services, &_gate)
+}
+
+pub(crate) fn readiness_under_gate(
+    services: &ServiceHandle,
+    _gate: &std::sync::MutexGuard<'_, ()>,
+) -> Result<crate::RecoveryReadiness, ServiceFailure> {
     services
         .instance
         .checked_backup_key_recovery_readiness()

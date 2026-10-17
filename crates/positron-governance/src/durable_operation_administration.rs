@@ -11,6 +11,20 @@ use positron_kernel::{
 use sha2::{Digest, Sha256};
 
 mod abandonment;
+mod upgrade_administration;
+#[cfg(test)]
+mod upgrade_codec_tests;
+mod upgrade_parameters;
+mod upgrade_publication;
+mod upgrade_replay;
+mod upgrade_rollback;
+mod upgrade_state;
+mod upgrade_verification;
+pub use upgrade_parameters::{
+    UpgradeDrainEvidence, UpgradeParameters, UpgradeReleaseIdentity, UpgradeSnapshotEvidence,
+    UpgradeStage,
+};
+pub use upgrade_publication::{UpgradePublication, UpgradePublicationOutcome};
 mod backup_administration;
 mod backup_parameters;
 mod backup_retention_administration;
@@ -236,7 +250,15 @@ impl DurableOperationAdministration {
         catalog: &Catalog<'_>,
         operation_id: OperationId,
     ) -> Result<Option<DurableOperation>, DurableOperationFailure> {
-        find_by_id(&catalog.pin().map_err(map_catalog)?, operation_id)
+        Self::inspect_snapshot(&catalog.pin().map_err(map_catalog)?, operation_id)
+    }
+
+    /// Inspects one operation in an authenticated generation-pinned read view.
+    pub fn inspect_snapshot(
+        snapshot: &CatalogSnapshot,
+        operation_id: OperationId,
+    ) -> Result<Option<DurableOperation>, DurableOperationFailure> {
+        find_by_id(snapshot, operation_id)
     }
 
     /// Returns one operation only to its system-administration creator.
@@ -724,7 +746,8 @@ fn has_other_cancellation_key(
             continue;
         };
         if operation.operation_id() != operation_id
-            && operation.cancellation_idempotency_key() == Some(idempotency)
+            && (operation.cancellation_idempotency_key() == Some(idempotency)
+                || operation.upgrade_rollback_key() == Some(idempotency))
         {
             return Ok(true);
         }
@@ -804,20 +827,20 @@ fn publish_with_objects(
     additional: Vec<CatalogObject>,
     replacement: Option<CatalogObjectId>,
 ) -> Result<DurableOperation, DurableOperationFailure> {
+    if operation.kind() == DurableOperationKind::Upgrade && !operation.is_legal_persisted_state() {
+        return Err(DurableOperationFailure::InvalidState);
+    }
     let transaction = transition_transaction(operation)?;
     let mut request_digest = transition_request_digest(operation);
     if let Some(previous) = replacement {
-        if additional.len() != 1 || snapshot.object(previous).map_err(map_catalog)?.is_none() {
+        if (operation.kind() != DurableOperationKind::Upgrade && additional.len() != 1)
+            || additional.is_empty()
+            || snapshot.object(previous).map_err(map_catalog)?.is_none()
+        {
             return Err(DurableOperationFailure::InvalidInput);
         }
-        let mut hash = Sha256::new();
-        hash.update(b"positron.backup.registration-publication.v1\0");
-        hash.update(request_digest);
-        hash.update(previous.to_bytes());
-        for object in &additional {
-            hash.update(object.identity().to_bytes());
-        }
-        request_digest = hash.finalize().into();
+        request_digest =
+            publication_request_digest(operation, request_digest, previous.to_bytes(), &additional);
     }
     if let Some(resumed) = resume_prepared_operation(
         catalog,
@@ -870,6 +893,32 @@ fn publish_with_objects(
         },
         Err(failure) => Err(map_catalog(failure)),
     }
+}
+
+fn publication_request_digest(
+    operation: DurableOperation,
+    digest: [u8; 32],
+    previous: [u8; 32],
+    additional: &[CatalogObject],
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    if operation.kind() == DurableOperationKind::Upgrade {
+        hash.update(b"positron.upgrade.publication.v1\0");
+    } else {
+        hash.update(b"positron.backup.registration-publication.v1\0");
+    }
+    hash.update(digest);
+    hash.update(previous);
+    // The prepared successor owns generated verification proof; its logical
+    // Upgrade completion request remains the same after a process crash.
+    if operation.kind() != DurableOperationKind::Upgrade
+        || operation.status() != DurableOperationStatus::Succeeded
+    {
+        for object in additional {
+            hash.update(object.identity().to_bytes());
+        }
+    }
+    hash.finalize().into()
 }
 
 fn resume_prepared_operation(
@@ -926,6 +975,17 @@ fn transition_request_digest(operation: DurableOperation) -> [u8; 32] {
     if let Some(receipt) = operation.backup_retention_claim() {
         hasher.update([3]);
         hasher.update(receipt.registry_generation());
+    }
+    if let Some(mut progress) = operation.upgrade_progress {
+        // The authenticated prepared proposal owns the first native report,
+        // just as credential creation owns its first generated verifier.
+        // A crash must not require re-signing an old Catalog generation.
+        if operation.status() == DurableOperationStatus::Succeeded {
+            progress.report = None;
+        }
+        let mut bytes = Vec::new();
+        progress.encode(&mut bytes);
+        hasher.update(bytes);
     }
     hasher.update([operation.status.code()]);
     hasher.update([operation.phase.code()]);

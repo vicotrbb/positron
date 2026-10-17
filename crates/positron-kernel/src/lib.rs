@@ -99,8 +99,10 @@ mod export_output;
 mod instance_bootstrap_storage;
 mod lifecycle_clock;
 mod maintenance;
+pub mod release_manifest;
 mod resource_governor;
 mod retention_time;
+pub mod upgrade_verification;
 
 pub use catalog::{
     AuditCheckpointSigner, AuditIntent, AuditRetentionAnchor, AuditRetentionTrust, Catalog,
@@ -157,7 +159,8 @@ pub use data_protection::{
     QUERY_CURSOR_MAX_PAYLOAD_BYTES, QueryResultDigest, RecoveryFailure, RecoveryIdentity,
     RecoveryMetadata, RecoveryPassphrase, RecoveryProtection, RecoveryRecipients, RecoverySession,
     RecoveryUnlock, RepositoryUploadAuthenticator, RootAdmissionReceipt, RootPredecessorEnvelope,
-    RootRewrapSession, VerifiedRootActivation,
+    RootRewrapSession, UpgradeVerificationSignature, UpgradeVerificationSigner,
+    VerifiedRootActivation,
 };
 pub use diagnostics::{CrashReadout, CrashRecord, CrashRecordFailure, CrashRecordStore};
 pub use export_output::{

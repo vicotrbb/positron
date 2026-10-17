@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "45230ec5ced4d227cb563a9c9da84460d0a3c2044dd834b28968a7dbcc5d865f"
+    "x-positron-schema-digest": "864737f586fbeb845c8d167de3569dbf784df08888ace435caccd7c243da855c"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1329,6 +1329,38 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TenantPurgeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/upgrades:manage": {
+      "post": {
+        "operationId": "ManageUpgrade",
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Declarative upgrade status or durable operation receipt; binary replacement remains an operator action",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpgradeResponse"
                 }
               }
             }
@@ -4433,6 +4465,164 @@
           },
           "managed_scope": {
             "type": "string"
+          }
+        }
+      },
+      "UpgradeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "candidate_manifest": {
+            "type": "string"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "retention_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expected_catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        }
+      },
+      "UpgradeResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "catalog_generation"
+        ],
+        "properties": {
+          "catalog_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "operation": {
+            "$ref": "#/components/schemas/UpgradeOperation"
+          },
+          "details": {
+            "$ref": "#/components/schemas/UpgradeDetails"
+          }
+        }
+      },
+      "UpgradeDetails": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_version",
+          "target_version",
+          "source_manifest",
+          "target_manifest",
+          "source_artifact",
+          "target_artifact",
+          "configuration",
+          "repository_id",
+          "format_epoch",
+          "rollback_available"
+        ],
+        "properties": {
+          "source_version": {
+            "type": "string"
+          },
+          "target_version": {
+            "type": "string"
+          },
+          "source_manifest": {
+            "type": "string"
+          },
+          "target_manifest": {
+            "type": "string"
+          },
+          "source_artifact": {
+            "type": "string"
+          },
+          "target_artifact": {
+            "type": "string"
+          },
+          "configuration": {
+            "type": "string"
+          },
+          "repository_id": {
+            "type": "string"
+          },
+          "snapshot_manifest": {
+            "type": "string"
+          },
+          "format_epoch": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "rollback_available": {
+            "type": "boolean"
+          }
+        }
+      },
+      "UpgradeOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "phase",
+          "progress_percent",
+          "retry",
+          "cancellation",
+          "irreversible_boundary"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "preflight",
+              "draining",
+              "snapshot",
+              "publishing",
+              "awaiting_restart",
+              "verifying",
+              "succeeded"
+            ]
+          },
+          "progress_percent": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retry": {
+            "type": "string"
+          },
+          "cancellation": {
+            "type": "string",
+            "enum": [
+              "allowed_before_publication",
+              "unavailable_after_publication",
+              "cancelled"
+            ]
+          },
+          "irreversible_boundary": {
+            "type": "string"
+          },
+          "lookup_expires_at_unix_seconds": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       }

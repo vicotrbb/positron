@@ -174,6 +174,14 @@ pub(crate) const SERVICES: &[ServiceSpec] = &[
         }],
     },
     ServiceSpec {
+        name: "UpgradeService",
+        methods: &[MethodSpec {
+            name: "Manage",
+            input: ".positron.v1.UpgradeRequest",
+            output: ".positron.v1.UpgradeResponse",
+        }],
+    },
+    ServiceSpec {
         name: "ApiKeyService",
         methods: API_KEY_METHODS,
     },

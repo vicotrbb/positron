@@ -40,6 +40,8 @@ mod values;
 pub use values::*;
 mod inputs;
 pub use inputs::*;
+mod installed_release;
+pub use installed_release::InstalledReleaseConfiguration;
 mod provider_access;
 pub use provider_access::{AzureManagedIdentitySelector, ProviderAccess, ProviderAuthentication};
 mod effective;
@@ -187,7 +189,7 @@ pub fn setting_for_path(path: &str) -> Option<Setting> {
 
 /// Returns the complete canonical contract in deterministic declaration order.
 #[must_use]
-pub const fn setting_definitions() -> [SettingDefinition; 103] {
+pub const fn setting_definitions() -> [SettingDefinition; 104] {
     contract::SETTING_DEFINITIONS
 }
 
@@ -263,7 +265,8 @@ struct Candidate {
     provider_access: Option<ProviderAccess>,
     key_cache_lease_seconds: u16,
     export_destinations: Vec<ExportDestinationDefinition>,
-    sources: [SettingSource; 103],
+    installed_release: Option<InstalledReleaseConfiguration>,
+    sources: [SettingSource; 104],
 }
 
 impl Candidate {
@@ -520,8 +523,9 @@ impl Candidate {
             )?,
             provider_access: None,
             export_destinations: Vec::new(),
+            installed_release: None,
             key_cache_lease_seconds: parse_key_cache_lease_seconds(key_cache_lease)?,
-            sources: [SettingSource::CompiledDefault; 103],
+            sources: [SettingSource::CompiledDefault; 104],
         })
     }
 
@@ -895,6 +899,7 @@ impl Candidate {
             | Setting::ListenerOtlpHttpTrustedProxyCidrs
             | Setting::ListenerLokiPushTrustedProxyCidrs
             | Setting::SecurityProviderAccess
+            | Setting::ReleaseInstallation
             | Setting::ExportDestinations => {
                 return Err(ConfigurationFailure::new(
                     ConfigurationFailureCode::Malformed,
@@ -1136,6 +1141,7 @@ impl Candidate {
             provider_access: self.provider_access,
             key_cache_lease_seconds: self.key_cache_lease_seconds,
             export_destinations: self.export_destinations,
+            installed_release: self.installed_release,
             sources: self.sources,
         })
     }
@@ -1657,7 +1663,8 @@ fn validate_path(value: &str, setting: Setting) -> Result<(), ConfigurationFailu
     let maximum_bytes = match setting_definition(setting).domain() {
         ValueDomain::AbsolutePath(maximum)
         | ValueDomain::ProtectedAbsolutePath(maximum)
-        | ValueDomain::ProviderAccess(_, _, maximum) => maximum,
+        | ValueDomain::ProviderAccess(_, _, maximum)
+        | ValueDomain::ReleaseInstallation(_, maximum) => maximum,
         _ => {
             return Err(ConfigurationFailure::new(
                 ConfigurationFailureCode::Malformed,
@@ -1917,6 +1924,7 @@ const fn failure_source(setting: Setting) -> FailureSource {
         Setting::SecurityKeyCacheLeaseSeconds => FailureSource::SecurityKeyCacheLeaseSeconds,
         Setting::SecurityLocalKeyFile => FailureSource::SecurityLocalKeyFile,
         Setting::SecurityProviderAccess => FailureSource::SecurityProviderAccess,
+        Setting::ReleaseInstallation => FailureSource::ConfigurationDocument,
         Setting::ExportDestinations => FailureSource::ExportDestinations,
     }
 }

@@ -23,6 +23,7 @@ const RETENTION_PARAMETERS_MAGIC: [u8; 8] = *b"POSBRP01";
 const RETENTION_CLAIM_MAGIC: [u8; 8] = *b"POSBRC01";
 const BACKUP_CLEANUP_MAGIC: [u8; 8] = *b"POSBCE01";
 const BACKUP_RECEIPT_MAGIC: [u8; 8] = *b"POSBKR02";
+const UPGRADE_PARAMETERS_MAGIC: [u8; 8] = *b"POSUPG01";
 const ROOT_PARAMETERS_MAGIC: [u8; 8] = *b"POSKPM01";
 const EXPIRED_OPERATION_BINDING_MAGIC_V1: [u8; 8] = *b"POSOPX01";
 const EXPIRED_OPERATION_BINDING_MAGIC_V2: [u8; 8] = *b"POSOPX02";
@@ -99,6 +100,7 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
                 encoded.extend_from_slice(&RETENTION_PARAMETERS_MAGIC);
                 value.encode(&mut encoded);
             },
+            super::BackupOperationParameters::Upgrade(_) => {},
         }
         match operation.backup_evidence {
             Some(super::backup_parameters::BackupOperationEvidence::RestoreReport(value)) => {
@@ -133,6 +135,16 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
         parameters.encode(&mut encoded);
         if let Some(policy) = operation.repository_policy {
             encoded.extend(policy.encoded_bytes());
+        }
+    }
+    if let Some(parameters) = operation.upgrade_parameters() {
+        encoded.extend_from_slice(&UPGRADE_PARAMETERS_MAGIC);
+        let mut bytes = Vec::new();
+        parameters.encode(&mut bytes);
+        encoded.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        encoded.extend_from_slice(&bytes);
+        if let Some(progress) = operation.upgrade_progress {
+            progress.encode(&mut encoded);
         }
     }
     encoded
@@ -233,6 +245,7 @@ pub(super) fn decode_operation(
     let v4 = encoded.starts_with(&OPERATION_MAGIC);
     // Keeping the recognized outer magic makes old readers reject the newer
     // root-kind layout by their exact-length check, rather than ignore it.
+    let upgrade_parameters_present = v4 && encoded.get(56) == Some(&11);
     let root_parameters = v4 && encoded.get(56) == Some(&4);
     let repository_parameters_present = v4 && encoded.get(56) == Some(&5);
     let backup_parameters_present = v4 && matches!(encoded.get(56), Some(6..=9));
@@ -241,10 +254,12 @@ pub(super) fn decode_operation(
     if !v4 && !v3 && !v2 && !encoded.starts_with(&OPERATION_MAGIC_V1) {
         return Ok(None);
     }
-    if (backup_parameters_present && !(351..=2784).contains(&encoded.len()))
+    if (upgrade_parameters_present && !(500..=3200).contains(&encoded.len()))
+        || (backup_parameters_present && !(351..=2784).contains(&encoded.len()))
         || (repository_parameters_present && !(310..=2428).contains(&encoded.len()))
         || (root_parameters && !(261..=2309).contains(&encoded.len()))
-        || (!root_parameters
+        || (!upgrade_parameters_present
+            && !root_parameters
             && !repository_parameters_present
             && !backup_parameters_present
             && encoded.len()
@@ -399,7 +414,7 @@ pub(super) fn decode_operation(
     } else {
         None
     };
-    let (backup_parameters, backup_evidence) = if backup_parameters_present {
+    let (mut backup_parameters, backup_evidence) = if backup_parameters_present {
         let magic = take_array::<8>(encoded, &mut offset)?;
         let restore = request.kind() == DurableOperationKind::BackupRestore;
         let verification = request.kind() == DurableOperationKind::BackupVerification;
@@ -505,6 +520,32 @@ pub(super) fn decode_operation(
     } else {
         (None, None)
     };
+    let (upgrade_parameters, upgrade_progress) = if upgrade_parameters_present {
+        if take_array::<8>(encoded, &mut offset)? != UPGRADE_PARAMETERS_MAGIC {
+            return Err(DurableOperationFailure::PersistenceUnavailable);
+        }
+        let length = usize::try_from(u32::from_be_bytes(take_array(encoded, &mut offset)?))
+            .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
+        let parameters = super::UpgradeParameters::decode(
+            encoded
+                .get(offset..end)
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
+        )
+        .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?;
+        let progress = super::upgrade_parameters::UpgradeProgress::decode(
+            encoded
+                .get(end..)
+                .ok_or(DurableOperationFailure::PersistenceUnavailable)?,
+        )
+        .map_err(|_| DurableOperationFailure::PersistenceUnavailable)?;
+        offset = encoded.len();
+        (Some(parameters), Some(progress))
+    } else {
+        (None, None)
+    };
     if offset != encoded.len() {
         return Err(DurableOperationFailure::PersistenceUnavailable);
     }
@@ -513,8 +554,12 @@ pub(super) fn decode_operation(
     } else {
         Some(completed)
     };
+    if let Some(parameters) = upgrade_parameters {
+        backup_parameters = Some(super::BackupOperationParameters::Upgrade(parameters));
+    }
     let operation = DurableOperation {
         request,
+        upgrade_progress,
         backup_parameters,
         backup_evidence,
         key_provider_migration_parameters,
@@ -658,6 +703,8 @@ pub(super) fn encode_audit(
 #[doc(hidden)]
 pub fn fuzz_durable_operation_record(data: &[u8]) {
     let _ = decode_operation(data);
+    let _ = super::UpgradePublication::decode(data);
+    let _ = positron_kernel::upgrade_verification::UpgradeVerificationReport::from_bytes(data);
     let _ = decode_expired_binding(data);
     let parameters = if data.first().copied().unwrap_or_default() & 1 == 0 {
         crate::RepositoryOperationParameters::local(

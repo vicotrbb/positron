@@ -56,13 +56,28 @@ impl InstanceBootstrap {
         paths: &BootstrapPaths,
         configuration: positron_kernel::key_provider::NativeRootConfiguration,
     ) -> Result<InitializedInstance, BootstrapFailure> {
-        operation::reopen_with_provider(paths, configuration, DEFAULT_MAX_REGISTERED_TENANTS)
+        operation::reopen_with_provider(paths, configuration, DEFAULT_MAX_REGISTERED_TENANTS, false)
     }
 
     /// Canonical access settings cannot replace the authenticated active route.
     pub fn reopen_configured(
         paths: &BootstrapPaths,
         configuration: &positron_config::EffectiveConfiguration,
+    ) -> Result<InitializedInstance, BootstrapFailure> {
+        Self::reopen_configured_with_access(paths, configuration, false)
+    }
+
+    pub(crate) fn reopen_configured_read_only(
+        paths: &BootstrapPaths,
+        configuration: &positron_config::EffectiveConfiguration,
+    ) -> Result<InitializedInstance, BootstrapFailure> {
+        Self::reopen_configured_with_access(paths, configuration, true)
+    }
+
+    fn reopen_configured_with_access(
+        paths: &BootstrapPaths,
+        configuration: &positron_config::EffectiveConfiguration,
+        read_only: bool,
     ) -> Result<InitializedInstance, BootstrapFailure> {
         let lease = positron_kernel::key_provider::KeyCacheLease::new(
             std::time::Duration::from_secs(u64::from(configuration.key_cache_lease_seconds())),
@@ -78,7 +93,11 @@ impl InstanceBootstrap {
                     &paths,
                     provider,
                     configuration.max_registered_tenants(),
+                    read_only,
                 )
+            },
+            None if read_only => {
+                operation::reopen_read_only(&paths, configuration.max_registered_tenants())
             },
             None => operation::reopen(&paths, configuration.max_registered_tenants()),
         }

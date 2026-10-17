@@ -37,6 +37,7 @@ pub enum IntegrityFenceReason {
     IdentityMismatch = 3,
     KeyEnvelopeMismatch = 4,
     DurabilityAmbiguity = 5,
+    UnsafeUpgradeState = 6,
 }
 
 impl IntegrityFenceReason {
@@ -47,6 +48,7 @@ impl IntegrityFenceReason {
             3 => Some(Self::IdentityMismatch),
             4 => Some(Self::KeyEnvelopeMismatch),
             5 => Some(Self::DurabilityAmbiguity),
+            6 => Some(Self::UnsafeUpgradeState),
             _ => None,
         }
     }
@@ -59,6 +61,7 @@ impl IntegrityFenceReason {
             Self::IdentityMismatch => "instance_identity_mismatch",
             Self::KeyEnvelopeMismatch => "key_envelope_mismatch",
             Self::DurabilityAmbiguity => "durability_frontier_ambiguity",
+            Self::UnsafeUpgradeState => "unsafe_upgrade_state",
         }
     }
 }

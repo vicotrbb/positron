@@ -1,0 +1,7 @@
+schema_version = 1
+[release.installation]
+project_trust_root_file = "/etc/positron/release-root.pub"
+current_manifest_file = "/etc/positron/current.manifest"
+candidate_manifest_file = "/srv/positron/candidate.manifest"
+candidate_artifact_files = ["/srv/positron/positron", "/srv/positron/schema", "/srv/positron/compatibility", "/srv/positron/sbom", "/srv/positron/provenance"]
+query_credential_file = "/run/positron/query-credential"

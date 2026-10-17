@@ -905,3 +905,6 @@ mod restore_purge_tests;
 
 #[path = "tenant_purge_tests.rs"]
 mod tenant_purge_tests;
+
+#[path = "upgrade_operation_tests.rs"]
+mod upgrade_operation_tests;

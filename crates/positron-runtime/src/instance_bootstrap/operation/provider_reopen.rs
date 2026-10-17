@@ -6,8 +6,16 @@ pub(in crate::instance_bootstrap) fn reopen(
     paths: &BootstrapPaths,
     configuration: NativeRootConfiguration,
     max_registered_tenants: u16,
+    read_only: bool,
 ) -> Result<InitializedInstance, BootstrapFailure> {
-    let (volume, access) = acquire(paths)?;
+    let (volume, access) = if read_only {
+        paths
+            .storage
+            .acquire_read_only()
+            .map_err(storage::storage_failure)?
+    } else {
+        acquire(paths)?
+    };
     let layout = access.layout().map_err(storage::storage_failure)?;
     use positron_kernel::BootstrapEntry;
     if layout.unknown_or_unsafe()
@@ -52,6 +60,6 @@ pub(in crate::instance_bootstrap) fn reopen(
         key,
         record,
         authority,
-        false,
+        read_only,
     )
 }
