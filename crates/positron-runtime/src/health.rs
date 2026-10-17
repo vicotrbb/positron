@@ -484,13 +484,11 @@ impl HealthState {
             .ok_or(ServingDiagnosticsFailure::Unavailable)?;
         let credential = PresentedCredential::parse(bearer)
             .map_err(|_| ServingDiagnosticsFailure::AuthenticationRejected)?;
-        let actor = authority
-            .attribute_read_only(
-                credential,
-                RequestedIntent::SystemAdministration,
-                CompatibilityHints::none(),
-            )
-            .map_err(|_| ServingDiagnosticsFailure::AuthenticationRejected)?;
+        let actor = authority.attribute_read_only(
+            credential,
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )?;
         collect(&authority, actor, configuration)
             .map_err(|_| ServingDiagnosticsFailure::Unavailable)
     }
@@ -524,7 +522,12 @@ impl HealthState {
                     RequestedIntent::SystemAdministration,
                     CompatibilityHints::none(),
                 )
-                .map_err(|_| FencedDiagnosticsFailure::AuthenticationRejected)?;
+                .map_err(|failure| match failure {
+                    ServingDiagnosticsFailure::AuthenticationRejected => {
+                        FencedDiagnosticsFailure::AuthenticationRejected
+                    },
+                    ServingDiagnosticsFailure::Unavailable => FencedDiagnosticsFailure::Unavailable,
+                })?;
             let facts = authority
                 .doctor_runtime_facts(actor)
                 .map_err(|_| FencedDiagnosticsFailure::Unavailable)?;
@@ -544,7 +547,12 @@ impl HealthState {
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
             )
-            .map_err(|_| FencedDiagnosticsFailure::AuthenticationRejected)?;
+            .map_err(|failure| match failure {
+                ServingDiagnosticsFailure::AuthenticationRejected => {
+                    FencedDiagnosticsFailure::AuthenticationRejected
+                },
+                ServingDiagnosticsFailure::Unavailable => FencedDiagnosticsFailure::Unavailable,
+            })?;
         let facts = authority
             .doctor_runtime_facts(actor)
             .map_err(|_| FencedDiagnosticsFailure::Unavailable)?;

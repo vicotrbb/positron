@@ -46,7 +46,14 @@ fn contended_resource_observation_preserves_serving_admission_after_control_comp
         endpoint,
     )?);
     let mut process = ApplicationRuntime::start(
-        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly)
+            .with_effective_configuration(std::sync::Arc::new(positron_config::resolve(
+                positron_config::ConfigurationInputs::try_new(
+                    None,
+                    positron_config::EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+                    positron_config::CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+                )?,
+            )?)),
         HostInputs::new(&host, &host),
     )?;
     let health = process.health();
@@ -66,6 +73,18 @@ fn contended_resource_observation_preserves_serving_admission_after_control_comp
             _ => None,
         })
         .ok_or("operations listener")?;
+    let diagnostic = instance._authority.with_control_contention_for_test(|| {
+        health.with_authenticated_serving_diagnostics(claim.secret(), |_, _, _| Ok(()))
+    })?;
+    assert_eq!(diagnostic, Err(ServingDiagnosticsFailure::Unavailable));
+    assert_eq!(
+        health.with_authenticated_serving_diagnostics(claim.secret(), |_, _, _| Ok(())),
+        Ok(())
+    );
+    assert_eq!(
+        health.with_authenticated_serving_diagnostics("invalid-credential", |_, _, _| Ok(())),
+        Err(ServingDiagnosticsFailure::AuthenticationRejected)
+    );
     let unavailable = instance
         ._authority
         .with_control_contention_for_test(|| status(operations, claim.secret()))??;
@@ -186,7 +205,22 @@ fn contended_resource_observation_preserves_serving_admission_after_control_comp
         "only the two acknowledged requests are durable"
     );
     drop(services);
+    health.request_integrity_fence(IntegrityFenceReason::UnreliableOwnership);
+    assert!(process.apply_pending_integrity_fence());
+    let unavailable = instance
+        ._authority
+        .with_control_contention_for_test(|| status(operations, claim.secret()))??;
+    assert!(
+        unavailable.starts_with("HTTP/1.1 503 "),
+        "fenced authority unavailable: {unavailable}"
+    );
     drop(instance);
+    let reopened = status(operations, claim.secret())?;
+    assert!(
+        reopened.starts_with("HTTP/1.1 200 "),
+        "reopened fenced inspection: {reopened}"
+    );
+    assert!(status(operations, "invalid-credential")?.starts_with("HTTP/1.1 401 "));
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         ExitOutcome::Graceful
