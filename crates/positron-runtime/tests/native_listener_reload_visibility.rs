@@ -628,9 +628,16 @@ fn retirement_failure(
     drop(volume);
     let reopened = InstanceBootstrap::reopen(&paths)?;
     drop(reopened);
-    assert_eq!(
+    // Bounded retirement may preserve a Fenced primary disposition even
+    // after reconciliation confirms termination and releases mutable authority.
+    assert!(matches!(
         process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
+        positron_runtime::ExitOutcome::Graceful | positron_runtime::ExitOutcome::Fenced
+    ));
+    drop(
+        roots
+            .acquire_volume_again()
+            .map_err(|failure| format!("post-shutdown mutable ownership: {failure:?}"))?,
     );
     Ok(())
 }
