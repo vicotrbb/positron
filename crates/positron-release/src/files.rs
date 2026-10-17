@@ -1,4 +1,6 @@
 use crate::{FileIdentity, ReleaseError, inventory::token};
+use base64::Engine;
+use der::{Decode, Reader};
 use rustix::fs::{Mode, OFlags};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, path::Path};
@@ -174,29 +176,51 @@ pub(crate) fn contains_secret(bytes: &[u8], canaries: &[Vec<u8>]) -> bool {
         }
     }
     for header in [
-        b"-----BEGIN PRIVATE KEY-----\n".as_slice(),
-        b"-----BEGIN RSA PRIVATE KEY-----\n",
-        b"-----BEGIN EC PRIVATE KEY-----\n",
+        b"-----BEGIN PRIVATE KEY-----".as_slice(),
+        b"-----BEGIN RSA PRIVATE KEY-----",
+        b"-----BEGIN EC PRIVATE KEY-----",
     ] {
         if bytes
             .windows(header.len())
             .enumerate()
             .any(|(index, window)| {
                 window == header
-                    && bytes.get(index + header.len()..).is_some_and(|tail| {
-                        tail.iter()
-                            .take_while(|byte| {
-                                byte.is_ascii_alphanumeric() || b"+/=".contains(byte)
-                            })
-                            .count()
-                            >= 32
-                    })
+                    && bytes
+                        .get(index + header.len()..)
+                        .is_some_and(private_key_prefix)
             })
         {
             return true;
         }
     }
     false
+}
+
+// PKCS#8, PKCS#1 RSA and SEC1 EC all begin with a DER SEQUENCE and
+// INTEGER version 0 or 1. Inspect only this bounded prefix, including for
+// truncated keys: an adjacent public string is not private-key encoding.
+fn private_key_prefix(tail: &[u8]) -> bool {
+    if !tail.starts_with(b"\n") && !tail.starts_with(b"\r\n") {
+        return false;
+    }
+    let encoded: Vec<_> = tail
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .take(32)
+        .collect();
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+        return false;
+    };
+    let Ok(mut reader) = der::SliceReader::new(&decoded) else {
+        return false;
+    };
+    let Ok(header) = der::Header::decode(&mut reader) else {
+        return false;
+    };
+    header.tag == der::Tag::Sequence
+        && u32::from(header.length) >= 3
+        && reader.decode::<u8>().is_ok_and(|version| version <= 1)
 }
 
 /// Read an explicitly named local release input with a strict allocation bound.

@@ -54,3 +54,92 @@ fn inspection_refuses_complete_twenty_character_aws_access_key_ids() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn inspection_accepts_adjacent_public_literals_after_a_pem_marker() {
+    let root = std::env::temp_dir().join(format!(
+        "positron-release-public-literals-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    // Public production constants from publication.rs and positron-config/lib.rs
+    // can be adjacent in a compiled binary; they are not encoded private-key DER.
+    let contents = [
+        "-----BEGIN EC PRIVATE KEY-----\n",
+        "A",
+        "/predicate/buildDefinition/externalParameters/cosign",
+        "/payload",
+        "https",
+    ]
+    .concat();
+    std::fs::write(root.join("public"), &contents).unwrap();
+    assert_eq!(
+        inspect_file(&root, "public", &[]),
+        Ok(FileIdentity::of(contents.as_bytes()))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn inspection_refuses_real_and_truncated_der_private_keys_across_chunks() {
+    use base64::Engine;
+    use der::Reader;
+    use rand::SeedableRng;
+    use rsa::{pkcs1::EncodeRsaPrivateKey, pkcs8::EncodePrivateKey};
+    let mut random = rand::rngs::StdRng::seed_from_u64(113);
+    let rsa = rsa::RsaPrivateKey::new(&mut random, 2048).unwrap();
+    let ec = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+        &ring::rand::SystemRandom::new(),
+    )
+    .unwrap();
+    let mut reader = der::SliceReader::new(ec.as_ref()).unwrap();
+    let sec1 = reader
+        .sequence(|reader| {
+            let _: u8 = reader.decode()?;
+            let _: der::asn1::AnyRef<'_> = reader.decode()?;
+            let inner: der::asn1::OctetStringRef<'_> = reader.decode()?;
+            Ok(inner.as_bytes().to_vec())
+        })
+        .unwrap();
+    let root =
+        std::env::temp_dir().join(format!("positron-release-real-pem-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    for (label, bytes) in [
+        (
+            "PRIVATE KEY",
+            rsa.to_pkcs8_der().unwrap().as_bytes().to_vec(),
+        ),
+        (
+            "RSA PRIVATE KEY",
+            rsa.to_pkcs1_der().unwrap().as_bytes().to_vec(),
+        ),
+        ("EC PRIVATE KEY", sec1),
+        ("PRIVATE KEY", ec.as_ref().to_vec()),
+    ] {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        for truncated in [false, true] {
+            for boundary in [0, 65_520] {
+                let mut contents = vec![b' '; boundary];
+                let newline = if boundary == 0 { "\n" } else { "\r\n" };
+                contents.extend_from_slice(format!("-----BEGIN {label}-----{newline}").as_bytes());
+                if truncated {
+                    contents.extend_from_slice(encoded.get(..32).unwrap().as_bytes());
+                } else {
+                    // Legal PEM wrapping/whitespace must retain detection.
+                    for chunk in encoded.as_bytes().chunks(16) {
+                        contents.extend_from_slice(chunk);
+                        contents.extend_from_slice(newline.as_bytes());
+                    }
+                    contents.extend_from_slice(format!("\n-----END {label}-----\n").as_bytes());
+                }
+                std::fs::write(root.join("private"), contents).unwrap();
+                assert_eq!(
+                    inspect_file(&root, "private", &[]),
+                    Err(ReleaseError::SecretDetected)
+                );
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

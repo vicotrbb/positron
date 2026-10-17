@@ -77,7 +77,12 @@ upstream SBOM schema validation or execute the conformance, dependency, security
 or independent build jobs described by their results.
 
 File measurement streams checksums and screens explicit caller canaries and
-recognized credential forms. Gzip, tar, and ZIP members are scanned after
+recognized credential forms. The supported PEM labels are PRIVATE KEY (PKCS#8),
+RSA PRIVATE KEY (PKCS#1), and EC PRIVATE KEY (SEC1). Screening recognizes
+their bounded base64 DER sequence/version prefix, including truncated keys,
+LF/CRLF, and wrapped payloads; a header followed by arbitrary public text is
+not a private-key encoding. Other private-key encodings still require the
+separately bound packaging scan results. Gzip, tar, and ZIP members are scanned after
 decoding without extracting paths, with limits on depth, bytes, and member count.
 Tar iteration stays raw: GNU/PAX metadata is counted, bounded and screened as
 serialized bytes before any expansion; GNU sparse entries are refused. Metadata
