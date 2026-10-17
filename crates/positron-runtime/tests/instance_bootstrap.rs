@@ -1,5 +1,5 @@
 pub use positron_runtime::{
-    BootstrapFailureCode, BootstrapPaths, BootstrapState, InitializationPlan, InstanceBootstrap,
+    BootstrapFailureCode, BootstrapPaths, BootstrapState, InitializationPlan, InitializedInstance, InstanceBootstrap,
     LocalKeyRotationFailure, LocalKeyRotationPhase, RecoveryReadiness,
 };
 
