@@ -103,7 +103,30 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=$PWD=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
           if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-reproducible"; fi
           cargo build --locked --release -p positron --target-dir "$RUNNER_TEMP/native-target"
-          cmp "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"
+          if ! cmp "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"; then
+            echo "Executable reproducibility mismatch: first 16 byte offsets (decimal) and values (octal)"
+            if cmp -l "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron" | head -n 16; then :; fi
+            for payload in "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"; do
+              echo "Executable: $payload"
+              wc -c < "$payload"
+              if [ "$(uname -s)" = Darwin ]; then
+                shasum -a 256 "$payload"
+                if otool -hv -l "$payload" | head -n 256; then :; else echo "Mach-O metadata diagnostic unavailable"; fi
+                for section in __text __const __unwind_info __eh_frame; do
+                  echo "__TEXT/$section content hash"
+                  if otool -s __TEXT "$section" "$payload" | tail -n +3 | shasum -a 256; then :; else echo "Section diagnostic unavailable"; fi
+                done
+              else
+                sha256sum "$payload"
+                if readelf -h -S -n -W "$payload" | head -n 256; then :; else echo "ELF metadata diagnostic unavailable"; fi
+                for section in .note.gnu.build-id .text .rodata .data .eh_frame; do
+                  echo "$section content hash"
+                  if objdump -s -j "$section" "$payload" | tail -n +5 | sha256sum; then :; else echo "Section diagnostic unavailable"; fi
+                done
+              fi
+            done
+            exit 1
+          fi
           "$RUNNER_TEMP/native-target/release/positron" release archive --target '${{ matrix.target }}' --binary "$RUNNER_TEMP/native-target/release/positron" --out "$RUNNER_TEMP/rebuilt-native.tar.gz"
           cmp "$RUNNER_TEMP/first/native.tar.gz" "$RUNNER_TEMP/rebuilt-native.tar.gz"
       - name: Install immutable non-root archive
