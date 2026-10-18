@@ -169,14 +169,26 @@ project_trust_root_file = "/opt/positron/trust/project-ed25519.pub"
 current_manifest_file = "/opt/positron/releases/current.manifest"
 ```
 
-The root file contains exactly 32 raw Ed25519 public-key bytes. The current
-manifest uses the canonical signed Release Manifest encoding. Paths name
+The root file is an InstalledReleaseTrust v1 JSON document. It pins the Project
+Trust Root, selected delegated target release signer, minimum revocation sequence,
+and root-signed current authorization and revocation snapshot. Raw-key files
+are refused. Native admission and offline continuation use the recovered
+Kernel security clock. The current manifest uses the canonical signed Release
+Manifest encoding. Historical source signatures may use a current root-authorized
+Release or InstalledSource identity; source-only authority never qualifies targets.
+Paths name
 regular files through real directory ancestors; symbolic links and files
 writable by another group or any user are refused.
 
 To authorize one staged candidate, also provide `candidate_manifest_file` and
 `candidate_artifact_files`. The latter lists every artifact file in exact
 signed manifest order, including all required roles and target platforms.
+Set `current_inventory_file` for a current full release manifest containing a
+Release Inventory; the candidate inventory is selected from signed artifact
+order. Both inventories are authenticated and checked against current revocations.
+A candidate must contain a complete published Release Inventory; a native-only
+legacy manifest can authenticate an installed source but cannot be a target.
+Actual admission reloads target authority under the owning instance Clock.
 Remote requests select the configured manifest digest and cannot provide a
 trust root or server file path. This does not download or install releases.
 

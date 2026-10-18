@@ -7,11 +7,12 @@ its own executable.
 
 ## Stage the release
 
-Install the independently trusted Ed25519 Project Trust Root as a 32-byte file.
-Keep that file separate from the instance Integrity Identity and client TLS
-trust files. Obtain the current and candidate signed manifests through your
-release process. Release manifest authoring and distribution tooling belongs
-to issue #113.
+Install an `InstalledReleaseTrust` v1 document containing the independent
+Project Trust Root, selected delegated release signer, positive minimum
+revocation sequence, and root-signed current trust snapshot. Raw 32-byte key
+files are refused. Keep this authority separate from the instance Integrity
+Identity and TLS trust. Obtain the current and candidate signed manifests
+through your release process and follow [offline release verification](release-trust.md).
 
 Configure `[release.installation]` in the canonical configuration document:
 
@@ -19,18 +20,37 @@ Configure `[release.installation]` in the canonical configuration document:
 [release.installation]
 project_trust_root_file = "/etc/positron/release-root.pub"
 current_manifest_file = "/etc/positron/current-release.manifest"
+current_inventory_file = "/etc/positron/current-release.inventory"
 candidate_manifest_file = "/var/lib/positron-staging/candidate.manifest"
 candidate_artifact_files = [
-  "/var/lib/positron-staging/positron",
+  "/var/lib/positron-staging/positron-linux-x86_64",
+  "/var/lib/positron-staging/positron-linux-aarch64",
+  "/var/lib/positron-staging/positron-macos-x86_64",
+  "/var/lib/positron-staging/positron-macos-aarch64",
   "/var/lib/positron-staging/schema",
   "/var/lib/positron-staging/compatibility",
   "/var/lib/positron-staging/sbom",
-  "/var/lib/positron-staging/provenance"
+  "/var/lib/positron-staging/provenance",
+  "/var/lib/positron-staging/inventory"
 ]
 query_credential_file = "/run/positron/query-credential"
 ```
 
-List candidate artifact files in the exact signed inventory order. Use absolute
+List every candidate artifact file in exact canonical manifest order. Full
+release manifests include four native targets and a Release Inventory member.
+The example must follow the exact order and identities in its signed manifest.
+A candidate must include the canonical full Release Inventory role and its
+configured artifact file. All required native registry members must be declared
+published under the exact manifest identity. Omitting the role, staging one
+required member, or supplying malformed inventory bytes refuses target
+acceptance. This metadata check does not require staging every SDK package on
+the native host. The selected executable and each configured core file are
+still measured before intent publication.
+
+The current inventory reference is required when the current manifest includes
+a Release Inventory. A historical native-only source without that member must
+omit the current inventory reference; it cannot qualify as an Upgrade target. Full publication verification remains a
+separate `positron release verify` operation. Use absolute
 paths without symlink components. Protect the Query credential file according
 to the canonical protected-file policy. The credential stays in memory during
 admission and startup verification and is absent from durable Upgrade status.

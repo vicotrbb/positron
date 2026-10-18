@@ -1115,19 +1115,31 @@ It never:
 
 ### 4.18 Release Trust
 
-Release Trust provides one offline verification interface:
+`positron-release` owns offline construction and complete-set verification.
+Kernel owns the canonical Release Manifest bytes and signature primitive. One
+signed inventory reference binds the minimum Release 1 distribution matrix and
+all native registry members; detached publication proofs bind the final manifest
+digest without creating a second authority.
 
-```rust
-fn verify_release(
-    artifacts: ArtifactSet,
-    trust: InstalledProjectTrustRoot,
-) -> ReleaseVerificationReport;
-```
+The installed root-signed trust snapshot authorizes separate release, publisher,
+transparency and native registry identities, with explicit expiry, revocations
+and an independently installed sequence floor. The CLI uses explicit local
+inputs and the host clock; native acceptance uses the owning instance Clock.
+Neither path fetches missing trust or reuses the Instance Integrity Key.
 
-It owns Release Manifest authentication, revocation, checksums, Schema Digest,
-Compatibility Manifest identity, target matching, transparency evidence, and
-Reproducible Payload comparison. It does not reuse the Instance Integrity Key
-as the Project Trust Root.
+Construction measures source/toolchain/artifact identities, SBOM and provenance
+bindings, decoded secret screening and independently supplied functional bytes.
+Full verification additionally checks publication completion and the eligible
+native registry evidence for each surface. It reports the installed trust
+sequence and verification time. SDK registry proofs cannot be replaced by a
+generic workflow assertion or a different URL label.
+
+Upgrade target metadata has a distinct authenticated complete-target type. It
+requires the full signed published inventory under current trust and support
+eligibility, while selected native files are measured by native preflight.
+Authentication of an older installed source remains separate so support age
+cannot prevent its signed upgrade path. The operations contract and supported
+native proof profiles are documented in `docs/operations/release-trust.md`.
 
 ## 5. Real seams and adapters
 
@@ -1452,6 +1464,7 @@ crates/
   positron-api/              generated public interface and transports
   positron-config/           Configuration module
   positron-runtime/          Process Phase, listeners, health, observation
+  positron-release/          full release construction, offline native proof verification
   positron-kernel/           Storage Kernel and private internal modules
   positron-signals/          Signal Store seam plus Log and Trace adapters
   positron-governance/       Identity, Administration, audit intent, operations
@@ -1478,6 +1491,7 @@ flowchart TD
     config["positron-config"]
     runtime["positron-runtime"]
     kernel["positron-kernel"]
+    release["positron-release"]
     darwin_acl["positron-darwin-acl"]
     darwin_system["positron-darwin-system"]
     signals["positron-signals"]
@@ -1486,6 +1500,9 @@ flowchart TD
     ingest["positron-ingest"]
     query["positron-query"]
 
+    app --> release
+    release --> kernel
+    runtime --> release
     app --> runtime
     app --> config
     app --> kernel

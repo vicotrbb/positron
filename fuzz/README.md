@@ -279,3 +279,28 @@ Repository Identity frames, and raw or fixture-authenticated `POSAZU01` recovery
 frames. It performs no network requests and resolves no credentials. Native
 socket behavior and persisted Maintenance admission run in the ordinary Azure
 Repository integration tests.
+
+The release-trust target starts with the complete authenticated native protocol
+fixture, including real SDK package formats, private Sigstore/Go/OpenPGP test
+authorities and a captured native NuGet repository signature. It mutates bundled
+native evidence and re-signs only the project's enclosing manifest-bound
+publication statement, so the native verifiers receive the changed proof.
+Named one-byte seeds exercise each unchanged eligible context; mutated seeds
+exercise parser and signature refusals. Raw inventory/trust decoders and decoded
+archive screening are also exercised. These are local protocol fixtures, not
+registry publication or a released Positron artifact set.
+
+```console
+cargo +nightly-2026-07-20 fuzz run release_trust -- -runs=200 -max_total_time=90 -max_len=65536 -print_final_stats=1
+```
+
+The native package lanes also mutate the real embedded NuGet CMS while maintaining
+ZIP CRCs and its unchanged unsigned payload, Go module contents under its signed
+checksum record, normalized Cargo TOML inside a freshly encoded gzip/tar member,
+and Maven POM XML. Only enclosing project metadata is re-signed; native signatures
+and authenticated checksum records retain their independent verification role.
+
+The tar metadata seeds cover raw GNU/PAX iteration, an oversized declared GNU
+extension, sparse refusal, and extension records exhausting the member budget.
+Extension payloads are streamed through the secret matcher and byte budget;
+automatic metadata/sparse expansion is never used by release scanning.

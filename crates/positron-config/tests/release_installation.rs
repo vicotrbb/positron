@@ -98,3 +98,25 @@ fn independently_signed_artifact_records_may_reference_the_same_operator_owned_f
     let doc = "schema_version=1\n[release.installation]\nproject_trust_root_file='/release/root'\ncurrent_manifest_file='/release/current'\ncandidate_manifest_file='/release/next'\ncandidate_artifact_files=['/release/shared','/release/shared']\n";
     assert!(configuration(doc).is_ok());
 }
+
+#[test]
+fn full_release_startup_can_reference_the_current_authenticated_inventory()
+-> Result<(), Box<dyn std::error::Error>> {
+    let inputs = positron_config::ConfigurationInputs::try_new(
+        Some(
+            "schema_version=1\n[release.installation]\nproject_trust_root_file='/release/trust.json'\ncurrent_manifest_file='/release/current.manifest'\ncurrent_inventory_file='/release/current.inventory'\n",
+        ),
+        positron_config::EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+        positron_config::CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+    )?;
+    assert_eq!(
+        positron_config::resolve(inputs)?
+            .installed_release()
+            .ok_or("release")?
+            .current_inventory_file()
+            .ok_or("inventory")?
+            .as_path(),
+        std::path::Path::new("/release/current.inventory")
+    );
+    Ok(())
+}

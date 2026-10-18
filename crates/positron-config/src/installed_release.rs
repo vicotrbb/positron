@@ -7,6 +7,7 @@ use super::{
 pub struct InstalledReleaseConfiguration {
     project_trust_root_file: ProtectedFileReference,
     current_manifest_file: ProtectedFileReference,
+    current_inventory_file: Option<ProtectedFileReference>,
     candidate_manifest_file: Option<ProtectedFileReference>,
     candidate_artifact_files: Vec<ProtectedFileReference>,
     query_credential_file: Option<ProtectedFileReference>,
@@ -17,6 +18,9 @@ impl InstalledReleaseConfiguration {
     }
     pub fn current_manifest_file(&self) -> &ProtectedFileReference {
         &self.current_manifest_file
+    }
+    pub fn current_inventory_file(&self) -> Option<&ProtectedFileReference> {
+        self.current_inventory_file.as_ref()
     }
     pub fn candidate_manifest_file(&self) -> Option<&ProtectedFileReference> {
         self.candidate_manifest_file.as_ref()
@@ -41,6 +45,7 @@ impl InstalledReleaseConfiguration {
                 key.as_str(),
                 "project_trust_root_file"
                     | "current_manifest_file"
+                    | "current_inventory_file"
                     | "candidate_manifest_file"
                     | "candidate_artifact_files"
                     | "query_credential_file"
@@ -60,6 +65,7 @@ impl InstalledReleaseConfiguration {
         };
         let project_trust_root_file = path("project_trust_root_file")?.ok_or_else(invalid)?;
         let current_manifest_file = path("current_manifest_file")?.ok_or_else(invalid)?;
+        let current_inventory_file = path("current_inventory_file")?;
         let candidate_manifest_file = path("candidate_manifest_file")?;
         let query_credential_file = path("query_credential_file")?;
         let mut candidate_artifact_files = Vec::new();
@@ -87,6 +93,7 @@ impl InstalledReleaseConfiguration {
         Ok(Self {
             project_trust_root_file,
             current_manifest_file,
+            current_inventory_file,
             candidate_manifest_file,
             candidate_artifact_files,
             query_credential_file,
@@ -106,9 +113,10 @@ impl InstalledReleaseConfiguration {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "root={};current={};candidate={};query={};files=[{}]",
+            "root={};current={};inventory={};candidate={};query={};files=[{}]",
             path(Some(&self.project_trust_root_file)),
             path(Some(&self.current_manifest_file)),
+            path(self.current_inventory_file.as_ref()),
             path(self.candidate_manifest_file.as_ref()),
             path(self.query_credential_file.as_ref()),
             files
@@ -125,6 +133,6 @@ pub(crate) fn schema(maximum: usize, path: usize) -> String {
         "{{\"type\":\"string\",\"maxLength\":{path},\"pattern\":\"^/\",\"x-positron-protected-file-reference\":true}}"
     );
     format!(
-        "{{\"type\":\"object\",\"additionalProperties\":false,\"writeOnly\":true,\"required\":[\"project_trust_root_file\",\"current_manifest_file\"],\"properties\":{{\"project_trust_root_file\":{file},\"current_manifest_file\":{file},\"candidate_manifest_file\":{file},\"query_credential_file\":{file},\"candidate_artifact_files\":{{\"type\":\"array\",\"maxItems\":{maximum},\"items\":{file}}}}}}}"
+        "{{\"type\":\"object\",\"additionalProperties\":false,\"writeOnly\":true,\"required\":[\"project_trust_root_file\",\"current_manifest_file\"],\"properties\":{{\"project_trust_root_file\":{file},\"current_manifest_file\":{file},\"current_inventory_file\":{file},\"candidate_manifest_file\":{file},\"query_credential_file\":{file},\"candidate_artifact_files\":{{\"type\":\"array\",\"maxItems\":{maximum},\"items\":{file}}}}}}}"
     )
 }

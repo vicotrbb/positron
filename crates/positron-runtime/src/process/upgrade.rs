@@ -121,8 +121,9 @@ impl RunningProcess {
             return Ok(None);
         };
         let instance = self.instance.as_ref().ok_or(UpgradeFailure::UnsafeState)?;
-        let verification = crate::upgrade::installed_upgrade_startup(configuration)?
-            .ok_or(UpgradeFailure::AuthenticationFailed)?;
+        let verification =
+            crate::upgrade::installed_upgrade_startup(configuration, &instance.retention_time)?
+                .ok_or(UpgradeFailure::AuthenticationFailed)?;
         let gate = self
             .services
             .as_ref()
@@ -290,8 +291,9 @@ mod tests {
             [0x74; 32],
             15,
         )?;
+        let qualified = crate::upgrade::qualified_fixture_target(&target)?;
         let request = UpgradeRequest::new(
-            (source, target),
+            (source, qualified),
             vec![],
             [0x75; 16],
             3600,

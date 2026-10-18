@@ -8,6 +8,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [patch.crates-io]
+sigstore-tsa = { path = "../vendor/sigstore-tsa-0.15.0" }
 azure_identity = { path = "../vendor/azure_identity-1.0.0" }
 azure_core = { path = "../vendor/azure_core-1.0.0" }
 typespec = { path = "../vendor/typespec-1.1.0" }
@@ -18,6 +19,22 @@ reqwest = { path = "../vendor/reqwest-0.12.28" }
 ring = { path = "../vendor/ring-0.17.14" }
 
 [dependencies]
+crc32fast = "=1.5.0"
+positron-release = { path = "../crates/positron-release" }
+pgp = { version = "=0.21.0", default-features = false }
+signed_note = "=0.2.0"
+cms = { version = "=0.2.3", default-features = false }
+x509-cert = "=0.2.5"
+sigstore-verify = { version = "=0.15.0", default-features = false, features = ["aws-lc-rs"] }
+zip = { version = "=9.0.4", default-features = false }
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+base64 = "=0.22.1"
+ring = { version = "=0.17.14", default-features = false }
+rand = "0.8.5"
+sha2 = "0.10.9"
+serde_json = "=1.0.150"
+tar = { version = "=0.4.46", default-features = false }
+rcgen = { version = "=0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }
 age = "=0.11.5"
 libfuzzer-sys = "0.4"
 opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "logs", "trace"] }
@@ -454,6 +471,13 @@ bench = false
 [[bin]]
 name = "upgrade_api"
 path = "fuzz_targets/upgrade_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "release_trust"
+path = "fuzz_targets/release_trust.rs"
 test = false
 doc = false
 bench = false

@@ -203,3 +203,19 @@ fn source_commit_is_an_exact_canonical_git_object_name() {
         assert!(manifest.canonical_bytes().is_err());
     }
 }
+
+#[test]
+fn authoring_uses_the_same_domain_as_offline_authentication()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pair = Ed25519KeyPair::from_seed_unchecked(&[17; 32]).map_err(|_| "key")?;
+    let manifest = fixture();
+    let signature = pair.sign(&manifest.signing_message()?);
+    let signed = SignedReleaseManifest::new(manifest, signature.as_ref().try_into()?)?;
+    signed.verify(&ProjectTrustRoot::new(
+        pair.public_key().as_ref().try_into()?,
+    ))?;
+    signed.verify_signature(&ReleaseSigningPublicKey::new(
+        pair.public_key().as_ref().try_into()?,
+    ))?;
+    Ok(())
+}

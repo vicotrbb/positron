@@ -228,6 +228,90 @@ fn contended_resource_observation_preserves_serving_admission_after_control_comp
     Ok(())
 }
 
+#[test]
+fn optional_trace_export_context_refuses_during_control_and_recovers_afterward()
+-> Result<(), Box<dyn std::error::Error>> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let root =
+        Root(std::env::temp_dir().join(format!("positron-tx-{}-{nonce}", std::process::id())));
+    std::fs::create_dir_all(root.0.join("data"))?;
+    std::fs::create_dir_all(root.0.join("secrets"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            root.0.join("secrets"),
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+    }
+    let paths = BootstrapPaths::new(
+        &root.0.join("data"),
+        &root.0.join("secrets"),
+        positron_kernel::MountQualification::LocalHost,
+    )?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let _claim = InstanceBootstrap::claim(&paths)?;
+    let endpoint = "127.0.0.1:0".parse()?;
+    let host = NativeHost::new(NativeBindings::new(
+        root.0.join("c.sock"),
+        endpoint,
+        endpoint,
+        endpoint,
+        endpoint,
+        endpoint,
+    )?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly)
+            .with_effective_configuration(std::sync::Arc::new(positron_config::resolve(
+                positron_config::ConfigurationInputs::try_new(
+                    Some("schema_version=1\n[diagnostics]\ntrace_otlp_grpc_address=\"127.0.0.1:1\"\n"),
+                    positron_config::EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+                    positron_config::CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+                )?,
+            )?)),
+        HostInputs::new(&host, &host),
+    )?;
+    let health = process.health();
+    let instance = process
+        .instance
+        .as_ref()
+        .ok_or("instance authority")?
+        .clone();
+    let refused = instance
+        ._authority
+        .with_control_contention_for_test(|| health.trace_export_context())?;
+    assert!(
+        refused.is_err(),
+        "optional export cannot bypass active control admission"
+    );
+    assert_eq!(health.phase(), ProcessPhase::Serving);
+    let mut recovered = None;
+    for _ in 0..8 {
+        if let Ok(Some(context)) = health.trace_export_context() {
+            recovered = Some(context);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let (destination, reservation) =
+        recovered.ok_or("optional export admission did not recover")?;
+    assert_eq!(destination, "127.0.0.1:1".parse()?);
+    drop(reservation);
+    assert_eq!(health.phase(), ProcessPhase::Serving);
+    drop(instance);
+    let outcome = process.shutdown(ShutdownTrigger::FirstSignal);
+    assert!(
+        matches!(outcome, ExitOutcome::Graceful | ExitOutcome::Fenced),
+        "optional context cleanup: {outcome:?}"
+    );
+    Ok(())
+}
+
 fn ingest(address: std::net::SocketAddr, credential: &str) -> Result<String, std::io::Error> {
     let body = br#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"43","body":{"stringValue":"after-control-contention"}}]}]}]}"#;
     let mut stream = std::net::TcpStream::connect(address)?;

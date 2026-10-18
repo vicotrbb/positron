@@ -21,7 +21,7 @@ mod source;
 fn native_upgrade_acceptance_and_queued_lookup_preserve_one_intent()
 -> Result<(), Box<dyn std::error::Error>> {
     let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
-    let _drained = source::drain_source_case(true, false, false, false, true)?;
+    let _drained = source::drain_source_case(true, false, false, true)?;
     Ok(())
 }
 
@@ -60,6 +60,12 @@ pub(super) fn publish_offline(drained: &DrainedFixture) -> Result<(), Box<dyn st
             installation.current_manifest_file().as_path(),
             target.signed_bytes(),
         )?;
+        if let Some(path) = installation.current_inventory_file() {
+            fs::write(
+                path.as_path(),
+                crate::upgrade::fixture_metadata::complete_metadata(target.manifest())?.1,
+            )?;
+        }
     }
     Ok(())
 }
@@ -149,6 +155,7 @@ pub(super) fn fixture_release(
         .clone();
     manifest.compatibility.persistent.readable_epochs = vec![epoch];
     manifest.compatibility.persistent.writable_epoch = epoch;
+    manifest = crate::upgrade::fixture_metadata::complete_metadata(&manifest)?.0;
     let key = Ed25519KeyPair::from_seed_unchecked(&[0x91; 32]).map_err(|_| "fixture key")?;
     let mut message = b"positron.release-manifest.v1\0".to_vec();
     message.extend(manifest.canonical_bytes()?);
@@ -188,6 +195,24 @@ fn cold_binding(
 }
 
 #[inline(never)]
+fn successor_release(
+    target: positron_kernel::release_manifest::VerifiedReleaseManifest,
+) -> Result<positron_kernel::release_manifest::VerifiedReleaseManifest, Box<dyn std::error::Error>>
+{
+    use positron_kernel::release_manifest::{ReleaseSigningPublicKey, SignedReleaseManifest};
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    let pair = Ed25519KeyPair::from_seed_unchecked(&[0x92; 32]).map_err(|_| "successor")?;
+    let manifest = target.manifest().clone();
+    Ok(SignedReleaseManifest::new(
+        manifest.clone(),
+        pair.sign(&manifest.signing_message()?)
+            .as_ref()
+            .try_into()?,
+    )?
+    .verify_signature(&ReleaseSigningPublicKey::new(
+        pair.public_key().as_ref().try_into()?,
+    ))?)
+}
 pub(super) fn installed_configuration(
     fixture: &Fixture,
     export: &std::path::Path,
@@ -196,14 +221,49 @@ pub(super) fn installed_configuration(
     executable: &std::path::Path,
     query: Option<&str>,
 ) -> Result<positron_config::EffectiveConfiguration, Box<dyn std::error::Error>> {
-    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use ring::signature::Ed25519KeyPair;
     let root = export.join("project.pub");
     let current = export.join("current.manifest");
     let candidate = export.join("candidate.manifest");
     let key = Ed25519KeyPair::from_seed_unchecked(&[0x91; 32]).map_err(|_| "installed key")?;
-    fs::write(&root, key.public_key().as_ref())?;
+    let mut installed = positron_release::InstalledReleaseTrust::from_bytes(
+        &crate::upgrade::installed_trust(&key)?,
+    )?;
+    let successor =
+        Ed25519KeyPair::from_seed_unchecked(&[0x92; 32]).map_err(|_| "successor key")?;
+    use ring::signature::KeyPair;
+    let successor_public = successor.public_key().as_ref().try_into()?;
+    if positron_kernel::release_manifest::SignedReleaseManifest::from_bytes(target.signed_bytes())?
+        .verify_signature(
+            &positron_kernel::release_manifest::ReleaseSigningPublicKey::new(successor_public),
+        )
+        .is_ok()
+    {
+        let mut snapshot = positron_release::TrustSnapshot::from_bytes(
+            installed.signed_snapshot.get(64..).ok_or("snapshot")?,
+        )?;
+        let mut successor_identity = snapshot.identities.first().ok_or("identity")?.clone();
+        successor_identity.public_key = successor_public;
+        successor_identity.purpose = positron_release::KeyPurpose::Release;
+        for identity in &mut snapshot.identities {
+            if identity.purpose == positron_release::KeyPurpose::Release {
+                identity.purpose = positron_release::KeyPurpose::InstalledSource;
+            }
+        }
+        snapshot.identities.push(successor_identity);
+        installed.release_signer = successor_public;
+        installed.signed_snapshot = snapshot.sign(&key)?;
+    }
+    fs::write(&root, installed.canonical_bytes()?)?;
     fs::write(&current, source.signed_bytes())?;
     fs::write(&candidate, target.signed_bytes())?;
+    let current_inventory = export.join("current.inventory.json");
+    fs::write(
+        &current_inventory,
+        crate::upgrade::fixture_metadata::complete_metadata(source.manifest())?.1,
+    )?;
+    let target_paths =
+        crate::upgrade::fixture_metadata::artifact_paths(target.manifest(), executable, export)?;
     let path = fixture.migration_configuration()?;
     let storage = path.parent().ok_or("config directory")?;
     let mut text = format!(
@@ -215,10 +275,11 @@ pub(super) fn installed_configuration(
         .manifest()
         .artifacts
         .iter()
-        .map(|_| format!("{executable:?}"))
+        .zip(&target_paths)
+        .map(|(_, path)| format!("{path:?}"))
         .collect::<Vec<_>>()
         .join(",");
-    text.push_str(&format!("\n[release.installation]\nproject_trust_root_file={root:?}\ncurrent_manifest_file={current:?}\ncandidate_manifest_file={candidate:?}\ncandidate_artifact_files=[{artifacts}]\n"));
+    text.push_str(&format!("\n[release.installation]\nproject_trust_root_file={root:?}\ncurrent_manifest_file={current:?}\ncurrent_inventory_file={current_inventory:?}\ncandidate_manifest_file={candidate:?}\ncandidate_artifact_files=[{artifacts}]\n"));
     if let Some(query) = query {
         use std::os::unix::fs::PermissionsExt;
         let credential = export.join("query.credential");
@@ -247,19 +308,19 @@ pub(super) struct DrainedFixture {
 }
 #[inline(never)]
 pub(super) fn drain_source(http: bool) -> Result<DrainedFixture, Box<dyn std::error::Error>> {
-    source::drain_source_case(http, false, false, false, false)
+    source::drain_source_case(http, false, false, false)
 }
 
 pub(super) fn drain_suspended_source() -> Result<DrainedFixture, Box<dyn std::error::Error>> {
-    source::drain_source_case(false, true, false, false, false)
+    source::drain_source_case(false, true, false, false)
 }
 
 pub(super) fn crash_source_before_drain() -> Result<DrainedFixture, Box<dyn std::error::Error>> {
-    source::drain_source_case(false, false, true, false, false)
+    source::drain_source_case(false, false, true, false)
 }
 
 pub(super) fn drain_installed_source() -> Result<DrainedFixture, Box<dyn std::error::Error>> {
-    source::drain_source_case(false, false, false, true, false)
+    source::drain_source_case(false, false, false, false)
 }
 
 #[inline(never)]
@@ -323,4 +384,44 @@ fn advance_once(
     deadline: Instant,
 ) -> Result<Box<positron_governance::DurableOperation>, UpgradeFailure> {
     session.advance(deadline).map(Box::new)
+}
+
+fn refuse_revoked_retained_target(
+    process: &crate::RunningProcess,
+    configuration: &positron_config::EffectiveConfiguration,
+    administrator: &str,
+    request: &UpgradeRequest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ring::signature::Ed25519KeyPair;
+    let path = configuration
+        .installed_release()
+        .ok_or("installed trust")?
+        .project_trust_root_file()
+        .as_path();
+    let mut installed = positron_release::InstalledReleaseTrust::from_bytes(&fs::read(path)?)?;
+    let mut snapshot = positron_release::TrustSnapshot::from_bytes(
+        installed.signed_snapshot.get(64..).ok_or("snapshot")?,
+    )?;
+    let key = Ed25519KeyPair::from_seed_unchecked(&[0x91; 32]).map_err(|_| "key")?;
+    // The retained request was qualified under the previous snapshot. Publish
+    // explicit newer test snapshots and floors, without a trust rollback.
+    snapshot.sequence += 1;
+    snapshot.revoked_manifests.push(request.target.digest());
+    installed.root.minimum_sequence = snapshot.sequence;
+    installed.signed_snapshot = snapshot.sign(&key)?;
+    fs::write(path, installed.canonical_bytes()?)?;
+    assert!(
+        matches!(
+            process.accept_upgrade(administrator, request.clone()),
+            Err(UpgradeFailure::AuthenticationFailed)
+        ),
+        "a retained target must recheck currently installed revocation"
+    );
+    assert_eq!(process.health().phase(), crate::ProcessPhase::Serving);
+    snapshot.sequence += 1;
+    snapshot.revoked_manifests.clear();
+    installed.root.minimum_sequence = snapshot.sequence;
+    installed.signed_snapshot = snapshot.sign(&key)?;
+    fs::write(path, installed.canonical_bytes()?)?;
+    Ok(())
 }

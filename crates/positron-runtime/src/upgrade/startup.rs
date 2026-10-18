@@ -144,6 +144,17 @@ pub(crate) fn authorize(
         DurableOperationAdministration as Administration, DurableOperationStatus,
         UpgradePublicationOutcome, UpgradeStage,
     };
+    if let Some(configuration) =
+        configuration.filter(|configuration| configuration.installed_release().is_some())
+    {
+        let current = super::installed_upgrade_startup(configuration, &instance.retention_time)?
+            .ok_or(UpgradeFailure::AuthenticationFailed)?;
+        if verification
+            .is_none_or(|verification| verification.release.digest() != current.release.digest())
+        {
+            return Err(UpgradeFailure::AuthenticationFailed);
+        }
+    }
     let catalog = open(instance)?;
     let active = Administration::next_upgrade_operation(&catalog, None).map_err(persistence)?;
     if active.is_some_and(|operation| {

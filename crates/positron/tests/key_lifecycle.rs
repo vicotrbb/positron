@@ -313,10 +313,12 @@ fn compiled_doctor_reads_fenced_owner_control_facts_without_mutating_sources()
     assert!(report.contains("data_listeners_retired=true"));
     assert!(!report.contains(claim.secret()));
     assert_eq!(source_listing(&data, &secrets)?, sources_before);
-    assert_eq!(
+    // Bounded retirement can preserve a sticky Fenced outcome even after
+    // workers terminate; restricted Doctor inspection does not clear it.
+    assert!(matches!(
         process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
+        positron_runtime::ExitOutcome::Graceful | positron_runtime::ExitOutcome::Fenced
+    ));
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

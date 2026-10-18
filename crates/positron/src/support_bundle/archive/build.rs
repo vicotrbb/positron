@@ -233,7 +233,7 @@ impl SupportBundle {
                 hex(redaction.as_bytes())?
             ));
             let signature = signer
-                .map(|signer| {
+                .map(|signer| -> Result<String, ()> {
                     let signature = signer.sign(manifest.as_bytes()).map_err(|_| ())?;
                     Ok(format!(
                         "integrity_identity={}\nsignature={}\n",

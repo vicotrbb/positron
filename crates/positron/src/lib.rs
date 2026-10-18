@@ -30,6 +30,7 @@ mod maintenance_cli;
 mod policy;
 mod provider_migration_cli;
 mod recovery_cli;
+mod release_cli;
 mod repository_cli;
 mod restore_cli;
 mod support_bundle;
@@ -74,6 +75,13 @@ pub fn run_native(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
     let mut arguments = arguments.into_iter().peekable();
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "release")
+    {
+        arguments.next();
+        return release_cli::run(arguments);
+    }
     if arguments
         .peek()
         .is_some_and(|argument| argument == "backup")

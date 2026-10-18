@@ -1852,11 +1852,16 @@ pub(super) fn drive_upgrade_backup(
     // Recovery intentionally retains the authenticated lifecycle anchor. An
     // accepted operation may be ahead of that conservative clock after restart;
     // only the clock owner can make its next transition eligible.
-    crate::upgrade::await_lifecycle_time(
+    let lifecycle_time = crate::upgrade::await_lifecycle_time(
         &services.instance,
         operation.updated_at_unix_seconds(),
         deadline,
-    )?;
+    );
+    #[cfg(test)]
+    if lifecycle_time == Err(UpgradeFailure::CapacityUnavailable) {
+        eprintln!("upgrade-backup-capacity stage=trusted-time-wait");
+    }
+    lifecycle_time?;
     let instance = &services.instance;
     let coordinator = instance.maintenance_coordinator();
     let initial_progress = coordinator
@@ -1874,20 +1879,23 @@ pub(super) fn drive_upgrade_backup(
         let catalog = services
             .open_maintenance_catalog()
             .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-        coordinator
-            .start_backup_operation_with_reservation_and_persist(
-                &catalog,
-                &instance._authority,
-                services
-                    .maintenance_status_now()
-                    .map_err(|_| UpgradeFailure::PersistenceUnavailable)?,
-                instance.retention_time.status().state()
-                    == positron_kernel::LifecycleClockState::ClockUncertain,
-                positron_kernel::MaintenanceTaskId::new(id.to_bytes())
-                    .map_err(|_| UpgradeFailure::InvalidRequest)?,
-            )
-            .map_err(|_| UpgradeFailure::CapacityUnavailable)?
+        coordinator.start_backup_operation_with_reservation_and_persist(
+            &catalog,
+            &instance._authority,
+            services
+                .maintenance_status_now()
+                .map_err(|_| UpgradeFailure::PersistenceUnavailable)?,
+            instance.retention_time.status().state()
+                == positron_kernel::LifecycleClockState::ClockUncertain,
+            positron_kernel::MaintenanceTaskId::new(id.to_bytes())
+                .map_err(|_| UpgradeFailure::InvalidRequest)?,
+        )
     };
+    #[cfg(test)]
+    if execution.is_err() {
+        eprintln!("upgrade-backup-capacity stage=coordinator-start");
+    }
+    let execution = execution.map_err(|_| UpgradeFailure::CapacityUnavailable)?;
     let Some(execution) = execution else {
         return inspect();
     };
@@ -1946,6 +1954,8 @@ pub(super) fn drive_upgrade_backup(
                 // Requeue bookkeeping alone is not recoverable progress. A
                 // shorter turn cannot retain the private semantic accumulator;
                 // report the retryable limit rather than loop without progress.
+                #[cfg(test)]
+                eprintln!("upgrade-backup-capacity stage=turn-no-progress");
                 return Err(UpgradeFailure::CapacityUnavailable);
             }
             return Ok(current);

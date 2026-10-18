@@ -149,9 +149,55 @@ pub(in crate::services) mod tests {
         services: &super::super::ServiceHandle,
         id: positron_governance::OperationId,
     ) -> Result<positron_governance::DurableOperation, crate::upgrade::UpgradeFailure> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(60);
         loop {
-            let operation = services.drive_upgrade_backup_operation(id, deadline)?;
+            let operation = match services.drive_upgrade_backup_operation(id, deadline) {
+                Ok(operation) => operation,
+                Err(failure) => {
+                    let trusted_now = services
+                        .instance
+                        .retention_time
+                        .governance_now_seconds()
+                        .ok();
+                    let operation_context = (|| {
+                        let _gate = services.catalog_operation().ok()?;
+                        let catalog = services.open_maintenance_catalog().ok()?;
+                        let operation =
+                            positron_governance::DurableOperationAdministration::inspect(
+                                &catalog, id,
+                            )
+                            .ok()??;
+                        Some((
+                            operation.updated_at_unix_seconds(),
+                            operation.revision(),
+                            operation.status(),
+                        ))
+                    })();
+                    let task_context = positron_kernel::MaintenanceTaskId::new(id.to_bytes())
+                        .ok()
+                        .and_then(|task| {
+                            services
+                                .instance
+                                .maintenance_coordinator()
+                                .status(task)
+                                .ok()
+                        })
+                        .map(|status| {
+                            (
+                                status.phase(),
+                                status
+                                    .checkpoint()
+                                    .map(|checkpoint| checkpoint.opaque_progress().len()),
+                            )
+                        });
+                    eprintln!(
+                        "upgrade-backup-driver failure={failure:?} elapsed_millis={} trusted_now={trusted_now:?} operation_updated_revision_status={operation_context:?} task_phase_checkpoint_len={task_context:?}",
+                        started.elapsed().as_millis()
+                    );
+                    return Err(failure);
+                },
+            };
             if operation.status().is_terminal() || std::time::Instant::now() >= deadline {
                 return Ok(operation);
             }

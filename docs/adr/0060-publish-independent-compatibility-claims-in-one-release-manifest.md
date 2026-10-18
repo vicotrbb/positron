@@ -36,3 +36,80 @@ target to support that writer and its independent verification reader. Legacy
 Epoch 1 inspection does not establish an Upgrade snapshot verification or native
 fresh-target Restore path.
 No Backup migration edge is declared by this mapping.
+
+Release Trust tooling (#113) now constructs and verifies the full release set
+in `positron-release`. This supersedes the earlier native consumer's raw
+Project Trust Root key-file configuration. The independently installed typed
+trust document supplies the root, an independently advanced minimum snapshot
+sequence, an explicitly selected delegated release signer, and a root-signed
+snapshot of signing roles, expiry, revocations, native publisher policies, and
+the current minor version. Kernel owns canonical Release Manifest encoding and
+signature verification. The tooling uses a distinct release signing key type;
+it never presents a delegated signer as an installed Project Trust Root.
+
+The signed Kernel manifest references one canonical full inventory by checksum
+and size. The inventory owns construction details and the required distribution
+matrix; it is not another release authority. Runtime authenticates this
+reference and its declared identities under the same installed trust before
+Upgrade. Detached publication proofs bind the final manifest digest and exact
+artifact digest. They are excluded from inventory file hashes because a proof
+of publication follows manifest signing; including a final-manifest receipt in
+its own inventory would create a circular hash dependency. Publisher keys and
+transparency roots are authorized by the installed root rather than by a
+receipt's self-asserted keys. Publisher provenance never substitutes for an
+applicable native registry signature or trusted-publishing proof.
+
+Support eligibility and installed-source authentication are separate decisions.
+A current snapshot defines the current and immediately preceding supported
+minor versions. Full release acceptance and Upgrade targets must satisfy that
+window. An older installed source remains subject to authentication,
+revocation, compatibility, and explicit source-version authorization, while
+support age alone cannot prevent startup or its signed supported upgrade path.
+Fresh trust is evaluated under the instance Clock authority during native
+acceptance; initial bootstrap metadata verification is repeated under the
+recovered authority before authorization and listeners.
+
+
+The full inventory matrix is a minimum, with the native publication closure
+required by each registry. Maven therefore includes POM, main, source and
+Javadoc artifacts and their signatures. Native SDK contexts are closed by
+surface: crates.io, npm, PyPI, Go module/checksum database, Maven Central and
+NuGet. A generic GitHub workflow or a renamed registry URL cannot replace their
+applicable native evidence. Homebrew uses an explicitly selected third-party
+tap identity and a separate signed tap revision. The standard public-key OCI
+signature profile remains distinct from keyless package provenance.
+
+The crates.io OIDC upload protocol currently exposes no independently verifiable
+offline registry receipt. Its explicit absence profile binds captured native
+index/publishing metadata and actual Cargo package/source identities under
+project publication provenance, without claiming a crates.io signature. Go
+checksum evidence establishes logged module content, not publisher identity.
+These distinctions preserve the product's strongest-native-evidence-available
+requirement rather than inventing an unavailable registry proof.
+
+The maintained offline Sigstore verifier supplies certificate, CT and Rekor
+verification with no trust fetching. Maven uses maintained OpenPGP primitives;
+NuGet uses maintained CMS/X.509/RFC 3161 primitives with a narrow, attributed
+RSA timestamp compatibility patch and strict profile validation. Installed
+native roots and certificate revocations remain root-signed release trust, not
+keys learned from an artifact.
+
+A native Upgrade target must carry the complete signed inventory with every
+required publication marked published. A signed native-only predecessor
+manifest remains valid source authentication, but cannot become a target by
+omitting the inventory role or its bytes. The complete-target type is created
+by the owning Release Trust validator; typed/native entry points cannot replace
+it with a merely signed manifest. This supersedes the earlier #112 consumer's
+five-role target acceptance while preserving old-source recovery and upgrade.
+
+
+Product §3.24 requires successor-key rotation and an authenticated upgrade path
+for historical installations. The installed document's selected `release_signer`
+is therefore target authority, rather than the key for every historical source.
+An additive root-signed `InstalledSource` identity role permits bounded current
+verification of old source signatures after their `Release` assignment retires.
+The owning validator tries at most 64 unique currently authorized source/release
+keys and requires one signature match using the same Kernel signature primitive.
+Revocation applies to both roles; source-only authority cannot construct a
+verified target or verify a full release. Snapshot expiry, rollback floor and the
+owning Clock still apply. No second trust root or manifest wire format is added.

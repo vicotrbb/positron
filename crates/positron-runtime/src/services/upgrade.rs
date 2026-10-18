@@ -135,6 +135,7 @@ impl ServiceHandle {
                 input
                     .expected_catalog_generation
                     .ok_or(Failure::InvalidRequest)?,
+                &self.instance.retention_time,
             )
             .map_err(upgrade_failure)?;
             let (operation, catalog_generation) = crate::process::upgrade::accept_preflight(

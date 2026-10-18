@@ -18,6 +18,7 @@ impl OfflineUpgradeSession {
             parameters.backup().retention_seconds(),
             operation.request().idempotency_key(),
             operation.request().accepted_generation(),
+            &self.instance.retention_time,
         )?;
         let plan = request.verify_payload(
             &self.instance,
@@ -36,8 +37,9 @@ impl OfflineUpgradeSession {
         revision: u64,
     ) -> Result<DurableOperation, UpgradeFailure> {
         self.require_recovered_clock()?;
-        let verification = super::super::installed_upgrade_startup(configuration)?
-            .ok_or(UpgradeFailure::AuthenticationFailed)?;
+        let verification =
+            super::super::installed_upgrade_startup(configuration, &self.instance.retention_time)?
+                .ok_or(UpgradeFailure::AuthenticationFailed)?;
         let executable =
             std::env::current_exe().map_err(|_| UpgradeFailure::ArtifactUnavailable)?;
         self.rollback(&verification.release, &executable, key, revision)

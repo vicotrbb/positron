@@ -8,8 +8,14 @@ impl ApplicationRuntime {
         if configuration.upgrade_verification.is_none()
             && let Some(effective) = configuration.effective_configuration.as_ref()
         {
+            // No instance clock exists yet. Authenticate metadata provisionally with
+            // the Kernel clock; authorize() rechecks under the recovered instance clock.
+            let release_clock =
+                positron_kernel::RetentionTimeAuthority::establish().map_err(|_| {
+                    ExitOutcome::StartupUnavailable(BootstrapFailureCode::ResourceUnavailable)
+                })?;
             configuration.upgrade_verification =
-                crate::upgrade::installed_upgrade_startup(effective)
+                crate::upgrade::installed_upgrade_startup(effective, &release_clock)
                     .map_err(|_| {
                         ExitOutcome::StartupUnavailable(BootstrapFailureCode::CatalogUnavailable)
                     })?

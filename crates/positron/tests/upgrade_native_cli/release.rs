@@ -1,5 +1,7 @@
 //! Independently signed fixture metadata; no distribution qualification claim.
 use super::*;
+#[path = "../../../positron-release/tests/support/upgrade_metadata.rs"]
+mod upgrade_metadata;
 fn release(
     epoch: u32,
     version: ProductVersion,
@@ -56,6 +58,7 @@ fn release(
             operator: [6; 32],
         },
     };
+    let (manifest, _) = upgrade_metadata::complete_metadata(&manifest)?;
     let mut signed = b"positron.release-manifest.v1\0".to_vec();
     signed.extend(manifest.canonical_bytes()?);
     let signature = key
@@ -101,8 +104,53 @@ pub(super) fn configuration(
     let current = export.join("current.manifest");
     let candidate = export.join("candidate.manifest");
     let credential = export.join("query.credential");
+    let current_inventory = export.join("current.inventory.json");
+    fs::write(
+        &current_inventory,
+        upgrade_metadata::complete_metadata(source.manifest())?.1,
+    )?;
+    let target_paths = upgrade_metadata::artifact_paths(target.manifest(), &executable, &export)?;
+    use positron_release::{
+        InstalledProjectTrustRoot, InstalledReleaseTrust, KeyPurpose, SigningIdentity,
+        TrustSnapshot,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let public_key = key.public_key().as_ref().try_into()?;
+    let snapshot = TrustSnapshot {
+        format: 1,
+        sequence: 1,
+        current_version: ProductVersion {
+            major: 0,
+            minor: 0,
+            patch: 1,
+        },
+        issued_unix: now - 60,
+        expires_unix: now + 3600,
+        identities: vec![SigningIdentity {
+            public_key,
+            purpose: KeyPurpose::Release,
+            not_before_unix: now - 60,
+            expires_unix: now + 3600,
+        }],
+        native_publishers: vec![],
+        revoked_keys: vec![],
+        revoked_manifests: vec![],
+        revoked_artifacts: vec![],
+    };
+    let installed = InstalledReleaseTrust {
+        format: 1,
+        root: InstalledProjectTrustRoot {
+            public_key,
+            minimum_sequence: 1,
+        },
+        release_signer: public_key,
+        signed_snapshot: snapshot.sign(&key)?,
+    }
+    .canonical_bytes()?;
     for (path, bytes) in [
-        (&trust, key.public_key().as_ref()),
+        (&trust, installed.as_slice()),
         (&current, source.signed_bytes()),
         (&candidate, target.signed_bytes()),
         (&credential, query.as_bytes()),
@@ -114,12 +162,13 @@ pub(super) fn configuration(
         .manifest()
         .artifacts
         .iter()
-        .map(|_| format!("{executable:?}"))
+        .zip(&target_paths)
+        .map(|(_, path)| format!("{path:?}"))
         .collect::<Vec<_>>()
         .join(",");
     let text = format!(
         "schema_version=1\n[storage]\ndata_directory={:?}\nsecrets_directory={:?}\n\
-        [release.installation]\nproject_trust_root_file={trust:?}\ncurrent_manifest_file={current:?}\n\
+        [release.installation]\nproject_trust_root_file={trust:?}\ncurrent_manifest_file={current:?}\ncurrent_inventory_file={current_inventory:?}\n\
         candidate_manifest_file={candidate:?}\ncandidate_artifact_files=[{artifacts}]\nquery_credential_file={credential:?}\n",
         root.join("data"),
         root.join("secrets")

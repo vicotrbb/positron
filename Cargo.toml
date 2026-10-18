@@ -12,13 +12,15 @@ members = [
     "crates/positron-kernel",
     "crates/positron-policy",
     "crates/positron-query",
+    "crates/positron-release",
     "crates/positron-runtime",
     "crates/positron-signals",
 ]
 resolver = "3"
-exclude = ["vendor/typespec-1.1.0", "vendor/azure_identity-1.0.0", "vendor/azure_core-1.0.0", "vendor/aws-types-1.6.0", "vendor/aws-config-1.12.0", "vendor/google-cloud-auth-1.17.0", "vendor/reqwest-0.12.28", "vendor/ring-0.17.14"]
+exclude = ["vendor/sigstore-tsa-0.15.0", "vendor/typespec-1.1.0", "vendor/azure_identity-1.0.0", "vendor/azure_core-1.0.0", "vendor/aws-types-1.6.0", "vendor/aws-config-1.12.0", "vendor/google-cloud-auth-1.17.0", "vendor/reqwest-0.12.28", "vendor/ring-0.17.14"]
 
 [patch.crates-io]
+sigstore-tsa = { path = "vendor/sigstore-tsa-0.15.0" }
 typespec = { path = "vendor/typespec-1.1.0" }
 azure_identity = { path = "vendor/azure_identity-1.0.0" }
 azure_core = { path = "vendor/azure_core-1.0.0" }

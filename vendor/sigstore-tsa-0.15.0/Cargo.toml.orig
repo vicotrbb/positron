@@ -1,0 +1,43 @@
+[package]
+name = "sigstore-tsa"
+description = "RFC 3161 Time-Stamp Protocol client for Sigstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["rustls", "aws-lc-rs"]
+client = ["dep:reqwest", "dep:rand"]
+rustls = ["client", "reqwest/rustls"]
+rustls-no-provider = ["client", "reqwest/rustls-no-provider"]
+native-tls = ["client", "reqwest/native-tls"]
+aws-lc-rs = ["sigstore-crypto/aws-lc-rs"]
+
+[dependencies]
+sigstore-types = { workspace = true }
+sigstore-crypto = { workspace = true }
+der = { workspace = true }
+const-oid = { workspace = true, features = ["db"] }
+reqwest = { workspace = true, optional = true }
+thiserror = { workspace = true }
+rand = { workspace = true, optional = true }
+
+# RFC 3161 timestamp verification
+cms = { workspace = true, default-features = false }
+x509-cert = { workspace = true }
+rustls-webpki = { workspace = true, default-features = false, features = [
+  "alloc",
+  "std",
+] }
+rustls-pki-types = { workspace = true, default-features = false }
+jiff = { workspace = true, features = ["std"] }
+tracing = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "net", "io-util", "time"] }
+base64 = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
