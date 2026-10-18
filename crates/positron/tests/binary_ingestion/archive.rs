@@ -47,31 +47,49 @@ pub(super) fn query_log(
     };
     let path = root.join("query-request.json");
     std::fs::write(&path, request.encode()?)?;
-    let mut child = Command::new(binary)
-        .args([
-            "query",
-            "--endpoint",
-            &endpoint.to_string(),
-            "--credential-stdin",
-            "--allow-plaintext",
-            "--request",
-        ])
-        .arg(&path)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("missing query credential pipe")?
-        .write_all(query_secret.as_bytes())?;
-    let output = child.wait_with_output()?;
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let output = loop {
+        let mut child = Command::new(binary)
+            .args([
+                "query",
+                "--endpoint",
+                &endpoint.to_string(),
+                "--credential-stdin",
+                "--allow-plaintext",
+                "--request",
+            ])
+            .arg(&path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or("missing query credential pipe")?
+            .write_all(query_secret.as_bytes())?;
+        let output = loop {
+            if child.try_wait()?.is_some() {
+                break child.wait_with_output()?;
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                child.wait()?;
+                return Err("public query exceeded its original wall budget".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if output.status.success() {
+            break output;
+        }
+        let error = String::from_utf8_lossy(&output.stderr);
+        if !error.contains("query capacity unavailable; retry after backoff")
+            || Instant::now() + Duration::from_secs(1) >= deadline
+        {
+            return Err(format!("public query refused: {error}").into());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    };
     let result = LogQueryResponse::decode(&output.stdout)?;
     let bodies = result
         .events

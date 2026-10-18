@@ -45,7 +45,7 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>) -> ExitCode {
             LogQueryServiceClient::new(transport).map_err(|_| "query transport unavailable")?;
         let response = client
             .execute(credential.trim_end_matches(['\r', '\n']), &request)
-            .map_err(|_| "query rejected or unavailable")?;
+            .map_err(client_failure)?;
         let output = response.encode().map_err(|_| "invalid query response")?;
         let mut stdout = std::io::stdout().lock();
         stdout
@@ -56,4 +56,15 @@ pub(super) fn run(mut arguments: impl Iterator<Item = String>) -> ExitCode {
             .map_err(|_| "query output unavailable")?;
         stdout.flush().map_err(|_| "query output unavailable")
     })())
+}
+
+fn client_failure(failure: positron_api::log_query::LogQueryServiceClientFailure) -> &'static str {
+    use positron_api::log_query::LogQueryServiceClientFailure as F;
+    match failure {
+        F::InvalidRequest => "invalid bounded query request",
+        F::AuthenticationRejected => "query authentication rejected",
+        F::CapacityUnavailable => "query capacity unavailable; retry after backoff",
+        F::QueryUnavailable => "query unavailable; inspect instance readiness",
+        F::Transport => "query transport or response unavailable",
+    }
 }

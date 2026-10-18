@@ -32,7 +32,7 @@ pub(in crate::native_host) fn query_failure_response(status: u16, code: &str) ->
             status,
             content_type: "application/json",
             body,
-            retry_after_seconds: None,
+            retry_after_seconds: (status == 429).then_some(1),
             response_reservation: None,
         },
         Err(_) => Response::empty(503),
@@ -911,6 +911,21 @@ mod tests {
         BootstrapPaths, CatalogConfigurationPublication, InitializationPlan, InstanceBootstrap,
         ListenerRole, RuntimeConfiguration, ServiceHandle, health::ProcessState,
     };
+
+    #[test]
+    fn query_capacity_rejection_exposes_bounded_backoff() {
+        let response = super::query_failure_response(429, "capacity_unavailable");
+        assert_eq!(response.status(), 429);
+        assert_eq!(response.retry_after_seconds(), Some(1));
+        assert_eq!(
+            positron_api::log_query::decode_query_rejection(429, response.body()),
+            positron_api::log_query::LogQueryServiceClientFailure::CapacityUnavailable,
+        );
+        assert_eq!(
+            super::query_failure_response(401, "authentication_rejected").retry_after_seconds(),
+            None
+        );
+    }
 
     #[test]
     fn authenticated_status_waits_for_shared_catalog_ownership()

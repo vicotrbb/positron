@@ -3,8 +3,14 @@
 
 #[path = "binary_ingestion/archive.rs"]
 mod archive;
+#[path = "support/archive_binary.rs"]
+mod archive_binary;
 #[path = "support/native_binary.rs"]
 mod native_binary;
+#[path = "binary_ingestion/recovery.rs"]
+mod recovery;
+#[path = "binary_ingestion/upgrade.rs"]
+mod upgrade;
 use positron_kernel::MountQualification;
 use positron_query::QueryBudget;
 use positron_runtime::{
@@ -158,7 +164,7 @@ fn ready(port: u16) -> TestResult {
 fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestResult {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let mut fixture = Fixture {
-        root: PathBuf::from("/tmp").join(format!("p-bin-{}-{nonce}", std::process::id())),
+        root: fs::canonicalize("/tmp")?.join(format!("p-bin-{}-{nonce}", std::process::id())),
         child: None,
     };
     let data = fixture.root.join("data");
@@ -169,7 +175,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
     let package = positron_release::native_archive(
         format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH).parse()?,
-        &fs::read(native_binary::executable())?,
+        &fs::read(archive_binary::executable()?)?,
     )?;
     let installation = fixture.root.join("installation");
     fs::create_dir(&installation)?;
@@ -246,6 +252,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     let bearer = format!("Bearer {ingest_secret}");
     let admin = format!("Bearer {admin_secret}");
     let query = format!("Bearer {query_secret}");
+    let recovery = recovery::RecoveryFiles::create(&binary, &fixture.root)?;
     for arguments in [
         vec!["config", "validate", "--config"],
         vec!["config", "effective", "--redacted", "--config"],
@@ -387,6 +394,19 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?,
         before_restart_digest
     );
+    recovery::roundtrip(
+        &mut fixture,
+        recovery::Installed {
+            binary: &binary,
+            config: &config,
+            endpoint: api_endpoint,
+            operations,
+            admin: admin_secret,
+            query: query_secret,
+        },
+        &recovery,
+        &before_restart_digest,
+    )?;
     assert!(
         request_with_capacity_retry(
             loki,

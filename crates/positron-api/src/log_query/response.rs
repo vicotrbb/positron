@@ -71,7 +71,8 @@ impl LogQueryResponse {
                 return Err(LogQueryWireFailure);
             }
             for row in &batch.rows {
-                for cell in &row.cells {
+                for (cell, column) in row.cells.iter().zip(&header.columns) {
+                    validate_cell_type(cell, column)?;
                     validate_cell(cell)?;
                 }
             }
@@ -190,6 +191,36 @@ fn reason(value: &str) -> bool {
             | "internal"
     )
 }
+fn validate_cell_type(
+    cell: &LogQueryCell,
+    column: &LogQueryColumn,
+) -> Result<(), LogQueryWireFailure> {
+    use log_query_cell::Value;
+    let valid = match cell.value.as_ref().ok_or(LogQueryWireFailure)? {
+        Value::Missing(_) => column.nullable,
+        Value::NativeValue(_) => column.value_type == "native_value",
+        Value::Occurrences(_) => column.value_type == "attribute_occurrence_set",
+        Value::UnsignedInteger(value) => {
+            matches!(
+                column.value_type.as_str(),
+                "commit_position" | "unsigned_integer"
+            ) || (column.value_type == "record_ordinal" && u32::try_from(*value).is_ok())
+        },
+        Value::Timestamp(time) => match column.value_type.as_str() {
+            "query_time" => matches!(time.provenance.as_str(), "event" | "observed" | "ingest"),
+            "event_time" => time.provenance.is_empty(),
+            "ingest_time" => time.provenance == "kernel",
+            "unix_nanoseconds" | "optional_unix_nanoseconds" => time.unix_nanoseconds.is_some(),
+            _ => false,
+        },
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(LogQueryWireFailure)
+    }
+}
+
 fn validate_cell(cell: &LogQueryCell) -> Result<(), LogQueryWireFailure> {
     match cell.value.as_ref().ok_or(LogQueryWireFailure)? {
         log_query_cell::Value::NativeValue(value) => validate_value(value, 0),

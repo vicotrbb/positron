@@ -12,6 +12,8 @@ bundle a libc or platform SDK. Do not run an archive built for another target.
 Build on each native target with the pinned Rust toolchain and locked resolution:
 
 ```console
+# On macOS, use the pinned platform linker's deterministic-input mode.
+if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="-C link-arg=-Wl,-reproducible"; fi
 cargo build --locked --release -p positron
 ./target/release/positron release archive --target macos-aarch64 --binary target/release/positron --out positron-macos-aarch64.tar.gz
 ```
@@ -189,3 +191,21 @@ trust or backups. Reinstalling the same compatible binary with those roots must
 recover the same data. Keep the service account or preserve its numeric ownership
 for that reinstall. Delete retained data and keys only as a separate explicit
 destructive administrative action after the required verified backups exist.
+
+## Native integration qualification
+
+The four native CI jobs compare independently rebuilt release binaries and
+archives, then exercise each installed executable. Ordinary local archive tests
+build the same source as a locked native release in a separate Cargo target
+directory when no installed executable is supplied. The retained-record flow
+uses authenticated commands for snapshot creation and independent verification,
+fresh-root restore, automatic Upgrade-to-Drain handoff, offline publication, and
+query after candidate restart.
+
+The upgrade candidate is a private test fixture: CI snapshots the tested source,
+changes only that copy's unreleased package version from `0.0.0` to `0.0.1`,
+commits the fixture source, and compiles its executable independently. Fixture
+manifests bind the actual source commits and executable digests under private
+test trust. This tests the native upgrade mechanism; it does not establish a
+published version, project release signature, or reproducibility between two
+released versions.

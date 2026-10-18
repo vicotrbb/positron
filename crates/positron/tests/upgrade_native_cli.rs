@@ -9,10 +9,8 @@ use positron_api::{
         RepositoryTransport,
     },
 };
-use positron_kernel::{MountQualification, release_manifest::*};
+use positron_kernel::MountQualification;
 use positron_runtime::*;
-use ring::signature::{Ed25519KeyPair, KeyPair};
-use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Write,

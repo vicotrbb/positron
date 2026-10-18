@@ -363,3 +363,65 @@ fn bounded_response_serialization_rejects_escape_expansion_before_exceeding_buff
     assert!(response.encode().is_err());
     assert!(LogQueryResponse::decode(&vec![b' '; MAX_RESPONSE_BYTES + 1]).is_err());
 }
+
+#[test]
+fn decoder_enforces_declared_cell_type_and_nullability() {
+    use positron_api::log_query::*;
+    for kind in ["commit_position", "unsigned_integer"] {
+        for (value, nullable, valid) in [
+            (log_query_cell::Value::UnsignedInteger(7), false, true),
+            (
+                log_query_cell::Value::NativeValue(LogQueryValue {
+                    value: Some(log_query_value::Value::TextValue("wrong type".into())),
+                }),
+                false,
+                false,
+            ),
+            (
+                log_query_cell::Value::Missing(LogQueryMissing {}),
+                false,
+                false,
+            ),
+            (
+                log_query_cell::Value::Missing(LogQueryMissing {}),
+                true,
+                true,
+            ),
+        ] {
+            let mut response = empty_complete_response();
+            if let Some(log_query_event::Event::Header(header)) = response.events[0].event.as_mut()
+            {
+                header.columns[0].value_type = kind.into();
+                header.columns[0].nullable = nullable;
+            }
+            response.events.insert(
+                1,
+                LogQueryEvent {
+                    event: Some(log_query_event::Event::Batch(LogQueryBatch {
+                        sequence: 0,
+                        rows: vec![LogQueryRow {
+                            cells: vec![LogQueryCell { value: Some(value) }],
+                            replayed: false,
+                        }],
+                        prior_digest: vec![0; 32],
+                        digest: vec![1; 32],
+                    })),
+                },
+            );
+            if let Some(log_query_event::Event::Terminal(terminal)) =
+                response.events[2].event.as_mut()
+            {
+                let stats = terminal.stats.as_mut().unwrap();
+                stats.records = 1;
+                stats.last_sequence = Some(0);
+                stats.result_digest = vec![1; 32];
+            }
+            let wire = serde_json::to_vec(&response).unwrap();
+            assert_eq!(
+                LogQueryResponse::decode(&wire).is_ok(),
+                valid,
+                "{kind} nullable={nullable}"
+            );
+        }
+    }
+}
