@@ -315,7 +315,9 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         operation_id: None,
     };
     assert!(client.manage(&ingest, &status).is_err());
-    let current = client.manage(&administrator, &status)?;
+    let current = client
+        .manage(&administrator, &status)
+        .map_err(|failure| format!("repository HTTP stage=initial-status: {failure:?}"))?;
     let mut request = RepositoryRequest {
         action: "init".into(),
         expected_catalog_generation: Some(current.catalog_generation),
@@ -334,10 +336,18 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
             Err(positron_api::repository::RepositoryServiceClientFailure::PreconditionFailed)
                 if std::time::Instant::now() < admission_deadline =>
             {
-                request.expected_catalog_generation =
-                    Some(client.manage(&administrator, &status)?.catalog_generation);
+                request.expected_catalog_generation = Some(
+                    client
+                        .manage(&administrator, &status)
+                        .map_err(|failure| {
+                            format!("repository HTTP stage=generation-refresh: {failure:?}")
+                        })?
+                        .catalog_generation,
+                );
             },
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(format!("repository HTTP stage=init-admission: {error:?}").into());
+            },
         }
     };
     let id = accepted
@@ -360,7 +370,9 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
             return Err("Repository HTTP completion deadline".into());
         }
         std::thread::sleep(Duration::from_millis(25));
-        accepted = client.manage(&administrator, &query)?;
+        accepted = client
+            .manage(&administrator, &query)
+            .map_err(|failure| format!("repository HTTP stage=operation-status: {failure:?}"))?;
     }
     assert_eq!(
         accepted
