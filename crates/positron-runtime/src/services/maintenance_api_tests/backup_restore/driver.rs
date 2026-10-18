@@ -17,6 +17,7 @@ pub(super) fn drive_restore(
         restore,
         unlock,
         query,
+        administrator,
         pin,
         provider,
     } = context;
@@ -89,7 +90,25 @@ pub(super) fn drive_restore(
             "exact cold retry must recover ownership before the origin descriptor existed"
         );
     }
+    if case == RestoreCase::HistoricalInterruption {
+        let interrupted = positron_kernel::with_catalog_publication_fault_after(
+            positron_kernel::CatalogPublicationFault::SynchronizeCommit,
+            1,
+            begin,
+        );
+        assert!(
+            interrupted.is_err(),
+            "interrupt acceptance after the historical completion transaction"
+        );
+        assert_restore_target_offline(paths);
+    }
     let mut session = begin().map_err(|failure| format!("begin restore: {failure:?}"))?;
+    if case == RestoreCase::HistoricalAppend {
+        drop(session);
+        fixture::append_snapshot(services, administrator, repository_path)?;
+        session = begin()
+            .map_err(|failure| format!("retry after unrelated registry append: {failure:?}"))?;
+    }
     if case == RestoreCase::InspectAccepted {
         let expected = session.status();
         drop(session);
@@ -383,6 +402,100 @@ pub(super) fn drive_restore(
         .map_err(|failure| format!("native startup: {failure:?}"))?;
     let restored_services = ServiceHandle::new(Arc::clone(&restored))
         .map_err(|failure| format!("services startup: {failure:?}"))?;
+    if matches!(
+        case,
+        RestoreCase::HistoricalSnapshot
+            | RestoreCase::HistoricalInterruption
+            | RestoreCase::HistoricalAppend
+            | RestoreCase::HistoricalUnrelated
+    ) {
+        let catalog = open_catalog(&restored)?;
+        let captured = positron_governance::DurableOperationAdministration::inspect_by_idempotency(
+            &catalog,
+            positron_governance::AdministrativeIdempotencyKey::new([
+                0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0x4a, 0xaa, 0x8a, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+                0xaa, 0xaa,
+            ])?,
+        )?
+        .ok_or("captured Snapshot")?;
+        if case == RestoreCase::HistoricalUnrelated {
+            let other =
+                positron_governance::DurableOperationAdministration::inspect_by_idempotency(
+                    &catalog,
+                    positron_governance::AdministrativeIdempotencyKey::new([0x8b; 16])?,
+                )?
+                .ok_or("unrelated intent")?;
+            assert_eq!(
+                other.status(),
+                positron_governance::DurableOperationStatus::Pending
+            );
+            assert_eq!(
+                other.phase(),
+                positron_governance::DurableOperationPhase::Accepted
+            );
+        }
+        assert_eq!(
+            captured.status(),
+            positron_governance::DurableOperationStatus::Succeeded
+        );
+        let evidence = captured
+            .restored_backup_publication()
+            .ok_or("historical evidence")?;
+        let source_catalog = open_catalog(initialized)?;
+        let source_operation = positron_governance::DurableOperationAdministration::inspect(
+            &source_catalog,
+            captured.operation_id(),
+        )?
+        .ok_or("source Snapshot")?;
+        assert_eq!(
+            evidence.current_registry_generation(),
+            source_operation
+                .backup_receipt()
+                .ok_or("source receipt")?
+                .registry_generation()
+        );
+        let mut historical_audits = 0;
+        for record in catalog.governance_audit_records()? {
+            if let positron_governance::GovernanceAuditEntry::DurableOperation(entry) =
+                positron_governance::GovernanceAuditEntry::decode(&record)?
+                && let Some(publication) = entry.restored_backup_publication()
+            {
+                assert_eq!(publication, evidence);
+                assert_ne!(
+                    record.transaction().to_bytes(),
+                    evidence.origin_transaction()
+                );
+                historical_audits += 1;
+            }
+        }
+        assert_eq!(
+            historical_audits, 1,
+            "cold retries retain one audited historical transition"
+        );
+        let binding = positron_kernel::RepositoryOperationBinding::new(
+            evidence.capture_operation(),
+            evidence.capture_request(),
+        )
+        .map_err(|failure| format!("task binding: {failure:?}"))?;
+        assert!(
+            !binding
+                .has_live_backup_owner(&catalog.pin()?)
+                .map_err(|failure| format!("task completion: {failure:?}"))?
+        );
+        drop(source_catalog);
+        drop(catalog);
+        let request = BackupRequest::decode(&serde_json::to_vec(
+            &serde_json::json!({"action":"status",
+            "operation_id":captured.operation_id().to_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>()}),
+        )?)?;
+        let public = restored_services
+            .manage_backup(administrator, &request.encode()?)
+            .map_err(|failure| format!("restored historical status: {failure:?}"))?;
+        assert!(public.receipt.is_none());
+        assert_eq!(public.operation.status, "succeeded");
+        assert!(public.restored_publication.is_some());
+        assert!(!public.cleanup_pending);
+    }
     {
         let catalog = open_catalog(&restored)?;
         let basis = catalog.pin()?;

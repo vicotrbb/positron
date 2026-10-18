@@ -68,3 +68,23 @@ Exact cold retries reuse this authenticated origin. A different target
 configuration is refused before writable Catalog access. The original source
 configuration remains in the signed snapshot and its original governance audit
 records remain in the authenticated source prefix.
+
+A fresh restore reconciles only the source snapshot's own captured Backup
+Snapshot intent. Its signed manifest capture ID and request digest must match
+one authenticated `Running/BackupCapture` operation, its repository binding,
+and the exact Kernel Backup task. After installing and authenticating the
+restore origin, the recovered System Administrator resolves the exact restore
+request before Governance atomically publishes a historical successful
+operation, the terminal task replacement, and ordinary governance audit. This
+uses a distinct deterministic successor transaction bound to the origin,
+manifest, capture/request binding, restore intent, administrative idempotency
+key, and resulting operation revision. It never reuses the origin transaction,
+cancels remote work, or changes source history. Other active intents retain
+ordinary recovery and admission guards. The target remains offline until normal
+restore verification, publication, and bootstrap completion.
+
+The distinct historical publication evidence records the signed manifest,
+source Catalog identity/generation, retention bound, capture binding, restore
+origin/intent, and authenticated registry head observed at reconciliation. That
+head is not asserted to be the original publication generation. Original
+transfer counters and original completion time are unavailable and are absent.

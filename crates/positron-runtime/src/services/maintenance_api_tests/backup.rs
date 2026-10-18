@@ -309,7 +309,7 @@ fn cancel_current(
         )?)?;
         match client.manage(bearer, &request) {
             Ok(response) => return Ok(response),
-            Err(BackupServiceClientFailure::PreconditionFailed) => {
+            Err(BackupServiceClientFailure::StaleGeneration) => {
                 if client.manage(bearer, &status)?.operation_revision == revision
                     || std::time::Instant::now() >= deadline
                 {
@@ -333,7 +333,7 @@ fn create_current(
         let request = create(services, repository, idempotency)?;
         match client.manage(bearer, &request) {
             Ok(response) => return Ok((request, response)),
-            Err(BackupServiceClientFailure::PreconditionFailed) => {
+            Err(BackupServiceClientFailure::StaleGeneration) => {
                 let _gate = services.catalog_operation()?;
                 let generation = open_catalog(&services.instance)?.pin()?.number();
                 if request.expected_catalog_generation == Some(generation)

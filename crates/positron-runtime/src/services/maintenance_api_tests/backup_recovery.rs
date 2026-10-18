@@ -289,7 +289,7 @@ fn cancellation_restart_at(
                 assert!(response.cleanup_pending);
                 break;
             },
-            Err(MaintenanceServiceFailure::PreconditionFailed)
+            Err(MaintenanceServiceFailure::StaleGeneration)
                 if std::time::Instant::now() < deadline => {},
             Err(failure) => {
                 cancellation.cancel();

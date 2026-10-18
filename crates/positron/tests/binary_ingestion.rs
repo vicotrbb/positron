@@ -11,12 +11,6 @@ mod native_binary;
 mod recovery;
 #[path = "binary_ingestion/upgrade.rs"]
 mod upgrade;
-use positron_kernel::MountQualification;
-use positron_query::QueryBudget;
-use positron_runtime::{
-    ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, NativeBindings, NativeHost,
-    ServeConfiguration, ShutdownTrigger,
-};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -180,9 +174,8 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     let installation = fixture.root.join("installation");
     fs::create_dir(&installation)?;
     tar::Archive::new(flate2::read::GzDecoder::new(package.as_slice())).unpack(&installation)?;
-    let binary = installation.join("positron/bin/positron");
+    let mut binary = installation.join("positron/bin/positron");
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o555))?;
-    let paths = BootstrapPaths::new(&data, &secrets, MountQualification::LocalHost)?;
     let probes = (0..5)
         .map(|_| TcpListener::bind(("127.0.0.1", 0)))
         .collect::<Result<Vec<_>, _>>()?;
@@ -394,7 +387,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?,
         before_restart_digest
     );
-    recovery::roundtrip(
+    binary = recovery::roundtrip(
         &mut fixture,
         recovery::Installed {
             binary: &binary,
@@ -557,7 +550,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     }
     let elapsed = started.elapsed();
     eprintln!(
-        "bounded binary workload: 64 OTLP JSON logs, 16 serial requests, {} encoded bytes, {:.3}s, {:.1} records/s (debug, durable loopback)",
+        "bounded binary workload: 64 OTLP JSON logs, 16 serial requests, {} encoded bytes, {:.3}s, {:.1} records/s (release executable, durable loopback)",
         encoded_bytes,
         elapsed.as_secs_f64(),
         64.0 / elapsed.as_secs_f64()
@@ -574,6 +567,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             .spawn()?,
     );
     ready(operations)?;
+    archive::query_capacity_refusal(&binary, &fixture.root, api_endpoint, query_secret)?;
     let child = fixture.child.as_mut().ok_or("missing restarted child")?;
     assert!(
         Command::new("/bin/kill")
@@ -599,37 +593,5 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         std::thread::sleep(Duration::from_millis(25));
     }
     fixture.child = None;
-    let endpoint = "127.0.0.1:0".parse()?;
-    let host = NativeHost::new(NativeBindings::new(
-        fixture.root.join("inspect.sock"),
-        endpoint,
-        endpoint,
-        endpoint,
-        endpoint,
-        endpoint,
-    )?);
-    let process = ApplicationRuntime::start(
-        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
-        HostInputs::new(&host, &host),
-    )?;
-    // The native principal's 16-unit CPU ceiling cannot scan this complete
-    // history. Verify a truthful refusal rather than accepting partial rows;
-    // successful durable query semantics are covered by the query integration suite.
-    assert_eq!(
-        process
-            .services()
-            .ok_or("missing query services")?
-            .query_log_bodies(
-                query_secret,
-                "logs | range query_time 0 2000 | limit 100",
-                QueryBudget::new(1_048_576, 100, 100, 1_048_576, 1_048_576, 60)?
-                    .with_cpu_work_units(16)?,
-            ),
-        Err(positron_runtime::ServiceFailure::CapacityUnavailable)
-    );
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
     Ok(())
 }

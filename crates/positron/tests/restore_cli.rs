@@ -170,7 +170,7 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
         }))?)?;
         match backup_client.manage(claim.secret(), &request) {
             Ok(accepted) => break accepted,
-            Err(positron_api::backup::BackupServiceClientFailure::PreconditionFailed)
+            Err(positron_api::backup::BackupServiceClientFailure::StaleGeneration)
                 if Instant::now() < deadline => {},
             Err(error) => return Err(format!("source backup admission: {error:?}").into()),
         }

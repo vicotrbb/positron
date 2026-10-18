@@ -293,7 +293,7 @@ pub(super) fn operation_failure(failure: DurableOperationFailure) -> Maintenance
         DurableOperationFailure::IdempotencyConflict => {
             MaintenanceServiceFailure::IdempotencyConflict
         },
-        DurableOperationFailure::StaleGeneration => MaintenanceServiceFailure::PreconditionFailed,
+        DurableOperationFailure::StaleGeneration => MaintenanceServiceFailure::StaleGeneration,
         DurableOperationFailure::InvalidInput | DurableOperationFailure::InvalidState => {
             MaintenanceServiceFailure::InvalidRequest
         },

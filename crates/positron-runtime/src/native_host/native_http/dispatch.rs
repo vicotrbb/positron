@@ -46,6 +46,7 @@ fn maintenance_failure_response(failure: MaintenanceServiceFailure) -> Response 
         MaintenanceServiceFailure::TaskUnavailable => (404, "task_unavailable"),
         MaintenanceServiceFailure::SourceUnavailable => (404, "source_unavailable"),
         MaintenanceServiceFailure::IdempotencyConflict => (409, "idempotency_conflict"),
+        MaintenanceServiceFailure::StaleGeneration => (409, "stale_generation"),
         MaintenanceServiceFailure::PreconditionFailed => (409, "precondition_failed"),
         MaintenanceServiceFailure::CapacityUnavailable => (503, "capacity_unavailable"),
         MaintenanceServiceFailure::AdministrationUnavailable => (503, "administration_unavailable"),
@@ -911,6 +912,22 @@ mod tests {
         BootstrapPaths, CatalogConfigurationPublication, InitializationPlan, InstanceBootstrap,
         ListenerRole, RuntimeConfiguration, ServiceHandle, health::ProcessState,
     };
+
+    #[test]
+    fn administrative_http_preserves_exact_generation_refusal() {
+        use super::MaintenanceServiceFailure as F;
+        for (failure, code) in [
+            (F::StaleGeneration, "stale_generation"),
+            (F::PreconditionFailed, "precondition_failed"),
+        ] {
+            let response = super::maintenance_failure_response(failure);
+            assert_eq!(response.status(), 409);
+            assert_eq!(
+                response.body(),
+                format!("{{\"code\":\"{code}\"}}").as_bytes()
+            );
+        }
+    }
 
     #[test]
     fn query_capacity_rejection_exposes_bounded_backoff() {

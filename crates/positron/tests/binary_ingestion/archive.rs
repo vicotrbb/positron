@@ -45,6 +45,48 @@ pub(super) fn query_log(
             maximum_time_range_nanoseconds: 100,
         }),
     };
+    let result = query_response(binary, root, endpoint, query_secret, &request)?;
+    let bodies = result
+        .events
+        .iter()
+        .filter_map(|event| match event.event.as_ref()? {
+            log_query_event::Event::Batch(batch) => Some(
+                batch
+                    .rows
+                    .iter()
+                    .flat_map(|row| row.cells.iter())
+                    .filter_map(|cell| match cell.value.as_ref()? {
+                        log_query_cell::Value::NativeValue(value) => match value.value.as_ref()? {
+                            log_query_value::Value::TextValue(text) => Some(text.as_str()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(bodies, ["binary-otlp"]);
+    let Some(log_query_event::Event::Terminal(terminal)) =
+        result.events.last().and_then(|event| event.event.as_ref())
+    else {
+        return Err("missing query terminal".into());
+    };
+    assert_eq!(terminal.state, "complete");
+    let stats = terminal.stats.as_ref().ok_or("missing query statistics")?;
+    assert_eq!(stats.records, 1);
+    Ok(stats.result_digest.clone())
+}
+
+fn query_response(
+    binary: &std::path::Path,
+    root: &std::path::Path,
+    endpoint: std::net::SocketAddr,
+    query_secret: &str,
+    request: &positron_api::log_query::LogQueryRequest,
+) -> TestResult<positron_api::log_query::LogQueryResponse> {
+    use positron_api::log_query::LogQueryResponse;
     let path = root.join("query-request.json");
     std::fs::write(&path, request.encode()?)?;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -90,38 +132,39 @@ pub(super) fn query_log(
         }
         std::thread::sleep(Duration::from_secs(1));
     };
-    let result = LogQueryResponse::decode(&output.stdout)?;
-    let bodies = result
+    Ok(LogQueryResponse::decode(&output.stdout)?)
+}
+
+pub(super) fn query_capacity_refusal(
+    binary: &std::path::Path,
+    root: &std::path::Path,
+    endpoint: std::net::SocketAddr,
+    credential: &str,
+) -> TestResult {
+    use positron_api::log_query::*;
+    let request = LogQueryRequest::decode(br#"{"pipeline":"logs | range query_time 0 2000 | limit 100","budget":{"scannedBytes":"1048576","decodedRecords":"100","outputRows":"100","outputBytes":"16384","memoryBytes":"1048576","cpuWorkUnits":"16","wallSeconds":"5","maximumTimeRangeNanoseconds":"2000"}}"#)?;
+    let response = query_response(binary, root, endpoint, credential, &request)?;
+    let Some(log_query_event::Event::Terminal(terminal)) = response
         .events
-        .iter()
-        .filter_map(|event| match event.event.as_ref()? {
-            log_query_event::Event::Batch(batch) => Some(
-                batch
-                    .rows
-                    .iter()
-                    .flat_map(|row| row.cells.iter())
-                    .filter_map(|cell| match cell.value.as_ref()? {
-                        log_query_cell::Value::NativeValue(value) => match value.value.as_ref()? {
-                            log_query_value::Value::TextValue(text) => Some(text.as_str()),
-                            _ => None,
-                        },
-                        _ => None,
-                    }),
-            ),
-            _ => None,
-        })
-        .flatten()
-        .collect::<Vec<_>>();
-    assert_eq!(bodies, ["binary-otlp"]);
-    let Some(log_query_event::Event::Terminal(terminal)) =
-        result.events.last().and_then(|event| event.event.as_ref())
+        .last()
+        .and_then(|event| event.event.as_ref())
     else {
-        return Err("missing query terminal".into());
+        return Err("missing bounded-query terminal".into());
     };
-    assert_eq!(terminal.state, "complete");
-    let stats = terminal.stats.as_ref().ok_or("missing query statistics")?;
-    assert_eq!(stats.records, 1);
-    Ok(stats.result_digest.clone())
+    assert_eq!(
+        terminal.state, "incomplete",
+        "a capacity-limited scan cannot claim complete"
+    );
+    assert!(
+        terminal
+            .stats
+            .as_ref()
+            .ok_or("query stats")?
+            .limiting_budget
+            .as_deref()
+            .is_some_and(|budget| !budget.is_empty())
+    );
+    Ok(())
 }
 
 pub(super) fn query_refusals(

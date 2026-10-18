@@ -1747,6 +1747,18 @@ impl DurableOperation {
     }
 
     pub(super) fn is_legal_persisted_state(&self) -> bool {
+        if let Some(receipt) = self.restored_backup_publication()
+            && (self.kind() != DurableOperationKind::BackupSnapshot
+                || self.status() != DurableOperationStatus::Succeeded
+                || self.phase() != DurableOperationPhase::Published
+                || receipt.capture_operation() != self.operation_id().to_bytes()
+                || !self.backup_parameters().is_some_and(|parameters| {
+                    parameters.intent_digest() == receipt.capture_request()
+                }))
+        {
+            return false;
+        }
+
         if match self.key_provider_migration_parameters {
             Some(parameters) => {
                 self.request.kind != DurableOperationKind::KeyProviderMigration

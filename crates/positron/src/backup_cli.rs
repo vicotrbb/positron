@@ -85,6 +85,12 @@ fn write_response(output: &mut impl Write, response: &BackupResponse) -> Result<
     if let Some(receipt) = &response.receipt {
         writeln!(output,"manifest_checksum={} catalog_generation={} catalog_identity={} uploaded_bytes={} reused_bytes={} retain_until_unix_seconds={} registry_generation_checksum={}",receipt.manifest_checksum,receipt.catalog_generation,receipt.catalog_identity,receipt.uploaded_bytes,receipt.reused_bytes,receipt.retain_until_unix_seconds,receipt.registry_generation_checksum).map_err(|_| "backup output unavailable")?;
     }
+    if let Some(evidence) = &response.restored_publication {
+        writeln!(output, "restored_publication=true manifest_checksum={} current_registry_generation_checksum={} source_catalog_identity={} source_catalog_generation={} retain_until_unix_seconds={} restore_origin_transaction={} restore_intent_digest={} capture_operation_id={} capture_request_digest={} restore_idempotency_key={}",
+            evidence.manifest_checksum, evidence.current_registry_generation_checksum, evidence.source_catalog_identity, evidence.source_catalog_generation,
+            evidence.retain_until_unix_seconds, evidence.restore_origin_transaction, evidence.restore_intent_digest, evidence.capture_operation_id, evidence.capture_request_digest, evidence.restore_idempotency_key)
+            .map_err(|_| "backup output unavailable")?;
+    }
     Ok(())
 }
 fn client_failure(failure: BackupServiceClientFailure) -> &'static str {
@@ -93,7 +99,10 @@ fn client_failure(failure: BackupServiceClientFailure) -> &'static str {
         F::InvalidRequest => "invalid backup request",
         F::AuthenticationRejected => "system administration authentication rejected",
         F::SourceUnavailable | F::TaskUnavailable => "backup operation unavailable",
-        F::PreconditionFailed => "stale Catalog generation; inspect current state before retrying",
+        F::StaleGeneration => "stale resource generation; inspect current state before retrying",
+        F::PreconditionFailed => {
+            "operation precondition failed; inspect current state before retrying"
+        },
         F::IdempotencyConflict => "idempotency key conflicts with an accepted request",
         F::AdministrationUnavailable => {
             "administration unavailable; inspect or retry the same operation"

@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "52c88e90680a04ede455a76e08f8a5d52717db2dac5d668cab9759e24ac74d3d"
+    "x-positron-schema-digest": "4fa04df2c9a95159b67868edf0f9885424cc8d9af904fdc4df5988e55d1cd26f"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1158,6 +1158,30 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Stale resource generation or operation revision, another failed precondition, or idempotency conflict. Only stale_generation identifies a generation retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "stale_generation",
+                        "precondition_failed",
+                        "idempotency_conflict"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -1187,6 +1211,30 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RepositoryResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale resource generation or operation revision, another failed precondition, or idempotency conflict. Only stale_generation identifies a generation retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "stale_generation",
+                        "precondition_failed",
+                        "idempotency_conflict"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -1239,6 +1287,30 @@
                       "enum": [
                         "administration_unavailable",
                         "capacity_unavailable"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale resource generation or operation revision, another failed precondition, or idempotency conflict. Only stale_generation identifies a generation retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "stale_generation",
+                        "precondition_failed",
+                        "idempotency_conflict"
                       ]
                     }
                   }
@@ -1332,6 +1404,30 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Stale resource generation or operation revision, another failed precondition, or idempotency conflict. Only stale_generation identifies a generation retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "stale_generation",
+                        "precondition_failed",
+                        "idempotency_conflict"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -1361,6 +1457,30 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UpgradeResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale resource generation or operation revision, another failed precondition, or idempotency conflict. Only stale_generation identifies a generation retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "stale_generation",
+                        "precondition_failed",
+                        "idempotency_conflict"
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -4343,6 +4463,9 @@
           "verification_report_checksum": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
+          },
+          "restored_publication": {
+            "$ref": "#/components/schemas/BackupRestoredPublication"
           }
         }
       },
@@ -5496,6 +5619,58 @@
           "reducedPruning": {
             "type": "boolean",
             "x-protobuf-field-number": 14
+          }
+        }
+      },
+      "BackupRestoredPublication": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "manifest_checksum",
+          "current_registry_generation_checksum",
+          "source_catalog_identity",
+          "source_catalog_generation",
+          "retain_until_unix_seconds",
+          "restore_origin_transaction",
+          "restore_intent_digest",
+          "capture_operation_id",
+          "capture_request_digest",
+          "restore_idempotency_key"
+        ],
+        "properties": {
+          "manifest_checksum": {
+            "type": "string"
+          },
+          "current_registry_generation_checksum": {
+            "type": "string"
+          },
+          "source_catalog_identity": {
+            "type": "string"
+          },
+          "source_catalog_generation": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 1
+          },
+          "retain_until_unix_seconds": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 1
+          },
+          "restore_origin_transaction": {
+            "type": "string"
+          },
+          "restore_intent_digest": {
+            "type": "string"
+          },
+          "capture_operation_id": {
+            "type": "string"
+          },
+          "capture_request_digest": {
+            "type": "string"
+          },
+          "restore_idempotency_key": {
+            "type": "string"
           }
         }
       }

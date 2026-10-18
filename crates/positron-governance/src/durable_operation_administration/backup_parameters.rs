@@ -425,6 +425,7 @@ impl BackupOperationParameters {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BackupOperationEvidence {
     Snapshot(BackupOperationReceipt),
+    RestoredPublication(super::RestoredBackupPublication),
     VerificationReport([u8; 32]),
     RestoreReport([u8; 32]),
     RetentionClaim(BackupRetentionClaimReceipt),

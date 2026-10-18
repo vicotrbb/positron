@@ -721,6 +721,10 @@ message ProviderMigrationIdentity {
   string version = 3;
 }
 
+// Native administration uses the closed HTTP failure codes in http.json.
+// stale_generation alone identifies a rejected expected resource generation or
+// operation revision;
+// precondition_failed does not imply that retrying is safe.
 // Native Repository administration is served by the authenticated HTTP API.
 // Locator is a server-local native credential context, never a serialized secret.
 service RepositoryService {
@@ -857,6 +861,21 @@ message BackupSnapshotReceipt {
   uint64 reused_bytes = 5;
   uint64 retain_until_unix_seconds = 6;
 }
+// Historical source publication authenticated during restore. The current
+// registry head is the one observed at reconciliation, not original publication.
+// Transfer counters and original publication time are deliberately absent.
+message BackupRestoredPublication {
+  string manifest_checksum = 1;
+  string current_registry_generation_checksum = 2;
+  string source_catalog_identity = 3;
+  uint64 source_catalog_generation = 4;
+  uint64 retain_until_unix_seconds = 5;
+  string restore_origin_transaction = 6;
+  string restore_intent_digest = 7;
+  string capture_operation_id = 8;
+  string capture_request_digest = 9;
+  string restore_idempotency_key = 10;
+}
 message BackupResponse {
   RepositoryOperation operation = 1;
   optional RepositoryIdentity repository = 2;
@@ -868,6 +887,7 @@ message BackupResponse {
   optional string terminal_error_code = 8;
   optional string verification_report = 9;
   optional string verification_report_checksum = 10;
+  optional BackupRestoredPublication restored_publication = 11;
 }
 
 message BackupListRequest {

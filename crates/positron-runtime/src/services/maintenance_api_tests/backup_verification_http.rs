@@ -154,7 +154,7 @@ fn submit_verification_current(
     loop {
         match client.manage(bearer, &request) {
             Ok(response) => return Ok((request, response)),
-            Err(BackupServiceClientFailure::PreconditionFailed) => {
+            Err(BackupServiceClientFailure::StaleGeneration) => {
                 let generation = {
                     let _gate = services.catalog_operation()?;
                     open_catalog(&services.instance)?.pin()?.number()
@@ -162,7 +162,7 @@ fn submit_verification_current(
                 if request.expected_catalog_generation == Some(generation)
                     || std::time::Instant::now() >= deadline
                 {
-                    return Err(BackupServiceClientFailure::PreconditionFailed.into());
+                    return Err(BackupServiceClientFailure::StaleGeneration.into());
                 }
                 request.expected_catalog_generation = Some(generation);
             },

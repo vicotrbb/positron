@@ -87,6 +87,45 @@ impl RepositoryOperationBinding {
         Ok(live)
     }
 
+    /// Canonical task replacement for the authenticated historical self-capture.
+    /// The Governance restore transaction publishes this with its operation/audit.
+    pub fn restored_snapshot_completion(
+        self,
+        snapshot: &crate::CatalogSnapshot,
+    ) -> Result<(crate::CatalogObjectId, CatalogObject), MaintenanceFailure> {
+        let mut found = None;
+        for identity in snapshot.object_identities() {
+            let bytes = snapshot
+                .object(identity)
+                .map_err(|_| MaintenanceFailure::CatalogUnavailable)?
+                .ok_or(MaintenanceFailure::CatalogUnavailable)?;
+            if record::record_identity(bytes)? != Some(MaintenanceTaskId::new(self.operation)?) {
+                continue;
+            }
+            if found.is_some() {
+                return Err(MaintenanceFailure::CatalogUnavailable);
+            }
+            let mut state = decode_record(bytes)?;
+            if state.task.class != MaintenanceTaskClass::BackupSnapshot
+                || Self::from_task(&state.task, state.checkpoint.as_ref())? != self
+                || !matches!(
+                    state.phase,
+                    MaintenanceTaskPhase::Queued
+                        | MaintenanceTaskPhase::Running
+                        | MaintenanceTaskPhase::Deferred
+                )
+                || state.cancellation_requested
+            {
+                return Err(MaintenanceFailure::PreconditionFailed);
+            }
+            state.phase = MaintenanceTaskPhase::Succeeded;
+            state.terminal_failure = None;
+            state.last_progress_at = None;
+            state.active_dispatch = None;
+            found = Some((identity, encode_record(&state)?.catalog_object()?));
+        }
+        found.ok_or(MaintenanceFailure::UnknownTask)
+    }
     pub fn new(operation: [u8; 16], intent: [u8; 32]) -> Result<Self, MaintenanceFailure> {
         if operation.iter().all(|byte| *byte == 0) || intent.iter().all(|byte| *byte == 0) {
             return Err(MaintenanceFailure::InvalidInput);

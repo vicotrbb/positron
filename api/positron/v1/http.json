@@ -1,5 +1,5 @@
 {
-  "schema_digest": "52c88e90680a04ede455a76e08f8a5d52717db2dac5d668cab9759e24ac74d3d",
+  "schema_digest": "4fa04df2c9a95159b67868edf0f9885424cc8d9af904fdc4df5988e55d1cd26f",
   "max_request_bytes": 64,
   "unknown_fields": "reject",
   "enums": {
@@ -2549,7 +2549,7 @@
         "400": "invalid_request",
         "401": "authentication_rejected",
         "404": "source_unavailable",
-        "409": "precondition_failed or idempotency_conflict",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
         "503": "administration_unavailable"
       }
     },
@@ -2682,7 +2682,7 @@
         "400": "invalid_request",
         "401": "authentication_rejected",
         "404": "source_unavailable",
-        "409": "precondition_failed or idempotency_conflict",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
         "503": "administration_unavailable"
       }
     },
@@ -2877,6 +2877,14 @@
           "number": 10,
           "deprecated": false,
           "optional": true
+        },
+        {
+          "proto": "restored_publication",
+          "json": "restored_publication",
+          "type": "BackupRestoredPublication",
+          "number": 11,
+          "deprecated": false,
+          "optional": true
         }
       ],
       "responses": {
@@ -2884,7 +2892,7 @@
         "400": "invalid_request",
         "401": "authentication_rejected",
         "404": "source_unavailable",
-        "409": "precondition_failed or idempotency_conflict",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
         "503": "administration_unavailable or capacity_unavailable"
       }
     },
@@ -3060,7 +3068,7 @@
         "400": "invalid_request",
         "401": "authentication_rejected",
         "404": "source_unavailable",
-        "409": "precondition_failed or idempotency_conflict",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
         "503": "administration_unavailable"
       }
     },
@@ -3161,7 +3169,7 @@
         "400": "invalid_request",
         "401": "authentication_rejected",
         "404": "source_unavailable",
-        "409": "precondition_failed or idempotency_conflict",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
         "503": "administration_unavailable"
       }
     },

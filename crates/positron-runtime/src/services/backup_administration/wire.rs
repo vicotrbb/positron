@@ -327,6 +327,26 @@ fn response(
         },
         operation: super::super::provider_migration::operation_response(operation),
         repository: Some(repository),
+        restored_publication: operation.restored_backup_publication().map(|evidence| {
+            positron_api::backup::BackupRestoredPublication {
+                manifest_checksum: hex(evidence.manifest()),
+                current_registry_generation_checksum: hex(evidence.current_registry_generation()),
+                source_catalog_identity: hex(evidence.source_catalog_identity()),
+                source_catalog_generation: evidence.source_catalog_generation(),
+                retain_until_unix_seconds: evidence.retain_until(),
+                restore_origin_transaction: super::super::maintenance_api::hex(
+                    evidence.origin_transaction(),
+                ),
+                restore_intent_digest: hex(evidence.restore_intent()),
+                capture_operation_id: super::super::maintenance_api::hex(
+                    evidence.capture_operation(),
+                ),
+                capture_request_digest: hex(evidence.capture_request()),
+                restore_idempotency_key: super::super::maintenance_api::hex(
+                    evidence.restore_idempotency_key(),
+                ),
+            }
+        }),
         receipt: operation
             .backup_receipt()
             .map(|receipt| BackupSnapshotReceipt {

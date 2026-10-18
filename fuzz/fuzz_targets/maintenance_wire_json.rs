@@ -17,6 +17,10 @@ fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_RESPONSE_BYTES.saturating_add(1) {
         return;
     }
+    if let Ok(response) = positron_api::backup::BackupResponse::decode(data) {
+        let encoded = response.encode().expect("accepted backup response encodes");
+        assert_eq!(positron_api::backup::BackupResponse::decode(&encoded), Ok(response));
+    }
     if let Ok(request) = TenantPurgeRequest::decode(data) {
         let encoded = request.encode().expect("accepted purge request encodes");
         assert_eq!(TenantPurgeRequest::decode(&encoded), Ok(request));

@@ -26,6 +26,8 @@ pub use upgrade_parameters::{
 };
 pub use upgrade_publication::{UpgradePublication, UpgradePublicationOutcome};
 mod backup_administration;
+mod restored_backup;
+pub use restored_backup::RestoredBackupPublication;
 mod backup_parameters;
 mod backup_retention_administration;
 mod backup_verification_administration;
@@ -957,6 +959,12 @@ fn transition_request_digest(operation: DurableOperation) -> [u8; 32] {
     hasher.update(operation.operation_id().to_bytes());
     hasher.update(operation.revision.to_be_bytes());
     hasher.update(operation.request.canonical_digest());
+    if let Some(receipt) = operation.restored_backup_publication() {
+        let mut bytes = Vec::new();
+        receipt.encode(&mut bytes);
+        hasher.update([5]);
+        hasher.update(bytes);
+    }
     if let Some(receipt) = operation.backup_receipt() {
         let mut bytes = Vec::new();
         receipt.encode(&mut bytes);
@@ -1153,6 +1161,9 @@ fn find_by_key(
 fn transition_transaction(
     operation: DurableOperation,
 ) -> Result<TransactionId, DurableOperationFailure> {
+    if let Some(receipt) = operation.restored_backup_publication() {
+        return receipt.transaction(operation.revision());
+    }
     TransactionId::new(transition_transaction_bytes(
         operation.operation_id(),
         operation.revision,

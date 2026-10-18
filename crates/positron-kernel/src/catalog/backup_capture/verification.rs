@@ -7,6 +7,7 @@ use std::sync::Arc;
 /// and checks every ciphertext file against `files()`. No live state is changed.
 pub struct BackupCaptureVerification {
     instance: InstanceId,
+    capture: ([u8; 16], [u8; 32]),
     generation: u64,
     catalog: [u8; 32],
     epoch: FormatEpoch,
@@ -77,6 +78,7 @@ impl BackupCaptureVerification {
             BackupCapture::decode_inventory(&plaintext, operation, request, epoch)?;
         Ok(BackupCaptureVerification {
             instance,
+            capture: (operation, request),
             generation,
             catalog,
             epoch,
@@ -397,9 +399,11 @@ impl BackupCaptureVerification {
             return Err(fail(CatalogFailureCode::InvalidInput));
         }
         let instance = self.instance;
+        let capture = self.capture;
         let (snapshot, audit, checkpoint) = self.finish_verified()?;
         Ok(super::super::restore_origin::BackupRestoreOrigin {
             instance,
+            capture,
             manifest,
             intent,
             snapshot,
@@ -513,6 +517,7 @@ mod tests {
     ) -> Result<BackupCaptureVerification, CatalogFailure> {
         Ok(BackupCaptureVerification {
             instance: InstanceId::new([1; 16])?,
+            capture: ([3; 16], [4; 32]),
             generation: 1,
             catalog: [1; 32],
             epoch: FormatEpoch::CATALOG_V2,

@@ -137,41 +137,70 @@ pub(super) fn field(output: &Output, name: &str) -> TestResult<String> {
         .remove(name)
         .ok_or_else(|| format!("missing public {name}").into())
 }
-fn generation(binary: &Path, endpoint: std::net::SocketAddr, admin: &str) -> TestResult<String> {
-    field(
-        &execute(
-            binary,
-            &online("repository", "status", endpoint),
-            Some(admin),
-        )?,
-        "catalog_generation",
-    )
-}
 pub(super) fn mutate(
-    binary: &Path,
-    arguments: &[String],
+    family: &str,
+    mut request: serde_json::Value,
     endpoint: std::net::SocketAddr,
     admin: &str,
-) -> TestResult<Output> {
+) -> TestResult<String> {
+    use positron_api::{
+        backup::BackupServiceClient,
+        maintenance::MaintenanceServiceClientFailure as F,
+        repository::{RepositoryServiceClient, RepositoryTransport},
+        upgrade::UpgradeServiceClient,
+    };
+    let transport = RepositoryTransport::PlaintextOptOut { endpoint };
+    let repository =
+        RepositoryServiceClient::new(transport.clone()).map_err(|_| "repository client")?;
+    let backup = BackupServiceClient::new(transport.clone()).map_err(|_| "backup client")?;
+    let upgrade = UpgradeServiceClient::new(transport).map_err(|_| "upgrade client")?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let mut arguments = arguments.to_vec();
-        arguments.extend([
-            "--expected-generation".into(),
-            generation(binary, endpoint, admin)?,
-        ]);
-        let output = invoke(binary, &arguments, Some(admin))?;
-        if output.status.success() {
-            return Ok(output);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("public mutation generation watchdog expired".into());
         }
-        let message = String::from_utf8_lossy(&output.stderr);
-        let precondition =
-            message.contains("stale Catalog generation") || message.contains("precondition failed");
-        if !precondition || Instant::now() >= deadline {
-            return Err(format!("public mutation failed: {message}").into());
+        let status = repository
+            .manage_with_timeout(
+                admin,
+                &positron_api::repository::RepositoryRequest::decode(br#"{"action":"status"}"#)?,
+                remaining,
+            )
+            .map_err(|failure| format!("public repository status refused: {failure:?}"))?;
+        // Generated mutation clients have the canonical five-second request bound.
+        if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(5) {
+            return Err("public mutation generation watchdog expired".into());
+        }
+        request["expected_catalog_generation"] = status.catalog_generation.into();
+        let bytes = serde_json::to_vec(&request)?;
+        let result = match family {
+            "repository" => repository
+                .manage(
+                    admin,
+                    &positron_api::repository::RepositoryRequest::decode(&bytes)?,
+                )
+                .map(|response| response.operation.map(|operation| operation.id)),
+            "backup" => backup
+                .manage(admin, &positron_api::backup::BackupRequest::decode(&bytes)?)
+                .map(|response| Some(response.operation.id)),
+            "upgrade" => upgrade
+                .manage(
+                    admin,
+                    &positron_api::upgrade::UpgradeRequest::decode(&bytes)?,
+                )
+                .map(|response| response.operation.map(|operation| operation.id)),
+            _ => return Err("unknown public mutation family".into()),
+        };
+        match result {
+            Ok(operation) => return Ok(operation.ok_or("accepted operation missing")?),
+            Err(F::StaleGeneration) if Instant::now() < deadline => continue,
+            Err(failure) => {
+                return Err(format!("public {family} mutation refused: {failure:?}").into());
+            },
         }
     }
 }
+
 fn wait(
     binary: &Path,
     family: &str,
@@ -219,7 +248,7 @@ pub(super) fn roundtrip(
     installed: Installed<'_>,
     recovery: &RecoveryFiles,
     expected: &[u8],
-) -> TestResult {
+) -> TestResult<PathBuf> {
     let Installed {
         binary,
         config,
@@ -232,57 +261,37 @@ pub(super) fn roundtrip(
     let root = &fixture.root;
     let repository = root.join("repository");
     directory(&repository)?;
-    let mut arguments = online("repository", "init", endpoint);
-    arguments.extend([
-        "--locator".into(),
-        repository.display().to_string(),
-        "--repository-id".into(),
-        REPOSITORY.into(),
-        "--idempotency-key".into(),
-        "22222222-2222-4222-8222-222222222222".into(),
-    ]);
-    let initialized = mutate(binary, &arguments, endpoint, admin)?;
-    wait(
-        binary,
+    let initialized = mutate(
         "repository",
+        serde_json::json!({
+            "action": "init", "locator": repository.display().to_string(), "repository_id": REPOSITORY,
+            "idempotency_key": "22222222-2222-4222-8222-222222222222"
+        }),
         endpoint,
         admin,
-        &field(&initialized, "operation_id")?,
     )?;
-    arguments = online("backup", "create", endpoint);
-    arguments.extend([
-        "--locator".into(),
-        repository.display().to_string(),
-        "--repository-id".into(),
-        REPOSITORY.into(),
-        "--retention-seconds".into(),
-        "3600".into(),
-        "--idempotency-key".into(),
-        "33333333-3333-4333-8333-333333333333".into(),
-    ]);
-    let accepted = mutate(binary, &arguments, endpoint, admin)?;
-    let snapshot = field(&accepted, "operation_id")?;
+    wait(binary, "repository", endpoint, admin, &initialized)?;
+    let snapshot = mutate(
+        "backup",
+        serde_json::json!({
+            "action": "create", "locator": repository.display().to_string(), "repository_id": REPOSITORY,
+            "retention_seconds": 3600, "idempotency_key": "33333333-3333-4333-8333-333333333333"
+        }),
+        endpoint,
+        admin,
+    )?;
     let backed_up = wait(binary, "backup", endpoint, admin, &snapshot)?;
     let checksum = field(&backed_up, "manifest_checksum")?;
-    arguments = online("backup", "verify", endpoint);
-    arguments.extend([
-        "--repository-id".into(),
-        REPOSITORY.into(),
-        "--snapshot-id".into(),
-        snapshot.clone(),
-        "--expected-manifest-checksum".into(),
-        checksum.clone(),
-        "--idempotency-key".into(),
-        "44444444-4444-4444-8444-444444444444".into(),
-    ]);
-    let accepted = mutate(binary, &arguments, endpoint, admin)?;
-    let verified = wait(
-        binary,
+    let accepted = mutate(
         "backup",
+        serde_json::json!({
+            "action": "verify", "repository_id": REPOSITORY, "snapshot_id": snapshot,
+            "expected_manifest_checksum": checksum, "idempotency_key": "44444444-4444-4444-8444-444444444444"
+        }),
         endpoint,
         admin,
-        &field(&accepted, "operation_id")?,
     )?;
+    let verified = wait(binary, "backup", endpoint, admin, &accepted)?;
     assert!(fields(&verified)?.contains_key("verification_report"));
     archive::stop(&mut fixture.child)?;
     let target = root.join("restored");
@@ -300,7 +309,7 @@ pub(super) fn roundtrip(
             &target.join("secrets").display().to_string(),
         );
     fs::write(&target_config, text)?;
-    arguments = plain(&["backup", "restore", "start", "--output", "json", "--config"]);
+    let mut arguments = plain(&["backup", "restore", "start", "--output", "json", "--config"]);
     arguments.extend([
         target_config.display().to_string(),
         "--locator".into(),
@@ -308,9 +317,9 @@ pub(super) fn roundtrip(
         "--repository-id".into(),
         REPOSITORY.into(),
         "--snapshot-id".into(),
-        snapshot,
+        snapshot.clone(),
         "--expected-manifest-checksum".into(),
-        checksum,
+        checksum.clone(),
         "--idempotency-key".into(),
         "55555555-5555-4555-8555-555555555555".into(),
         "--bundle".into(),
@@ -354,21 +363,30 @@ pub(super) fn roundtrip(
     );
     ready(operations)?;
     assert_eq!(archive::query_log(binary, root, endpoint, query)?, expected);
-    super::upgrade::run(
-        fixture,
-        Installed {
-            config: &target_config,
-            ..installed
-        },
-        &target,
-        expected,
-    )?;
+    let mut inspection = online("backup", "status", endpoint);
+    inspection.extend(["--operation-id".into(), snapshot]);
+    let inherited = execute(binary, &inspection, Some(admin))?;
+    assert_eq!(field(&inherited, "status")?, "succeeded");
+    assert_eq!(field(&inherited, "restored_publication")?, "true");
+    assert_eq!(field(&inherited, "manifest_checksum")?, checksum);
+    assert_eq!(
+        field(&inherited, "source_catalog_identity")?,
+        field(&backed_up, "catalog_identity")?
+    );
+    assert_eq!(
+        field(&inherited, "source_catalog_generation")?,
+        field(&backed_up, "catalog_generation")?
+    );
+    assert!(!fields(&inherited)?.contains_key("uploaded_bytes"));
+    assert!(!fields(&inherited)?.contains_key("reused_bytes"));
+    // Fresh-root Restore and source Upgrade are independent supported journeys.
+    let candidate = super::upgrade::run(fixture, installed, &fixture.root.clone(), expected)?;
     fixture.child = Some(
-        Command::new(binary)
+        Command::new(&candidate)
             .args(["serve", "--config"])
             .arg(config)
             .spawn()?,
     );
     ready(operations)?;
-    Ok(())
+    Ok(candidate)
 }

@@ -22,6 +22,7 @@ const BACKUP_PARAMETERS_MAGIC: [u8; 8] = *b"POSBKP01";
 const RETENTION_PARAMETERS_MAGIC: [u8; 8] = *b"POSBRP01";
 const RETENTION_CLAIM_MAGIC: [u8; 8] = *b"POSBRC01";
 const BACKUP_CLEANUP_MAGIC: [u8; 8] = *b"POSBCE01";
+const RESTORED_PUBLICATION_MAGIC: [u8; 8] = *b"POSBKH01";
 const BACKUP_RECEIPT_MAGIC: [u8; 8] = *b"POSBKR02";
 const UPGRADE_PARAMETERS_MAGIC: [u8; 8] = *b"POSUPG01";
 const ROOT_PARAMETERS_MAGIC: [u8; 8] = *b"POSKPM01";
@@ -110,6 +111,10 @@ pub(super) fn encode_operation(operation: DurableOperation) -> Vec<u8> {
             Some(super::backup_parameters::BackupOperationEvidence::VerificationReport(value)) => {
                 encoded.extend_from_slice(&VERIFICATION_REPORT_MAGIC);
                 encoded.extend_from_slice(&value);
+            },
+            Some(super::backup_parameters::BackupOperationEvidence::RestoredPublication(value)) => {
+                encoded.extend_from_slice(&RESTORED_PUBLICATION_MAGIC);
+                value.encode(&mut encoded);
             },
             Some(super::backup_parameters::BackupOperationEvidence::Snapshot(value)) => {
                 encoded.extend_from_slice(&BACKUP_RECEIPT_MAGIC);
@@ -479,7 +484,11 @@ pub(super) fn decode_operation(
             let bytes = encoded
                 .get(offset..)
                 .ok_or(DurableOperationFailure::PersistenceUnavailable)?;
-            let value = if magic == RESTORE_REPORT_MAGIC {
+            let value = if magic == RESTORED_PUBLICATION_MAGIC {
+                super::backup_parameters::BackupOperationEvidence::RestoredPublication(
+                    super::RestoredBackupPublication::decode(bytes)?,
+                )
+            } else if magic == RESTORE_REPORT_MAGIC {
                 super::backup_parameters::BackupOperationEvidence::RestoreReport(
                     bytes
                         .try_into()
@@ -675,6 +684,11 @@ pub(super) fn encode_audit(
             encoded.extend_from_slice(&report);
             return Ok(encoded);
         }
+        if let Some(receipt) = operation.restored_backup_publication() {
+            encoded.push(5);
+            receipt.encode(&mut encoded);
+            return Ok(encoded);
+        }
         match operation.backup_receipt() {
             Some(receipt) => {
                 encoded.push(1);
@@ -834,6 +848,9 @@ pub fn fuzz_durable_operation_record(data: &[u8]) {
             operation.backup_evidence =
                 Some(super::backup_parameters::BackupOperationEvidence::RestoreReport([0xae; 32]));
         }
+    }
+    if data.get(7).copied().unwrap_or_default() & 1 != 0 {
+        operation = super::restored_backup::historical_record_fixture();
     }
     let mut record = encode_operation(operation);
     for mutation in data.chunks(4).take(128) {

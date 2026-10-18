@@ -16,7 +16,9 @@ pub use list::{
     BackupListEntry, BackupListRequest, BackupListResponse, LIST_HTTP_PATH, MAX_LIST_RESPONSE_BYTES,
 };
 mod response;
-pub use response::{BackupResponse, BackupRetentionReceipt, BackupSnapshotReceipt};
+pub use response::{
+    BackupResponse, BackupRestoredPublication, BackupRetentionReceipt, BackupSnapshotReceipt,
+};
 pub const HTTP_PATH: &str = "/v1/backups:manage";
 pub const MAX_REQUEST_BYTES: usize = 4096;
 pub const MAX_RESPONSE_BYTES: usize = 4096;

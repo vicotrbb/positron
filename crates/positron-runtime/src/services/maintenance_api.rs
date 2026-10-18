@@ -29,6 +29,7 @@ pub(crate) enum MaintenanceServiceFailure {
     TaskUnavailable,
     SourceUnavailable,
     IdempotencyConflict,
+    StaleGeneration,
     PreconditionFailed,
     AdministrationUnavailable,
     CapacityUnavailable,

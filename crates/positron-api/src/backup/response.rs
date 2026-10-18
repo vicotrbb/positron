@@ -13,6 +13,21 @@ pub struct BackupSnapshotReceipt {
     pub reused_bytes: u64,
     pub retain_until_unix_seconds: u64,
 }
+/// Historical publication observed through a verified restore; no transfer counters.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupRestoredPublication {
+    pub manifest_checksum: String,
+    pub current_registry_generation_checksum: String,
+    pub source_catalog_identity: String,
+    pub source_catalog_generation: u64,
+    pub retain_until_unix_seconds: u64,
+    pub restore_origin_transaction: String,
+    pub restore_intent_digest: String,
+    pub capture_operation_id: String,
+    pub capture_request_digest: String,
+    pub restore_idempotency_key: String,
+}
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackupResponse {
@@ -32,6 +47,8 @@ pub struct BackupResponse {
     pub repository: Option<RepositoryIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<BackupSnapshotReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_publication: Option<BackupRestoredPublication>,
 }
 impl BackupResponse {
     pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
@@ -155,6 +172,30 @@ impl BackupResponse {
         {
             return Err(MaintenanceWireFailure);
         }
+        if let Some(evidence) = &self.restored_publication
+            && (!snapshot
+                || self.receipt.is_some()
+                || self.retention_receipt.is_some()
+                || self.cleanup_pending
+                || op.status != "succeeded"
+                || phase != "published"
+                || boundary != "backup_registry_published"
+                || self.repository.is_none()
+                || evidence.source_catalog_generation == 0
+                || evidence.retain_until_unix_seconds == 0
+                || !crate::provider_migration::operation_id(&evidence.restore_idempotency_key)
+                || evidence.capture_operation_id != op.id
+                || !crate::provider_migration::operation_id(&evidence.restore_origin_transaction)
+                || !hash(&evidence.manifest_checksum)
+                || !hash(&evidence.current_registry_generation_checksum)
+                || !hash(&evidence.source_catalog_identity)
+                || !hash(&evidence.restore_intent_digest)
+                || !hash(&evidence.capture_request_digest)
+                || evidence.manifest_checksum.get(..32)
+                    != Some(evidence.restore_origin_transaction.as_str()))
+        {
+            return Err(MaintenanceWireFailure);
+        }
         if let Some(receipt) = &self.retention_receipt
             && (!retention
                 || self.receipt.is_some()
@@ -221,7 +262,8 @@ impl BackupResponse {
             }
         }
         if op.status == "succeeded"
-            && (snapshot && self.receipt.is_none() || retention && self.retention_receipt.is_none())
+            && (snapshot && (self.receipt.is_none() && self.restored_publication.is_none())
+                || retention && self.retention_receipt.is_none())
         {
             return Err(MaintenanceWireFailure);
         }

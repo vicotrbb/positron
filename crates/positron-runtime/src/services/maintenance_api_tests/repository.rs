@@ -101,7 +101,7 @@ fn serving_repository_initialize_and_doctor_are_authenticated_durable_tasks()
     };
     assert_eq!(
         services.accept_repository_operation(&administrator, stale),
-        Err(MaintenanceServiceFailure::PreconditionFailed)
+        Err(MaintenanceServiceFailure::StaleGeneration)
     );
     assert_eq!(std::fs::read_dir(&repository_path)?.count(), 0);
 
@@ -333,7 +333,7 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
     let mut accepted = loop {
         match client.manage(&administrator, &request) {
             Ok(accepted) => break accepted,
-            Err(positron_api::repository::RepositoryServiceClientFailure::PreconditionFailed)
+            Err(positron_api::repository::RepositoryServiceClientFailure::StaleGeneration)
                 if std::time::Instant::now() < admission_deadline =>
             {
                 request.expected_catalog_generation = Some(

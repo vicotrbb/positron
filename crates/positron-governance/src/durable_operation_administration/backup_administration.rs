@@ -377,7 +377,7 @@ impl DurableOperationAdministration {
         Ok(next)
     }
 }
-fn authorized(
+pub(super) fn authorized(
     catalog: &Catalog<'_>,
     actor: crate::AuthorizedContext,
     id: OperationId,
@@ -463,7 +463,8 @@ pub(super) fn legal_state(operation: &DurableOperation) -> bool {
             operation.phase == DurableOperationPhase::Published
                 && operation.progress_percent == 100
                 && operation.boundary == DurableOperationBoundary::BackupRegistryPublished
-                && operation.backup_receipt().is_some()
+                && (operation.backup_receipt().is_some()
+                    ^ operation.restored_backup_publication().is_some())
                 && operation.completed_at_unix_seconds == Some(operation.updated_at_unix_seconds)
                 && operation.retry == DurableOperationRetry::Never
                 && operation.cancellation == DurableOperationCancellation::NotAllowedAfterDrain
