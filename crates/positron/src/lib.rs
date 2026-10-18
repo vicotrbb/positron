@@ -20,6 +20,7 @@ use signal_hook::iterator::Signals;
 
 mod administrative_cli;
 mod backup_cli;
+mod bootstrap_cli;
 mod config_cli;
 #[cfg(unix)]
 mod control_socket;
@@ -29,6 +30,7 @@ mod local_key_cli;
 mod maintenance_cli;
 mod policy;
 mod provider_migration_cli;
+mod query_cli;
 mod recovery_cli;
 mod release_cli;
 mod repository_cli;
@@ -75,6 +77,17 @@ pub fn run_native(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
     let mut arguments = arguments.into_iter().peekable();
+    if arguments.peek().is_some_and(|argument| argument == "query") {
+        arguments.next();
+        return query_cli::run(arguments);
+    }
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "bootstrap")
+    {
+        arguments.next();
+        return bootstrap_cli::run(arguments, environment);
+    }
     if arguments
         .peek()
         .is_some_and(|argument| argument == "release")

@@ -34,7 +34,7 @@ fn offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_
         ),
     )?;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["doctor", "--offline", "--config"])
         .arg(&config)
         .output()?;
@@ -61,7 +61,7 @@ fn offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_
         );
     }
     assert!(!stdout.contains("pos_"));
-    let verify = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let verify = Command::new(native_binary::executable())
         .args(["verify", "--offline", "--config"])
         .arg(&config)
         .output()?;
@@ -88,7 +88,7 @@ fn offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_
     let tenant = selected_field("report_scope_tenant=")?;
     let signal = selected_field("report_scope_signal=")?;
     let shard = selected_field("report_scope_shard=")?;
-    let scoped_verify = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let scoped_verify = Command::new(native_binary::executable())
         .args(["verify", "--offline", "--config"])
         .arg(&config)
         .args(["--tenant", tenant, "--signal", signal, "--shard", shard])
@@ -117,7 +117,7 @@ fn compiled_offline_verify_reaches_authentication_for_a_runtime_sized_continuati
         .map_err(|_| "process test lock poisoned")?;
     let (root, _roots, config) = initialized_doctor_fixture("runtime-sized-continuation")?;
     let continuation = "ab".repeat(1_038);
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["verify", "--offline", "--config"])
         .arg(&config)
         .args(["--continuation", &continuation])
@@ -156,7 +156,7 @@ fn offline_doctor_refuses_a_volume_owned_by_another_process()
     )?;
     let ownership =
         positron_kernel::PrimaryDataVolume::acquire(&roots.data, MountQualification::LocalHost)?;
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["doctor", "--offline", "--config"])
         .arg(&config)
         .output()?;
@@ -180,7 +180,7 @@ fn offline_doctor_reports_missing_key_without_mutating_the_faulted_volume()
     fs::remove_file(roots.secrets.join("local-root-key.v1"))?;
     let before_data = volume_bytes(&roots.data)?;
     let before_secrets = volume_bytes(&roots.secrets)?;
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["doctor", "--offline", "--config"])
         .arg(&config)
         .output()?;
@@ -214,7 +214,7 @@ fn offline_doctor_reports_corrupt_bootstrap_as_fenced_without_repairing_it()
     *byte ^= 0x80;
     fs::write(&initialized, &bytes)?;
     let before = volume_bytes(&roots.data)?;
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["doctor", "--offline", "--config"])
         .arg(&config)
         .output()?;
@@ -251,7 +251,7 @@ fn offline_doctor_does_not_initialize_an_empty_volume_or_create_an_ownership_art
     )?;
     let before_data = volume_bytes(&roots.data)?;
     let before_secrets = volume_bytes(&roots.secrets)?;
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["doctor", "--offline", "--config"])
         .arg(&config)
         .output()?;
@@ -270,7 +270,7 @@ fn offline_doctor_does_not_initialize_an_empty_volume_or_create_an_ownership_art
 #[test]
 fn offline_doctor_reports_configuration_failure_without_echoing_rejected_values()
 -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args([
             "doctor",
             "--offline",
@@ -299,7 +299,7 @@ fn offline_doctor_does_not_recreate_a_missing_ownership_artifact()
     let (root, roots, config) = initialized_doctor_fixture("missing-lock")?;
     fs::remove_file(roots.data.join(".positron-volume.lock"))?;
     let before = volume_bytes(&roots.data)?;
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["doctor", "--offline", "--config"])
         .arg(&config)
         .output()?;

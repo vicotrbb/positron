@@ -1501,6 +1501,7 @@ flowchart TD
     query["positron-query"]
 
     app --> release
+    release --> config
     release --> kernel
     runtime --> release
     app --> runtime

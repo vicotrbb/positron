@@ -453,3 +453,14 @@ Drain lifecycle. `positron upgrade offline` continues the same operation while
 holding exclusive volume ownership. Executable replacement is an explicit
 operator action. The native adapter delivered here is HTTP administration;
 shared native gRPC administration remains tracked by issue #219.
+
+## Bounded Log query HTTP subset
+
+`LogQueryService/Execute` is implemented by the native API listener at
+`POST /v1/logs:query`, the schema-generated Rust client, and `positron query`.
+It requires a tenant-bound Query credential. The request and typed event
+response use descriptor-generated standard ProtoJSON, including decimal
+64-bit integers, base64 bytes and flat oneofs. See the
+[public interface reference](../../../docs/public-api-v1.md#bounded-log-execute)
+for explicit bounds, rejection metadata, terminal semantics and remaining
+issue #219 scope. The aggregate Release 1 Query capability remains unavailable.

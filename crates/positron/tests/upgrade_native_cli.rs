@@ -1,5 +1,7 @@
 //! Real CLI admission and Process Drain; candidate metadata is synthetic, not two-build qualification.
 #![cfg(unix)]
+#[path = "support/native_binary.rs"]
+mod native_binary;
 use positron_api::{
     backup::{BackupRequest, BackupServiceClient, BackupServiceClientFailure, BackupTransport},
     repository::{
@@ -248,7 +250,7 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
             .ok_or("API profile")?
             .connection_protection()
             .request_deadline();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let mut child = Command::new(native_binary::executable())
         .args([
             "upgrade",
             "start",
@@ -286,7 +288,7 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
             if Instant::now() >= admission_deadline {
                 return Err("ambiguous native acceptance exceeded original API budget".into());
             }
-            let mut lookup = Command::new(env!("CARGO_BIN_EXE_positron"))
+            let mut lookup = Command::new(native_binary::executable())
                 .args(["upgrade", "lookup", "--endpoint", &address.to_string(),
                     "--allow-plaintext", "--credential-stdin", "--idempotency-key", KEY])
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;

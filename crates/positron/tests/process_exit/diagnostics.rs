@@ -1,5 +1,7 @@
 //! Native binary exit and secret-safe diagnostics.
 
+#[path = "../support/native_binary.rs"]
+mod native_binary;
 use std::process::Command;
 
 #[cfg(unix)]

@@ -1,5 +1,7 @@
 //! Real backup owner and separate offline restore command processes.
 #![cfg(unix)]
+#[path = "support/native_binary.rs"]
+mod native_binary;
 use age::secrecy::ExposeSecret;
 use positron_api::{
     backup::{BackupRequest, BackupServiceClient, BackupTransport},
@@ -40,7 +42,7 @@ fn host(root: &Path, suffix: &str) -> Result<NativeHost> {
     )?))
 }
 fn command(action: &str, arguments: &[String], private: &[&str]) -> Result<Output> {
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["backup", "restore", action])
         .args(arguments)
         .output()?;

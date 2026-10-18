@@ -39,7 +39,7 @@ Public plaintext requires the server's configuration-file-only
 credentials and API data without transport encryption. Positron emits the
 non-secret configuration warning, remains ready with a persistent health
 warning, and records the selected profile once in the governance audit chain.
-SDK publication and a public query transport remain unavailable.
+SDK publication remains unavailable. The bounded Log HTTP execute subset below is available.
 
 `UpgradeService` selects the independently trusted, operator-staged candidate
 through `POST /v1/upgrades:manage` and the generated HTTP client. The
@@ -55,6 +55,55 @@ The native administration transport delivered here is HTTP. The shared native
 gRPC administration adapter gap remains tracked by issue #219; canonical
 Protobuf definitions and generated clients do not establish native gRPC delivery.
 
+## Bounded Log execute
+
+`LogQueryService/Execute` maps to authenticated `POST /v1/logs:query` on the
+native `api` listener. The descriptor-generated Rust client and `positron query`
+CLI use that route and the existing TLS-default transport and protected stdin
+credential boundary. Only a Query credential authorizes its own tenant; tenant
+and forwarded-actor selectors are refused. Authentication and existing Drain
+admission precede decoding and planning, and the shared Query owner revalidates
+authorization against the pinned Catalog.
+
+The request contains a Log pipeline and all eight explicit resource budgets.
+This execute subset caps decoded records at 1,024, rows at 128, logical output
+at 16 KiB, query memory at 1 MiB, CPU work at 1,024, wall time at five seconds,
+and the range at 31 days. The request is at most 8 KiB and the response at most
+256 KiB. The transport reserves its bounded response workspace before mapping
+or serialization and retains the reservation until the final response byte
+owner is dropped. Query statistics retain the Query owner's original values;
+transport workspace is governed separately.
+
+The envelope preserves the original schema, ordering, pinned snapshot,
+effective budget, lease and initial cursor, typed native values and occurrence
+sets, original batch sequences and digest chain, and exactly one terminal.
+Complete and Incomplete preserve original statistics and result digest;
+Incomplete also preserves its reason and affected ranges. Continued remains
+Continued with its original continuation cursor. This route does not manufacture
+completion or a resume cursor. Pre-execution rejections use canonical
+`PublicError` code, retry class, Rejected completion, source and safe detail;
+malformed or unknown remote metadata fails closed.
+
+Log Query JSON uses standard ProtoJSON: lowerCamelCase output, decimal strings
+for 64-bit integers, base64 bytes and flat oneof fields. Decoding accepts standard
+ProtoJSON aliases and numeric forms, rejects unknown fields, duplicate aliases
+and ambiguous oneofs, and validates closed domain vocabularies and the envelope.
+
+For example, save a canonical `LogQueryRequest` JSON file with `pipeline` and
+`budget`, then pipe a Query credential to:
+
+```console
+positron query --endpoint 127.0.0.1:8080 --server-name positron.example \
+  --trust-file /protected/ca.pem --credential-stdin --request query.json
+```
+
+The CLI emits the complete canonical envelope. Automation must inspect the
+terminal state; receiving Incomplete or Continued never establishes Complete.
+This is the archive acceptance prerequisite delivered with issue #114.
+Issue #219 remains open for native public gRPC, SQL and the remaining Query
+methods, resume, tail, export, Trace client paths and the six SDK release set.
+The aggregate `release_one_query` capability therefore remains unavailable.
+
 ## Compatibility and capability behavior
 
 The v1 package evolves additively. An older v1 capability request that omits
@@ -65,7 +114,7 @@ Unsupported API majors are refused before work begins.
 | Capability | Availability | Meaning |
 | --- | --- | --- |
 | `canonical_public_interface` | `implemented` | The v1 negotiation and mapping boundary is available. |
-| `release_one_query` | `unavailable` | Query behavior is in Release 1 scope but is not implemented yet. |
+| `release_one_query` | `unavailable` | Bounded Log HTTP execute is available; the complete Release 1 Query transport and SDK contract remains incomplete. |
 | `metrics` | `unsupported` | Metrics are outside Release 1 scope. |
 | Any capability request on another API major | `version_incompatible` | The server cannot interpret that API package. |
 

@@ -1,11 +1,15 @@
-//! Real executable and HTTP clients; Rust query interfaces verify durable output.
+//! Installed native executable and HTTP clients verify durable ingestion and query.
 #![cfg(unix)]
 
+#[path = "binary_ingestion/archive.rs"]
+mod archive;
+#[path = "support/native_binary.rs"]
+mod native_binary;
 use positron_kernel::MountQualification;
 use positron_query::QueryBudget;
 use positron_runtime::{
-    ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, InitializationPlan,
-    InstanceBootstrap, NativeBindings, NativeHost, ServeConfiguration, ShutdownTrigger,
+    ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, NativeBindings, NativeHost,
+    ServeConfiguration, ShutdownTrigger,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -163,22 +167,16 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700))?;
     fs::create_dir_all(&secrets)?;
     fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
+    let package = positron_release::native_archive(
+        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH).parse()?,
+        &fs::read(native_binary::executable())?,
+    )?;
+    let installation = fixture.root.join("installation");
+    fs::create_dir(&installation)?;
+    tar::Archive::new(flate2::read::GzDecoder::new(package.as_slice())).unpack(&installation)?;
+    let binary = installation.join("positron/bin/positron");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o555))?;
     let paths = BootstrapPaths::new(&data, &secrets, MountQualification::LocalHost)?;
-    drop(InstanceBootstrap::initialize(
-        &paths,
-        InitializationPlan::non_interactive(),
-    )?);
-    let claim = InstanceBootstrap::claim(&paths)?;
-    assert!(InstanceBootstrap::claim(&paths).is_err());
-    let bearer = format!(
-        "Bearer {}",
-        claim.ingest_secret().ok_or("missing ingest key")?
-    );
-    let admin = format!("Bearer {}", claim.secret());
-    let query = format!(
-        "Bearer {}",
-        claim.query_secret().ok_or("missing query key")?
-    );
     let probes = (0..5)
         .map(|_| TcpListener::bind(("127.0.0.1", 0)))
         .collect::<Result<Vec<_>, _>>()?;
@@ -215,22 +213,54 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         .connection_protection()
         .request_deadline();
 
+    drop(probes);
+    let operations = *ports.first().ok_or("missing operations port")?;
+    fixture.child = Some(
+        Command::new(&binary)
+            .args(["serve", "--init-if-empty", "--config"])
+            .arg(&config)
+            .spawn()?,
+    );
+    ready(operations)?;
+    archive::stop(&mut fixture.child)?;
+    let claimed = Command::new(&binary)
+        .args(["bootstrap", "claim", "--config"])
+        .arg(&config)
+        .output()?;
+    assert!(
+        claimed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&claimed.stderr)
+    );
+    assert!(claimed.stderr.is_empty());
+    let claimed = String::from_utf8(claimed.stdout)?;
+    let secret = |name: &str| -> TestResult<&str> {
+        claimed
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .ok_or_else(|| "missing bootstrap credential".into())
+    };
+    let admin_secret = secret("administrator_secret=")?;
+    let ingest_secret = secret("ingest_secret=")?;
+    let query_secret = secret("query_secret=")?;
+    let bearer = format!("Bearer {ingest_secret}");
+    let admin = format!("Bearer {admin_secret}");
+    let query = format!("Bearer {query_secret}");
     for arguments in [
         vec!["config", "validate", "--config"],
         vec!["config", "effective", "--redacted", "--config"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        let output = Command::new(&binary)
             .args(arguments)
             .arg(&config)
             .output()?;
         assert!(output.status.success());
         let rendered = String::from_utf8(output.stdout)?;
-        assert!(!rendered.contains(claim.secret()));
-        assert!(!rendered.contains(claim.ingest_secret().ok_or("missing ingest key")?));
+        assert!(!rendered.contains(admin_secret));
+        assert!(!rendered.contains(ingest_secret));
     }
-    drop(probes);
     fixture.child = Some(
-        Command::new(env!("CARGO_BIN_EXE_positron"))
+        Command::new(&binary)
             .args(["serve", "--config"])
             .arg(&config)
             .spawn()?,
@@ -242,7 +272,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
 
     let doctor_deadline = Instant::now() + Duration::from_secs(10);
     let output = loop {
-        let mut doctor = Command::new(env!("CARGO_BIN_EXE_positron"))
+        let mut doctor = Command::new(&binary)
             .args(["doctor", "--online", "--endpoint"])
             .arg(format!("127.0.0.1:{operations}"))
             .arg("--allow-plaintext")
@@ -252,7 +282,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             .stderr(std::process::Stdio::piped())
             .spawn()?;
         let mut input = doctor.stdin.take().ok_or("missing doctor stdin")?;
-        writeln!(input, "{}", claim.secret())?;
+        writeln!(input, "{}", admin_secret)?;
         drop(input);
         while doctor.try_wait()?.is_none() {
             if Instant::now() >= doctor_deadline {
@@ -280,7 +310,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(report.contains("catalog_bootstrap="));
-    assert!(!report.contains(claim.secret()));
+    assert!(!report.contains(admin_secret));
     // Doctor truthfully reports unavailable planned families rather than claiming release readiness.
     let body = br#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"42","body":{"stringValue":"binary-otlp"}}]}]}]}"#;
     for credential in ["Bearer invalid", admin.as_str(), query.as_str()] {
@@ -329,6 +359,33 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     assert!(
         response.starts_with("HTTP/1.1 200 "),
         "initial Log response: {response}; public resource metrics: {diagnostic}"
+    );
+    let api_endpoint = format!("127.0.0.1:{}", ports.get(1).ok_or("missing API port")?).parse()?;
+    let before_restart_digest =
+        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?;
+    archive::query_refusals(
+        &fixture.root,
+        api_endpoint,
+        query_secret,
+        admin_secret,
+        ingest_secret,
+    )?;
+    archive::stop(&mut fixture.child)?;
+    fs::remove_dir_all(&installation)?;
+    assert!(data.exists());
+    assert!(secrets.join("local-root-key.v1").exists());
+    fs::create_dir(&installation)?;
+    tar::Archive::new(flate2::read::GzDecoder::new(package.as_slice())).unpack(&installation)?;
+    fixture.child = Some(
+        Command::new(&binary)
+            .args(["serve", "--config"])
+            .arg(&config)
+            .spawn()?,
+    );
+    ready(operations)?;
+    assert_eq!(
+        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?,
+        before_restart_digest
     );
     assert!(
         request_with_capacity_retry(
@@ -491,7 +548,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     fixture.child = None;
     assert!(fixture.root.join("control.sock").exists());
     fixture.child = Some(
-        Command::new(env!("CARGO_BIN_EXE_positron"))
+        Command::new(&binary)
             .args(["serve", "--config"])
             .arg(&config)
             .spawn()?,
@@ -543,7 +600,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             .services()
             .ok_or("missing query services")?
             .query_log_bodies(
-                claim.query_secret().ok_or("missing query key")?,
+                query_secret,
                 "logs | range query_time 0 2000 | limit 100",
                 QueryBudget::new(1_048_576, 100, 100, 1_048_576, 1_048_576, 60)?
                     .with_cpu_work_units(16)?,

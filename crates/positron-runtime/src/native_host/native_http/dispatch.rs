@@ -26,6 +26,19 @@ use super::MAX_API_BODY_BYTES;
 
 const MAX_CONTROL_SUPPORT_BUNDLE_REQUEST_BYTES: usize = 8 * 1024;
 
+pub(in crate::native_host) fn query_failure_response(status: u16, code: &str) -> Response {
+    match positron_api::log_query::query_rejection(status, code) {
+        Ok(body) => Response {
+            status,
+            content_type: "application/json",
+            body,
+            retry_after_seconds: None,
+            response_reservation: None,
+        },
+        Err(_) => Response::empty(503),
+    }
+}
+
 fn maintenance_failure_response(failure: MaintenanceServiceFailure) -> Response {
     let (status, code) = match failure {
         MaintenanceServiceFailure::InvalidRequest => (400, "invalid_request"),
@@ -45,6 +58,7 @@ pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
         return MAX_API_BODY_BYTES;
     }
     match path {
+        positron_api::log_query::HTTP_PATH => positron_api::log_query::MAX_REQUEST_BYTES,
         positron_api::upgrade::HTTP_PATH => positron_api::upgrade::MAX_REQUEST_BYTES,
         positron_api::backup::HTTP_PATH | positron_api::backup::LIST_HTTP_PATH => {
             positron_api::backup::MAX_REQUEST_BYTES
@@ -183,9 +197,43 @@ fn route_inner<S: Read + Write>(
         ListenerRole::Api | ListenerRole::OtlpHttp | ListenerRole::LokiPush
     ) && !health.admits_data_or_mutation()
     {
-        return Ok(Response::empty(503));
+        return Ok(
+            if role == ListenerRole::Api && head.path == positron_api::log_query::HTTP_PATH {
+                query_failure_response(503, "query_unavailable")
+            } else {
+                Response::empty(503)
+            },
+        );
     }
     match (role, head.method.as_str(), head.path.as_str()) {
+        (ListenerRole::Api, "POST", positron_api::log_query::HTTP_PATH) => {
+            let services =
+                services.ok_or_else(|| query_failure_response(503, "query_unavailable"))?;
+            if head.tenant_hint.is_some() || head.forwarded_actor.is_some() {
+                return Ok(query_failure_response(401, "authentication_rejected"));
+            }
+            let bearer = Zeroizing::new(
+                head.bearer
+                    .take()
+                    .ok_or_else(|| query_failure_response(401, "authentication_rejected"))?,
+            );
+            let body = read_body(
+                stream,
+                head.content_length,
+                positron_api::log_query::MAX_REQUEST_BYTES,
+            )
+            .map_err(|_| query_failure_response(400, "invalid_request"))?;
+            match services.execute_log_query(&bearer, &body) {
+                Ok((body, reservation)) => Ok(Response {
+                    status: 200,
+                    content_type: "application/json",
+                    body,
+                    retry_after_seconds: None,
+                    response_reservation: Some(Box::new(reservation)),
+                }),
+                Err((status, code)) => Ok(query_failure_response(status, code)),
+            }
+        },
         (ListenerRole::Api, "POST", positron_api::api_keys::HTTP_PATH) => {
             let services = services.ok_or_else(|| Response::empty(503))?;
             let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
@@ -204,7 +252,7 @@ fn route_inner<S: Read + Write>(
                         content_type: "application/json",
                         body,
                         retry_after_seconds: None,
-                        diagnostics_reservation: None,
+                        response_reservation: None,
                     })
                 },
                 Err((status, code)) => {
@@ -276,7 +324,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -297,7 +345,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -318,7 +366,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -339,7 +387,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -360,7 +408,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -381,7 +429,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -402,7 +450,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -423,7 +471,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -444,7 +492,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -469,7 +517,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -490,7 +538,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -511,7 +559,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -532,7 +580,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -553,7 +601,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -729,7 +777,7 @@ fn route_inner<S: Read + Write>(
                         content_type: "application/octet-stream",
                         body,
                         retry_after_seconds: None,
-                        diagnostics_reservation: Some(Box::new(reservation)),
+                        response_reservation: Some(Box::new(reservation)),
                     })
                 },
                 Err(ControlDiagnosticsFailure::AuthenticationRejected) => Ok(Response::json(
@@ -783,7 +831,7 @@ fn route_inner<S: Read + Write>(
                     },
                     body: body.into_bytes(),
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 });
             }
             let status = status.ok_or_else(|| Response::empty(503))?;

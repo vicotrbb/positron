@@ -174,7 +174,7 @@ fn command(
     id: positron_governance::OperationId,
     revision: Option<u64>,
 ) -> Result<Output> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_positron"));
+    let mut command = Command::new(native_binary::executable());
     command
         .args(["upgrade", "offline", action, "--config"])
         .arg(case.root.join("positron.toml"))

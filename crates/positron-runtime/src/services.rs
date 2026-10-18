@@ -816,6 +816,34 @@ impl ServiceHandle {
         )
     }
 
+    /// Executes the canonical bounded Log pipeline transport. Wire types remain
+    /// at the Public Interface boundary; Query owns its original event stream.
+    pub fn execute_log_query(
+        &self,
+        bearer: &str,
+        body: &[u8],
+    ) -> Result<(Vec<u8>, TransferredResourceReservation), (u16, &'static str)> {
+        let started = std::time::Instant::now();
+        let result = query::execute(self, bearer, body).map_err(|failure| match failure {
+            ServiceFailure::Unauthorized => (401, "authentication_rejected"),
+            ServiceFailure::InvalidRequest
+            | ServiceFailure::InvalidRequestWithLimit(_)
+            | ServiceFailure::RequestTooLarge => (400, "invalid_request"),
+            ServiceFailure::CapacityUnavailable => (429, "capacity_unavailable"),
+            _ => (503, "query_unavailable"),
+        });
+        let status = result.as_ref().err().map_or(200, |(status, _)| *status);
+        if let Ok(owner) = self.integrity_health.lock()
+            && let Some(health) = owner.as_ref()
+        {
+            health.operational_telemetry().record_query(
+                crate::operational::RequestOutcome::from_status(status),
+                started.elapsed(),
+            );
+        }
+        result
+    }
+
     /// Reads durable log bodies through the existing native Query service.
     ///
     /// This is deliberately not a wire route: the public v1 schema does not yet

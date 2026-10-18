@@ -3,7 +3,7 @@
   "info": {
     "title": "Positron API",
     "version": "v1",
-    "x-positron-schema-digest": "864737f586fbeb845c8d167de3569dbf784df08888ace435caccd7c243da855c"
+    "x-positron-schema-digest": "52c88e90680a04ede455a76e08f8a5d52717db2dac5d668cab9759e24ac74d3d"
   },
   "paths": {
     "/v1/capabilities:negotiate": {
@@ -1367,6 +1367,79 @@
           }
         }
       }
+    },
+    "/v1/logs:query": {
+      "post": {
+        "operationId": "ExecuteLogQuery",
+        "description": "Bounded Log pipeline execute; header, typed batches and one original terminal. No resume or tail.",
+        "security": [
+          {
+            "apiKeyBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogQueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Complete or explicitly incomplete Log Query envelope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogQueryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Rejected before execution; canonical retry, completion, source and safe detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorProtoJson"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Rejected before execution; canonical retry, completion, source and safe detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorProtoJson"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rejected before execution; canonical retry, completion, source and safe detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorProtoJson"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Rejected before execution; canonical retry, completion, source and safe detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorProtoJson"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1566,7 +1639,10 @@
           3,
           4,
           5,
-          6
+          6,
+          7,
+          8,
+          9
         ],
         "x-enumNames": [
           "UNSPECIFIED",
@@ -1575,9 +1651,15 @@
           "CAPABILITY_UNSUPPORTED",
           "MALFORMED_REQUEST",
           "REQUEST_TOO_LARGE",
-          "UNKNOWN_FIELD"
+          "UNKNOWN_FIELD",
+          "AUTHENTICATION_REJECTED",
+          "CAPACITY_UNAVAILABLE",
+          "QUERY_UNAVAILABLE"
         ],
         "x-enumDeprecated": [
+          false,
+          false,
+          false,
           false,
           false,
           false,
@@ -1593,15 +1675,18 @@
           0,
           1,
           2,
-          3
+          3,
+          4
         ],
         "x-enumNames": [
           "UNSPECIFIED",
           "CAPABILITY_NEGOTIATION",
           "GRPC_DECODE",
-          "HTTP_DECODE"
+          "HTTP_DECODE",
+          "QUERY_EXECUTION"
         ],
         "x-enumDeprecated": [
+          false,
           false,
           false,
           false,
@@ -1617,7 +1702,10 @@
           3,
           4,
           5,
-          6
+          6,
+          7,
+          8,
+          9
         ],
         "x-enumNames": [
           "UNSPECIFIED",
@@ -1626,9 +1714,15 @@
           "CAPABILITY_NOT_SUPPORTED",
           "REQUEST_MALFORMED",
           "REQUEST_LIMIT_EXCEEDED",
-          "FIELD_NOT_RECOGNIZED"
+          "FIELD_NOT_RECOGNIZED",
+          "AUTHENTICATION_REJECTED",
+          "CAPACITY_UNAVAILABLE",
+          "QUERY_UNAVAILABLE"
         ],
         "x-enumDeprecated": [
+          false,
+          false,
+          false,
           false,
           false,
           false,
@@ -4623,6 +4717,785 @@
           "lookup_expires_at_unix_seconds": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "RetryClassProtoJson": {
+        "type": "string",
+        "enum": [
+          "RETRY_CLASS_UNSPECIFIED",
+          "RETRY_CLASS_NEVER",
+          "RETRY_CLASS_AFTER_BACKOFF",
+          "RETRY_CLASS_AFTER_INPUT_CORRECTION"
+        ]
+      },
+      "CompletionStateProtoJson": {
+        "type": "string",
+        "enum": [
+          "COMPLETION_STATE_UNSPECIFIED",
+          "COMPLETION_STATE_REJECTED"
+        ]
+      },
+      "PublicErrorCodeProtoJson": {
+        "type": "string",
+        "enum": [
+          "PUBLIC_ERROR_CODE_UNSPECIFIED",
+          "PUBLIC_ERROR_CODE_UNSUPPORTED_API_VERSION",
+          "PUBLIC_ERROR_CODE_CAPABILITY_UNAVAILABLE",
+          "PUBLIC_ERROR_CODE_CAPABILITY_UNSUPPORTED",
+          "PUBLIC_ERROR_CODE_MALFORMED_REQUEST",
+          "PUBLIC_ERROR_CODE_REQUEST_TOO_LARGE",
+          "PUBLIC_ERROR_CODE_UNKNOWN_FIELD",
+          "PUBLIC_ERROR_CODE_AUTHENTICATION_REJECTED",
+          "PUBLIC_ERROR_CODE_CAPACITY_UNAVAILABLE",
+          "PUBLIC_ERROR_CODE_QUERY_UNAVAILABLE"
+        ]
+      },
+      "FailureSourceProtoJson": {
+        "type": "string",
+        "enum": [
+          "FAILURE_SOURCE_UNSPECIFIED",
+          "FAILURE_SOURCE_CAPABILITY_NEGOTIATION",
+          "FAILURE_SOURCE_GRPC_DECODE",
+          "FAILURE_SOURCE_HTTP_DECODE",
+          "FAILURE_SOURCE_QUERY_EXECUTION"
+        ]
+      },
+      "SafeDetailProtoJson": {
+        "type": "string",
+        "enum": [
+          "SAFE_DETAIL_UNSPECIFIED",
+          "SAFE_DETAIL_API_MAJOR_UNSUPPORTED",
+          "SAFE_DETAIL_CAPABILITY_NOT_AVAILABLE",
+          "SAFE_DETAIL_CAPABILITY_NOT_SUPPORTED",
+          "SAFE_DETAIL_REQUEST_MALFORMED",
+          "SAFE_DETAIL_REQUEST_LIMIT_EXCEEDED",
+          "SAFE_DETAIL_FIELD_NOT_RECOGNIZED",
+          "SAFE_DETAIL_AUTHENTICATION_REJECTED",
+          "SAFE_DETAIL_CAPACITY_UNAVAILABLE",
+          "SAFE_DETAIL_QUERY_UNAVAILABLE"
+        ]
+      },
+      "PublicErrorProtoJson": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/PublicErrorCodeProtoJson",
+            "x-protobuf-field-number": 1
+          },
+          "retryClass": {
+            "$ref": "#/components/schemas/RetryClassProtoJson",
+            "x-protobuf-field-number": 2
+          },
+          "completionState": {
+            "$ref": "#/components/schemas/CompletionStateProtoJson",
+            "x-protobuf-field-number": 3
+          },
+          "source": {
+            "$ref": "#/components/schemas/FailureSourceProtoJson",
+            "x-protobuf-field-number": 4
+          },
+          "safeDetail": {
+            "$ref": "#/components/schemas/SafeDetailProtoJson",
+            "x-protobuf-field-number": 5
+          }
+        }
+      },
+      "LogQueryBudget": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "scannedBytes": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 1
+          },
+          "decodedRecords": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 2
+          },
+          "outputRows": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 3
+          },
+          "outputBytes": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 4
+          },
+          "memoryBytes": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 5
+          },
+          "cpuWorkUnits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 6
+          },
+          "wallSeconds": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 7
+          },
+          "maximumTimeRangeNanoseconds": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 8
+          }
+        }
+      },
+      "LogQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pipeline": {
+            "type": "string",
+            "x-protobuf-field-number": 1
+          },
+          "budget": {
+            "$ref": "#/components/schemas/LogQueryBudget",
+            "x-protobuf-field-number": 2
+          }
+        }
+      },
+      "LogQueryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryEvent"
+            },
+            "x-protobuf-field-number": 1
+          }
+        }
+      },
+      "LogQueryEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "header": {
+            "$ref": "#/components/schemas/LogQueryHeader",
+            "x-protobuf-field-number": 1
+          },
+          "batch": {
+            "$ref": "#/components/schemas/LogQueryBatch",
+            "x-protobuf-field-number": 2
+          },
+          "terminal": {
+            "$ref": "#/components/schemas/LogQueryTerminal",
+            "x-protobuf-field-number": 3
+          }
+        },
+        "allOf": [
+          {
+            "oneOf": [
+              {
+                "required": [
+                  "header"
+                ]
+              },
+              {
+                "required": [
+                  "batch"
+                ]
+              },
+              {
+                "required": [
+                  "terminal"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "LogQueryColumn": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "x-protobuf-field-number": 1
+          },
+          "valueType": {
+            "type": "string",
+            "x-protobuf-field-number": 2
+          },
+          "nullable": {
+            "type": "boolean",
+            "x-protobuf-field-number": 3
+          }
+        }
+      },
+      "LogQuerySnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "x-protobuf-field-number": 1
+          },
+          "generation": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 2
+          },
+          "frontier": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 3
+          }
+        }
+      },
+      "LogQueryOrdering": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "column": {
+            "type": "string",
+            "x-protobuf-field-number": 1
+          },
+          "valueType": {
+            "type": "string",
+            "x-protobuf-field-number": 2
+          },
+          "direction": {
+            "type": "string",
+            "x-protobuf-field-number": 3
+          }
+        }
+      },
+      "LogQueryLease": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "x-protobuf-field-number": 1
+          },
+          "expiryUnixSeconds": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 2
+          }
+        }
+      },
+      "LogQueryHeader": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryColumn"
+            },
+            "x-protobuf-field-number": 1
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/LogQuerySnapshot",
+            "x-protobuf-field-number": 2
+          },
+          "ordering": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryOrdering"
+            },
+            "x-protobuf-field-number": 3
+          },
+          "effectiveBudget": {
+            "$ref": "#/components/schemas/LogQueryBudget",
+            "x-protobuf-field-number": 4
+          },
+          "lease": {
+            "$ref": "#/components/schemas/LogQueryLease",
+            "x-protobuf-field-number": 5
+          },
+          "initialCursor": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "x-protobuf-field-number": 6
+          }
+        }
+      },
+      "LogQueryBatch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sequence": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 1
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryRow"
+            },
+            "x-protobuf-field-number": 2
+          },
+          "priorDigest": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "x-protobuf-field-number": 3
+          },
+          "digest": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "x-protobuf-field-number": 4
+          }
+        }
+      },
+      "LogQueryRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "cells": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryCell"
+            },
+            "x-protobuf-field-number": 1
+          },
+          "replayed": {
+            "type": "boolean",
+            "x-protobuf-field-number": 2
+          }
+        }
+      },
+      "LogQueryCell": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "nativeValue": {
+            "$ref": "#/components/schemas/LogQueryValue",
+            "x-protobuf-field-number": 1
+          },
+          "occurrences": {
+            "$ref": "#/components/schemas/LogQueryOccurrences",
+            "x-protobuf-field-number": 2
+          },
+          "timestamp": {
+            "$ref": "#/components/schemas/LogQueryTimestamp",
+            "x-protobuf-field-number": 3
+          },
+          "unsignedInteger": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 4
+          },
+          "missing": {
+            "$ref": "#/components/schemas/LogQueryMissing",
+            "x-protobuf-field-number": 5
+          }
+        },
+        "allOf": [
+          {
+            "oneOf": [
+              {
+                "required": [
+                  "nativeValue"
+                ]
+              },
+              {
+                "required": [
+                  "occurrences"
+                ]
+              },
+              {
+                "required": [
+                  "timestamp"
+                ]
+              },
+              {
+                "required": [
+                  "unsignedInteger"
+                ]
+              },
+              {
+                "required": [
+                  "missing"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "LogQueryMissing": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "LogQueryOccurrences": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryValue"
+            },
+            "x-protobuf-field-number": 1
+          }
+        }
+      },
+      "LogQueryTimestamp": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "unixNanoseconds": {
+            "type": "string",
+            "pattern": "^-?[0-9]+$",
+            "format": "int64",
+            "x-protobuf-field-number": 1
+          },
+          "provenance": {
+            "type": "string",
+            "x-protobuf-field-number": 2
+          },
+          "quality": {
+            "type": "string",
+            "x-protobuf-field-number": 3
+          },
+          "sourceValue": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 4
+          }
+        }
+      },
+      "LogQueryValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "nullValue": {
+            "$ref": "#/components/schemas/LogQueryNull",
+            "x-protobuf-field-number": 1
+          },
+          "booleanValue": {
+            "type": "boolean",
+            "x-protobuf-field-number": 2
+          },
+          "integerValue": {
+            "type": "string",
+            "pattern": "^-?[0-9]+$",
+            "format": "int64",
+            "x-protobuf-field-number": 3
+          },
+          "floatBits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 4
+          },
+          "textValue": {
+            "type": "string",
+            "x-protobuf-field-number": 5
+          },
+          "bytesValue": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "x-protobuf-field-number": 6
+          },
+          "arrayValue": {
+            "$ref": "#/components/schemas/LogQueryArray",
+            "x-protobuf-field-number": 7
+          },
+          "objectValue": {
+            "$ref": "#/components/schemas/LogQueryObject",
+            "x-protobuf-field-number": 8
+          },
+          "markerValue": {
+            "$ref": "#/components/schemas/LogQueryMarker",
+            "x-protobuf-field-number": 9
+          },
+          "truncatedValue": {
+            "$ref": "#/components/schemas/LogQueryTruncated",
+            "x-protobuf-field-number": 10
+          }
+        },
+        "allOf": [
+          {
+            "oneOf": [
+              {
+                "required": [
+                  "nullValue"
+                ]
+              },
+              {
+                "required": [
+                  "booleanValue"
+                ]
+              },
+              {
+                "required": [
+                  "integerValue"
+                ]
+              },
+              {
+                "required": [
+                  "floatBits"
+                ]
+              },
+              {
+                "required": [
+                  "textValue"
+                ]
+              },
+              {
+                "required": [
+                  "bytesValue"
+                ]
+              },
+              {
+                "required": [
+                  "arrayValue"
+                ]
+              },
+              {
+                "required": [
+                  "objectValue"
+                ]
+              },
+              {
+                "required": [
+                  "markerValue"
+                ]
+              },
+              {
+                "required": [
+                  "truncatedValue"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "LogQueryNull": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "LogQueryArray": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryValue"
+            },
+            "x-protobuf-field-number": 1
+          }
+        }
+      },
+      "LogQueryObject": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryKeyValue"
+            },
+            "x-protobuf-field-number": 1
+          }
+        }
+      },
+      "LogQueryKeyValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string",
+            "x-protobuf-field-number": 1
+          },
+          "value": {
+            "$ref": "#/components/schemas/LogQueryValue",
+            "x-protobuf-field-number": 2
+          }
+        }
+      },
+      "LogQueryMarker": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "x-protobuf-field-number": 1
+          },
+          "originalKind": {
+            "type": "string",
+            "x-protobuf-field-number": 2
+          }
+        }
+      },
+      "LogQueryTruncated": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "x-protobuf-field-number": 1
+          },
+          "value": {
+            "$ref": "#/components/schemas/LogQueryValue",
+            "x-protobuf-field-number": 2
+          }
+        }
+      },
+      "LogQueryTerminal": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "type": "string",
+            "x-protobuf-field-number": 1
+          },
+          "reason": {
+            "type": "string",
+            "x-protobuf-field-number": 2
+          },
+          "stats": {
+            "$ref": "#/components/schemas/LogQueryStats",
+            "x-protobuf-field-number": 3
+          },
+          "affectedRanges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogQueryAffectedRange"
+            },
+            "x-protobuf-field-number": 4
+          },
+          "continuationCursor": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "x-protobuf-field-number": 5
+          }
+        }
+      },
+      "LogQueryAffectedRange": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "temporalAxis": {
+            "type": "string",
+            "x-protobuf-field-number": 1
+          },
+          "earliestNanoseconds": {
+            "type": "string",
+            "pattern": "^-?[0-9]+$",
+            "format": "int64",
+            "x-protobuf-field-number": 2
+          },
+          "latestNanoseconds": {
+            "type": "string",
+            "pattern": "^-?[0-9]+$",
+            "format": "int64",
+            "x-protobuf-field-number": 3
+          }
+        }
+      },
+      "LogQueryStats": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "records": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 1
+          },
+          "scannedBytes": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 2
+          },
+          "decodedRecords": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 3
+          },
+          "outputBytes": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 4
+          },
+          "memoryPeakBytes": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 5
+          },
+          "cpuWorkUnits": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 6
+          },
+          "wallSeconds": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 7
+          },
+          "lastSequence": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 8
+          },
+          "resultDigest": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "x-protobuf-field-number": 9
+          },
+          "cumulativeBudget": {
+            "$ref": "#/components/schemas/LogQueryBudget",
+            "x-protobuf-field-number": 10
+          },
+          "resumeCount": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 11
+          },
+          "repeatedBatchCount": {
+            "type": "string",
+            "pattern": "^[0-9]+$",
+            "format": "uint64",
+            "x-protobuf-field-number": 12
+          },
+          "limitingBudget": {
+            "type": "string",
+            "x-protobuf-field-number": 13
+          },
+          "reducedPruning": {
+            "type": "boolean",
+            "x-protobuf-field-number": 14
           }
         }
       }

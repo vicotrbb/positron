@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.guaracloud.positron</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/lib/positron/bin/positron</string>
+    <string>serve</string><string>--config</string>
+    <string>/etc/positron/positron.toml</string>
+  </array>
+  <key>UserName</key><string>positron</string>
+  <key>GroupName</key><string>positron</string>
+  <key>Umask</key><integer>63</integer>
+  <key>RunAtLoad</key><true/>
+  <key>ExitTimeOut</key><integer>65</integer>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+</dict>
+</plist>

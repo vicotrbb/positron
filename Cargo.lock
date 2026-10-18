@@ -3346,6 +3346,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pbjson"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8edd1efdd8ab23ba9cb9ace3d9987a72663d5d7c9f74fa00b51d6213645cf6c"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+]
+
+[[package]]
+name = "pbjson-build"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ed4d5c6ae95e08ac768883c8401cf0e8deb4e6e1d6a4e1fd3d2ec4f0ec63200"
+dependencies = [
+ "heck",
+ "itertools",
+ "prost 0.14.3",
+ "prost-types 0.14.3",
+]
+
+[[package]]
 name = "pbkdf2"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3611,6 +3633,8 @@ dependencies = [
 name = "positron-api"
 version = "0.0.0"
 dependencies = [
+ "pbjson",
+ "pbjson-build",
  "prost 0.14.3",
  "prost-build",
  "prost-types 0.14.3",
@@ -3786,6 +3810,7 @@ dependencies = [
  "der",
  "flate2",
  "pgp",
+ "positron-config",
  "positron-kernel",
  "rand 0.8.8",
  "rcgen",
