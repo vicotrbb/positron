@@ -23,7 +23,10 @@ rejects a mismatched executable header. It preserves the executable bytes and
 normalizes archive order, modes, owner/group, timestamps, and gzip header. Build
 again in an independent checkout with the same declared compiler, linker,
 platform SDK, dependencies, source and build paths; compare both executable and
-archive bytes. An archive match from the same executable is packaging
+archive bytes. Use byte-identical compiler flags for both builds: when remapping
+independent checkout paths, include both source-root mappings to the same
+canonical prefix in both invocations. Preserve the native build UUID and
+code signature; neither is rewritten after linking. An archive match from the same executable is packaging
 reproducibility only, not an independent compiler rebuild.
 
 Treat these as unsigned construction outputs. Add each executable and archive to

@@ -74,14 +74,7 @@ pub(super) fn receive_from<S: Read + Write>(
     })?;
     let context = services
         .authorize_logs_with_hints(&bearer, hints)
-        .map_err(|_| {
-            failure(
-                401,
-                UNAUTHENTICATED,
-                "OTLP Logs request authentication was rejected",
-                response_encoding,
-            )
-        })?;
+        .map_err(|failure| service_response_with_encoding(failure, response_encoding))?;
     let admission = services
         .admit_logs(context)
         .map_err(|failure| service_response_with_encoding(failure, response_encoding))?;
@@ -166,14 +159,7 @@ pub(super) fn receive_traces_from<S: Read + Write>(
     })?;
     let context = services
         .authorize_traces_with_hints(&bearer, hints)
-        .map_err(|_| {
-            failure(
-                401,
-                UNAUTHENTICATED,
-                "OTLP Traces request authentication was rejected",
-                response_encoding,
-            )
-        })?;
+        .map_err(|failure| trace_service_response_with_encoding(failure, response_encoding))?;
     let admission = services
         .admit_traces(context)
         .map_err(|failure| trace_service_response_with_encoding(failure, response_encoding))?;
