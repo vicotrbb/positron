@@ -8,7 +8,8 @@ with existing data.
 
 Prepare a canonical configuration file whose storage roots name those directories.
 Use the same file, source identities, recovery input and idempotency key for every
-retry. Obtain the source instance, root identity and integrity public key from
+retry. The accepted target configuration becomes active after restore; ordinary
+startup still refuses later immutable changes. Obtain the source instance, root identity and integrity public key from
 independently recorded recovery output, rather than trusting repository contents.
 Use the original snapshot ID and exact signed manifest checksum from its backup
 receipt. The repository must still retain that snapshot.

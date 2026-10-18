@@ -1041,7 +1041,10 @@ from the Registry. Offline retirement cannot substitute for this live proof.
 
 Restore opens only an empty offline target, verifies the current registry chain
 and snapshot, applies Purge Tombstones, and atomically publishes the recovered
-instance. It has no merge or in-place overwrite path.
+instance. The owning configuration module binds the accepted target Effective
+Configuration in the restored origin using its canonical codec; ordinary startup
+then enforces that immutable target binding. It has no merge or in-place overwrite
+path.
 
 ### 4.14 Upgrade and Migration
 

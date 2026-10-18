@@ -48,10 +48,15 @@ impl InstanceBootstrap {
             &index,
         )
         .map_err(|_| failure())?;
+        let configuration_bytes = u64::try_from(configuration.redacted_effective().len())
+            .map_err(|_| failure())?
+            .checked_mul(3)
+            .ok_or_else(failure)?;
         let retained = verification
             .prospective_memory_bytes()
             .map_err(|_| failure())?
             .checked_mul(3)
+            .and_then(|bytes| bytes.checked_add(configuration_bytes))
             .and_then(|bytes| bytes.checked_add(index.len() as u64))
             .and_then(|bytes| bytes.checked_add(manifest.retained_memory_bytes().ok()?))
             .ok_or_else(failure)?;
@@ -195,9 +200,15 @@ impl InstanceBootstrap {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let objects =
+        let mut objects =
             TenantAdministration::restore_catalog_objects(origin.snapshot(), &custody, &envelopes)
                 .map_err(|_| failure())?;
+        crate::configuration_catalog::bind_restored_configuration(
+            &origin,
+            &mut objects,
+            configuration,
+            &secret,
+        )?;
         let record = execution::record(request.pin, &custody, governance)?;
         let origin = origin
             .with_restored_objects(objects)

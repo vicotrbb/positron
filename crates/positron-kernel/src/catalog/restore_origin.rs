@@ -35,6 +35,15 @@ impl BackupRestoreOrigin {
     pub fn retains_segment_file(&self, file: BackupCaptureFile) -> Result<bool, CatalogFailure> {
         crate::active_segment_ledger::restore_file_is_reachable(&self.snapshot, file)
     }
+    /// Identity of the actual target-origin transaction used by the Catalog Writer.
+    pub fn transaction_id(&self) -> Result<TransactionId, CatalogFailure> {
+        TransactionId::new(
+            self.manifest
+                .get(..16)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| fail(CatalogFailureCode::InvalidInput))?,
+        )
+    }
     pub fn snapshot(&self) -> &CatalogSnapshot {
         &self.snapshot
     }
@@ -145,17 +154,8 @@ impl Catalog<'_> {
             .values()
             .map(|bytes| CatalogObject::new(bytes.to_vec()))
             .collect::<Result<Vec<_>, _>>()?;
-        let proposal = CatalogProposal::new(
-            TransactionId::new(
-                origin
-                    .manifest
-                    .get(..16)
-                    .and_then(|bytes| bytes.try_into().ok())
-                    .ok_or_else(|| fail(CatalogFailureCode::InvalidInput))?,
-            )?,
-            FormatEpoch::CATALOG_V2,
-            objects,
-        )?;
+        let proposal =
+            CatalogProposal::new(origin.transaction_id()?, FormatEpoch::CATALOG_V2, objects)?;
         let claim = RecoveryWorkClaim::system(
             RecoveryWorkKind::DurabilityCompletion,
             budget::commit_resource_claim(&proposal, None)?,

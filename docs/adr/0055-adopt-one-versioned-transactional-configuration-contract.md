@@ -1,3 +1,12 @@
 # Adopt one versioned transactional Configuration Contract
 
 Release 1 derives one versioned Configuration Contract from Rust types for every Distribution Surface, with TOML as the canonical file format and generated JSON Schema, documentation, examples, and operator validation. Precedence is compiled defaults, configuration file, environment, then command-line overrides; Positron environment and CLI sources cannot carry secret values. Provider-native credential discovery remains inside the external adapter's authentication boundary, is not interpreted as a `POSITRON__` configuration override, and is never copied into Effective Configuration. Unknown, invalid, unsupported, and unsafe configuration fails validation, while deprecations name their replacement and removal release. Each field is classified as live-reloadable, drain-and-reload, restart-required, or immutable after initialization. Reload validates a complete candidate before atomic application and preserves the previous Effective Configuration on failure. The CLI provides validation, explanation, redacted effective-state, and diff tooling. Operator-managed instances derive desired configuration from `PositronCluster.spec` and referenced Secrets, reject bypass overrides, expose a configuration digest, reconcile ordinary drift, and fence security- or identity-critical drift. Instance identity, storage format, encryption identity, and initialized durable paths change only through explicit migration or restore workflows.
+
+A verified fresh-target Restore binds its already accepted target Effective
+Configuration while transforming the authenticated restore origin. The canonical
+configuration codec replaces the source deployment's active configuration object
+using the actual Kernel target-origin transaction identity and the target's
+private configuration binding. The signed source snapshot and original audit
+prefix remain unchanged. Ordinary startup therefore observes the restored target
+binding and still rejects later immutable changes; restore does not grant a
+standing startup or reload exception.

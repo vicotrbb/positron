@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) struct RestoreTestFixture {
     pub(super) initialized: Arc<crate::InitializedInstance>,
+    pub(super) source_configuration: Option<(positron_config::EffectiveConfiguration, u64)>,
     pub(super) services: ServiceHandle,
     pub(super) repository_path: std::path::PathBuf,
     pub(super) runtime: tokio::runtime::Runtime,
@@ -21,6 +22,31 @@ impl RestoreTestFixture {
         let fixture = Fixture::new()?;
         let (initialized, ingest, query, administrator) = fixture.initialized_with_admin()?;
         let export = fixture.recovery_export_directory()?;
+        let source_configuration = if case == RestoreCase::Configured {
+            let path = export.join("source.toml");
+            let root = export.parent().ok_or("source root")?;
+            fs::write(
+                &path,
+                format!(
+                    "schema_version=1\n[storage]\ndata_directory={:?}\nsecrets_directory={:?}\n",
+                    root.join("data"),
+                    root.join("secrets")
+                ),
+            )?;
+            let configuration = positron_config::resolve(
+                positron_config::ConfigurationInputs::try_from_sources(
+                    Some(&path),
+                    [] as [(&str, &str); 0],
+                    [] as [(&str, &str); 0],
+                )
+                .map_err(|failure| format!("source configuration: {failure:?}"))?,
+            )?;
+            let generation = crate::CatalogConfigurationPublication::new(Arc::clone(&initialized))
+                .establish(&configuration)?;
+            Some((configuration, generation))
+        } else {
+            None
+        };
         let repository_path = export.join("repository");
         fs::create_dir(&repository_path)?;
         fs::set_permissions(&repository_path, fs::Permissions::from_mode(0o700))?;
@@ -267,6 +293,7 @@ impl RestoreTestFixture {
         };
         Ok(Self {
             initialized,
+            source_configuration,
             services,
             repository_path,
             runtime,

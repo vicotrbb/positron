@@ -20,6 +20,12 @@ fn fresh_restore_publishes_durable_operation_and_original_query_results()
     exercise_restore(RestoreCase::Complete)
 }
 #[test]
+fn fresh_restore_binds_target_configuration_without_relaxing_initialized_immutability()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_restore(RestoreCase::Configured)
+}
+
+#[test]
 fn cancelled_fresh_restore_remains_offline_on_exact_cold_retry()
 -> Result<(), Box<dyn std::error::Error>> {
     exercise_restore(RestoreCase::Cancel)
@@ -88,6 +94,7 @@ fn fresh_restore_status_authenticates_existing_receipt_without_changing_target_b
 enum RestoreCase {
     OriginInterruption,
     Complete,
+    Configured,
     Cancel,
     Tamper,
     Nonempty,
@@ -116,6 +123,7 @@ fn exercise_restore(case: RestoreCase) -> Result<(), Box<dyn std::error::Error>>
     drive_restore(RestoreTestContext {
         case,
         initialized: &fixture.initialized,
+        source_configuration: fixture.source_configuration.as_ref(),
         services: &fixture.services,
         repository_path: &fixture.repository_path,
         runtime: &fixture.runtime,
@@ -132,6 +140,7 @@ fn exercise_restore(case: RestoreCase) -> Result<(), Box<dyn std::error::Error>>
 struct RestoreTestContext<'a> {
     case: RestoreCase,
     initialized: &'a Arc<crate::InitializedInstance>,
+    source_configuration: Option<&'a (positron_config::EffectiveConfiguration, u64)>,
     services: &'a ServiceHandle,
     repository_path: &'a std::path::Path,
     runtime: &'a tokio::runtime::Runtime,

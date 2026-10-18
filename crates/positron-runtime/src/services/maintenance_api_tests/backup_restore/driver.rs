@@ -7,6 +7,7 @@ pub(super) fn drive_restore(
     let RestoreTestContext {
         case,
         initialized,
+        source_configuration,
         services,
         repository_path,
         runtime,
@@ -316,6 +317,35 @@ pub(super) fn drive_restore(
         positron_governance::DurableOperationStatus::Succeeded
     );
     drop(replay);
+    if source_configuration.is_some() {
+        let document = format!(
+            "schema_version=1\n[runtime]\nshutdown_grace_seconds=31\n[storage]\ndata_directory={:?}\nsecrets_directory={:?}\n",
+            target.join("data"),
+            target.join("secrets"),
+        );
+        let changed = positron_config::resolve(
+            positron_config::ConfigurationInputs::try_new(
+                Some(&document),
+                positron_config::EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])
+                    .map_err(|error| format!("environment: {error:?}"))?,
+                positron_config::CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])
+                    .map_err(|error| format!("overrides: {error:?}"))?,
+            )
+            .map_err(|error| format!("changed configuration: {error:?}"))?,
+        )?;
+        let before = restore_target_bytes(target)?;
+        assert!(
+            crate::InstanceBootstrap::begin_restore(
+                paths,
+                &changed,
+                restore,
+                positron_kernel::RecoveryUnlock::Identity(unlock)
+            )
+            .is_err(),
+            "same physical roots with a changed accepted configuration must refuse"
+        );
+        assert_eq!(restore_target_bytes(target)?, before);
+    }
     let restored = Arc::new(
         match provider {
             Some(provider) => {
@@ -325,6 +355,30 @@ pub(super) fn drive_restore(
         }
         .map_err(|failure| format!("normal reopen: {failure:?}"))?,
     );
+    if let Some((source_configuration, source_generation)) = source_configuration {
+        let source = crate::CatalogConfigurationPublication::new(Arc::clone(initialized));
+        assert_eq!(
+            source.establish(source_configuration)?,
+            *source_generation,
+            "restore must preserve source active configuration"
+        );
+        let publication = crate::CatalogConfigurationPublication::new(Arc::clone(&restored));
+        let generation = publication.establish(configuration)?;
+        assert_eq!(
+            publication.establish(configuration)?,
+            generation,
+            "target publication is idempotent after exact restore replay"
+        );
+        assert!(matches!(
+            publication.establish(source_configuration),
+            Err(crate::ConfigurationRuntimeFailure::ImmutableConfiguration)
+        ));
+        assert_eq!(
+            publication.establish(configuration)?,
+            generation,
+            "ordinary startup cannot replace restored immutable binding"
+        );
+    }
     crate::instance_bootstrap::recover_initial_ledgers(&restored)
         .map_err(|failure| format!("native startup: {failure:?}"))?;
     let restored_services = ServiceHandle::new(Arc::clone(&restored))

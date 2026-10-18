@@ -59,3 +59,12 @@ the target Catalog transaction that records the signed Restore Report and
 `Succeeded`. Root custody and the bootstrap gate are then synchronized. If that
 final synchronization is interrupted, normal startup remains blocked and an
 exact retry reconciles publication forward from the authenticated receipt.
+
+Restore-origin transformation also installs the accepted target Effective
+Configuration through the owning configuration module. Its canonical object binds
+the target-origin transaction and target configuration digest; it does not retain
+the source deployment's immutable storage-path binding as active target state.
+Exact cold retries reuse this authenticated origin. A different target
+configuration is refused before writable Catalog access. The original source
+configuration remains in the signed snapshot and its original governance audit
+records remain in the authenticated source prefix.
