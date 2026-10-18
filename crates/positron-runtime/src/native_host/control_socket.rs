@@ -90,7 +90,10 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
     use super::super::{NativeBindings, NativeHost};
     use crate::{ListenerFactory, ListenerRequest, ListenerRole, health::ProcessState};
@@ -98,9 +101,14 @@ mod tests {
     struct Root(PathBuf);
     impl Root {
         fn new() -> Result<Self, Box<dyn std::error::Error>> {
-            let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-            let path =
-                std::env::temp_dir().join(format!("pos-control-{}-{nonce}", std::process::id()));
+            Self::at_clock(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())
+        }
+        fn at_clock(nonce: u128) -> Result<Self, Box<dyn std::error::Error>> {
+            let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "pos-control-{}-{nonce}-{sequence}",
+                std::process::id()
+            ));
             fs::create_dir(&path)?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
             Ok(Self(path))
@@ -130,6 +138,25 @@ mod tests {
     fn stale(path: &Path) -> Result<(), std::io::Error> {
         drop(UnixListener::bind(path)?);
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    }
+
+    #[test]
+    fn simultaneous_fixture_roots_bind_independent_control_sockets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let first = Root::at_clock(0)?;
+        let second = Root::at_clock(0)?;
+        let first_path = first.0.join("control.sock");
+        let second_path = second.0.join("control.sock");
+        let first_listener = host(&first_path)?.bind(request())?;
+        let second_listener = host(&second_path)?.bind(request())?;
+        assert_ne!(first.0, second.0);
+        assert!(UnixStream::connect(&first_path).is_ok());
+        assert!(UnixStream::connect(&second_path).is_ok());
+        drop(first_listener);
+        assert!(!first_path.exists());
+        assert!(UnixStream::connect(&second_path).is_ok());
+        drop(second_listener);
+        Ok(())
     }
 
     #[test]

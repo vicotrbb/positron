@@ -437,3 +437,96 @@ fn set_owner_only(path: &Path) -> Result<(), std::io::Error> {
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
+
+#[test]
+fn grpc_log_authentication_preserves_identity_read_capacity_refusal()
+-> Result<(), Box<dyn std::error::Error>> {
+    grpc_authentication_preserves_identity_read_capacity_refusal(false)
+}
+
+#[test]
+fn grpc_trace_authentication_preserves_identity_read_capacity_refusal()
+-> Result<(), Box<dyn std::error::Error>> {
+    grpc_authentication_preserves_identity_read_capacity_refusal(true)
+}
+
+fn grpc_authentication_preserves_identity_read_capacity_refusal(
+    traces: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new()?;
+    let paths = roots.paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let bearer = InstanceBootstrap::claim(&paths)?
+        .ingest_secret()
+        .ok_or("ingest secret missing")?
+        .to_owned();
+    let instance = Arc::new(InstanceBootstrap::reopen(&paths)?);
+    let services = ServiceHandle::new(Arc::clone(&instance))?;
+    let generation = instance.catalog_generation();
+    let before = instance.resource_governor().inspect()?;
+    let authenticate = |credential: Option<&str>| -> Result<_, Box<dyn std::error::Error>> {
+        let mut request = tonic::Request::new(());
+        if let Some(credential) = credential {
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {credential}").parse()?);
+        }
+        Ok(if traces {
+            super::super::authenticate_traces(request, &services, None)
+        } else {
+            super::super::authenticate(request, &services, None)
+        })
+    };
+    for credential in [None, Some("invalid credential")] {
+        assert_eq!(
+            authenticate(credential)?
+                .expect_err("invalid credential must be refused")
+                .code(),
+            Code::Unauthenticated
+        );
+    }
+    let status = instance
+        ._authority
+        .with_control_contention_for_test(|| {
+            let authorized = if traces {
+                services.authorize_traces_with_hints(
+                    &bearer,
+                    positron_governance::CompatibilityHints::none(),
+                )
+            } else {
+                services.authorize_logs_with_hints(
+                    &bearer,
+                    positron_governance::CompatibilityHints::none(),
+                )
+            };
+            assert!(matches!(
+                authorized,
+                Err(crate::ServiceFailure::CapacityUnavailable)
+            ));
+            authenticate(Some(&bearer))
+        })??
+        .expect_err("identity read refusal must not admit the request");
+    assert_eq!(status.code(), Code::Unavailable);
+    assert_eq!(
+        status.message(),
+        if traces {
+            "OTLP Traces ingest capacity is unavailable"
+        } else {
+            "OTLP Logs ingest capacity is unavailable"
+        }
+    );
+    assert!(status.metadata().is_empty());
+    assert_eq!(instance.catalog_generation(), generation);
+    let after = instance.resource_governor().inspect()?;
+    assert_eq!(
+        after.outstanding_reservations(),
+        before.outstanding_reservations()
+    );
+    for dimension in positron_kernel::ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+    Ok(())
+}

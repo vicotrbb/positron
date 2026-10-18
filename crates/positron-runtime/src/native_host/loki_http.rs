@@ -29,7 +29,7 @@ pub(super) fn receive_push<S: Read + Write>(
         .ok_or_else(|| failure(401, "Loki Push authentication was rejected"))?;
     let context = services
         .authorize_logs_with_hints(&bearer, hints)
-        .map_err(|_| failure(401, "Loki Push authentication was rejected"))?;
+        .map_err(service_response)?;
     let admission = services.admit_logs(context).map_err(service_response)?;
     let (encoded_limit, decoded_limit) =
         services.logs_transport_limits().map_err(service_response)?;
