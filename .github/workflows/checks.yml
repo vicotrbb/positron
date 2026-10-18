@@ -106,6 +106,10 @@ jobs:
           if ! cmp "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"; then
             echo "Executable reproducibility mismatch: first 16 byte offsets (decimal) and values (octal)"
             if cmp -l "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron" | awk 'NR <= 16 { print } END { print "cmp_differing_byte_count=" NR }'; then :; fi
+            if [ "$(uname -s)" = Darwin ]; then
+              echo "Last 32 differing byte offsets (decimal; no values)"
+              if cmp -l "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron" | awk '{ offsets[(NR - 1) % 32] = $1 } END { for (i = (NR > 32 ? NR - 32 : 0); i < NR; i++) print offsets[i % 32] }'; then :; fi
+            fi
             for payload in "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"; do
               echo "Executable: $payload"
               wc -c < "$payload"
@@ -121,10 +125,12 @@ jobs:
               else
                 sha256sum "$payload"
                 if readelf -h -S -n -W "$payload" | head -n 256; then :; else echo "ELF metadata diagnostic unavailable"; fi
-                for section in .note.gnu.build-id .text .rodata .data .eh_frame; do
-                  echo "$section content hash"
-                  if objdump -s -j "$section" "$payload" | tail -n +5 | sha256sum; then :; else echo "Section diagnostic unavailable"; fi
-                done
+                echo "ELF section headers (at most 128)"
+                if readelf -SW "$payload" | awk '/^[[:space:]]*\[[[:space:]]*[0-9]+\]/ && count++ < 128 { print }'; then :; else echo "Section headers unavailable"; fi
+                while IFS= read -r section; do
+                  printf '%s ' "$section"
+                  if readelf -x "$section" "$payload" | awk '$1 ~ /^0x[0-9a-fA-F]+$/ { print }' | sha256sum | awk '{ print $1 }'; then :; else echo "Section diagnostic unavailable"; fi
+                done < <(readelf -SW "$payload" | sed -n 's/^[[:space:]]*\[[[:space:]]*[1-9][0-9]*\][[:space:]]*\([^[:space:]]*\).*/\1/p' | head -n 128)
               fi
             done
             exit 1
