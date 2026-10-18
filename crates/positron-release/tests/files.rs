@@ -143,3 +143,43 @@ fn inspection_refuses_real_and_truncated_der_private_keys_across_chunks() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn inspection_preserves_token_thresholds_alphabets_and_embedded_prefixes() {
+    let root = std::env::temp_dir().join(format!("positron-release-prefix-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    for (prefix, minimum, aws) in [
+        ("ghp_", 32, false),
+        ("github_pat_", 32, false),
+        ("sk-proj-", 32, false),
+        ("AKIA", 16, true),
+        ("ASIA", 16, true),
+    ] {
+        for leading in ["", "embedded_word"] {
+            for length in [minimum - 1, minimum, minimum + 4] {
+                for byte in if aws { [b'A', b'9'] } else { [b'A', b'_'] } {
+                    let mut contents = format!("{leading}{prefix}").into_bytes();
+                    contents.extend(std::iter::repeat_n(byte, length));
+                    contents.push(b'.');
+                    std::fs::write(root.join("token"), &contents).unwrap();
+                    let expected = if length >= minimum {
+                        Err(ReleaseError::SecretDetected)
+                    } else {
+                        Ok(FileIdentity::of(&contents))
+                    };
+                    assert_eq!(inspect_file(&root, "token", &[]), expected);
+                }
+            }
+            let mut contents = format!("{leading}{prefix}").into_bytes();
+            contents.extend(std::iter::repeat_n(b'A', minimum - 1));
+            contents.push(if aws { b'a' } else { b'.' });
+            contents.extend(std::iter::repeat_n(b'A', 8));
+            std::fs::write(root.join("token"), &contents).unwrap();
+            assert_eq!(
+                inspect_file(&root, "token", &[]),
+                Ok(FileIdentity::of(&contents))
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

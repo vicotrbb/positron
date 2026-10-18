@@ -13,6 +13,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let mut fixture = support::Fixture::new();
+    assert_token_predicate_compatibility(&fixture, data);
     let selection = usize::from(data.first().copied().unwrap_or(0));
     let index = selection % fixture.inventory.artifacts.len();
     let selected = fixture.inventory.artifacts[index].clone();
@@ -192,5 +193,36 @@ fn mutate(bytes: &mut [u8], data: &[u8]) {
     for (index, value) in data.iter().copied().enumerate().skip(1) {
         let offset = (index * 257 + usize::from(value)) % bytes.len();
         bytes[offset] ^= value.max(1);
+    }
+}
+
+// Test-only compatibility oracle for the token predicate before its public
+// marker representation changed. Generated raw bytes reach the public file
+// inspector without introducing a second production validation authority.
+fn assert_token_predicate_compatibility(fixture: &support::Fixture, data: &[u8]) {
+    let prefixes = [b"ghp_".as_slice(), b"github_pat_", b"sk-proj-", b"AKIA", b"ASIA"];
+    let selected = usize::from(data.first().copied().unwrap_or(0)) % prefixes.len();
+    let mut bytes = b"embedded_word".to_vec();
+    bytes.extend_from_slice(prefixes.get(selected).expect("closed prefix selection"));
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+    bytes.extend(data.iter().skip(1).map(|byte| alphabet[usize::from(*byte) % alphabet.len()]));
+    let expected = prefixes.iter().any(|prefix| {
+        bytes.windows(prefix.len()).enumerate().any(|(index, window)| {
+            let aws = *prefix == b"AKIA" || *prefix == b"ASIA";
+            window == *prefix && bytes.get(index + prefix.len()..).is_some_and(|tail| {
+                tail.iter().take_while(|byte| if aws {
+                    byte.is_ascii_uppercase() || byte.is_ascii_digit()
+                } else {
+                    byte.is_ascii_alphanumeric() || **byte == b'_'
+                }).count() >= if aws { 16 } else { 32 }
+            })
+        })
+    });
+    std::fs::write(fixture.root.join("fuzz-token"), &bytes).expect("bounded raw token fixture");
+    let result = inspect_file(&fixture.root, "fuzz-token", &[]);
+    if expected {
+        assert_eq!(result, Err(ReleaseError::SecretDetected));
+    } else {
+        assert_eq!(result, Ok(FileIdentity::of(&bytes)));
     }
 }

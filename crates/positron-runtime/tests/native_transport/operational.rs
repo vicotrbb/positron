@@ -129,13 +129,55 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut completed_requests = 0;
     let mut completed_query = false;
+    let mut api_requests = 1;
+    let mut ingest_requests = 1;
+    let mut query_requests = 1;
+    let mut fresh_probes = 0;
+    let mut http_probes = 0;
     while completed_requests < 2 || !completed_query {
-        let request = received
-            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-            .map_err(|error| format!(
-                "operational export arrival: {error}; completed_requests={completed_requests}; completed_query={completed_query}; telemetry={}",
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let request = match received.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(request) => request,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                if std::time::Instant::now() < deadline =>
+            {
+                // Optional export can refuse an individual event. Produce fresh
+                // operations only for a missing category, without assuming that
+                // every issued request is exported or crediting aggregate loss.
+                if fresh_probes < 8 {
+                    fresh_probes += 1;
+                    if completed_requests < 2 {
+                        if http_probes % 2 == 0 {
+                            assert_status(operational_probe(
+                                api, "/telemetry-body-canary", &administrator, b"", deadline,
+                            )?, 404);
+                            api_requests += 1;
+                        } else {
+                            assert_status(operational_probe(
+                                address(&process.bound_endpoints(), positron_runtime::ListenerRole::OtlpHttp)?,
+                                "/v1/logs", &ingest, &otlp_body("stored-telemetry-canary"), deadline,
+                            )?, 200);
+                            ingest_requests += 1;
+                        }
+                        http_probes += 1;
+                    } else if !completed_query {
+                        assert_eq!(
+                            process.services().ok_or("query services")?.query_log_bodies(
+                                &query, "logs | range query_time 0 100 | limit 16",
+                                QueryBudget::new(1, 16, 16, 1_048_576, 1_048_576, 60)?
+                            ),
+                            Err(positron_runtime::ServiceFailure::CapacityUnavailable)
+                        );
+                        query_requests += 1;
+                    }
+                }
+                continue;
+            },
+            Err(error) => return Err(format!(
+                "operational export arrival: {error}; completed_requests={completed_requests}; completed_query={completed_query}; fresh_probes={fresh_probes}; telemetry={}",
                 process.health().operational_telemetry_snapshot()
-            ))?;
+            ).into()),
+        };
         let encoded = request.encode_to_vec();
         assert!(encoded.len() < 4096);
         for canary in [&administrator, &ingest, &query] {
@@ -185,14 +227,15 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
     )?;
     assert_status(scrape.clone(), 200);
     assert!(scrape.ends_with("# EOF\n"));
-    assert!(
-        scrape
-            .contains("positron_requests_total{listener=\"api\",outcome=\"request_rejected\"} 1\n")
-    );
-    assert!(scrape.contains("positron_queries_total{outcome=\"capacity_rejected\"} 1\n"));
-    assert!(
-        scrape.contains("positron_query_budget_failures_total{dimension=\"scanned_bytes\"} 1\n")
-    );
+    assert!(scrape.contains(&format!(
+        "positron_requests_total{{listener=\"api\",outcome=\"request_rejected\"}} {api_requests}\n"
+    )));
+    assert!(scrape.contains(&format!(
+        "positron_queries_total{{outcome=\"capacity_rejected\"}} {query_requests}\n"
+    )));
+    assert!(scrape.contains(&format!(
+        "positron_query_budget_failures_total{{dimension=\"scanned_bytes\"}} {query_requests}\n"
+    )));
     assert!(scrape.contains("positron_security_warning{warning=\"otlp_http_plaintext\"} 1\n"));
     assert!(
         scrape
@@ -202,9 +245,9 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
     assert!(!scrape.contains("telemetry-body-canary"));
     assert!(!scrape.contains("stored-telemetry-canary"));
     assert!(!scrape.contains(&ingest));
-    assert!(
-        scrape.contains("positron_ingest_records_total{signal=\"logs\",outcome=\"committed\"} 1\n")
-    );
+    assert!(scrape.contains(&format!(
+        "positron_ingest_records_total{{signal=\"logs\",outcome=\"committed\"}} {ingest_requests}\n"
+    )));
     shutdown_gracefully(process, &roots)?;
     stop.send(()).map_err(|_| "collector stopped early")?;
     collector
@@ -212,6 +255,47 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         .map_err(|_| "collector panic")?
         .map_err(std::io::Error::other)?;
     Ok(())
+}
+
+// Fresh probes share the original observation deadline and retain a strict
+// response bound; they do not extend the export or socket budget.
+fn operational_probe(
+    address: SocketAddr,
+    path: &str,
+    credential: &str,
+    body: &[u8],
+    deadline: std::time::Instant,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let remaining = || {
+        deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or("operational probe deadline")
+    };
+    let mut stream = TcpStream::connect_timeout(&address, remaining()?)?;
+    let method = if body.is_empty() { "GET" } else { "POST" };
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    request.extend_from_slice(body);
+    stream.set_write_timeout(Some(remaining()?))?;
+    stream.write_all(&request)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        stream.set_read_timeout(Some(remaining()?))?;
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                if bytes.len() + count > 65_536 {
+                    return Err("operational probe response bound".into());
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(String::from_utf8(bytes)?)
 }
 
 fn operational_process(
