@@ -150,6 +150,18 @@ jobs:
                 done
               else
                 sha256sum "$payload"
+                echo "Native C driver and bundled ELF linker versions"
+                if cc --version | awk 'NR <= 2 { print }'; then :; else echo "C driver version unavailable"; fi
+                if "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ { print $2 }')/bin/rust-lld" -flavor gnu --version; then :; else echo "Bundled linker version unavailable"; fi
+                if readelf -sW "$payload" | awk '$1 ~ /^[0-9]+:$/ { print $4, $5, $6, $7, $8 }' > "$payload.symbols"; then
+                  echo "ELF symbol names: ordered and sorted unique SHA256"
+                  awk '{ print $5 }' "$payload.symbols" | sha256sum
+                  awk '{ print $5 }' "$payload.symbols" | LC_ALL=C sort -u | sha256sum
+                  echo "ELF STT_FILE names: count, ordered and sorted unique SHA256"
+                  awk '$1 == "FILE" { count++ } END { print count+0 }' "$payload.symbols"
+                  awk '$1 == "FILE" { print $5 }' "$payload.symbols" | sha256sum
+                  awk '$1 == "FILE" { print $5 }' "$payload.symbols" | LC_ALL=C sort -u | sha256sum
+                else echo "ELF symbol diagnostic unavailable"; fi
                 if readelf -h -S -n -W "$payload" | head -n 256; then :; else echo "ELF metadata diagnostic unavailable"; fi
                 echo "ELF section headers (at most 128)"
                 if readelf -SW "$payload" | awk '/^[[:space:]]*\[[[:space:]]*[0-9]+\]/ && count++ < 128 { print }'; then :; else echo "Section headers unavailable"; fi
@@ -159,6 +171,10 @@ jobs:
                 done < <(readelf -SW "$payload" | sed -n 's/^[[:space:]]*\[[[:space:]]*[1-9][0-9]*\][[:space:]]*\([^[:space:]]*\).*/\1/p' | head -n 128)
               fi
             done
+            if [ "$(uname -s)" != Darwin ]; then
+              echo "First 16 changed ELF symbol metadata rows (type/binding/visibility/section/name; at most 256 characters each)"
+              if diff -U 0 "$RUNNER_TEMP/first/positron.symbols" "$RUNNER_TEMP/native-target/release/positron.symbols" | awk '/^[+-]/ && !/^---/ && !/^\+\+\+/ && count++ < 16 { print substr($0, 1, 256) }'; then :; fi
+            fi
             exit 1
           fi
           "$RUNNER_TEMP/native-target/release/positron" release archive --target '${{ matrix.target }}' --binary "$RUNNER_TEMP/native-target/release/positron" --out "$RUNNER_TEMP/rebuilt-native.tar.gz"
