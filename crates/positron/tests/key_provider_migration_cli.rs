@@ -200,7 +200,7 @@ fn phase(
             );
         }
         let error = String::from_utf8(output.stderr)?;
-        if Instant::now() >= admission_deadline || !error.contains("stale Catalog generation") {
+        if Instant::now() >= admission_deadline || !error.contains("stale resource generation") {
             return Err(format!("{action} admission: {error}").into());
         }
     };
@@ -334,7 +334,7 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
         ],
     )?;
     assert!(!stale.status.success());
-    assert!(String::from_utf8(stale.stderr)?.contains("stale Catalog generation"));
+    assert!(String::from_utf8(stale.stderr)?.contains("stale resource generation"));
     let drained = wait_for_maintenance(endpoint, &client, claim.secret())?;
     let checkpoint_id: String = checkpoint
         .to_bytes()

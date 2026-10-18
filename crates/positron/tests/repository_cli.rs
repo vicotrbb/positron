@@ -195,7 +195,7 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
             }
             let error = String::from_utf8(output.stderr)?;
             if std::time::Instant::now() >= admission_deadline
-                || !(error.contains("stale Catalog generation")
+                || !(error.contains("stale resource generation")
                     || error.contains("administration unavailable"))
             {
                 return Err(format!("repository {action} admission refused: {error}").into());
