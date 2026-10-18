@@ -2,13 +2,26 @@
 use super::{Administration, DurableOperation, OfflineUpgradeSession, UpgradeFailure, open};
 use positron_kernel::MaintenanceTaskId;
 use sha2::Digest;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+// Reopening an offline owner must not reset the diagnostic I/O/read bound.
+static CAPTURE_BUDGET: AtomicU8 = AtomicU8::new(32);
 
 pub(super) struct Context {
     children: Result<[String; 2], &'static str>,
     clock: String,
 }
 
-pub(super) fn capture(session: &OfflineUpgradeSession) -> Context {
+pub(super) fn capture(session: &OfflineUpgradeSession) -> Option<Context> {
+    CAPTURE_BUDGET
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .ok()?;
+    Some(context(session))
+}
+
+fn context(session: &OfflineUpgradeSession) -> Context {
     Context {
         children: children(session),
         clock: format!(
@@ -81,10 +94,13 @@ fn child(session: &OfflineUpgradeSession, operation: &DurableOperation) -> Strin
 
 pub(super) fn report(
     session: &OfflineUpgradeSession,
-    before: Context,
+    before: Option<Context>,
     result: &Result<DurableOperation, UpgradeFailure>,
 ) {
-    let after = capture(session);
+    let Some(before) = before else {
+        return;
+    };
+    let after = context(session);
     if result.is_err() || before.children == after.children {
         let outcome = result.as_ref().map(|_| ()).map_err(|failure| *failure);
         eprintln!(
