@@ -88,6 +88,7 @@ jobs:
         run: |
           test "$(id -u)" != 0
           export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
+          export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
           if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-reproducible"; fi
           cargo build --locked --release -p positron --target-dir "$RUNNER_TEMP/native-target"
           echo "Native build flag identity and executable leaf names"
@@ -113,6 +114,7 @@ jobs:
           cargo clean --release --target-dir "$RUNNER_TEMP/native-target"
           cd "$RUNNER_TEMP/independent-source"
           export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
+          export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
           if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-reproducible"; fi
           cargo build --locked --release -p positron --target-dir "$RUNNER_TEMP/native-target"
           echo "Native build flag identity and executable leaf names"

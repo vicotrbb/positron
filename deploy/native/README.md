@@ -12,6 +12,8 @@ bundle a libc or platform SDK. Do not run an archive built for another target.
 Build on each native target with the pinned Rust toolchain and locked resolution:
 
 ```console
+# Remap native C and assembly debug compilation directories.
+export CFLAGS="-fdebug-prefix-map=$PWD=/positron-source"
 # On macOS, use the pinned platform linker's deterministic-input mode.
 if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="-C link-arg=-Wl,-reproducible"; fi
 cargo build --locked --release -p positron
@@ -25,14 +27,20 @@ again in an independent checkout with the same declared compiler, linker,
 platform SDK, dependencies, source and build paths; compare both executable and
 archive bytes. Use byte-identical compiler flags for both builds: when remapping
 independent checkout paths, include both source-root mappings to the same
-canonical prefix in both invocations. Preserve the native build UUID and
-code signature; neither is rewritten after linking. An archive match from the same executable is packaging
+canonical prefix in both invocations. Apply the same source-root and target-root
+mappings to native C and assembly through `CFLAGS=-fdebug-prefix-map=old=new`.
+Rust path remapping does not cover native debug compilation directories; those
+can change the linker's content-derived UUID even when Cargo subsequently
+removes the debug data. Preserve the native build UUID and code signature;
+neither is rewritten after linking. An archive match from the same executable is packaging
 reproducibility only, not an independent compiler rebuild.
 
 Treat these as unsigned construction outputs. Add each executable and archive to
 the existing Release Inventory as `NativeExecutable` and `NativeArchive` for its
 exact target, with the independent unsigned payload, SHA-256 and size, both SPDX
 and CycloneDX SBOMs, license policy, pinned toolchain inputs and build provenance.
+Record the exact `RUSTFLAGS` and `CFLAGS`, including their remap prefixes, in the
+existing pinned build inputs and authenticated in-toto/SLSA build provenance.
 Use `positron release inspect` for checksums. See
 `docs/operations/release-trust.md` in this archive for construction,
 external signing, detached publication proof and complete offline verification.
