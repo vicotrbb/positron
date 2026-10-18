@@ -242,3 +242,139 @@ fn admitted<'authority>(
         receiver: crate::PolicyReceiver::OtlpGrpc,
     })
 }
+
+#[test]
+fn admitted_receiver_retains_its_complete_grant_when_shrink_control_is_contended()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let baseline = fixture.authority.governor().inspect()?.outstanding_total();
+    let request = admitted_empty(&fixture, 1)?;
+    let original = request.capacity.as_ref().ok_or("receiver grant")?.granted();
+    let batch = fixture
+        .authority
+        .with_control_contention_for_test(|| OtlpLogsReceiver::new().decode(request))??;
+    assert_eq!(batch.records().len(), 1);
+    let retained = batch.capacity.as_ref().ok_or("retained receiver grant")?;
+    assert!(retained.is_active());
+    assert_eq!(retained.granted(), original);
+    drop(batch);
+    assert_eq!(
+        fixture.authority.governor().inspect()?.outstanding_total(),
+        baseline
+    );
+    Ok(())
+}
+
+#[test]
+fn admitted_receiver_refuses_fenced_control_even_when_its_grant_covers_decode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let request = admitted_empty(&fixture, 1)?;
+    let decoded = fixture
+        .authority
+        .with_fenced_control_contention_for_test(|| OtlpLogsReceiver::new().decode(request))?;
+    assert!(matches!(decoded, Err(ReceiveFailure::CapacityUnavailable)));
+    Ok(())
+}
+
+#[test]
+fn admitted_receiver_does_not_treat_contended_growth_as_an_existing_grant()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let mut request = admitted_empty(&fixture, 1)?;
+    drop(request.capacity.take());
+    request.capacity = Some(fixture.authority.governor().reserve(WorkClaim::tenant(
+        fixture.tenant,
+        WorkKind::Ingest,
+        ResourceAmounts::new([1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0]),
+    )?)?);
+    let decoded = fixture
+        .authority
+        .with_control_contention_for_test(|| OtlpLogsReceiver::new().decode(request))?;
+    assert!(matches!(decoded, Err(ReceiveFailure::CapacityUnavailable)));
+    Ok(())
+}
+
+#[test]
+fn admitted_receiver_refuses_cancelled_and_capacity_cancelled_grants()
+-> Result<(), Box<dyn std::error::Error>> {
+    for explicit_cancel in [true, false] {
+        let fixture = fixture()?;
+        let mut request = admitted_empty(&fixture, 1)?;
+        let grant = request.capacity.as_mut().ok_or("receiver grant")?;
+        if explicit_cancel {
+            grant.cancel()?;
+        } else {
+            assert!(
+                grant
+                    .try_resize(ResourceAmounts::new([
+                        16_000_000, 1, 1, 1_048_576, 1_025, 0, 0, 0, 1, 1, 0,
+                    ]))
+                    .is_err()
+            );
+        }
+        assert!(!grant.is_active());
+        let decoded = fixture
+            .authority
+            .with_control_contention_for_test(|| OtlpLogsReceiver::new().decode(request))?;
+        assert!(matches!(decoded, Err(ReceiveFailure::CapacityUnavailable)));
+    }
+    Ok(())
+}
+
+#[test]
+fn admitted_receiver_refuses_growth_that_cancels_its_old_capacity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let mut request = admitted_empty(&fixture, 1)?;
+    drop(request.capacity.take());
+    request.capacity = Some(fixture.authority.governor().reserve(WorkClaim::tenant(
+        fixture.tenant,
+        WorkKind::Ingest,
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, 1)?,
+    )?)?);
+    let snapshot = fixture.authority.governor().inspect()?;
+    let available = snapshot
+        .ordinary_capacity(ResourceDimension::MemoryBytes)
+        .checked_sub(snapshot.usage(ResourceDimension::MemoryBytes))
+        .ok_or("ordinary headroom")?;
+    let refusal = fixture
+        .authority
+        .governor()
+        .reserve(WorkClaim::tenant(
+            fixture.tenant,
+            WorkKind::Ingest,
+            ResourceAmounts::only(ResourceDimension::MemoryBytes, available)?,
+        )?)
+        .err()
+        .ok_or("fixture saturation probe must refuse")?;
+    let remaining = refusal
+        .allowed()
+        .checked_sub(refusal.in_use())
+        .ok_or("remaining headroom")?;
+    let _occupied = fixture.authority.governor().reserve(WorkClaim::tenant(
+        fixture.tenant,
+        WorkKind::Ingest,
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, remaining)?,
+    )?)?;
+    assert!(matches!(
+        OtlpLogsReceiver::new().decode(request),
+        Err(ReceiveFailure::CapacityUnavailable)
+    ));
+    Ok(())
+}
+
+#[test]
+fn admitted_receiver_refuses_a_published_fence_after_control_is_released()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = fixture()?;
+    let request = admitted_empty(&fixture, 1)?;
+    fixture
+        .authority
+        .with_fenced_control_contention_for_test(|| ())?;
+    assert!(matches!(
+        OtlpLogsReceiver::new().decode(request),
+        Err(ReceiveFailure::CapacityUnavailable)
+    ));
+    Ok(())
+}

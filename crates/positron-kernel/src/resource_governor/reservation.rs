@@ -136,6 +136,16 @@ impl<'authority> ResourceReservation<'authority> {
         self.amounts
     }
 
+    /// Reads the owning Governor's canonical lifecycle without waiting for its
+    /// accounting lock, including pending fences and poisoned accounting.
+    #[must_use]
+    pub fn governor_lifecycle(&self) -> GovernorLifecycle {
+        ResourceGovernor {
+            inner: self.governor,
+        }
+        .lifecycle()
+    }
+
     /// Returns the non-serializable capability for this live authenticated
     /// root operation. Tenant, system, recovery, and child reservations do
     /// not mint another root capability.

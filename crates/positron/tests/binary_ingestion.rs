@@ -400,15 +400,21 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         &recovery,
         &before_restart_digest,
     )?;
+    let loki_response = request_with_capacity_retry(
+        loki,
+        "/loki/api/v1/push",
+        &headers,
+        br#"{"streams":[{"stream":{"app":"audit"},"values":[["43","binary-loki"]]}]}"#,
+        admission_budget,
+    )?;
     assert!(
-        request_with_capacity_retry(
-            loki,
-            "/loki/api/v1/push",
-            &headers,
-            br#"{"streams":[{"stream":{"app":"audit"},"values":[["43","binary-loki"]]}]}"#,
-            admission_budget,
-        )?
-        .starts_with("HTTP/1.1 204 No Content")
+        loki_response.starts_with("HTTP/1.1 204 No Content"),
+        "installed Loki push status: {}",
+        loki_response
+            .lines()
+            .next()
+            .filter(|status| status.starts_with("HTTP/1.1 ") && status.len() <= 64)
+            .map_or("<missing HTTP status line>", |status| status),
     );
     // A generated OTLP gRPC client drives the actual binary's HTTP/2 listener.
     let grpc = *ports.get(2).ok_or("missing gRPC port")?;

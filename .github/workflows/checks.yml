@@ -105,13 +105,15 @@ jobs:
           cargo build --locked --release -p positron --target-dir "$RUNNER_TEMP/native-target"
           if ! cmp "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"; then
             echo "Executable reproducibility mismatch: first 16 byte offsets (decimal) and values (octal)"
-            if cmp -l "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron" | head -n 16; then :; fi
+            if cmp -l "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron" | awk 'NR <= 16 { print } END { print "cmp_differing_byte_count=" NR }'; then :; fi
             for payload in "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"; do
               echo "Executable: $payload"
               wc -c < "$payload"
               if [ "$(uname -s)" = Darwin ]; then
                 shasum -a 256 "$payload"
                 if otool -hv -l "$payload" | head -n 256; then :; else echo "Mach-O metadata diagnostic unavailable"; fi
+                echo "Mach-O UUID and code-signature load-command fields"
+                if otool -l "$payload" | awk '$1 == "cmd" { selected = ($2 == "LC_UUID" || $2 == "LC_CODE_SIGNATURE") } selected && ($1 == "cmd" || $1 == "cmdsize" || $1 == "uuid" || $1 == "dataoff" || $1 == "datasize") && count++ < 8 { print }'; then :; else echo "Mach-O identity diagnostic unavailable"; fi
                 for section in __text __const __unwind_info __eh_frame; do
                   echo "__TEXT/$section content hash"
                   if otool -s __TEXT "$section" "$payload" | tail -n +3 | shasum -a 256; then :; else echo "Section diagnostic unavailable"; fi
