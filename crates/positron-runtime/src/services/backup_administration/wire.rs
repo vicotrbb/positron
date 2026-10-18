@@ -1,5 +1,6 @@
 use super::super::repository_administration::{RepositoryAdmission, RepositoryLocation};
 use super::*;
+use crate::operational::{BackupReadStage, OperationalEvent};
 use positron_api::backup::{BackupRequest, BackupResponse, BackupSnapshotReceipt};
 use positron_domain::identity::TenantId;
 impl ServiceHandle {
@@ -7,6 +8,21 @@ impl ServiceHandle {
         &self,
         bearer: &str,
         bytes: &[u8],
+    ) -> Result<BackupResponse, MaintenanceServiceFailure> {
+        let mut stage = BackupReadStage::AdministratorIdentity;
+        let result = self.manage_backup_observed(bearer, bytes, &mut stage);
+        if let Err(failure @ MaintenanceServiceFailure::AdministrationUnavailable) = result {
+            // The inner operation has returned and released all Catalog/gate owners.
+            self.record_backup_read_failure(stage, failure);
+        }
+        result
+    }
+
+    fn manage_backup_observed(
+        &self,
+        bearer: &str,
+        bytes: &[u8],
+        stage: &mut BackupReadStage,
     ) -> Result<BackupResponse, MaintenanceServiceFailure> {
         let actor = {
             let _gate = self
@@ -16,6 +32,7 @@ impl ServiceHandle {
         };
         let request =
             BackupRequest::decode(bytes).map_err(|_| MaintenanceServiceFailure::InvalidRequest)?;
+        *stage = BackupReadStage::OtherAction;
         let operation = match request.action.as_str() {
             "create" => {
                 let fingerprint = {
@@ -145,10 +162,12 @@ impl ServiceHandle {
                 idempotency(request.idempotency_key.as_deref())?,
             )?,
             "status" | "lookup" | "cancel" => {
+                *stage = BackupReadStage::OperationCatalogOpen;
                 let _gate = self
                     .catalog_operation()
                     .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
                 let catalog = self.open_maintenance_catalog()?;
+                *stage = BackupReadStage::OperationInspect;
                 let operation = if request.action == "lookup" {
                     DurableOperationAdministration::inspect_by_idempotency(
                         &catalog,
@@ -179,6 +198,7 @@ impl ServiceHandle {
                 .map_err(super::super::provider_migration::operation_failure)?
                 .ok_or(MaintenanceServiceFailure::SourceUnavailable)?;
                 if request.action == "cancel" {
+                    *stage = BackupReadStage::OtherAction;
                     if operation.kind() == DurableOperationKind::BackupVerification {
                         DurableOperationAdministration::cancel_backup_verification(
                             &catalog,
@@ -211,14 +231,16 @@ impl ServiceHandle {
             _ => return Err(MaintenanceServiceFailure::InvalidRequest),
         };
         self.notify_maintenance_worker();
-        response(self, operation, self.instance.instance.to_bytes())
+        response(self, operation, self.instance.instance.to_bytes(), stage)
     }
 }
 fn response(
     services: &ServiceHandle,
     operation: DurableOperation,
     instance: [u8; 16],
+    stage: &mut BackupReadStage,
 ) -> Result<BackupResponse, MaintenanceServiceFailure> {
+    *stage = BackupReadStage::Response;
     let parameters = operation
         .backup_binding()
         .ok_or(MaintenanceServiceFailure::AdministrationUnavailable)?
@@ -229,6 +251,7 @@ fn response(
     let report = operation
         .backup_verification_report()
         .map(|checksum| {
+            *stage = BackupReadStage::VerificationReport;
             let _gate = services
                 .catalog_operation()
                 .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
@@ -263,6 +286,7 @@ fn response(
     } else if operation.phase() == positron_governance::DurableOperationPhase::BackupCancellation {
         true
     } else if operation.status() == positron_governance::DurableOperationStatus::Failed {
+        *stage = BackupReadStage::TaskStatus;
         let task = positron_kernel::MaintenanceTaskId::new(operation.operation_id().to_bytes())
             .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
         let status = services
@@ -277,12 +301,14 @@ fn response(
                 | positron_kernel::MaintenanceTaskPhase::Deferred
         )
     } else {
+        *stage = BackupReadStage::CaptureExists;
         positron_kernel::BackupCapture::exists(
             &services.instance._authority,
             operation.operation_id().to_bytes(),
         )
         .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?
     };
+    *stage = BackupReadStage::Response;
     Ok(BackupResponse {
         verification_report: report,
         verification_report_checksum: operation.backup_verification_report().map(hex),
@@ -401,4 +427,32 @@ pub(super) fn repository_response(
         integrity_fingerprint: hex(parameters.integrity_fingerprint()),
         prefix_commitment: hex(parameters.prefix_commitment()),
     })
+}
+
+impl ServiceHandle {
+    fn record_backup_read_failure(
+        &self,
+        stage: BackupReadStage,
+        failure: MaintenanceServiceFailure,
+    ) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        static REMAINING: AtomicU8 = AtomicU8::new(32);
+        if REMAINING
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_err()
+        {
+            return;
+        }
+        let health = match self.integrity_health.lock() {
+            Ok(owner) => owner.clone(),
+            Err(_) => None,
+        };
+        if let Some(health) = health {
+            health
+                .operational_telemetry()
+                .record(OperationalEvent::BackupReadFailure { stage, failure });
+        }
+    }
 }

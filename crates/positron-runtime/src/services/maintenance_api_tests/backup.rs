@@ -6,6 +6,74 @@ use positron_backup::{LocalRepository, RepositoryIdentity};
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn backup_status_identity_read_refusal_reports_only_its_closed_stage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let state = crate::health::ProcessState::starting();
+    services.attach_health(state.health());
+    let request = BackupRequest::decode(
+        br#"{"action":"status","operation_id":"11111111111111111111111111111111"}"#,
+    )?
+    .encode()?;
+    let invalid = "invalid-administrator-secret-canary";
+    for credential in ["", invalid] {
+        assert_eq!(
+            services.manage_backup(credential, &request),
+            Err(MaintenanceServiceFailure::AuthenticationRejected)
+        );
+    }
+    let generation = initialized.catalog_generation();
+    let before = initialized.resource_governor().inspect()?;
+    initialized
+        ._authority
+        .with_control_contention_for_test(|| {
+            assert_eq!(
+                initialized
+                    .durable_identity()
+                    .err()
+                    .map(|failure| failure.code()),
+                Some(crate::BootstrapFailureCode::ResourceUnavailable)
+            );
+            assert_eq!(
+                services.manage_backup(&administrator, &request),
+                Err(MaintenanceServiceFailure::AdministrationUnavailable)
+            );
+        })?;
+    assert_eq!(initialized.catalog_generation(), generation);
+    let after = initialized.resource_governor().inspect()?;
+    assert_eq!(
+        after.outstanding_reservations(),
+        before.outstanding_reservations()
+    );
+    for dimension in positron_kernel::ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+    let rendered = state
+        .health()
+        .operational_logs_json()
+        .map_err(|_| "operational logs unavailable")?;
+    assert!(!rendered.contains(&administrator));
+    assert!(!rendered.contains(invalid));
+    let records: Vec<serde_json::Value> = serde_json::from_str(&rendered)?;
+    let failures = records
+        .iter()
+        .filter(|record| record["event"] == "backup_read_failure")
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1, "{rendered}");
+    assert_eq!(
+        failures.first().ok_or("read diagnostic")?["stage"],
+        "administrator_identity"
+    );
+    assert_eq!(
+        failures.first().ok_or("read diagnostic")?["failure"],
+        "AdministrationUnavailable"
+    );
+    Ok(())
+}
+
+#[test]
 fn online_backup_requires_verified_recovery_and_publishes_reusable_ciphertext()
 -> Result<(), Box<dyn std::error::Error>> {
     let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();

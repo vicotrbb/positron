@@ -154,6 +154,8 @@ pub(super) fn complete(
             return Err(ServiceFailure::BackupRepositoryRejected);
         }
         work.remote = Some(remote);
+        #[cfg(feature = "test-support")]
+        report_state("remote_initialized", Some(work), None);
         return Ok(false);
     }
     let remote = work.remote.as_mut().ok_or(ServiceFailure::Internal)?;
@@ -461,6 +463,73 @@ fn verify_schema_object(
         .map_err(|_| ServiceFailure::CapacityUnavailable)?;
     seen.push(schema.tenant());
     Ok(())
+}
+
+#[cfg(feature = "test-support")]
+pub(in crate::services) fn report_turn(stage: &'static str, work: Option<&BackupWork>) {
+    report_state(
+        stage,
+        match work {
+            Some(BackupWork::Verification(work)) => Some(work),
+            _ => None,
+        },
+        None,
+    );
+}
+
+#[cfg(feature = "test-support")]
+fn report_state(
+    stage: &'static str,
+    work: Option<&VerificationWork>,
+    readmission: Option<(ServiceFailure, u64, u64)>,
+) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static REMAINING: AtomicU8 = AtomicU8::new(64);
+    if REMAINING
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_err()
+    {
+        return;
+    }
+    if let Some(work) = work {
+        eprintln!(
+            "upgrade_verification_turn stage={stage} readmission_failure_requested_granted={readmission:?} remote_complete={:?} native_file_index={} native_file_total={:?} catalog_ready={} schema_index={} schema_total={:?} key_index={}",
+            work.remote
+                .as_ref()
+                .map(BackupSnapshotVerification::complete),
+            work.next_file,
+            work.metadata
+                .as_ref()
+                .map(|metadata| metadata.files().len()),
+            work.catalog.is_some(),
+            work.next_schema,
+            work.catalog
+                .as_ref()
+                .map(|catalog| catalog.object_identities().count()),
+            work.recovered_keys
+        );
+    } else {
+        eprintln!("upgrade_verification_turn stage={stage} verification_work=false");
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub(in crate::services) fn report_readmission(
+    work: Option<&BackupWork>,
+    failure: ServiceFailure,
+    requested_memory: u64,
+    granted_memory: u64,
+) {
+    let Some(BackupWork::Verification(work)) = work else {
+        return;
+    };
+    report_state(
+        "readmission_discard",
+        Some(work),
+        Some((failure, requested_memory, granted_memory)),
+    );
 }
 
 #[cfg(test)]

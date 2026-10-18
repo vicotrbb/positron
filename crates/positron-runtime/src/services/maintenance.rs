@@ -599,6 +599,18 @@ fn complete_installed_maintenance(
             _ => None,
         };
         if let Some(memory_bytes) = required_memory {
+            #[cfg(feature = "test-support")]
+            if let Err(failure) = result {
+                super::backup_administration::report_verification_readmission(
+                    work.as_ref(),
+                    failure,
+                    memory_bytes,
+                    execution
+                        .task()
+                        .reservations()
+                        .get(positron_kernel::ResourceDimension::MemoryBytes),
+                );
+            }
             // All provider workers are joined by their owning calls. Dropping
             // volatile work relinquishes every transferred capability clone;
             // the old execution keeps the grant until requeue is durable.
@@ -1891,9 +1903,9 @@ pub(super) fn drive_upgrade_backup(
                 .map_err(|_| UpgradeFailure::InvalidRequest)?,
         )
     };
-    #[cfg(test)]
+    #[cfg(feature = "test-support")]
     if execution.is_err() {
-        eprintln!("upgrade-backup-capacity stage=coordinator-start");
+        super::backup_administration::report_verification_turn("coordinator_start_refused", None);
     }
     let execution = execution.map_err(|_| UpgradeFailure::CapacityUnavailable)?;
     let Some(execution) = execution else {
@@ -1920,6 +1932,11 @@ pub(super) fn drive_upgrade_backup(
             return inspect();
         }
         if std::time::Instant::now() >= deadline {
+            #[cfg(feature = "test-support")]
+            super::backup_administration::report_verification_turn(
+                "deadline_discard",
+                work.as_ref(),
+            );
             *work = None;
             let binding = positron_kernel::RepositoryOperationBinding::from_execution(owner)
                 .map_err(|_| UpgradeFailure::UnsafeState)?;
@@ -1954,8 +1971,11 @@ pub(super) fn drive_upgrade_backup(
                 // Requeue bookkeeping alone is not recoverable progress. A
                 // shorter turn cannot retain the private semantic accumulator;
                 // report the retryable limit rather than loop without progress.
-                #[cfg(test)]
-                eprintln!("upgrade-backup-capacity stage=turn-no-progress");
+                #[cfg(feature = "test-support")]
+                super::backup_administration::report_verification_turn(
+                    "turn_no_durable_progress",
+                    None,
+                );
                 return Err(UpgradeFailure::CapacityUnavailable);
             }
             return Ok(current);
