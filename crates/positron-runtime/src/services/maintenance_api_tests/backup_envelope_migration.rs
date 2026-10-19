@@ -240,7 +240,7 @@ pub(super) fn finish_root(
         loop {
             let status = match services.manage_provider_migration(administrator, &request) {
                 Ok(status) => status,
-                Err(MaintenanceServiceFailure::AdministrationUnavailable)
+                Err(MaintenanceServiceFailure::CapacityUnavailable)
                     if !worker.is_finished() && std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(Duration::from_millis(100));

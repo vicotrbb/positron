@@ -540,7 +540,7 @@ fn finish(
                     return Ok(response);
                 }
             },
-            Err(BackupServiceClientFailure::AdministrationUnavailable) => {},
+            Err(BackupServiceClientFailure::CapacityUnavailable) => {},
             Err(failure) => return Err(failure.into()),
         }
         if std::time::Instant::now() >= deadline {

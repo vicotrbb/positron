@@ -85,8 +85,8 @@ fn status(
         };
         match client.manage(bearer, &request) {
             Ok(response) => return Ok(response),
-            Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::AdministrationUnavailable) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(error.into()),
+            Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::CapacityUnavailable) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(format!("provider migration status read: {error:?}").into()),
         }
     }
 }
@@ -113,13 +113,15 @@ fn wait_for_maintenance(
         loop {
             let page = match maintenance.status(bearer, &request) {
                 Ok(page) => page,
-                Err(positron_api::maintenance::MaintenanceServiceClientFailure::AdministrationUnavailable)
-                    if Instant::now() < deadline =>
-                {
+                Err(
+                    positron_api::maintenance::MaintenanceServiceClientFailure::CapacityUnavailable,
+                ) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                     continue 'inspection;
                 },
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    return Err(format!("maintenance quiescence status read: {error:?}").into());
+                },
             };
             tasks.extend(page.tasks);
             match page.next_cursor {

@@ -68,7 +68,7 @@ fn generation(client: &RepositoryServiceClient, bearer: &str) -> Result<u64> {
             &RepositoryRequest::decode(br#"{"action":"status"}"#)?,
         ) {
             Ok(status) => return Ok(status.catalog_generation),
-            Err(RepositoryServiceClientFailure::AdministrationUnavailable)
+            Err(RepositoryServiceClientFailure::CapacityUnavailable)
                 if Instant::now() < deadline =>
             {
                 std::thread::sleep(Duration::from_millis(100))

@@ -107,7 +107,7 @@ fn inspect_with_backpressure(
     loop {
         match client.manage(bearer, request) {
             Ok(response) => return Ok(response),
-            Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::AdministrationUnavailable) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::CapacityUnavailable) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Err(failure) => return Err(failure.into()),
         }
     }

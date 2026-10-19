@@ -54,7 +54,7 @@ fn root_operation_success_survives_task_completion_publication_failure()
         loop {
             let operation = match services.manage_provider_migration(&administrator, &lookup) {
                 Ok(operation) => operation,
-                Err(MaintenanceServiceFailure::AdministrationUnavailable)
+                Err(MaintenanceServiceFailure::CapacityUnavailable)
                     if !worker.is_finished() && std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(Duration::from_millis(10));
@@ -64,7 +64,7 @@ fn root_operation_success_survives_task_completion_publication_failure()
             };
             let tasks = match services.maintenance_status(&administrator, br"{}") {
                 Ok(tasks) => tasks,
-                Err(MaintenanceServiceFailure::AdministrationUnavailable)
+                Err(MaintenanceServiceFailure::CapacityUnavailable)
                     if !worker.is_finished() && std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(Duration::from_millis(10));
