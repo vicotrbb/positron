@@ -18,13 +18,11 @@ pub(in crate::services) struct VerificationWork {
     policy_tenants: Vec<positron_domain::identity::TenantId>,
 }
 
-pub(super) fn complete(
+fn parameters(
     services: &ServiceHandle,
-    execution: &mut MaintenanceExecution<'_>,
-    work: &mut Option<BackupWork>,
+    execution: &MaintenanceExecution<'_>,
     operation: DurableOperation,
-    cancellation: Option<&crate::TaskCancellation>,
-) -> Result<bool, ServiceFailure> {
+) -> Result<(BackupVerificationParameters, RepositoryOperationBinding), ServiceFailure> {
     require_operation(operation, services.instance.instance.to_bytes())?;
     let parameters = operation
         .backup_verification_parameters()
@@ -34,6 +32,52 @@ pub(super) fn complete(
     if parameters.intent_digest() != binding.intent_digest() {
         return Err(ServiceFailure::CorruptState);
     }
+    Ok((parameters, binding))
+}
+
+pub(super) fn prepare(
+    services: &ServiceHandle,
+    execution: &MaintenanceExecution<'_>,
+    operation: DurableOperation,
+    catalog: &positron_kernel::Catalog<'_>,
+) -> Result<positron_governance::AuthorizedContext, ServiceFailure> {
+    parameters(services, execution, operation)?;
+    let now = services
+        .maintenance_status_now()
+        .map_err(|_| ServiceFailure::StorageUnavailable)?;
+    let actor =
+        DurableOperationAdministration::resume_backup_actor(catalog, operation.operation_id(), now)
+            .map_err(|_| ServiceFailure::Unauthorized)?;
+    if operation.status() == positron_governance::DurableOperationStatus::Pending {
+        DurableOperationAdministration::begin(catalog, actor, operation.operation_id(), now)
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+    }
+    if matches!(
+        operation.phase(),
+        positron_governance::DurableOperationPhase::Accepted
+            | positron_governance::DurableOperationPhase::Preflight
+    ) {
+        DurableOperationAdministration::advance_backup_verification(
+            catalog,
+            actor,
+            operation.operation_id(),
+            false,
+            now,
+        )
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+    }
+    Ok(actor)
+}
+
+pub(super) fn complete(
+    services: &ServiceHandle,
+    execution: &mut MaintenanceExecution<'_>,
+    work: &mut Option<BackupWork>,
+    operation: DurableOperation,
+    cancellation: Option<&crate::TaskCancellation>,
+    actor: Option<positron_governance::AuthorizedContext>,
+) -> Result<bool, ServiceFailure> {
+    let (parameters, binding) = parameters(services, execution, operation)?;
     if operation.status().is_terminal() {
         *work = None;
         let _gate = services.catalog_operation()?;
@@ -55,40 +99,7 @@ pub(super) fn complete(
             .map_err(super::super::maintenance::map_failure)?;
         return Ok(true);
     }
-    let actor = {
-        let _gate = services.catalog_operation()?;
-        let catalog = services
-            .open_maintenance_catalog()
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        let now = services
-            .maintenance_status_now()
-            .map_err(|_| ServiceFailure::StorageUnavailable)?;
-        let actor = DurableOperationAdministration::resume_backup_actor(
-            &catalog,
-            operation.operation_id(),
-            now,
-        )
-        .map_err(|_| ServiceFailure::Unauthorized)?;
-        if operation.status() == positron_governance::DurableOperationStatus::Pending {
-            DurableOperationAdministration::begin(&catalog, actor, operation.operation_id(), now)
-                .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        }
-        if matches!(
-            operation.phase(),
-            positron_governance::DurableOperationPhase::Accepted
-                | positron_governance::DurableOperationPhase::Preflight
-        ) {
-            DurableOperationAdministration::advance_backup_verification(
-                &catalog,
-                actor,
-                operation.operation_id(),
-                false,
-                now,
-            )
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        }
-        actor
-    };
+    let actor = actor.ok_or(ServiceFailure::CorruptState)?;
     if !matches!(work, Some(BackupWork::Verification(_))) {
         *work = Some(BackupWork::Verification(Box::new(VerificationWork {
             owner: BackupOwner::open(services, execution, operation)?,

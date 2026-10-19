@@ -38,6 +38,12 @@ fn independent_verification_rejects_a_remote_envelope_with_the_wrong_native_fing
     restart_at(StopPoint::VerificationMetadataVerified, false, 3)
 }
 
+#[test]
+fn independent_verification_rechecks_requester_grant_on_the_next_advance()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationMetadataVerified, false, 4)
+}
+
 fn restart_at(
     point: StopPoint,
     cancel: bool,
@@ -103,7 +109,7 @@ fn restart_at(
     let published =
         published.map_err(|failure| format!("backup: {failure}; worker={worker_result:?}"))?;
     let manifest = published.receipt.ok_or("backup receipt")?.manifest_checksum;
-    if key_failure != 0 {
+    if (1..=3).contains(&key_failure) {
         replace_remote_key(
             &services,
             &runtime,
@@ -123,6 +129,115 @@ fn restart_at(
     let accepted = services
         .manage_backup(&administrator, &request.encode()?)
         .map_err(|failure| format!("verify: {failure:?}"))?;
+    if key_failure == 4 {
+        let id = positron_governance::OperationId::from_bytes(
+            crate::services::maintenance_verification::decode_fixed_hex(&accepted.operation.id)
+                .ok_or("verification operation ID")?,
+        )?;
+        let task =
+            positron_kernel::MaintenanceTaskId::new(id.to_bytes()).map_err(|e| format!("{e:?}"))?;
+        let coordinator = initialized.maintenance_coordinator();
+        let mut execution = {
+            let _gate = services.catalog_operation()?;
+            let catalog = services
+                .open_maintenance_catalog()
+                .map_err(|e| format!("{e:?}"))?;
+            coordinator
+                .start_backup_operation_with_reservation_and_persist(
+                    &catalog,
+                    &initialized._authority,
+                    services
+                        .maintenance_status_now()
+                        .map_err(|e| format!("{e:?}"))?,
+                    false,
+                    task,
+                )
+                .map_err(|e| format!("{e:?}"))?
+                .ok_or("verification start")?
+        };
+        let mut work = None;
+        assert!(!crate::services::backup_administration::complete(
+            &services,
+            &mut execution,
+            &mut work,
+            None,
+        )?);
+        // Change the canonical persistent grant between advances. There is no
+        // operator API for rotating the bootstrap system credential.
+        let catalog = services
+            .open_maintenance_catalog()
+            .map_err(|e| format!("{e:?}"))?;
+        let basis = catalog.pin()?;
+        let (source, governance) = basis.governance_object()?;
+        let credentials = governance
+            .credentials()
+            .iter()
+            .map(|credential| {
+                if credential.scope_code() == 4 {
+                    credential.with_active(false)
+                } else {
+                    *credential
+                }
+            })
+            .collect::<Vec<_>>();
+        let changed = positron_kernel::CatalogObject::new(
+            governance.with_credentials(governance.credential_generation() + 1, &credentials)?,
+        )?;
+        let mut objects = basis
+            .object_identities()
+            .map(|identity| {
+                let bytes = basis.object(identity)?.expect("fixture object");
+                positron_kernel::CatalogObject::new(bytes.to_vec())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        objects.retain(|object| object.identity() != source);
+        objects.push(changed);
+        catalog.commit(
+            basis.identity(),
+            positron_kernel::CatalogProposal::new(
+                positron_kernel::TransactionId::new([0xd4; 16])?,
+                positron_kernel::FormatEpoch::CATALOG_V1,
+                objects,
+            )?,
+            None,
+        )?;
+        drop(basis);
+        drop(catalog);
+        assert_eq!(
+            crate::services::backup_administration::complete(
+                &services,
+                &mut execution,
+                &mut work,
+                None,
+            ),
+            Err(crate::ServiceFailure::Unauthorized)
+        );
+        let catalog = services
+            .open_maintenance_catalog()
+            .map_err(|e| format!("{e:?}"))?;
+        let refused = positron_governance::DurableOperationAdministration::inspect(&catalog, id)?
+            .ok_or("verification outcome")?;
+        assert_eq!(
+            refused.status(),
+            positron_governance::DurableOperationStatus::Running
+        );
+        assert!(refused.backup_verification_report().is_none());
+        drop(catalog);
+        let status = BackupRequest::decode(&serde_json::to_vec(
+            &serde_json::json!({"action":"status","operation_id":accepted.operation.id}),
+        )?)?;
+        assert_eq!(
+            services.manage_backup(&administrator, &status.encode()?),
+            Err(MaintenanceServiceFailure::AuthenticationRejected)
+        );
+        drop(work);
+        drop(execution);
+        drop(runtime);
+        drop(services);
+        drop(initialized);
+        fs::remove_dir_all(repository_path)?;
+        return Ok(());
+    }
     let stop = stop_after(point)?;
     let cancellation = crate::TaskCancellation::new();
     let worker_services = services.clone();

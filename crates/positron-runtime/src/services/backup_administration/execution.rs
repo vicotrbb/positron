@@ -90,25 +90,36 @@ pub(in crate::services) fn complete(
         .map_err(|_| ServiceFailure::CorruptState)?;
     let id = OperationId::from_bytes(binding.operation_id())
         .map_err(|_| ServiceFailure::CorruptState)?;
-    {
-        let operation = {
-            let _gate = services.catalog_operation()?;
-            let catalog = services
-                .open_maintenance_catalog()
-                .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-            DurableOperationAdministration::inspect(&catalog, id)
-                .map_err(|_| ServiceFailure::CorruptState)?
-                .ok_or(ServiceFailure::CorruptState)?
-        };
+    let verification = {
+        let _gate = services.catalog_operation()?;
+        let catalog = services
+            .open_maintenance_catalog()
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+        let operation = DurableOperationAdministration::inspect(&catalog, id)
+            .map_err(|_| ServiceFailure::CorruptState)?
+            .ok_or(ServiceFailure::CorruptState)?;
         if operation.kind() == DurableOperationKind::BackupVerification {
-            return super::verification::complete(
-                services,
-                execution,
-                work,
-                operation,
-                cancellation,
-            );
+            let actor = if operation.status().is_terminal() {
+                None
+            } else {
+                Some(super::verification::prepare(
+                    services, execution, operation, &catalog,
+                )?)
+            };
+            Some((operation, actor))
+        } else {
+            None
         }
+    };
+    if let Some((operation, actor)) = verification {
+        return super::verification::complete(
+            services,
+            execution,
+            work,
+            operation,
+            cancellation,
+            actor,
+        );
     }
     if execution.task().class() == positron_kernel::MaintenanceTaskClass::RepositoryCleanup {
         let (operation, actor) = {
