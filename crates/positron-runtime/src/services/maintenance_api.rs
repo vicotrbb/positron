@@ -85,10 +85,15 @@ impl ServiceHandle {
     ) -> Result<AuthorizedContext, MaintenanceServiceFailure> {
         let credential = PresentedCredential::parse(bearer)
             .map_err(|_| MaintenanceServiceFailure::AuthenticationRejected)?;
-        let identity = self
-            .instance
-            .durable_identity()
-            .map_err(|_| MaintenanceServiceFailure::AdministrationUnavailable)?;
+        let identity =
+            self.instance
+                .durable_identity()
+                .map_err(|failure| match failure.code() {
+                    crate::BootstrapFailureCode::ResourceUnavailable => {
+                        MaintenanceServiceFailure::CapacityUnavailable
+                    },
+                    _ => MaintenanceServiceFailure::AdministrationUnavailable,
+                })?;
         identity
             .attribute_with_expiry_time(
                 &self.instance.key,

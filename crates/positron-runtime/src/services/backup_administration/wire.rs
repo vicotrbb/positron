@@ -11,7 +11,11 @@ impl ServiceHandle {
     ) -> Result<BackupResponse, MaintenanceServiceFailure> {
         let mut stage = BackupReadStage::AdministratorIdentity;
         let result = self.manage_backup_observed(bearer, bytes, &mut stage);
-        if let Err(failure @ MaintenanceServiceFailure::AdministrationUnavailable) = result {
+        if let Err(
+            failure @ (MaintenanceServiceFailure::AdministrationUnavailable
+            | MaintenanceServiceFailure::CapacityUnavailable),
+        ) = result
+        {
             // The inner operation has returned and released all Catalog/gate owners.
             self.record_backup_read_failure(stage, failure);
         }

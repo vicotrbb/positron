@@ -38,7 +38,7 @@ fn backup_status_identity_read_refusal_reports_only_its_closed_stage()
             );
             assert_eq!(
                 services.manage_backup(&administrator, &request),
-                Err(MaintenanceServiceFailure::AdministrationUnavailable)
+                Err(MaintenanceServiceFailure::CapacityUnavailable)
             );
         })?;
     assert_eq!(initialized.catalog_generation(), generation);
@@ -68,7 +68,7 @@ fn backup_status_identity_read_refusal_reports_only_its_closed_stage()
     );
     assert_eq!(
         failures.first().ok_or("read diagnostic")?["failure"],
-        "AdministrationUnavailable"
+        "CapacityUnavailable"
     );
     Ok(())
 }
