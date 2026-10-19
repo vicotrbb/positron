@@ -57,7 +57,13 @@ impl ServiceHandle {
             ) {
                 self.request_integrity_fence();
             }
-            MaintenanceServiceFailure::AdministrationUnavailable
+            match failure.code() {
+                positron_kernel::CatalogFailureCode::ResourceAdmissionRefused
+                | positron_kernel::CatalogFailureCode::LimitExceeded => {
+                    MaintenanceServiceFailure::CapacityUnavailable
+                },
+                _ => MaintenanceServiceFailure::AdministrationUnavailable,
+            }
         })
     }
 

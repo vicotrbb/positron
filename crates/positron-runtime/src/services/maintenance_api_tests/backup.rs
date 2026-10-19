@@ -6,6 +6,53 @@ use positron_backup::{LocalRepository, RepositoryIdentity};
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn backup_catalog_open_preserves_resource_admission_refusal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _, _) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let generation = initialized.catalog_generation();
+    let before = initialized.resource_governor().inspect()?;
+    let secret = initialized.key.catalog_secret(initialized.instance)?;
+    initialized
+        ._authority
+        .with_control_contention_for_test(|| {
+            assert_eq!(
+                positron_kernel::Catalog::open(
+                    &initialized._authority,
+                    initialized.instance,
+                    secret
+                )
+                .err()
+                .map(|failure| failure.code()),
+                Some(positron_kernel::CatalogFailureCode::ResourceAdmissionRefused),
+            );
+            assert_eq!(
+                services.open_maintenance_catalog().err(),
+                Some(MaintenanceServiceFailure::CapacityUnavailable),
+            );
+        })?;
+    assert_eq!(initialized.catalog_generation(), generation);
+    let after = initialized.resource_governor().inspect()?;
+    assert_eq!(
+        after.outstanding_reservations(),
+        before.outstanding_reservations()
+    );
+    for dimension in positron_kernel::ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+    assert_eq!(
+        services
+            .open_maintenance_catalog()
+            .map_err(|_| "Catalog reopen")?
+            .pin()?
+            .number(),
+        generation
+    );
+    Ok(())
+}
+
+#[test]
 fn backup_status_identity_read_refusal_reports_only_its_closed_stage()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new()?;
