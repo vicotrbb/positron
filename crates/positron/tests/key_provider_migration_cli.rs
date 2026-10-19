@@ -336,7 +336,22 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
         ],
     )?;
     assert!(!stale.status.success());
-    assert!(String::from_utf8(stale.stderr)?.contains("stale resource generation"));
+    let stale_error = String::from_utf8(stale.stderr)?;
+    for secret in [
+        Some(claim.secret()),
+        claim.ingest_secret(),
+        claim.query_secret(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(!stale_error.contains(secret));
+    }
+    assert!(!stale_error.contains(&secrets.display().to_string()));
+    assert!(
+        stale_error.contains("stale resource generation"),
+        "stale-generation migration CLI failure: {stale_error}"
+    );
     let drained = wait_for_maintenance(endpoint, &client, claim.secret())?;
     let checkpoint_id: String = checkpoint
         .to_bytes()

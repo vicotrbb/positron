@@ -124,9 +124,21 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
         &native,
     )?;
     assert!(!rejected.status.success());
+    let rejected_error = String::from_utf8(rejected.stderr)?;
+    for secret in [
+        Some(claim.secret()),
+        claim.ingest_secret(),
+        claim.query_secret(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(!rejected_error.contains(secret));
+    }
+    assert!(!rejected_error.contains("123456789012"));
     assert!(
-        String::from_utf8(rejected.stderr)?
-            .contains("system administration authentication rejected")
+        rejected_error.contains("system administration authentication rejected"),
+        "repository ingest-credential CLI refusal: {rejected_error}"
     );
     let mut invalid = native;
     for value in &mut invalid {
