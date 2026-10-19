@@ -311,7 +311,13 @@ pub(in crate::services) mod tests {
                 std::time::Instant::now() + std::time::Duration::from_secs(1),
             )
             .map_err(|failure| format!("initial one-second backup pause: {failure:?}"))?;
-        assert!(!paused.status().is_terminal());
+        assert!(
+            !paused.status().is_terminal(),
+            "initial backup pause became terminal: kind={:?} phase={:?} terminal_error={:?}",
+            paused.kind(),
+            paused.phase(),
+            paused.terminal_error()
+        );
         let task = positron_kernel::MaintenanceTaskId::new(first.operation_id().to_bytes())
             .map_err(|failure| format!("first task: {failure:?}"))?;
         assert_eq!(

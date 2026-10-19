@@ -586,9 +586,9 @@ fn verify_semantic_admission(
                 }
             },
             Err(ServiceFailure::BackupControlMemoryRequired { memory_bytes }) => {
-                assert_ne!(
-                    phase, 1,
-                    "semantic decode requested additional memory after metadata acceptance: {memory_bytes}"
+                assert_eq!(
+                    phase, 0,
+                    "verification requested additional memory after metadata acceptance: {memory_bytes}"
                 );
                 if phase == 0 {
                     assert!(!stop.as_ref().ok_or("metadata stop")?.observed());

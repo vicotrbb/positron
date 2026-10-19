@@ -276,9 +276,9 @@ pub(super) fn complete(
         let prospective = external
             .checked_add(governance_required)
             .ok_or(ServiceFailure::CapacityUnavailable)?;
-        let _admitted = work
-            .owner
+        work.owner
             .publisher(prospective)
+            .and_then(|publisher| publisher.admit_snapshot_verification_controls(remote))
             .map_err(provider_failure)?;
         let tenants = positron_governance::TenantAdministration::restore_key_tenant_ids(&snapshot)
             .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
