@@ -9,6 +9,7 @@ pub(in crate::services) enum StopPoint {
     RegistryPublished,
     BackupOverlayPublished,
     VerificationMetadataVerified,
+    VerificationSemanticVerified,
     VerificationKeyRecovered,
     VerificationReportPublished,
     CaptureCleanupBatch,

@@ -271,22 +271,7 @@ pub(super) fn complete(
         {
             return Err(ServiceFailure::BackupRepositoryRejected);
         }
-        let object_count = snapshot.object_identities().count();
-        let mut governance_required = 0_u64;
-        for identity in snapshot.object_identities() {
-            let bytes = snapshot
-                .object(identity)
-                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?
-                .ok_or(ServiceFailure::BackupRepositoryRejected)?;
-            let memory =
-                positron_governance::Identity::catalog_object_memory_bound(bytes, object_count)
-                    .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
-            governance_required = governance_required
-                .checked_add(
-                    u64::try_from(memory).map_err(|_| ServiceFailure::CapacityUnavailable)?,
-                )
-                .ok_or(ServiceFailure::CapacityUnavailable)?;
-        }
+        let governance_required = semantic_memory_requirement(&snapshot)?;
         work.governance_required = governance_required;
         let prospective = external
             .checked_add(governance_required)
@@ -319,35 +304,17 @@ pub(super) fn complete(
             continue;
         }
         if bytes.starts_with(b"PSCHEMA1") {
-            let memory = positron_signals::SchemaCatalog::catalog_memory_bound(bytes)
-                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
-            let prospective = external
-                .checked_add(
-                    u64::try_from(memory).map_err(|_| ServiceFailure::CapacityUnavailable)?,
-                )
-                .ok_or(ServiceFailure::CapacityUnavailable)?;
-            // Reuse the native owner's ordinary readmission path before decoding.
-            let _admitted = work
-                .owner
-                .publisher(prospective)
-                .map_err(provider_failure)?;
+            let memory = semantic_memory_bound(bytes)?;
+            // The authenticated snapshot's maximum transient is already priced.
+            let _admitted = work.owner.publisher(external).map_err(provider_failure)?;
             let tenants =
                 positron_governance::TenantAdministration::restore_key_tenant_ids(snapshot)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
             verify_schema_object(bytes, &tenants, &mut work.schema_tenants, memory)?;
         }
         if bytes.starts_with(b"PIPACT01") {
-            let memory = positron_policy::IngestPolicy::activated_object_memory_bound(bytes)
-                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
-            let prospective = external
-                .checked_add(
-                    u64::try_from(memory).map_err(|_| ServiceFailure::CapacityUnavailable)?,
-                )
-                .ok_or(ServiceFailure::CapacityUnavailable)?;
-            let _admitted = work
-                .owner
-                .publisher(prospective)
-                .map_err(provider_failure)?;
+            semantic_memory_bound(bytes)?;
+            let _admitted = work.owner.publisher(external).map_err(provider_failure)?;
             let tenants =
                 positron_governance::TenantAdministration::restore_key_tenant_ids(snapshot)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
@@ -355,6 +322,11 @@ pub(super) fn complete(
         }
         return Ok(false);
     }
+    #[cfg(test)]
+    execution::test_stops::hit(
+        execution::test_stops::StopPoint::VerificationSemanticVerified,
+        cancellation,
+    )?;
     if work.recovered_keys < publisher.verification_key_count(remote) {
         let envelope = work
             .owner
@@ -456,6 +428,47 @@ fn verify_policy_object(
         .map_err(|_| ServiceFailure::CapacityUnavailable)?;
     seen.push(tenant);
     Ok(())
+}
+
+fn semantic_memory_requirement(
+    snapshot: &positron_kernel::CatalogSnapshot,
+) -> Result<u64, ServiceFailure> {
+    let object_count = snapshot.object_identities().count();
+    let mut governance_required = 0_u64;
+    let mut semantic_transient = 0_usize;
+    for identity in snapshot.object_identities() {
+        let bytes = snapshot
+            .object(identity)
+            .map_err(|_| ServiceFailure::BackupRepositoryRejected)?
+            .ok_or(ServiceFailure::BackupRepositoryRejected)?;
+        let memory =
+            positron_governance::Identity::catalog_object_memory_bound(bytes, object_count)
+                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
+        semantic_transient = semantic_transient.max(semantic_memory_bound(bytes)?);
+        governance_required = governance_required
+            .checked_add(u64::try_from(memory).map_err(|_| ServiceFailure::CapacityUnavailable)?)
+            .ok_or(ServiceFailure::CapacityUnavailable)?;
+    }
+    // Semantic readers run sequentially. Retain the Governance reconstruction
+    // charge plus the largest schema/policy decode peak, not their sum.
+    let governance_required = governance_required
+        .checked_add(
+            u64::try_from(semantic_transient).map_err(|_| ServiceFailure::CapacityUnavailable)?,
+        )
+        .ok_or(ServiceFailure::CapacityUnavailable)?;
+    Ok(governance_required)
+}
+
+fn semantic_memory_bound(bytes: &[u8]) -> Result<usize, ServiceFailure> {
+    if bytes.starts_with(b"PSCHEMA1") {
+        positron_signals::SchemaCatalog::catalog_memory_bound(bytes)
+            .map_err(|_| ServiceFailure::BackupRepositoryRejected)
+    } else if bytes.starts_with(b"PIPACT01") {
+        positron_policy::IngestPolicy::activated_object_memory_bound(bytes)
+            .map_err(|_| ServiceFailure::BackupRepositoryRejected)
+    } else {
+        Ok(0)
+    }
 }
 
 fn verify_schema_object(
@@ -597,6 +610,121 @@ pub(in crate::services) fn report_readmission(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn semantic_peak_prices_the_largest_sequential_owner_across_registered_tenants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_domain::identity::{TenantId, TenantSlug};
+        use positron_governance::{
+            AdministrativeIdempotencyKey, CompatibilityHints, PresentedCredential, RequestedIntent,
+        };
+        use positron_kernel::{CatalogObject, CatalogProposal, FormatEpoch, TransactionId};
+        let fixture = crate::services::tests::schema_maintenance::Fixture::new()?;
+        let (instance, _, _, administrator) = fixture.initialized_with_admin()?;
+        let actor = instance.attribute(
+            PresentedCredential::parse(&administrator)?,
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )?;
+        let secondary = TenantId::from_bytes([0xe4; 16])?;
+        instance.create_tenant(
+            actor,
+            secondary,
+            positron_governance::TenantCreateConfiguration::new(
+                TenantSlug::parse_canonical("semantic-peak")?,
+                "Semantic peak",
+                2_592_000,
+                1,
+                [
+                    32_000_000, 32, 32, 5_000_000, 2048, 32, 32, 32, 32, 32, 2_000_000,
+                ],
+            ),
+            AdministrativeIdempotencyKey::new([0xe5; 16])?,
+        )?;
+        let schema = |tenant| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            Ok(positron_signals::SchemaCatalog::new(
+                tenant,
+                positron_signals::SchemaBudget::new(16, 16_384, 16_384, 4096)?,
+            )?
+            .encode_catalog_object()?)
+        };
+        let default_schema = schema(instance.default_tenant_id())?;
+        let secondary_schema = schema(secondary)?;
+        let policy = positron_policy::IngestPolicy::reject_exact_text_body(
+            1,
+            "large-policy",
+            &"x".repeat(8192),
+        )?
+        .activated_object(secondary)?
+        .into_bytes();
+        let policy_peak = positron_policy::IngestPolicy::activated_object_memory_bound(&policy)?;
+        assert!(
+            policy_peak > positron_signals::SchemaCatalog::catalog_memory_bound(&default_schema)?
+        );
+        assert!(
+            policy_peak > positron_signals::SchemaCatalog::catalog_memory_bound(&secondary_schema)?
+        );
+        let catalog = crate::services::tests::schema_maintenance::open_catalog(&instance)?;
+        let append =
+            |extra: Vec<Vec<u8>>,
+             transaction|
+             -> Result<positron_kernel::CatalogSnapshot, Box<dyn std::error::Error>> {
+                let basis = catalog.pin()?;
+                let mut objects = Vec::new();
+                for identity in basis.object_identities() {
+                    objects.push(CatalogObject::new(
+                        basis
+                            .object(identity)?
+                            .ok_or("semantic fixture object")?
+                            .to_vec(),
+                    )?);
+                }
+                for bytes in extra {
+                    objects.push(CatalogObject::new(bytes)?);
+                }
+                catalog.commit(
+                    basis.identity(),
+                    CatalogProposal::new(
+                        TransactionId::new([transaction; 16])?,
+                        FormatEpoch::CATALOG_V1,
+                        objects,
+                    )?,
+                    None,
+                )?;
+                Ok(catalog.pin()?)
+            };
+        let first = append(vec![default_schema, policy], 0xe6)?;
+        let mut governance = 0_u64;
+        for identity in first.object_identities() {
+            let bytes = first.object(identity)?.ok_or("semantic object")?;
+            governance +=
+                u64::try_from(positron_governance::Identity::catalog_object_memory_bound(
+                    bytes,
+                    first.object_identities().count(),
+                )?)?;
+        }
+        let first_peak = semantic_memory_requirement(&first)?;
+        assert_eq!(first_peak, governance + u64::try_from(policy_peak)?);
+        drop(first);
+        let second = append(vec![secondary_schema], 0xe7)?;
+        assert_eq!(
+            semantic_memory_requirement(&second)?,
+            first_peak,
+            "a second valid tenant schema adds no simultaneous transient decode"
+        );
+        drop(second);
+        let malformed = append(vec![b"PSCHEMA1truncated".to_vec()], 0xe8)?;
+        assert_eq!(
+            semantic_memory_requirement(&malformed),
+            Err(ServiceFailure::BackupRepositoryRejected)
+        );
+        assert_eq!(
+            semantic_memory_bound(b"PIPACT01truncated"),
+            Err(ServiceFailure::BackupRepositoryRejected)
+        );
+        assert_eq!(semantic_memory_bound(b"another owner"), Ok(0));
+        Ok(())
+    }
+
     #[test]
     fn independent_verification_binds_schema_metadata_to_one_registered_tenant()
     -> Result<(), Box<dyn std::error::Error>> {

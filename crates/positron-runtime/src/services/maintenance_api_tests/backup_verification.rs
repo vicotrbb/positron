@@ -4,50 +4,79 @@ use crate::services::backup_administration::{StopPoint, stop_after};
 #[test]
 fn independent_verification_rebuilds_native_metadata_after_cold_stop()
 -> Result<(), Box<dyn std::error::Error>> {
-    restart_at(StopPoint::VerificationMetadataVerified, false, 0)
+    restart_at(StopPoint::VerificationMetadataVerified, false, 0, None)
 }
 #[test]
 fn independent_verification_rechecks_remote_keys_after_cold_stop()
 -> Result<(), Box<dyn std::error::Error>> {
-    restart_at(StopPoint::VerificationKeyRecovered, false, 0)
+    restart_at(StopPoint::VerificationKeyRecovered, false, 0, None)
 }
 #[test]
 fn independent_verification_cancellation_drops_reads_without_deleting_snapshot()
 -> Result<(), Box<dyn std::error::Error>> {
-    restart_at(StopPoint::VerificationMetadataVerified, true, 0)
+    restart_at(StopPoint::VerificationMetadataVerified, true, 0, None)
 }
 #[test]
 fn independent_verification_report_survives_stop_before_maintenance_completion()
 -> Result<(), Box<dyn std::error::Error>> {
-    restart_at(StopPoint::VerificationReportPublished, false, 0)
+    restart_at(StopPoint::VerificationReportPublished, false, 0, None)
 }
 #[test]
 fn independent_verification_rejects_a_checksum_valid_remote_key_that_cannot_unwrap()
 -> Result<(), Box<dyn std::error::Error>> {
-    restart_at(StopPoint::VerificationMetadataVerified, false, 1)
+    restart_at(StopPoint::VerificationMetadataVerified, false, 1, None)
 }
 
 #[test]
 fn independent_verification_rejects_a_remote_envelope_with_the_wrong_native_epoch()
 -> Result<(), Box<dyn std::error::Error>> {
-    restart_at(StopPoint::VerificationMetadataVerified, false, 2)
+    restart_at(StopPoint::VerificationMetadataVerified, false, 2, None)
 }
 #[test]
 fn independent_verification_rejects_a_remote_envelope_with_the_wrong_native_fingerprint()
 -> Result<(), Box<dyn std::error::Error>> {
-    restart_at(StopPoint::VerificationMetadataVerified, false, 3)
+    restart_at(StopPoint::VerificationMetadataVerified, false, 3, None)
 }
 
 #[test]
 fn independent_verification_rechecks_requester_grant_on_the_next_advance()
 -> Result<(), Box<dyn std::error::Error>> {
-    restart_at(StopPoint::VerificationMetadataVerified, false, 4)
+    restart_at(StopPoint::VerificationMetadataVerified, false, 4, None)
+}
+
+#[derive(Clone, Copy)]
+enum SemanticPeak {
+    Schema,
+    Policy,
+}
+
+#[test]
+fn independent_verification_admits_schema_peak_before_semantic_reconstruction()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(
+        StopPoint::VerificationMetadataVerified,
+        false,
+        0,
+        Some(SemanticPeak::Schema),
+    )
+}
+
+#[test]
+fn independent_verification_admits_policy_peak_before_semantic_reconstruction()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(
+        StopPoint::VerificationMetadataVerified,
+        false,
+        0,
+        Some(SemanticPeak::Policy),
+    )
 }
 
 fn restart_at(
     point: StopPoint,
     cancel: bool,
     key_failure: u8,
+    semantic_peak: Option<SemanticPeak>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
     let fixture = Fixture::new()?;
@@ -74,10 +103,87 @@ fn restart_at(
         identity.clone(),
     ))?);
     let services = ServiceHandle::new(Arc::clone(&initialized))?;
-    services.ingest_otlp_logs(
-        &ingest,
-        request("independently verified telemetry").encode_to_vec(),
-    )?;
+    let mut telemetry = request("independently verified telemetry");
+    if matches!(semantic_peak, Some(SemanticPeak::Schema)) {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+        let record = telemetry
+            .resource_logs
+            .first_mut()
+            .and_then(|resource| resource.scope_logs.first_mut())
+            .and_then(|scope| scope.log_records.first_mut())
+            .ok_or("schema fixture log")?;
+        record.attributes = (0..128)
+            .map(|index| KeyValue {
+                key: format!("semantic-bound-{index}"),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("observed".into())),
+                }),
+                ..KeyValue::default()
+            })
+            .collect();
+    }
+    services.ingest_otlp_logs(&ingest, telemetry.encode_to_vec())?;
+    if matches!(semantic_peak, Some(SemanticPeak::Policy)) {
+        use positron_domain::identity::Scope;
+        use positron_governance::{
+            AdministrativeIdempotencyKey, CompatibilityHints, PresentedCredential, RequestedIntent,
+            ResourceGeneration,
+        };
+        let system = initialized.attribute(
+            PresentedCredential::parse(&administrator)?,
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )?;
+        let created = initialized.create_api_key_for_tenant(
+            system,
+            initialized.default_tenant_id(),
+            Scope::TenantAdministration,
+            None,
+            ResourceGeneration::new(1)?,
+            AdministrativeIdempotencyKey::new([0xe1; 16])?,
+        )?;
+        let actor = initialized.attribute(
+            PresentedCredential::parse(
+                created.secret().ok_or("policy administration credential")?,
+            )?,
+            RequestedIntent::TenantAdministration,
+            CompatibilityHints::none(),
+        )?;
+        services.activate_ingest_policy(
+            actor,
+            ResourceGeneration::new(1)?,
+            AdministrativeIdempotencyKey::new([0xe2; 16])?,
+            positron_policy::IngestPolicy::reject_exact_text_body(
+                2,
+                "large-verification-policy",
+                &"x".repeat(8192),
+            )?,
+        )?;
+    }
+    if semantic_peak.is_some() {
+        services.prepare_shutdown_schema_checkpoint()?;
+        services.publish_prepared_shutdown_schema_checkpoint(&mut || false)?;
+        let catalog = open_catalog(&initialized)?;
+        let basis = catalog.pin()?;
+        let mut schema = 0;
+        let mut policy = 0;
+        for identity in basis.object_identities() {
+            let bytes = basis.object(identity)?.ok_or("semantic fixture object")?;
+            if bytes.starts_with(b"PSCHEMA1") {
+                schema = schema.max(positron_signals::SchemaCatalog::catalog_memory_bound(
+                    bytes,
+                )?);
+            } else if bytes.starts_with(b"PIPACT01") {
+                policy = policy
+                    .max(positron_policy::IngestPolicy::activated_object_memory_bound(bytes)?);
+            }
+        }
+        match semantic_peak {
+            Some(SemanticPeak::Schema) => assert!(schema > policy),
+            Some(SemanticPeak::Policy) => assert!(policy > schema),
+            None => unreachable!(),
+        }
+    }
     let unlock = age::x25519::Identity::generate();
     let bundle = fixture
         .recovery_export_directory()?
@@ -129,6 +235,14 @@ fn restart_at(
     let accepted = services
         .manage_backup(&administrator, &request.encode()?)
         .map_err(|failure| format!("verify: {failure:?}"))?;
+    if semantic_peak.is_some() {
+        verify_semantic_admission(&services, &administrator, &accepted.operation.id)?;
+        drop(runtime);
+        drop(services);
+        drop(initialized);
+        fs::remove_dir_all(repository_path)?;
+        return Ok(());
+    }
     if key_failure == 4 {
         let id = positron_governance::OperationId::from_bytes(
             crate::services::maintenance_verification::decode_fixed_hex(&accepted.operation.id)
@@ -402,6 +516,145 @@ fn restart_at(
         crate::ExitOutcome::Graceful
     );
     fs::remove_dir_all(repository_path)?;
+    Ok(())
+}
+
+fn verify_semantic_admission(
+    services: &ServiceHandle,
+    administrator: &str,
+    operation: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::ServiceFailure;
+    use crate::services::backup_administration::{BackupWork, complete};
+    let id = positron_governance::OperationId::from_bytes(
+        crate::services::maintenance_verification::decode_fixed_hex(operation)
+            .ok_or("verification identity")?,
+    )?;
+    let task =
+        positron_kernel::MaintenanceTaskId::new(id.to_bytes()).map_err(|e| format!("{e:?}"))?;
+    let coordinator = services.instance.maintenance_coordinator();
+    let status = BackupRequest::decode(&serde_json::to_vec(
+        &serde_json::json!({"action":"status", "operation_id":operation}),
+    )?)?;
+    let mut stop = Some(stop_after(StopPoint::VerificationMetadataVerified)?);
+    let mut phase = 0;
+    let mut semantic_reservation = None;
+    let mut execution = None;
+    let mut work: Option<BackupWork> = None;
+    let mut shortfall = None;
+    let mut checked_shortfalls = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err("semantic admission fixture deadline".into());
+        }
+        if execution.is_none() {
+            let _gate = services.catalog_operation()?;
+            let catalog = services
+                .open_maintenance_catalog()
+                .map_err(|e| format!("{e:?}"))?;
+            execution = coordinator
+                .start_backup_operation_with_reservation_and_persist(
+                    &catalog,
+                    &services.instance._authority,
+                    services
+                        .maintenance_status_now()
+                        .map_err(|e| format!("{e:?}"))?,
+                    false,
+                    task,
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        let Some(owner) = execution.as_mut() else {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        };
+        match complete(services, owner, &mut work, None) {
+            Err(ServiceFailure::Cancelled) if stop.as_ref().is_some_and(|stop| stop.observed()) => {
+                drop(stop.take());
+                if phase == 0 {
+                    semantic_reservation = Some(owner.task().reservations());
+                    stop = Some(stop_after(StopPoint::VerificationSemanticVerified)?);
+                    phase = 1;
+                } else {
+                    assert_eq!(
+                        owner.task().reservations(),
+                        semantic_reservation.ok_or("metadata reservation")?,
+                        "semantic reconstruction must retain its admitted reservation"
+                    );
+                    phase = 2;
+                }
+            },
+            Err(ServiceFailure::BackupControlMemoryRequired { memory_bytes }) => {
+                assert_ne!(
+                    phase, 1,
+                    "semantic decode requested additional memory after metadata acceptance: {memory_bytes}"
+                );
+                if phase == 0 {
+                    assert!(!stop.as_ref().ok_or("metadata stop")?.observed());
+                    let pending = services
+                        .manage_backup(administrator, &status.encode()?)
+                        .map_err(|e| format!("{e:?}"))?;
+                    assert!(pending.verification_report.is_none());
+                    assert!(pending.verification_report_checksum.is_none());
+                }
+                let previous = owner.task().reservations();
+                let granted = previous.get(positron_kernel::ResourceDimension::MemoryBytes);
+                let requested = if shortfall == Some(memory_bytes) {
+                    assert_eq!(granted.checked_add(1), Some(memory_bytes));
+                    checked_shortfalls += 1;
+                    shortfall = None;
+                    memory_bytes
+                } else if phase == 0 && memory_bytes > granted.saturating_add(1) {
+                    shortfall = Some(memory_bytes);
+                    memory_bytes - 1
+                } else {
+                    memory_bytes
+                };
+                work = None;
+                let binding = positron_kernel::RepositoryOperationBinding::from_execution(owner)
+                    .map_err(|e| format!("{e:?}"))?;
+                let resources = positron_kernel::ResourceAmounts::new(
+                    positron_kernel::ResourceDimension::ALL.map(|dimension| {
+                        if dimension == positron_kernel::ResourceDimension::MemoryBytes {
+                            requested
+                        } else {
+                            previous.get(dimension)
+                        }
+                    }),
+                );
+                let _gate = services.catalog_operation()?;
+                let catalog = services
+                    .open_maintenance_catalog()
+                    .map_err(|e| format!("{e:?}"))?;
+                owner
+                    .requeue_backup_with_resources_and_persist(
+                        coordinator,
+                        &catalog,
+                        binding,
+                        resources,
+                        services
+                            .maintenance_status_now()
+                            .map_err(|e| format!("{e:?}"))?,
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                drop(catalog);
+                drop(_gate);
+                execution = None;
+            },
+            Ok(true) => break,
+            Ok(false) => {},
+            Err(error) => return Err(format!("semantic verification advance: {error:?}").into()),
+        }
+    }
+    assert_eq!(phase, 2);
+    assert!(checked_shortfalls > 0);
+    let completed = services
+        .manage_backup(administrator, &status.encode()?)
+        .map_err(|e| format!("{e:?}"))?;
+    assert_eq!(completed.operation.status, "succeeded");
+    assert!(completed.verification_report.is_some());
+    assert!(completed.verification_report_checksum.is_some());
     Ok(())
 }
 
