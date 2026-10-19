@@ -5,7 +5,8 @@ pub(in crate::services) mod registered;
 mod verification;
 #[cfg(feature = "test-support")]
 pub(super) use verification::{
-    report_readmission as report_verification_readmission, report_turn as report_verification_turn,
+    report_readmission as report_verification_readmission,
+    report_timed_turn as report_verification_timed_turn, report_turn as report_verification_turn,
 };
 mod wire;
 use super::{ServiceFailure, ServiceHandle, maintenance_api::MaintenanceServiceFailure};

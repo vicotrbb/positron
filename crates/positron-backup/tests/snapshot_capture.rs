@@ -148,6 +148,16 @@ async fn cold_capture_corruption_cannot_be_signed_as_a_fresh_snapshot()
             let mut verification = publisher
                 .begin_snapshot_verification(expected.snapshot_id(), [44; 16], [45; 32])
                 .await?;
+            let rendered = format!("{verification:?}");
+            for private in [
+                format!("{:?}", [44_u8; 16]),
+                format!("{:?}", [45_u8; 32]),
+                format!("{:?}", expected.snapshot_id()),
+                format!("{:?}", keys[0].protected()),
+            ] {
+                assert!(!rendered.contains(&private));
+            }
+            assert!(rendered.len() <= 512);
             let index_bytes = publisher
                 .read_snapshot_file(expected, expected.capture_index(), 8 * 1024 * 1024)
                 .await?;

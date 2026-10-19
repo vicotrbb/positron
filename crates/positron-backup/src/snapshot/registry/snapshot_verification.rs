@@ -21,6 +21,21 @@ pub struct BackupSnapshotVerification {
     inventory_verified: bool,
     resumed_inventory: Option<([u8; 32], usize)>,
 }
+impl std::fmt::Debug for BackupSnapshotVerification {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BackupSnapshotVerification")
+            .field("publication_complete", &self.check.complete())
+            .field("publication", &self.check)
+            .field("inventory_verified", &self.inventory_verified)
+            .field("completed_files", &self.next_file)
+            .field("file_count", &self.files.len())
+            .field("object_index", &self.file_object)
+            .field("file_offset", &self.file_offset)
+            .finish()
+    }
+}
+
 impl BackupSnapshotVerification {
     fn start(
         owner: [u8; 16],

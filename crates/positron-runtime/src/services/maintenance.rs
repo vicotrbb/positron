@@ -1916,8 +1916,26 @@ pub(super) fn drive_upgrade_backup(
         work: None,
     };
     loop {
-        complete_installed_maintenance(services, None, &mut execution)
-            .map_err(|_| UpgradeFailure::SnapshotUnavailable)?;
+        #[cfg(feature = "test-support")]
+        let step_started = std::time::Instant::now();
+        let step_result = complete_installed_maintenance(services, None, &mut execution);
+        #[cfg(feature = "test-support")]
+        {
+            let elapsed = step_started.elapsed();
+            // Diagnostic cadence only; the original turn deadline is unchanged.
+            if elapsed >= std::time::Duration::from_secs(1) {
+                let work = match &execution {
+                    InstalledMaintenanceExecution::BackupSnapshot { work, .. } => work.as_ref(),
+                    _ => None,
+                };
+                super::backup_administration::report_verification_timed_turn(
+                    work,
+                    elapsed,
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                );
+            }
+        }
+        step_result.map_err(|_| UpgradeFailure::SnapshotUnavailable)?;
         let InstalledMaintenanceExecution::BackupSnapshot {
             execution: owner,
             work,

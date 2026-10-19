@@ -1,6 +1,5 @@
 //! Bounded verify-before-publication, with authenticated restart progress.
 use super::*;
-#[derive(Debug)]
 pub struct BackupPublicationCheck {
     pub(super) manifest: [u8; 32],
     pub(super) head: ObjectVersion,
@@ -11,6 +10,19 @@ pub struct BackupPublicationCheck {
     offset: u64,
     digest: Sha256,
 }
+impl std::fmt::Debug for BackupPublicationCheck {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BackupPublicationCheck")
+            .field("next_object", &self.next_object)
+            .field("object_count", &self.objects)
+            .field("offset", &self.offset)
+            .field("next_key", &self.next_key)
+            .field("key_count", &self.keys.len())
+            .finish()
+    }
+}
+
 impl BackupPublicationCheck {
     pub(super) fn start(
         manifest: [u8; 32],

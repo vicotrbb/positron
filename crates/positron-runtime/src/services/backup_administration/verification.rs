@@ -125,6 +125,8 @@ pub(super) fn complete(
         return Err(ServiceFailure::Cancelled);
     }
     if work.remote.is_none() {
+        #[cfg(feature = "test-support")]
+        let initialization_started = std::time::Instant::now();
         let (_, checkpoint) = execution::checkpoint::current(services, execution, binding)?;
         let (_, progress) = execution::checkpoint::unpack(&checkpoint)?;
         let remote = work
@@ -155,7 +157,13 @@ pub(super) fn complete(
         }
         work.remote = Some(remote);
         #[cfg(feature = "test-support")]
-        report_state("remote_initialized", Some(work), None);
+        report_state(
+            "remote_initialized",
+            Some(work),
+            None,
+            Some(initialization_started.elapsed().as_millis()),
+            None,
+        );
         return Ok(false);
     }
     let remote = work.remote.as_mut().ok_or(ServiceFailure::Internal)?;
@@ -474,6 +482,26 @@ pub(in crate::services) fn report_turn(stage: &'static str, work: Option<&Backup
             _ => None,
         },
         None,
+        None,
+        None,
+    );
+}
+
+#[cfg(feature = "test-support")]
+pub(in crate::services) fn report_timed_turn(
+    work: Option<&BackupWork>,
+    elapsed: std::time::Duration,
+    remaining: std::time::Duration,
+) {
+    let Some(BackupWork::Verification(work)) = work else {
+        return;
+    };
+    report_state(
+        "slow_step",
+        Some(work),
+        None,
+        Some(elapsed.as_millis()),
+        Some(remaining.as_millis()),
     );
 }
 
@@ -482,6 +510,8 @@ fn report_state(
     stage: &'static str,
     work: Option<&VerificationWork>,
     readmission: Option<(ServiceFailure, u64, u64)>,
+    elapsed_ms: Option<u128>,
+    remaining_ms: Option<u128>,
 ) {
     use std::sync::atomic::{AtomicU8, Ordering};
     static REMAINING: AtomicU8 = AtomicU8::new(64);
@@ -495,10 +525,11 @@ fn report_state(
     }
     if let Some(work) = work {
         eprintln!(
-            "upgrade_verification_turn stage={stage} readmission_failure_requested_granted={readmission:?} remote_complete={:?} native_file_index={} native_file_total={:?} catalog_ready={} schema_index={} schema_total={:?} key_index={}",
+            "upgrade_verification_turn stage={stage} readmission_failure_requested_granted={readmission:?} remote_complete={:?} remote_progress={:?} elapsed_ms={elapsed_ms:?} remaining_ms={remaining_ms:?} native_file_index={} native_file_total={:?} catalog_ready={} schema_index={} schema_total={:?} key_index={}",
             work.remote
                 .as_ref()
                 .map(BackupSnapshotVerification::complete),
+            work.remote.as_ref(),
             work.next_file,
             work.metadata
                 .as_ref()
@@ -529,6 +560,8 @@ pub(in crate::services) fn report_readmission(
         "readmission_discard",
         Some(work),
         Some((failure, requested_memory, granted_memory)),
+        None,
+        None,
     );
 }
 

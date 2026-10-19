@@ -208,6 +208,11 @@ async fn signed_registry_and_snapshot_objects_survive_reopen_and_reuse()
                 .await?;
         }
         let mut verification = publisher.prepare_publication(&manifest).await?;
+        let rendered = format!("{verification:?}");
+        assert!(!rendered.contains(&format!("{reserved_head:?}")));
+        assert!(!rendered.contains(&format!("{:?}", envelope.tenant())));
+        assert!(!rendered.contains(&format!("{:?}", envelope.protected())));
+        assert!(rendered.len() <= 256);
         assert!(!verification.complete());
         assert_eq!(
             publisher.commit_publication(&manifest, &verification).await,
