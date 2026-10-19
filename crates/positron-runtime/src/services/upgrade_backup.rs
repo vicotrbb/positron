@@ -333,6 +333,8 @@ pub(in crate::services) mod tests {
     fn registered_local_snapshot_and_independent_verification_use_the_existing_backup_owner()
     -> Result<(), Box<dyn std::error::Error>> {
         use positron_governance::{AdministrativeIdempotencyKey, DurableOperationStatus};
+        let _serial =
+            crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
         let fixture = crate::services::tests::schema_maintenance::Fixture::new()?;
         let (instance, ingest, query, administrator) = fixture.initialized_with_admin()?;
         let export = fixture.recovery_export_directory()?;
