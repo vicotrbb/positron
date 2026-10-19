@@ -491,9 +491,10 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             .into_bytes(),
     ] {
         let response =
-            request_with_capacity_retry(otlp, "/v1/traces", &headers, &payload, admission_budget)?;
+            request_with_capacity_retry(otlp, "/v1/traces", &headers, &payload, admission_budget)
+                .map_err(|error| format!("trace observation request failed: {error}"))?;
         let diagnostic = if response.starts_with("HTTP/1.1 200 ") {
-            String::new()
+            Ok(String::new())
         } else {
             request_with_method(
                 "GET",
@@ -501,11 +502,11 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
                 "/metrics",
                 &[("Authorization", admin.as_str())],
                 b"",
-            )?
+            )
         };
         assert!(
             response.starts_with("HTTP/1.1 200 "),
-            "trace observation response: {response}; public resource metrics: {diagnostic}"
+            "trace observation response: {response}; public resource metrics: {diagnostic:?}"
         );
     }
 
