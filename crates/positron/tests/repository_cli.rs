@@ -137,9 +137,12 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
     let rejected = command(endpoint, claim.secret(), "doctor", &invalid)?;
     assert!(!rejected.status.success());
     let error = String::from_utf8(rejected.stderr)?;
-    assert!(error.contains("invalid repository request"));
     assert!(!error.contains(claim.secret()));
     assert!(!error.contains("123456789012"));
+    assert!(
+        error.contains("invalid repository request"),
+        "invalid-target repository CLI failure: {error}"
+    );
     let repository = root.join("repository");
     fs::create_dir(&repository)?;
     fs::set_permissions(&repository, fs::Permissions::from_mode(0o700))?;
