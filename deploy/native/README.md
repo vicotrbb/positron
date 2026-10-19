@@ -35,6 +35,12 @@ removes the debug data. Preserve the native build UUID and code signature;
 neither is rewritten after linking. An archive match from the same executable is packaging
 reproducibility only, not an independent compiler rebuild.
 
+The pinned release profile compiles `age` as one codegen unit. This keeps that
+crate out of Cargo's default local ThinLTO cross-unit promotion path while
+retaining its optimization level, cryptographic features and dependencies.
+Include this package profile in the declared build inputs. It does not replace
+the independent executable and archive comparisons on every supported target.
+
 Treat these as unsigned construction outputs. Add each executable and archive to
 the existing Release Inventory as `NativeExecutable` and `NativeArchive` for its
 exact target, with the independent unsigned payload, SHA-256 and size, both SPDX
