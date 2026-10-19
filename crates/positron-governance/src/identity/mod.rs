@@ -57,6 +57,41 @@ struct AdditionalTenantIdentity {
     credentials: Vec<CredentialIdentity>,
 }
 
+impl AdditionalTenantIdentity {
+    fn from_catalog(
+        snapshot: &CatalogSnapshot,
+        record: crate::api_key_administration::TenantCredentialIdentity,
+        lifecycles: &[(TenantId, TenantLifecycleState)],
+    ) -> Result<Self, IdentityFailure> {
+        let lifecycle = lifecycles
+            .iter()
+            .find_map(|(tenant, lifecycle)| (*tenant == record.tenant).then_some(*lifecycle))
+            .ok_or(IdentityFailure)?;
+        let credentials = record
+            .credentials
+            .into_iter()
+            .map(|credential| {
+                let identity = codec::credential_from_catalog(&credential)?;
+                identity
+                    .scope
+                    .is_tenant_scoped()
+                    .then_some(identity)
+                    .ok_or(IdentityFailure)
+            })
+            .collect::<Result<Vec<_>, IdentityFailure>>()?;
+        let external_alias = tenant_alias_record(snapshot, record.tenant)
+            .map_err(|_| IdentityFailure)?
+            .ok_or(IdentityFailure)?
+            .alias;
+        Ok(Self {
+            tenant: record.tenant,
+            lifecycle,
+            external_alias,
+            credentials,
+        })
+    }
+}
+
 /// The sole immutable identity view reconstructed from one Catalog Generation.
 #[derive(Clone)]
 pub struct Identity {
@@ -331,43 +366,7 @@ impl Identity {
                     .map_err(|_| IdentityFailure)?
                     .into_iter()
                     .map(|record| {
-                        let lifecycle = lifecycles
-                            .iter()
-                            .find_map(|(tenant, lifecycle)| {
-                                (*tenant == record.tenant).then_some(*lifecycle)
-                            })
-                            .ok_or(IdentityFailure)?;
-                        let credentials = record
-                            .credentials
-                            .into_iter()
-                            .map(|credential| {
-                                let scope = match credential.scope_code() {
-                                    1 => Scope::Ingest,
-                                    2 => Scope::Query,
-                                    3 => Scope::TenantAdministration,
-                                    _ => return Err(IdentityFailure),
-                                };
-                                let (salt, hash) = credential.salted_hash();
-                                Ok(CredentialIdentity {
-                                    principal: credential.principal(),
-                                    scope,
-                                    active: credential.is_active(),
-                                    expires_at_unix_seconds: credential.expires_at_unix_seconds(),
-                                    salt,
-                                    hash,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, IdentityFailure>>()?;
-                        let external_alias = tenant_alias_record(snapshot, record.tenant)
-                            .map_err(|_| IdentityFailure)?
-                            .ok_or(IdentityFailure)?
-                            .alias;
-                        Ok(AdditionalTenantIdentity {
-                            tenant: record.tenant,
-                            lifecycle,
-                            external_alias,
-                            credentials,
-                        })
+                        AdditionalTenantIdentity::from_catalog(snapshot, record, &lifecycles)
                     })
                     .collect::<Result<Vec<_>, IdentityFailure>>()?;
         }

@@ -1,4 +1,4 @@
-use positron_kernel::CatalogGovernanceObject;
+use positron_kernel::{CatalogCredential, CatalogGovernanceObject};
 
 use positron_domain::identity::Scope;
 
@@ -31,24 +31,7 @@ pub(super) fn identity_from_catalog(
     let credentials = decoded
         .credentials()
         .iter()
-        .map(|credential| {
-            let scope = match credential.scope_code() {
-                1 => Scope::Ingest,
-                2 => Scope::Query,
-                3 => Scope::TenantAdministration,
-                4 => Scope::SystemAdministration,
-                _ => return Err(IdentityFailure),
-            };
-            let (salt, hash) = credential.salted_hash();
-            Ok(CredentialIdentity {
-                principal: credential.principal(),
-                scope,
-                active: credential.is_active(),
-                expires_at_unix_seconds: credential.expires_at_unix_seconds(),
-                salt,
-                hash,
-            })
-        })
+        .map(credential_from_catalog)
         .collect::<Result<Vec<_>, IdentityFailure>>()?;
     Ok(Identity {
         instance: decoded.instance(),
@@ -69,5 +52,26 @@ pub(super) fn identity_from_catalog(
         additional_tenant_key_envelopes: Vec::new(),
         additional_tenant_lifecycles: Vec::new(),
         additional_tenants: Vec::new(),
+    })
+}
+
+pub(super) fn credential_from_catalog(
+    credential: &CatalogCredential,
+) -> Result<CredentialIdentity, IdentityFailure> {
+    let scope = match credential.scope_code() {
+        1 => Scope::Ingest,
+        2 => Scope::Query,
+        3 => Scope::TenantAdministration,
+        4 => Scope::SystemAdministration,
+        _ => return Err(IdentityFailure),
+    };
+    let (salt, hash) = credential.salted_hash();
+    Ok(CredentialIdentity {
+        principal: credential.principal(),
+        scope,
+        active: credential.is_active(),
+        expires_at_unix_seconds: credential.expires_at_unix_seconds(),
+        salt,
+        hash,
     })
 }
