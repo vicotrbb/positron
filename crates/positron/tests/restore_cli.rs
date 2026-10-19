@@ -159,10 +159,12 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
     let backup_client = BackupServiceClient::new(BackupTransport::PlaintextOptOut { endpoint })?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let accepted = loop {
-        let status = repository_client.manage(
-            claim.secret(),
-            &RepositoryRequest::decode(br#"{"action":"status"}"#)?,
-        )?;
+        let status = repository_client
+            .manage(
+                claim.secret(),
+                &RepositoryRequest::decode(br#"{"action":"status"}"#)?,
+            )
+            .map_err(|error| format!("source repository status read: {error:?}"))?;
         let request = BackupRequest::decode(&serde_json::to_vec(&serde_json::json!({
             "action":"create", "expected_catalog_generation":status.catalog_generation,
             "idempotency_key":"22222222-2222-4222-8222-222222222222", "repository_id":repository_id,
@@ -179,7 +181,9 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
         &serde_json::json!({"action":"status", "operation_id":accepted.operation.id}),
     )?)?;
     let published = loop {
-        let status = backup_client.manage(claim.secret(), &lookup)?;
+        let status = backup_client
+            .manage(claim.secret(), &lookup)
+            .map_err(|error| format!("source backup status read: {error:?}"))?;
         if status.operation.status == "succeeded" {
             break status;
         }

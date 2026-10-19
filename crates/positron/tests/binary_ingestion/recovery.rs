@@ -223,7 +223,15 @@ fn wait(
     loop {
         let output = invoke(binary, &arguments, Some(admin))?;
         if output.status.success() {
-            assert_eq!(field(&output, "status")?, "succeeded");
+            let state = fields(&output)?;
+            assert_eq!(
+                field(&output, "status")?,
+                "succeeded",
+                "public terminal outcome family={family} kind={:?} phase={:?} terminal_error_code={:?}",
+                state.get("kind"),
+                state.get("phase"),
+                state.get("terminal_error_code")
+            );
             return Ok(output);
         }
         let error = String::from_utf8_lossy(&output.stderr);

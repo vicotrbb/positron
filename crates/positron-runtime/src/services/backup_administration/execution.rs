@@ -398,10 +398,18 @@ pub(in crate::services) fn complete(
         .checked_add(manifest.retained_memory_bytes().map_err(capture_failure)?)
         .and_then(|bytes| bytes.checked_add(verification_retained))
         .ok_or(ServiceFailure::CorruptState)?;
-    if !work
+    #[cfg(feature = "test-support")]
+    let registry_started = std::time::Instant::now();
+    let ready = work
         .owner
-        .registry_ready(services, execution, registry_retained)?
-    {
+        .registry_ready(services, execution, registry_retained)?;
+    #[cfg(feature = "test-support")]
+    super::verification::report_snapshot_stage(
+        "publication_registry_ready",
+        registry_started.elapsed(),
+        work.verification.as_ref(),
+    );
+    if !ready {
         return Ok(false);
     }
     if operation.phase() == DurableOperationPhase::BackupPublication {
@@ -568,6 +576,8 @@ pub(in crate::services) fn complete(
         .publisher(external_retained_bytes)
         .map_err(provider_failure)?;
     if work.verification.is_none() {
+        #[cfg(feature = "test-support")]
+        let initialization_started = std::time::Instant::now();
         work.verification = Some(
             work.owner
                 .runtime
@@ -583,6 +593,12 @@ pub(in crate::services) fn complete(
                 .map_err(provider_failure)?,
         );
         work.saved_verification.clear();
+        #[cfg(feature = "test-support")]
+        super::verification::report_snapshot_stage(
+            "publication_initialize_resume",
+            initialization_started.elapsed(),
+            work.verification.as_ref(),
+        );
     }
     let verification = work.verification.as_mut().ok_or(ServiceFailure::Internal)?;
     let started = std::time::Instant::now();
@@ -620,6 +636,10 @@ pub(in crate::services) fn complete(
             break;
         }
     }
+    #[cfg(feature = "test-support")]
+    let batch_elapsed = started.elapsed();
+    #[cfg(feature = "test-support")]
+    let checkpoint_started = std::time::Instant::now();
     let progress = checkpoint::encode(
         work.transfer.ok_or(ServiceFailure::Internal)?,
         work.next_key,
@@ -635,6 +655,20 @@ pub(in crate::services) fn complete(
         registry.as_deref(),
         Some(&progress),
     )?;
+    #[cfg(feature = "test-support")]
+    {
+        let checkpoint_elapsed = checkpoint_started.elapsed();
+        super::verification::report_snapshot_stage(
+            "publication_verify_batch",
+            batch_elapsed,
+            Some(verification),
+        );
+        super::verification::report_snapshot_stage(
+            "publication_checkpoint_publish",
+            checkpoint_elapsed,
+            Some(verification),
+        );
+    }
     if !complete {
         return Ok(false);
     }

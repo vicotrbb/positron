@@ -517,6 +517,31 @@ pub(in crate::services) fn report_timed_turn(
 }
 
 #[cfg(feature = "test-support")]
+fn take_diagnostic_permit() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static REMAINING: AtomicU8 = AtomicU8::new(64);
+    REMAINING
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+}
+
+#[cfg(feature = "test-support")]
+pub(super) fn report_snapshot_stage(
+    stage: &'static str,
+    elapsed: std::time::Duration,
+    progress: Option<&positron_backup::BackupPublicationCheck>,
+) {
+    if elapsed >= std::time::Duration::from_millis(250) && take_diagnostic_permit() {
+        eprintln!(
+            "backup_snapshot_stage stage={stage} elapsed_ms={} publication_progress={progress:?}",
+            elapsed.as_millis()
+        );
+    }
+}
+
+#[cfg(feature = "test-support")]
 fn report_state(
     stage: &'static str,
     work: Option<&VerificationWork>,
@@ -524,14 +549,7 @@ fn report_state(
     elapsed_ms: Option<u128>,
     remaining_ms: Option<u128>,
 ) {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    static REMAINING: AtomicU8 = AtomicU8::new(64);
-    if REMAINING
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-            remaining.checked_sub(1)
-        })
-        .is_err()
-    {
+    if !take_diagnostic_permit() {
         return;
     }
     if let Some(work) = work {
