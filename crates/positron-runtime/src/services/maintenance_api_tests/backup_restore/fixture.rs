@@ -393,7 +393,7 @@ impl RestoreProviderFixture {
             .map_err(|error| format!("provider source activate: {error:?}"))?;
         // Registered backups require the owning migration worker for retirement;
         // this fixture retains the legitimate active provider and publishes its route.
-        let (old, new) = initialized.backup_migration_envelopes()?;
+        let (old, new) = initialized.backup_migration_envelopes(None)?;
         let catalog = open_catalog(initialized)?;
         let basis = catalog.pin()?;
         let signer = initialized.key.backup_control_signer(

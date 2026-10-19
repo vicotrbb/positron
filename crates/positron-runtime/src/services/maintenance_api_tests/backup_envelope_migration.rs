@@ -123,7 +123,7 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
             initialized = fixture.reopen()?;
             services = ServiceHandle::new(Arc::clone(&initialized))?;
             initialized.cancel_key_provider_migration()?;
-            assert!(initialized.backup_migration_envelopes().is_err());
+            assert!(initialized.backup_migration_envelopes(None).is_err());
             initialized.resume_key_provider_migration()?;
             let replay = services
                 .manage_provider_migration(&administrator, &request)
@@ -143,7 +143,7 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
             initialized.backup_key_recovery_readiness()
         );
         if action == "activate" {
-            routes = Some(initialized.backup_migration_envelopes()?);
+            routes = Some(initialized.backup_migration_envelopes(None)?);
             let successor = directory.join("successor.age");
             initialized.create_recovery_bundle(&successor, &recipients)?;
             initialized.verify_recovery_bundle(

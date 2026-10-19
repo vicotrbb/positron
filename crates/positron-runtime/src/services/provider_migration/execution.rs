@@ -175,6 +175,8 @@ pub(in crate::services) fn complete(
         principal: actor.principal_id(),
         operation: id,
         catalog_gate: &services.catalog_operation,
+        #[cfg(test)]
+        backup_route_recheck: None,
     };
     let backup_proof = if matches!(
         parameters.action(),
@@ -185,6 +187,7 @@ pub(in crate::services) fn complete(
             operation,
             actor,
             configuration.as_ref(),
+            context,
             cancellation,
         ) {
             Ok(Some(proof)) => Some(proof),

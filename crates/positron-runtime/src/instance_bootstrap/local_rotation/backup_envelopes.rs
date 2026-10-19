@@ -33,21 +33,25 @@ impl InitializedInstance {
     /// SYSTEM KEK during preparation and activation; no root key is exported.
     pub(crate) fn backup_migration_envelopes(
         &self,
+        context: Option<RootMigrationContext<'_>>,
     ) -> Result<(KeyEnvelope, KeyEnvelope), LocalKeyRotationFailure> {
         let session = RootRewrapSession::admit_provider(&self._authority)
             .map_err(|_| LocalKeyRotationFailure::LimitExceeded)?;
-        let catalog = self.rotation_catalog(&session)?;
-        let basis = catalog
-            .pin()
-            .map_err(|_| LocalKeyRotationFailure::Storage)?;
-        let state = State::find(&basis)?.ok_or(LocalKeyRotationFailure::InvalidInput)?;
-        if state.cancelled
-            || state.successor.is_some()
-            || state.instance != self.instance
-            || state.anchor != self.key.bootstrap_identity()
-        {
-            return Err(LocalKeyRotationFailure::Busy);
-        }
+        let state = {
+            let catalog = self.rotation_catalog_for_operation(&session, context)?;
+            let basis = catalog
+                .pin()
+                .map_err(|_| LocalKeyRotationFailure::Storage)?;
+            let state = State::find(&basis)?.ok_or(LocalKeyRotationFailure::InvalidInput)?;
+            if state.cancelled
+                || state.successor.is_some()
+                || state.instance != self.instance
+                || state.anchor != self.key.bootstrap_identity()
+            {
+                return Err(LocalKeyRotationFailure::Busy);
+            }
+            state
+        };
         let source = state
             .predecessor
             .as_ref()
@@ -77,6 +81,25 @@ impl InitializedInstance {
         }
         let source = decode(source)?;
         let target = decode(&state.active)?;
+        #[cfg(test)]
+        if let Some(context) = context
+            && let Some(hook) = context.backup_route_recheck
+        {
+            let action = hook
+                .lock()
+                .map_err(|_| LocalKeyRotationFailure::Storage)?
+                .take();
+            if let Some(action) = action {
+                action(self, context);
+            }
+        }
+        let catalog = self.rotation_catalog_for_operation(&session, context)?;
+        let basis = catalog
+            .pin()
+            .map_err(|_| LocalKeyRotationFailure::Storage)?;
+        if State::find(&basis)?.as_ref() != Some(&state) {
+            return Err(LocalKeyRotationFailure::Busy);
+        }
         super::cutover::confirm_state(&catalog, &state)?;
         Ok((source, target))
     }

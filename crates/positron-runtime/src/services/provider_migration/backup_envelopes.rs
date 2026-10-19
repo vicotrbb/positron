@@ -13,6 +13,7 @@ pub(super) fn step(
     operation: DurableOperation,
     actor: positron_governance::AuthorizedContext,
     configuration: Option<&positron_config::EffectiveConfiguration>,
+    context: crate::instance_bootstrap::RootMigrationContext<'_>,
     cancellation: Option<&crate::TaskCancellation>,
 ) -> Result<Option<BackupRootRetirementProof>, ServiceFailure> {
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
@@ -63,7 +64,7 @@ pub(super) fn step(
     }
     let (source, target) = services
         .instance
-        .backup_migration_envelopes()
+        .backup_migration_envelopes(Some(context))
         .map_err(super::super::tenant_rotation::rotation_failure)?;
     for repository_id in registrations {
         let (_, registration, parameters, signer) =

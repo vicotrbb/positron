@@ -237,3 +237,127 @@ fn rotation_resource_refusal_precedes_successor_custody_and_catalog_work()
     );
     Ok(())
 }
+
+#[test]
+fn backup_routes_accept_an_unrelated_generation_during_provider_verification()
+-> Result<(), Box<dyn std::error::Error>> {
+    backup_routes_after_intervening_change(append_during_backup_route_verification, false)
+}
+
+#[test]
+fn backup_routes_refuse_cancellation_during_provider_verification()
+-> Result<(), Box<dyn std::error::Error>> {
+    backup_routes_after_intervening_change(cancel_during_backup_route_verification, true)
+}
+
+fn backup_routes_after_intervening_change(
+    action: for<'context> fn(
+        &InitializedInstance,
+        super::super::local_rotation::RootMigrationContext<'context>,
+    ),
+    cancelled: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use super::super::local_rotation::{BackupRouteRecheckHook, RootMigrationContext};
+    let roots = Roots::new()?;
+    let initialized =
+        InstanceBootstrap::initialize(&roots.paths(), InitializationPlan::non_interactive())?;
+    initialized.begin_local_key_rotation()?;
+    initialized.activate_local_key_rotation()?;
+    let expected = initialized.backup_migration_envelopes(None)?;
+    let gate = std::sync::Mutex::new(());
+    let hook = BackupRouteRecheckHook::new(Some(action));
+    let context = RootMigrationContext {
+        principal: initialized.administrator(),
+        operation: positron_governance::OperationId::from_bytes([0xd7; 16])?,
+        catalog_gate: &gate,
+        backup_route_recheck: Some(&hook),
+    };
+    let result = initialized.backup_migration_envelopes(Some(context));
+    if cancelled {
+        assert!(matches!(result, Err(LocalKeyRotationFailure::Busy)));
+        assert_eq!(
+            initialized.local_key_rotation_status()?.phase(),
+            LocalKeyRotationPhase::Cancelled
+        );
+    } else {
+        assert!(
+            result? == expected,
+            "unrelated publication must preserve authenticated routes"
+        );
+    }
+    Ok(())
+}
+
+fn inspect_during_backup_route_verification(
+    initialized: &InitializedInstance,
+    context: super::super::local_rotation::RootMigrationContext<'_>,
+) {
+    drop(
+        context
+            .catalog_gate
+            .try_lock()
+            .expect("provider work released Catalog gate"),
+    );
+    assert!(
+        initialized.local_key_rotation_status().is_ok(),
+        "public root status must read during provider work"
+    );
+}
+
+fn append_during_backup_route_verification(
+    initialized: &InitializedInstance,
+    context: super::super::local_rotation::RootMigrationContext<'_>,
+) {
+    inspect_during_backup_route_verification(initialized, context);
+    let _gate = context.catalog_gate.lock().expect("test Catalog gate");
+    let session = RootRewrapSession::admit(&initialized._authority).expect("test root session");
+    let catalog = Catalog::open(
+        &initialized._authority,
+        initialized.instance,
+        session
+            .rotation_catalog_secret(&initialized.key, initialized.instance)
+            .expect("test Catalog secret"),
+    )
+    .expect("test Catalog");
+    let before = catalog.pin().expect("test Catalog snapshot");
+    let mut objects = before
+        .object_identities()
+        .map(|identity| {
+            CatalogObject::new(
+                before
+                    .object(identity)
+                    .expect("fixture object read")
+                    .expect("fixture object")
+                    .to_vec(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("fixture objects");
+    objects.push(
+        CatalogObject::new(b"unrelated backup route verification generation".to_vec())
+            .expect("test object"),
+    );
+    catalog
+        .commit(
+            before.identity(),
+            CatalogProposal::new(
+                TransactionId::new([0xd8; 16]).expect("test transaction"),
+                positron_kernel::FormatEpoch::CATALOG_V1,
+                objects,
+            )
+            .expect("test proposal"),
+            None,
+        )
+        .expect("unrelated publication");
+}
+
+fn cancel_during_backup_route_verification(
+    initialized: &InitializedInstance,
+    context: super::super::local_rotation::RootMigrationContext<'_>,
+) {
+    inspect_during_backup_route_verification(initialized, context);
+    let _gate = context.catalog_gate.lock().expect("test Catalog gate");
+    initialized
+        .cancel_key_provider_migration()
+        .expect("canonical cancellation");
+}
