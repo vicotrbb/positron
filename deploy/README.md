@@ -6,6 +6,10 @@ x86_64/aarch64 and macOS x86_64/aarch64. Construction uses `positron release
 archive`; the canonical release inventory and trust verifier bind signing,
 checksums, SBOMs, provenance, and independent rebuilds.
 
+[Linux packages](linux/README.md) use native Debian and RPM package managers,
+preserve the common GNU executable and generated contract, and add an explicit
+systemd lifecycle with retained data and keys.
+
 Every surface uses the same Positron artifact and storage format. OCI, packages,
 Compose, Nix, Helm, Kubernetes and other surface implementation tickets must not
 introduce their own database behavior.

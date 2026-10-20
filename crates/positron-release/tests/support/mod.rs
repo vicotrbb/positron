@@ -2,6 +2,7 @@
 pub mod keyless;
 mod native_packages;
 mod native_registry;
+mod native_rpm;
 use positron_kernel::release_manifest::{
     FormatCompatibility, ProductVersion, ReleaseCompatibility,
 };
@@ -160,7 +161,13 @@ impl Fixture {
             serde_json::to_vec(&fixture.inventory.compatibility).unwrap(),
         ));
         for (index, (surface, target)) in required.into_iter().enumerate() {
-            let payload_bytes = if surface == Api {
+            let payload_bytes = if surface == Debian {
+                if target == "linux-x86_64" {
+                    include_bytes!("../fixtures/positron_1.0.0_amd64.deb").to_vec()
+                } else {
+                    include_bytes!("../fixtures/positron_1.0.0_arm64.deb").to_vec()
+                }
+            } else if surface == Api {
                 b"canonical api definition".to_vec()
             } else {
                 format!("functional artifact {index}").into_bytes()
@@ -196,7 +203,19 @@ impl Fixture {
             } else {
                 payload
             };
-            let file = fixture.add(format!("artifact-{index}"), &content);
+            let filename = if surface == Debian {
+                format!(
+                    "positron_1.0.0_{}.deb",
+                    if target == "linux-x86_64" {
+                        "amd64"
+                    } else {
+                        "arm64"
+                    }
+                )
+            } else {
+                format!("artifact-{index}")
+            };
+            let file = fixture.add(filename, &content);
             let digest = hex(&FileIdentity::of(&content).sha256);
             let spdx = fixture.add(format!("spdx-{index}"),&serde_json::to_vec(&json!({"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","packages":[{"SPDXID":"SPDXRef-positron","name":file,"versionInfo":"1.0.0","licenseConcluded":"MIT","checksums":[{"algorithm":"SHA256","checksumValue":digest}]}]})).unwrap());
             let cyclonedx = fixture.add(format!("cdx-{index}"),&serde_json::to_vec(&json!({"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[{"type":"application","name":file,"version":"1.0.0","hashes":[{"alg":"SHA-256","content":digest}]}]})).unwrap());
@@ -228,6 +247,7 @@ impl Fixture {
         }
         let mut native = native_registry::fixtures("1.0.0", &fixture.inventory.source_commit);
         native.extend(native_packages::fixtures("1.0.0"));
+        native.extend(native_rpm::fixtures());
         fixture.install_native(native);
         fixture
     }
@@ -238,9 +258,15 @@ impl Fixture {
                 .inventory
                 .artifacts
                 .iter()
-                .position(|artifact| artifact.surface == data.surface)
+                .position(|artifact| {
+                    artifact.surface == data.surface
+                        && (data.surface != Surface::Rpm
+                            || data
+                                .filename
+                                .contains(artifact.target.strip_prefix("linux-").unwrap()))
+                })
                 .unwrap();
-            let index = if seen.contains(&data.surface) {
+            let index = if seen.contains(&data.surface) && data.surface != Surface::Rpm {
                 let mut artifact = self.inventory.artifacts[base].clone();
                 let next = self.inventory.artifacts.len();
                 for id in [

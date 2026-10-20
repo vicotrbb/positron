@@ -13,6 +13,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let mut fixture = support::Fixture::new();
+    std::fs::write(fixture.root.join("bundle").join("fuzz-archive"), data).expect("fuzz input");
+    let _decoded = scan_release_contents(&fixture.root.join("bundle"), "fuzz-archive", &[]);
     assert_token_predicate_compatibility(&fixture, data);
     let selection = usize::from(data.first().copied().unwrap_or(0));
     let index = selection % fixture.inventory.artifacts.len();
@@ -116,8 +118,6 @@ fuzz_target!(|data: &[u8]| {
     }
     let _raw_inventory = ReleaseInventory::from_bytes(data);
     let _raw_trust = TrustSnapshot::from_bytes(data);
-    std::fs::write(fixture.root.join("bundle").join("fuzz-archive"), data).expect("fuzz input");
-    let _decoded = scan_release_contents(&fixture.root.join("bundle"), "fuzz-archive", &[]);
 });
 
 // Mutate native package boundaries while preserving the independently bound
@@ -128,6 +128,46 @@ fn mutate_package(fixture: &mut support::Fixture, index: usize, data: &[u8]) -> 
     let mut bytes = std::fs::read(path).unwrap();
     let mut payload = None;
     match artifact.surface {
+        Surface::Rpm => {
+            let word = |offset: usize| {
+                u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
+            };
+            let header = (96 + 16 + word(104) * 16 + word(108)).next_multiple_of(8);
+            let payload_start = header + 16 + word(header + 8) * 16 + word(header + 12);
+            let selection = data.get(1).copied().unwrap_or(0) % 4;
+            if selection == 2 {
+                let mut decoded = Vec::new();
+                flate2::read::GzDecoder::new(&bytes[payload_start..])
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+                mutate(&mut decoded, data);
+                let mut compressed =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                compressed.write_all(&decoded).unwrap();
+                bytes.truncate(payload_start);
+                bytes.extend(compressed.finish().unwrap());
+            } else {
+                let range = match selection {
+                    0 => {
+                        let count = word(104);
+                        let tag = (0..count)
+                            .map(|index| 112 + index * 16)
+                            .find(|offset| matches!(word(*offset), 267 | 268))
+                            .unwrap();
+                        let start = 112 + count * 16 + word(tag + 8);
+                        start..start + word(tag + 12)
+                    },
+                    1 => header..payload_start,
+                    _ => payload_start..bytes.len(),
+                };
+                mutate(&mut bytes[range], data);
+            }
+            payload = Some(
+                rpm_functional_payload(&bytes)
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_else(|_| bytes.clone()),
+            );
+        },
         Surface::SdkDotNet => {
             let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
             let member = archive.by_name(".signature.p7s").unwrap();
@@ -200,23 +240,42 @@ fn mutate(bytes: &mut [u8], data: &[u8]) {
 // marker representation changed. Generated raw bytes reach the public file
 // inspector without introducing a second production validation authority.
 fn assert_token_predicate_compatibility(fixture: &support::Fixture, data: &[u8]) {
-    let prefixes = [b"ghp_".as_slice(), b"github_pat_", b"sk-proj-", b"AKIA", b"ASIA"];
+    let prefixes = [
+        b"ghp_".as_slice(),
+        b"github_pat_",
+        b"sk-proj-",
+        b"AKIA",
+        b"ASIA",
+    ];
     let selected = usize::from(data.first().copied().unwrap_or(0)) % prefixes.len();
     let mut bytes = b"embedded_word".to_vec();
     bytes.extend_from_slice(prefixes.get(selected).expect("closed prefix selection"));
     let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
-    bytes.extend(data.iter().skip(1).map(|byte| alphabet[usize::from(*byte) % alphabet.len()]));
+    bytes.extend(
+        data.iter()
+            .skip(1)
+            .map(|byte| alphabet[usize::from(*byte) % alphabet.len()]),
+    );
     let expected = prefixes.iter().any(|prefix| {
-        bytes.windows(prefix.len()).enumerate().any(|(index, window)| {
-            let aws = *prefix == b"AKIA" || *prefix == b"ASIA";
-            window == *prefix && bytes.get(index + prefix.len()..).is_some_and(|tail| {
-                tail.iter().take_while(|byte| if aws {
-                    byte.is_ascii_uppercase() || byte.is_ascii_digit()
-                } else {
-                    byte.is_ascii_alphanumeric() || **byte == b'_'
-                }).count() >= if aws { 16 } else { 32 }
+        bytes
+            .windows(prefix.len())
+            .enumerate()
+            .any(|(index, window)| {
+                let aws = *prefix == b"AKIA" || *prefix == b"ASIA";
+                window == *prefix
+                    && bytes.get(index + prefix.len()..).is_some_and(|tail| {
+                        tail.iter()
+                            .take_while(|byte| {
+                                if aws {
+                                    byte.is_ascii_uppercase() || byte.is_ascii_digit()
+                                } else {
+                                    byte.is_ascii_alphanumeric() || **byte == b'_'
+                                }
+                            })
+                            .count()
+                            >= if aws { 16 } else { 32 }
+                    })
             })
-        })
     });
     std::fs::write(fixture.root.join("fuzz-token"), &bytes).expect("bounded raw token fixture");
     let result = inspect_file(&fixture.root, "fuzz-token", &[]);

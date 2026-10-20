@@ -7,6 +7,7 @@ use std::{
     io::{Cursor, Read},
     path::Path,
 };
+mod packages;
 const MAX_ZIP: usize = 67_108_864;
 const MAX_MEMBER: u64 = 536_870_912;
 struct Budget {
@@ -64,7 +65,41 @@ fn scan(
     let gzip = prefix.starts_with(&[0x1f, 0x8b]);
     let zip = prefix.starts_with(b"PK\x03\x04") || prefix.starts_with(b"PK\x05\x06");
     let tar = prefix.get(257..262) == Some(b"ustar".as_slice());
+    let rpm = prefix.starts_with(b"\xed\xab\xee\xdb");
+    let ar = prefix.starts_with(b"!<arch>\n");
+    let cpio = prefix.starts_with(b"070701") || prefix.starts_with(b"070702");
     let stream = Cursor::new(prefix).chain(reader);
+    if rpm {
+        let mut bytes = Vec::new();
+        stream
+            .take((64 << 20) + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ReleaseError::Invalid)?;
+        let package = crate::native_rpm::package(&bytes)?;
+        let size = inspect_reader(
+            package.metadata,
+            canaries,
+            budget.remaining.min(MAX_MEMBER),
+            true,
+        )?
+        .size;
+        budget.remaining = budget
+            .remaining
+            .checked_sub(size)
+            .ok_or(ReleaseError::LimitExceeded)?;
+        return scan(
+            Box::new(package.payload) as Box<dyn Read>,
+            canaries,
+            depth + 1,
+            budget,
+        );
+    }
+    if ar {
+        return packages::ar(stream, canaries, depth, budget);
+    }
+    if cpio {
+        return packages::cpio(stream, canaries, depth, budget);
+    }
     if gzip {
         return scan(
             Box::new(flate2::read::MultiGzDecoder::new(stream)) as Box<dyn Read>,

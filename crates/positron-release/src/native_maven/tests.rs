@@ -332,3 +332,30 @@ fn maven_refuses_unknown_json_fields_and_oversized_native_material() {
         Err(ReleaseError::LimitExceeded)
     );
 }
+
+#[test]
+fn maven_refuses_incomplete_trailing_signature_packets_instead_of_discarding_them() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let key = key(31);
+    let root = root(&certificate(&key, None));
+    let proof = proof(&key, HashAlgorithm::Sha256, None);
+    let mut decoded = Vec::new();
+    Dearmor::new(proof["signature"].as_str().unwrap().as_bytes())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    for trailing in [false, true] {
+        let mut bytes = decoded.clone();
+        if trailing {
+            bytes.push(0xc2);
+        }
+        let proof = json!({"signature":format!("-----BEGIN PGP SIGNATURE-----\n\n{}\n-----END PGP SIGNATURE-----",STANDARD.encode(bytes))});
+        assert_eq!(
+            verify(&root, &proof, CONTENTS, NOW.into()),
+            if trailing {
+                Err(ReleaseError::Invalid)
+            } else {
+                Ok(())
+            }
+        );
+    }
+}

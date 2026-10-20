@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+case "$1" in
+remove|deconfigure)
+    if [ -d /run/systemd/system ]; then systemctl stop positron.service; systemctl disable positron.service; fi
+    ;;
+upgrade)
+    if [ -d /run/systemd/system ] && systemctl is-active --quiet positron.service; then
+        echo 'Stop Positron after its explicit verified Upgrade workflow before replacing this package.' >&2
+        exit 1
+    fi
+    ;;
+esac

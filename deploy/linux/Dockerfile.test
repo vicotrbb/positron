@@ -1,0 +1,20 @@
+# Runtime qualification only: install the selected distro's native service tools.
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
+ARG FIXTURE_UID=1001
+RUN if command -v apt-get >/dev/null; then \
+      apt-get update && apt-get install -y --no-install-recommends systemd ca-certificates passwd util-linux libgcc-s1 libc-bin coreutils && rm -rf /var/lib/apt/lists/*; \
+    else \
+      set --; \
+      if [ -f /etc/rocky-release ]; then \
+        set -- --disablerepo='*' \
+          --repofrompath=fixture-baseos,https://dl.rockylinux.org/vault/rocky/9.6/BaseOS/$(uname -m)/os/ \
+          --repofrompath=fixture-appstream,https://dl.rockylinux.org/vault/rocky/9.6/AppStream/$(uname -m)/os/ \
+          --setopt=fixture-baseos.gpgcheck=1 --setopt=fixture-appstream.gpgcheck=1 \
+          --setopt=fixture-baseos.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9 \
+          --setopt=fixture-appstream.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9; \
+      fi; \
+      dnf "$@" install -y --allowerasing systemd ca-certificates shadow-utils util-linux libgcc glibc-common coreutils && dnf clean all; \
+    fi && useradd -m -u "$FIXTURE_UID" fixture
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]

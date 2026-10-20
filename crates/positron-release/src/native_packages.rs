@@ -42,6 +42,16 @@ pub(crate) fn verify(
         trust.check_artifact(expected)?;
     }
     match policy {
+        NativePublisherPolicy::Rpm { .. } if artifact.surface == Surface::Rpm => {
+            crate::native_rpm::verify(
+                root,
+                &contents,
+                &version,
+                &artifact.target,
+                &artifact.publication.native_subject,
+                trust.now(),
+            )?;
+        },
         NativePublisherPolicy::NugetRepository { .. }
             if artifact.surface == Surface::SdkDotNet
                 && artifact.publication.registry == "https://api.nuget.org/v3/index.json" =>

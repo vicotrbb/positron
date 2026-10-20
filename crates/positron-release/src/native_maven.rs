@@ -23,6 +23,38 @@ pub(crate) fn verify(
 ) -> Result<(), ReleaseError> {
     let key: SignedPublicKey = armored(field(root, "public_key")?, BlockType::PublicKey)?;
     let detached: DetachedSignature = armored(field(proof, "signature")?, BlockType::Signature)?;
+    verify_signature(key, detached, contents, now)
+}
+
+/// The RPM signature packet is binary, but uses precisely the same certificate
+/// authorization, algorithm, revocation, expiry, and signer policy as Maven.
+pub(crate) fn verify_binary(
+    root: &Value,
+    bytes: &[u8],
+    contents: &[u8],
+    now: u64,
+) -> Result<(), ReleaseError> {
+    if bytes.len() > MAX_NATIVE_BYTES {
+        return Err(ReleaseError::LimitExceeded);
+    }
+    let key: SignedPublicKey = armored(field(root, "public_key")?, BlockType::PublicKey)?;
+    let mut packets = PacketParser::new(bytes);
+    let signature = match packets.next() {
+        Some(Ok(Packet::Signature(signature))) => signature,
+        _ => return Err(ReleaseError::Invalid),
+    };
+    if !packets.into_inner().is_empty() {
+        return Err(ReleaseError::Invalid);
+    }
+    verify_signature(key, DetachedSignature::new(signature), contents, now)
+}
+
+fn verify_signature(
+    key: SignedPublicKey,
+    detached: DetachedSignature,
+    contents: &[u8],
+    now: u64,
+) -> Result<(), ReleaseError> {
     if !matches!(key.version(), KeyVersion::V4 | KeyVersion::V6)
         || !key.public_subkeys.is_empty()
         || !key.details.user_attributes.is_empty()
@@ -137,9 +169,18 @@ fn armored<T: Deserializable>(text: &str, kind: BlockType) -> Result<T, ReleaseE
     }
     // The high-level convenience parser intentionally skips some malformed or
     // unsupported packets. This trust boundary must preserve those failures.
-    let packets = PacketParser::new(decoded.as_slice())
-        .collect::<pgp::errors::Result<Vec<_>>>()
-        .map_err(|_| ReleaseError::Invalid)?;
+    let mut remaining = decoded.as_slice();
+    let mut packets = Vec::new();
+    while !remaining.is_empty() {
+        let mut parser = PacketParser::new(remaining);
+        packets.push(
+            parser
+                .next()
+                .ok_or(ReleaseError::Invalid)?
+                .map_err(|_| ReleaseError::Invalid)?,
+        );
+        remaining = parser.into_inner();
+    }
     if packets.iter().any(|packet| match kind {
         BlockType::PublicKey => !matches!(
             packet,

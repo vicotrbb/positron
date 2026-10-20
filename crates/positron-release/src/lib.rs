@@ -14,6 +14,8 @@ mod native_maven;
 mod native_maven_package;
 mod native_nuget;
 mod native_packages;
+mod native_rpm;
+pub use native_rpm::rpm_functional_payload;
 mod native_publication;
 mod native_xml;
 mod nuget_zip;

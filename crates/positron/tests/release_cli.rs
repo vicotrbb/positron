@@ -318,3 +318,75 @@ fn malformed_cli_inputs_refuse_without_creating_or_rendering_secret_material() {
         assert!(result.stdout.is_empty());
     }
 }
+
+#[test]
+fn native_cli_extracts_the_known_rpm_functional_identity_without_overwriting_files() {
+    let fixture = support::Fixture::new();
+    let source = fixture.root.join("package.rpm");
+    let output = fixture.root.join("functional.rpm-payload");
+    std::fs::write(
+        &source,
+        include_bytes!("../../positron-release/tests/fixtures/positron-1.0.0-1.aarch64.rpm"),
+    )
+    .unwrap();
+    let arguments = [
+        "rpm-payload",
+        "--package",
+        path(&source),
+        "--out",
+        path(&output),
+    ];
+    let extracted = run(&arguments);
+    assert!(
+        extracted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&extracted.stdout).unwrap();
+    assert_eq!(report["state"], "unsigned-rpm-functional-payload");
+    assert_eq!(report["size"], 31707);
+    assert_eq!(
+        report["sha256"],
+        "a0a873a76179d61be3334b942d52cb8b82d1bfc1fd71a475e2e9deeb0a58251e"
+    );
+    assert_eq!(std::fs::metadata(&output).unwrap().len(), 31707);
+    assert!(!run(&arguments).status.success());
+    for (label, bytes) in [
+        ("invalid", b"not an RPM".as_slice()),
+        ("truncated", b"\xed\xab\xee\xdb".as_slice()),
+    ] {
+        let invalid = fixture.root.join(label);
+        let refused = fixture.root.join(format!("{label}-output"));
+        std::fs::write(&invalid, bytes).unwrap();
+        assert!(
+            !run(&[
+                "rpm-payload",
+                "--package",
+                path(&invalid),
+                "--out",
+                path(&refused)
+            ])
+            .status
+            .success()
+        );
+        assert!(!refused.exists());
+    }
+    let oversized = fixture.root.join("oversized.rpm");
+    std::fs::File::create(&oversized)
+        .unwrap()
+        .set_len((64 << 20) + 1)
+        .unwrap();
+    let refused = fixture.root.join("oversized-output");
+    assert!(
+        !run(&[
+            "rpm-payload",
+            "--package",
+            path(&oversized),
+            "--out",
+            path(&refused)
+        ])
+        .status
+        .success()
+    );
+    assert!(!refused.exists());
+}

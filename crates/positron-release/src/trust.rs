@@ -51,6 +51,7 @@ pub enum NativePublisherPolicy {
     Keyless(NativeKeylessPublisher),
     NugetRepository { trusted_root_sha256: [u8; 32] },
     Maven { trusted_root_sha256: [u8; 32] },
+    Rpm { trusted_root_sha256: [u8; 32] },
     GoChecksum { trusted_root_sha256: [u8; 32] },
     CratesIo { repository: String },
 }
@@ -68,6 +69,9 @@ impl NativePublisherPolicy {
                 trusted_root_sha256,
             }
             | Self::Maven {
+                trusted_root_sha256,
+            }
+            | Self::Rpm {
                 trusted_root_sha256,
             }
             | Self::GoChecksum {

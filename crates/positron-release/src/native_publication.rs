@@ -19,6 +19,8 @@ pub(crate) fn verify_native(
     verify_registry_metadata(artifact, inventory)?;
     let authorization = trust.native_publisher(&artifact.publication.registry)?;
     let eligible = match (artifact.surface, &authorization.policy) {
+        (Surface::Rpm, NativePublisherPolicy::Rpm { .. }) => true,
+        (Surface::Rpm, _) => false,
         (Surface::SdkRust, NativePublisherPolicy::CratesIo { .. }) => {
             artifact.publication.registry == "https://crates.io"
         },

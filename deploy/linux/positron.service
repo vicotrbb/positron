@@ -1,0 +1,24 @@
+[Unit]
+Description=Positron observability database
+After=network.target
+
+[Service]
+Type=simple
+User=positron
+Group=positron
+CPUWeight=100
+MemoryAccounting=yes
+ExecStart=/usr/bin/positron serve --config /etc/positron/positron.toml
+Restart=on-failure
+KillSignal=SIGTERM
+TimeoutStopSec=65
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/positron /var/lib/positron-secrets /run/positron
+RuntimeDirectory=positron
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
