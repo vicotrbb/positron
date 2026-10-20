@@ -82,6 +82,18 @@ fn native_manager_installs_exact_payload_and_retains_owner_configuration_data_an
         fs::read_to_string("/etc/positron/positron.toml").unwrap(),
         positron_config::generated_example()
     );
+    // Debian conffile deletion is an administrator decision retained by dpkg.
+    if debian {
+        fs::remove_file("/etc/positron/positron.toml").unwrap();
+        install();
+        assert!(!Path::new("/etc/positron/positron.toml").exists());
+        fs::write(
+            "/etc/positron/positron.toml",
+            positron_config::generated_example(),
+        )
+        .unwrap();
+        install();
+    }
     let uid: u32 = run("id", &["-u", "positron"]).trim().parse().unwrap();
     assert_ne!(uid, 0);
     let identity = run("getent", &["passwd", "positron"]);

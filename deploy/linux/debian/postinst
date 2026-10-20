@@ -28,8 +28,10 @@ if [ "$1" = configure ]; then
         *) echo 'Positron service identity must have a non-login shell.' >&2; exit 1;;
     esac
     install -d -o root -g positron -m 0750 /etc/positron
-    chown root:positron /etc/positron/positron.toml
-    chmod 0640 /etc/positron/positron.toml
+    if [ -e /etc/positron/positron.toml ]; then
+        chown root:positron /etc/positron/positron.toml
+        chmod 0640 /etc/positron/positron.toml
+    fi
     install -d -o positron -g positron -m 0700 /var/lib/positron /var/lib/positron-secrets
     if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
 fi
