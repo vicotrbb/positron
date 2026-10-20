@@ -1,7 +1,8 @@
 use super::*;
 
-fn scripted_mutation(
+fn scripted_requests(
     responses: &[(u16, serde_json::Value)],
+    request: impl FnOnce(std::net::SocketAddr) -> TestResult<String>,
 ) -> TestResult<(TestResult<String>, Vec<serde_json::Value>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
@@ -51,24 +52,104 @@ fn scripted_mutation(
             let mut bytes = vec![0; length];
             stream.read_exact(&mut bytes).map_err(|e| e.to_string())?;
             requests.push(serde_json::from_slice(&bytes).map_err(|e| e.to_string())?);
+            if status == 0 {
+                continue;
+            }
             let bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
             write!(stream, "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).map_err(|e| e.to_string())?;
             stream.write_all(&bytes).map_err(|e| e.to_string())?;
         }
         Ok(requests)
     });
-    let result = mutate(
-        "repository",
-        serde_json::json!({
-            "action":"init", "idempotency_key":"11111111-1111-4111-8111-111111111111",
-            "repository_id":"22222222-2222-4222-8222-222222222222", "locator":"/fixture/repository"
-        }),
-        endpoint,
-        "test-administrator",
-    );
+    let result = request(endpoint);
     let requests = server.join().map_err(|_| "script server panic")??;
     Ok((result, requests))
 }
+fn scripted_mutation(
+    responses: &[(u16, serde_json::Value)],
+) -> TestResult<(TestResult<String>, Vec<serde_json::Value>)> {
+    scripted_requests(responses, |endpoint| {
+        mutate(
+            "repository",
+            serde_json::json!({
+                "action":"init", "idempotency_key":"11111111-1111-4111-8111-111111111111",
+                "repository_id":"22222222-2222-4222-8222-222222222222", "locator":"/fixture/repository"
+            }),
+            endpoint,
+            "test-administrator",
+        )
+    })
+}
+#[test]
+fn wait_reconciles_lost_read_response_using_the_same_retained_operation() -> TestResult {
+    let mut terminal = success();
+    terminal["operation"]["status"] = serde_json::json!("succeeded");
+    terminal["operation"]["phase"] = serde_json::json!("published");
+    let (result, requests) = scripted_requests(
+        &[(0, serde_json::Value::Null), (200, terminal)],
+        |endpoint| {
+            let output = wait(
+                &native_binary::executable(),
+                "repository",
+                endpoint,
+                "test-administrator",
+                "11111111111111111111111111111111",
+            )?;
+            field(&output, "status")
+        },
+    )?;
+    assert_eq!(result?, "succeeded");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests.first().and_then(|request| request.get("action")),
+        Some(&serde_json::json!("status"))
+    );
+    assert_eq!(
+        requests
+            .first()
+            .and_then(|request| request.get("operation_id")),
+        Some(&serde_json::json!("11111111111111111111111111111111"))
+    );
+    assert_eq!(
+        requests.first(),
+        requests.get(1),
+        "only the same read-only operation status may be replayed"
+    );
+    Ok(())
+}
+
+#[test]
+fn wait_refuses_authentication_failure_without_replaying_operation_status() -> TestResult {
+    let (result, requests) = scripted_requests(
+        &[
+            (401, serde_json::json!({"code":"authentication_rejected"})),
+            (200, serde_json::json!({})),
+        ],
+        |endpoint| {
+            let output = wait(
+                &native_binary::executable(),
+                "repository",
+                endpoint,
+                "test-administrator",
+                "11111111111111111111111111111111",
+            )?;
+            field(&output, "status")
+        },
+    )?;
+    assert!(result.is_err());
+    assert_eq!(
+        requests.len(),
+        2,
+        "one status read followed by maintenance diagnostics"
+    );
+    assert_ne!(
+        requests.first(),
+        requests.get(1),
+        "definite rejection must not replay the operation status"
+    );
+    Ok(())
+}
+
 fn success() -> serde_json::Value {
     serde_json::json!({"catalog_generation":12,"operation":{
         "id":"11111111111111111111111111111111","status":"pending","phase":"accepted",

@@ -256,7 +256,11 @@ fn wait(
             return Ok(output);
         }
         let error = String::from_utf8_lossy(&output.stderr);
-        if !error.contains("operation outcome remains unknown") || Instant::now() >= watchdog {
+        // Both unknown outcomes require inspecting this same retained ID. This
+        // command reads status only; it never resubmits the original mutation.
+        let unknown = error.contains("operation outcome remains unknown")
+            || error.contains("transport outcome unknown");
+        if !unknown || Instant::now() >= watchdog {
             let maintenance = invoke(
                 binary,
                 &online("maintenance", "status", endpoint),
