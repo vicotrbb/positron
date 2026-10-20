@@ -3,6 +3,52 @@ use super::schema_maintenance::{Fixture, request};
 use prost::Message;
 use std::sync::Arc;
 
+fn advance_recovered_verifier(
+    services: &ServiceHandle,
+    administrator: &str,
+    tenant: positron_domain::identity::TenantId,
+) -> Result<crate::TenantKeyVerificationProgress, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let result = services.advance_tenant_key_verification(administrator, tenant);
+        if result != Err(super::super::ServiceFailure::CatalogBusy) {
+            return result.map_err(Into::into);
+        }
+        let now = services
+            .instance
+            .retention_time
+            .inspect_governance_now_seconds()?;
+        let future = services
+            .instance
+            .maintenance_coordinator()
+            .statuses()
+            .map_err(|_| "recovered verifier status")?
+            .into_iter()
+            .find(|status| {
+                status.task().class() == positron_kernel::MaintenanceTaskClass::EnvelopeVerification
+                    && status.task().scope() == positron_kernel::MaintenanceScope::tenant(tenant)
+                    && status.phase() == positron_kernel::MaintenanceTaskPhase::Queued
+                    && status.submitted_at() > now
+            });
+        let Some(task) = future else {
+            return result.map_err(Into::into);
+        };
+        while services
+            .instance
+            .retention_time
+            .inspect_governance_now_seconds()?
+            < task.submitted_at()
+        {
+            if std::time::Instant::now() >= deadline {
+                return Err(
+                    "recovered verifier clock did not reach submission within 10 seconds".into(),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
 fn verified_audits(
     initialized: &crate::InitializedInstance,
     services: &ServiceHandle,
@@ -42,6 +88,10 @@ fn native_host_background_handler_completes_a_resumed_target_only_verifier()
         &ingest,
         request("native-background-target-only").encode_to_vec(),
     )?;
+    services.ingest_otlp_traces(
+        &ingest,
+        super::schema_lifecycle_support::trace_request().encode_to_vec(),
+    )?;
     services.begin_tenant_key_rotation(&administrator, tenant)?;
     services.advance_tenant_key_rotation(&administrator, tenant)?;
     assert_eq!(
@@ -50,14 +100,100 @@ fn native_host_background_handler_completes_a_resumed_target_only_verifier()
             .active_epoch(),
         2
     );
-    for remaining in [true, true, false] {
-        assert_eq!(
-            services
-                .advance_tenant_key_migration(&administrator, tenant)?
-                .remaining_segments(),
-            remaining
-        );
+    let source_object_bound = super::schema_maintenance::open_catalog(&initialized)?
+        .pin()?
+        .object_identities()
+        .count();
+    for _ in 0..source_object_bound {
+        let progress = services.advance_tenant_key_migration(&administrator, tenant)?;
+        if !progress.remaining_segments() {
+            break;
+        }
     }
+    assert!(
+        super::schema_maintenance::open_catalog(&initialized)?
+            .pin()?
+            .next_unmigrated_ledger_scope(tenant, 2)?
+            .is_none()
+    );
+    // Retire the empty sealed predecessors while preserving the two real-data
+    // sources. Query-purpose observation does not create another active segment.
+    let source_scopes = {
+        let catalog = super::schema_maintenance::open_catalog(&initialized)?;
+        let mut scopes = Vec::new();
+        for signal in [
+            positron_domain::routing::SignalKind::Logs,
+            positron_domain::routing::SignalKind::Traces,
+        ] {
+            scopes.extend(catalog.pin()?.reachable_ledger_scopes(tenant, signal)?);
+        }
+        let mut empty_predecessors = 0;
+        for scope in &scopes {
+            assert!(!catalog.pin()?.has_active_ledger_scope(*scope)?);
+            let ledger = positron_kernel::ActiveSegmentLedger::open_for_query_with_retention_time(
+                &initialized._authority,
+                &initialized.retention_time,
+                &catalog,
+                *scope,
+                initialized.tenant_segment_key_for_test(*scope)?,
+            )?;
+            assert!(
+                !ledger.snapshot()?.blocks().is_empty(),
+                "real source remains in each scope"
+            );
+            empty_predecessors += 1;
+            let preparation = ledger.prepare_retention_publication()?;
+            let publication = preparation.task().identity();
+            assert_eq!(preparation.task().inputs().len(), 1);
+            let now = initialized
+                .retention_time
+                .inspect_governance_now_seconds()?;
+            let coordinator = initialized.maintenance_coordinator();
+            preparation.submit_and_persist(coordinator, &catalog, now)?;
+            let execution = coordinator
+                .start_next_with_reservation_and_persist_for_class(
+                    &catalog,
+                    &initialized._authority,
+                    now,
+                    false,
+                    Some(MaintenanceTaskClass::RetentionPublication),
+                )
+                .map_err(|failure| format!("predecessor publication dispatch: {failure:?}"))?
+                .ok_or("predecessor publication")?;
+            assert_eq!(execution.task().identity(), publication);
+            let reclamation =
+                ledger.complete_running_retention_publication_task(coordinator, &execution)?;
+            drop(execution);
+            let execution = coordinator
+                .start_next_with_reservation_and_persist_for_class(
+                    &catalog,
+                    &initialized._authority,
+                    now,
+                    false,
+                    Some(MaintenanceTaskClass::RetentionReclamation),
+                )
+                .map_err(|failure| format!("predecessor reclamation dispatch: {failure:?}"))?
+                .ok_or("predecessor reclamation")?;
+            assert_eq!(execution.task().identity(), reclamation);
+            ledger.complete_running_retention_reclamation_task(coordinator, &execution)?;
+            assert_eq!(
+                coordinator
+                    .status(reclamation)
+                    .map_err(|failure| format!("predecessor status: {failure:?}"))?
+                    .phase(),
+                MaintenanceTaskPhase::Succeeded
+            );
+        }
+        assert_eq!(empty_predecessors, 2);
+        let mut remaining = Vec::new();
+        for signal in [
+            positron_domain::routing::SignalKind::Logs,
+            positron_domain::routing::SignalKind::Traces,
+        ] {
+            remaining.extend(catalog.pin()?.reachable_ledger_scopes(tenant, signal)?);
+        }
+        u64::try_from(remaining.len())?
+    };
     assert!(
         !services
             .advance_tenant_key_verification(&administrator, tenant)?
@@ -72,16 +208,15 @@ fn native_host_background_handler_completes_a_resumed_target_only_verifier()
         .ok_or("durable verifier")?
         .task()
         .identity();
-    let before = {
+    {
         let _gate = services
             .catalog_operation
             .lock()
             .map_err(|_| "Catalog gate")?;
-        super::schema_maintenance::open_catalog(&initialized)?
-            .pin()?
-            .object_identities()
-            .collect::<Vec<_>>()
-    };
+        let catalog = super::schema_maintenance::open_catalog(&initialized)?;
+        let basis = catalog.pin()?;
+        assert!(basis.next_active_ledger_scope(tenant)?.is_none());
+    }
     drop((services, initialized));
     let ephemeral = "127.0.0.1:0".parse()?;
     let host = NativeHost::new(NativeBindings::new(
@@ -132,48 +267,40 @@ fn native_host_background_handler_completes_a_resumed_target_only_verifier()
                     .map_err(|_| "Catalog gate")?;
                 let catalog = super::schema_maintenance::open_catalog(&services.instance)?;
                 let basis = catalog.pin()?;
-                let mut added = Vec::new();
-                for id in basis.object_identities().filter(|id| !before.contains(id)) {
-                    let bytes = basis.object(id)?.ok_or("managed object")?;
-                    let kind = if bytes.starts_with(b"PMTC") {
-                        "maintenance"
-                    } else if bytes.starts_with(b"PSCHEMA1") {
-                        "schema"
-                    } else if bytes.starts_with(b"POSCFGV1") {
-                        "effective configuration"
-                    } else if bytes.starts_with(b"POSGOV") {
-                        "governance"
-                    } else if bytes.starts_with(b"PLIFCLK1") {
-                        "lifecycle clock anchor"
-                    } else if bytes.starts_with(b"PFRONT02") {
-                        "recovery frontier"
-                    } else if bytes.starts_with(b"PSEGMET1") {
-                        "segment metadata"
-                    } else if bytes.starts_with(b"PSLEASE1") {
-                        "snapshot lease"
-                    } else {
-                        "other managed object"
-                    };
-                    added.push((id, kind));
-                }
                 let statuses = services
                     .instance
                     .maintenance_coordinator()
                     .statuses()
                     .map_err(|_| "statuses")?
                     .into_iter()
-                    .map(|status| (status.task().class(), status.phase()))
+                    .map(|status| {
+                        (
+                            status.task().identity(),
+                            status.task().class(),
+                            status.phase(),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 if phase == MaintenanceTaskPhase::Failed && !reset_after_startup {
+                    // Startup creates one active scope for each signal.
+                    for signal in [
+                        positron_domain::routing::SignalKind::Logs,
+                        positron_domain::routing::SignalKind::Traces,
+                    ] {
+                        let mut active = 0;
+                        for scope in basis.reachable_ledger_scopes(tenant, signal)? {
+                            if basis.has_active_ledger_scope(scope)? {
+                                active += 1;
+                            }
+                        }
+                        assert_eq!(active, 1, "one new active {signal:?} scope");
+                    }
                     assert_eq!(
-                        added
-                            .iter()
-                            .filter(|(_, kind)| *kind == "segment metadata")
-                            .count(),
-                        2
-                    );
-                    assert_eq!(
-                        statuses,
+                        statuses
+                            .into_iter()
+                            .filter(|(identity, _, _)| *identity == task)
+                            .map(|(_, class, phase)| (class, phase))
+                            .collect::<Vec<_>>(),
                         vec![(
                             MaintenanceTaskClass::EnvelopeVerification,
                             MaintenanceTaskPhase::Failed
@@ -206,7 +333,7 @@ fn native_host_background_handler_completes_a_resumed_target_only_verifier()
                     drop(_gate);
                     // Startup invalidation and foreground source preparation
                     // have their own five-second bound. Only now is the native
-                    // handler notified to execute its five resumed passes.
+                    // handler notified to resume its bounded traversal.
                     assert!(
                         std::time::Instant::now() <= preparation_deadline,
                         "startup invalidation and reset exceeded their bounded phase"
@@ -216,7 +343,7 @@ fn native_host_background_handler_completes_a_resumed_target_only_verifier()
                     continue;
                 }
                 return Err(format!(
-                    "native verifier terminal phase {phase:?}; added={added:?}; tasks={statuses:?}"
+                    "native verifier terminal phase {phase:?}; tasks={statuses:?}"
                 )
                 .into());
             },
@@ -224,7 +351,7 @@ fn native_host_background_handler_completes_a_resumed_target_only_verifier()
     }
     assert!(
         reset_after_startup,
-        "native startup must invalidate the old three-object basis"
+        "native startup must invalidate the captured source basis"
     );
     assert_eq!(
         services
@@ -235,7 +362,7 @@ fn native_host_background_handler_completes_a_resumed_target_only_verifier()
             .checkpoint()
             .ok_or("completed checkpoint")?
             .sequence(),
-        5
+        source_scopes + 2
     );
     assert!(
         services
@@ -370,8 +497,7 @@ fn tenant_target_only_verification_is_bounded_and_resumes_durable_checkpoint_aft
             "quiescent schema must preserve the authenticated inventory across reopen"
         );
     }
-    let second = services
-        .advance_tenant_key_verification(&administrator, tenant)
+    let second = advance_recovered_verifier(&services, &administrator, tenant)
         .map_err(|failure| format!("second after reopen: {failure:?}"))?;
     assert!(!second.is_complete());
     assert_eq!(second.examined_segments(), 1);
@@ -413,7 +539,7 @@ fn tenant_target_only_verification_is_bounded_and_resumes_durable_checkpoint_aft
         "restart and reset preserve the original durable audit"
     );
     for complete in [false, false, false, true] {
-        let progress = services.advance_tenant_key_verification(&administrator, tenant)?;
+        let progress = advance_recovered_verifier(&services, &administrator, tenant)?;
         assert_eq!(progress.is_complete(), complete);
         assert_eq!(progress.examined_segments(), 1);
     }
@@ -476,7 +602,7 @@ fn verification_schema_publication_fault_never_publishes_a_proof_task()
         drop((services, initialized));
         let initialized = fixture.reopen()?;
         let services = ServiceHandle::new(Arc::clone(&initialized))?;
-        let resumed = services.advance_tenant_key_verification(&administrator, tenant)?;
+        let resumed = advance_recovered_verifier(&services, &administrator, tenant)?;
         assert!(!resumed.is_complete());
         assert_eq!(resumed.examined_segments(), 1);
     }
@@ -550,7 +676,7 @@ fn verifier_reset_publication_fault_resumes_the_same_owner_after_reopen()
         assert_eq!(reset.task(), &task);
         assert!(reset.checkpoint().is_none());
         for complete in [false, false, true] {
-            let progress = services.advance_tenant_key_verification(&administrator, tenant)?;
+            let progress = advance_recovered_verifier(&services, &administrator, tenant)?;
             assert_eq!(progress.is_complete(), complete);
             assert_eq!(progress.examined_segments(), 1);
         }
