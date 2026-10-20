@@ -8,15 +8,18 @@ fn scripted_requests(
     listener.set_nonblocking(true)?;
     let endpoint = listener.local_addr()?;
     let responses = responses.to_vec();
+    let (completed, finished) = std::sync::mpsc::channel::<()>();
     let server = std::thread::spawn(move || -> Result<_, String> {
-        let deadline = Instant::now() + Duration::from_secs(3);
         let mut requests = Vec::new();
         for (status, body) in responses {
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        if Instant::now() >= deadline {
+                        if matches!(
+                            finished.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Disconnected)
+                        ) {
                             return Ok(requests);
                         }
                         std::thread::sleep(Duration::from_millis(5));
@@ -61,8 +64,16 @@ fn scripted_requests(
         }
         Ok(requests)
     });
-    let result = request(endpoint);
-    let requests = server.join().map_err(|_| "script server panic")??;
+    // The caller already bounds its request; keep this fixture alive through
+    // CLI startup and join it even if the caller fails or panics.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| request(endpoint)));
+    drop(completed);
+    let joined = server.join();
+    let result = match result {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    let requests = joined.map_err(|_| "script server panic")??;
     Ok((result, requests))
 }
 fn scripted_mutation(
@@ -80,6 +91,29 @@ fn scripted_mutation(
         )
     })
 }
+#[test]
+fn scripted_status_server_survives_valid_client_startup_delay() -> TestResult {
+    use positron_api::repository::{
+        RepositoryRequest, RepositoryServiceClient, RepositoryTransport,
+    };
+    let (result, requests) = scripted_requests(
+        &[(200, serde_json::json!({"catalog_generation":12}))],
+        |endpoint| {
+            std::thread::sleep(Duration::from_millis(3100));
+            let client =
+                RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })?;
+            let response = client.manage(
+                "test-administrator",
+                &RepositoryRequest::decode(br#"{"action":"status"}"#)?,
+            )?;
+            Ok(response.catalog_generation.to_string())
+        },
+    )?;
+    assert_eq!(result?, "12");
+    assert_eq!(requests, vec![serde_json::json!({"action":"status"})]);
+    Ok(())
+}
+
 #[test]
 fn wait_reconciles_lost_read_response_using_the_same_retained_operation() -> TestResult {
     let mut terminal = success();
