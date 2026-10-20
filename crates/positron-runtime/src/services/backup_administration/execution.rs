@@ -90,7 +90,17 @@ pub(in crate::services) fn complete(
         .map_err(|_| ServiceFailure::CorruptState)?;
     let id = OperationId::from_bytes(binding.operation_id())
         .map_err(|_| ServiceFailure::CorruptState)?;
-    let verification = {
+    enum Prepared {
+        Verification(
+            DurableOperation,
+            Option<positron_governance::AuthorizedContext>,
+        ),
+        Retention,
+        Snapshot(
+            std::ops::ControlFlow<bool, (DurableOperation, positron_governance::AuthorizedContext)>,
+        ),
+    }
+    let prepared = {
         let _gate = services.catalog_operation()?;
         let catalog = services
             .open_maintenance_catalog()
@@ -106,12 +116,18 @@ pub(in crate::services) fn complete(
                     services, execution, operation, &catalog,
                 )?)
             };
-            Some((operation, actor))
+            Prepared::Verification(operation, actor)
+        } else if execution.task().class()
+            == positron_kernel::MaintenanceTaskClass::RepositoryCleanup
+        {
+            Prepared::Retention
         } else {
-            None
+            Prepared::Snapshot(prepare_snapshot(
+                services, execution, work, operation, binding, &catalog,
+            )?)
         }
     };
-    if let Some((operation, actor)) = verification {
+    if let Prepared::Verification(operation, actor) = prepared {
         return super::verification::complete(
             services,
             execution,
@@ -167,94 +183,12 @@ pub(in crate::services) fn complete(
         };
         return retention::complete(services, execution, work, operation, actor, cancellation);
     }
-    let (operation, actor) = {
-        let _gate = services.catalog_operation()?;
-        let catalog = services
-            .open_maintenance_catalog()
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        let operation = DurableOperationAdministration::inspect(&catalog, id)
-            .map_err(|_| ServiceFailure::CorruptState)?
-            .ok_or(ServiceFailure::CorruptState)?;
-        require_operation(operation, services.instance.instance.to_bytes())?;
-        if operation
-            .backup_parameters()
-            .ok_or(ServiceFailure::CorruptState)?
-            .intent_digest()
-            != binding.intent_digest()
-        {
-            return Err(ServiceFailure::CorruptState);
-        }
-        let (sequence, owner_checkpoint) = checkpoint::current(services, execution, binding)?;
-        let (registry_checkpoint, terminal_checkpoint) = checkpoint::unpack(&owner_checkpoint)?;
-        let cleanup_ack_pending = operation.status() == DurableOperationStatus::Cancelled
-            && terminal_checkpoint.starts_with(b"POSBKC02");
-        if operation.status().is_terminal()
-            && operation.status() != DurableOperationStatus::Failed
-            && !cleanup_ack_pending
-        {
-            let coordinator = services.instance.maintenance_coordinator();
-            if terminal_checkpoint != b"POSBKC01" {
-                let sequence = sequence
-                    .checked_add(1)
-                    .ok_or(ServiceFailure::CorruptState)?;
-                execution
-                    .checkpoint_and_persist(
-                        coordinator,
-                        &catalog,
-                        binding
-                            .backup_checkpoint(
-                                sequence,
-                                &checkpoint::pack(registry_checkpoint, b"POSBKC01")?,
-                            )
-                            .map_err(super::super::maintenance::map_failure)?,
-                    )
-                    .map_err(super::super::maintenance::map_failure)?;
-            }
-            *work = None;
-            if !catalog
-                .release_backup_capture(binding.operation_id(), binding.intent_digest())
-                .map_err(|_| ServiceFailure::StorageUnavailable)?
-            {
-                return Ok(false);
-            }
-            if operation.status() == DurableOperationStatus::Cancelled {
-                coordinator
-                    .cancel_and_persist(&catalog, execution.task().identity())
-                    .map_err(super::super::maintenance::map_failure)?;
-            }
-            execution
-                .complete_and_persist(
-                    services.instance.maintenance_coordinator(),
-                    &catalog,
-                    operation.status() == DurableOperationStatus::Succeeded,
-                )
-                .map_err(super::super::maintenance::map_failure)?;
-            return Ok(true);
-        }
-        let now = services
-            .maintenance_status_now()
-            .map_err(|_| ServiceFailure::StorageUnavailable)?;
-        let actor = DurableOperationAdministration::resume_backup_actor(&catalog, id, now)
-            .map_err(|_| ServiceFailure::Unauthorized)?;
-        let operation = if operation.status() == DurableOperationStatus::Pending {
-            DurableOperationAdministration::begin(&catalog, actor, id, now)
-                .map_err(|_| ServiceFailure::CatalogUnavailable)?
-        } else {
-            operation
-        };
-        let operation = if operation.phase() == DurableOperationPhase::Preflight {
-            DurableOperationAdministration::advance_backup(
-                &catalog,
-                actor,
-                id,
-                BackupOperationStage::Capturing,
-                now,
-            )
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?
-        } else {
-            operation
-        };
-        (operation, actor)
+    let Prepared::Snapshot(prepared) = prepared else {
+        return Err(ServiceFailure::CorruptState);
+    };
+    let (operation, actor) = match prepared {
+        std::ops::ControlFlow::Break(complete) => return Ok(complete),
+        std::ops::ControlFlow::Continue(prepared) => prepared,
     };
     if operation.phase() == DurableOperationPhase::BackupCancellation
         || matches!(
@@ -909,4 +843,98 @@ impl BackupWork {
         }
         Ok(())
     }
+}
+
+fn prepare_snapshot(
+    services: &ServiceHandle,
+    execution: &mut MaintenanceExecution<'_>,
+    work: &mut Option<BackupWork>,
+    operation: DurableOperation,
+    binding: RepositoryOperationBinding,
+    catalog: &positron_kernel::Catalog<'_>,
+) -> Result<
+    std::ops::ControlFlow<bool, (DurableOperation, positron_governance::AuthorizedContext)>,
+    ServiceFailure,
+> {
+    let id = operation.operation_id();
+    require_operation(operation, services.instance.instance.to_bytes())?;
+    if operation
+        .backup_parameters()
+        .ok_or(ServiceFailure::CorruptState)?
+        .intent_digest()
+        != binding.intent_digest()
+    {
+        return Err(ServiceFailure::CorruptState);
+    }
+    let (sequence, owner_checkpoint) = checkpoint::current(services, execution, binding)?;
+    let (registry_checkpoint, terminal_checkpoint) = checkpoint::unpack(&owner_checkpoint)?;
+    let cleanup_ack_pending = operation.status() == DurableOperationStatus::Cancelled
+        && terminal_checkpoint.starts_with(b"POSBKC02");
+    if operation.status().is_terminal()
+        && operation.status() != DurableOperationStatus::Failed
+        && !cleanup_ack_pending
+    {
+        let coordinator = services.instance.maintenance_coordinator();
+        if terminal_checkpoint != b"POSBKC01" {
+            let sequence = sequence
+                .checked_add(1)
+                .ok_or(ServiceFailure::CorruptState)?;
+            execution
+                .checkpoint_and_persist(
+                    coordinator,
+                    catalog,
+                    binding
+                        .backup_checkpoint(
+                            sequence,
+                            &checkpoint::pack(registry_checkpoint, b"POSBKC01")?,
+                        )
+                        .map_err(super::super::maintenance::map_failure)?,
+                )
+                .map_err(super::super::maintenance::map_failure)?;
+        }
+        *work = None;
+        if !catalog
+            .release_backup_capture(binding.operation_id(), binding.intent_digest())
+            .map_err(|_| ServiceFailure::StorageUnavailable)?
+        {
+            return Ok(std::ops::ControlFlow::Break(false));
+        }
+        if operation.status() == DurableOperationStatus::Cancelled {
+            coordinator
+                .cancel_and_persist(catalog, execution.task().identity())
+                .map_err(super::super::maintenance::map_failure)?;
+        }
+        execution
+            .complete_and_persist(
+                services.instance.maintenance_coordinator(),
+                catalog,
+                operation.status() == DurableOperationStatus::Succeeded,
+            )
+            .map_err(super::super::maintenance::map_failure)?;
+        return Ok(std::ops::ControlFlow::Break(true));
+    }
+    let now = services
+        .maintenance_status_now()
+        .map_err(|_| ServiceFailure::StorageUnavailable)?;
+    let actor = DurableOperationAdministration::resume_backup_actor(catalog, id, now)
+        .map_err(|_| ServiceFailure::Unauthorized)?;
+    let operation = if operation.status() == DurableOperationStatus::Pending {
+        DurableOperationAdministration::begin(catalog, actor, id, now)
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?
+    } else {
+        operation
+    };
+    let operation = if operation.phase() == DurableOperationPhase::Preflight {
+        DurableOperationAdministration::advance_backup(
+            catalog,
+            actor,
+            id,
+            BackupOperationStage::Capturing,
+            now,
+        )
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?
+    } else {
+        operation
+    };
+    Ok(std::ops::ControlFlow::Continue((operation, actor)))
 }

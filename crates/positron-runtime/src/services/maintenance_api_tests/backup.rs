@@ -663,3 +663,6 @@ mod restore;
 
 #[path = "backup_tenant_purge.rs"]
 mod tenant_purge;
+
+#[path = "backup_snapshot_authorization.rs"]
+mod snapshot_authorization;
