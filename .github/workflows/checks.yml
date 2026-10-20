@@ -250,7 +250,7 @@ jobs:
             export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
             export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
             docker run --rm --user "$(id -u):$(id -g)" -e RUSTFLAGS -e CFLAGS -e CARGO_HOME=/cargo \
-              -e POSITRON_TEST_NATIVE_BINARY \
+              -e POSITRON_TEST_NATIVE_BINARY -e "TMPDIR=$RUNNER_TEMP" \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
               -v "$RUNNER_TEMP/gnu-cargo:/cargo" -w "$GITHUB_WORKSPACE" positron-gnu-builder \
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli
@@ -264,7 +264,7 @@ jobs:
             export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
             export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
             docker run --rm --user "$(id -u):$(id -g)" -e RUSTFLAGS -e CFLAGS -e CARGO_HOME=/cargo \
-              -e POSITRON_TEST_NATIVE_BINARY \
+              -e POSITRON_TEST_NATIVE_BINARY -e "TMPDIR=$RUNNER_TEMP" \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
               -v "$RUNNER_TEMP/gnu-cargo:/cargo" -w "$GITHUB_WORKSPACE" positron-gnu-builder \
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron --test process_exit offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_listing_or_bytes
@@ -278,7 +278,7 @@ jobs:
             export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
             export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
             docker run --rm --user "$(id -u):$(id -g)" -e RUSTFLAGS -e CFLAGS -e CARGO_HOME=/cargo \
-              -e POSITRON_TEST_NATIVE_BINARY \
+              -e POSITRON_TEST_NATIVE_BINARY -e "TMPDIR=$RUNNER_TEMP" \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
               -v "$RUNNER_TEMP/gnu-cargo:/cargo" -w "$GITHUB_WORKSPACE" positron-gnu-builder \
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron-release --test native_archives
