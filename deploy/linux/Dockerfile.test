@@ -3,7 +3,7 @@ ARG RUNTIME_IMAGE
 FROM ${RUNTIME_IMAGE}
 ARG FIXTURE_UID=1001
 RUN if command -v apt-get >/dev/null; then \
-      apt-get update && apt-get install -y --no-install-recommends systemd ca-certificates passwd util-linux git libgcc-s1 libc-bin coreutils && rm -rf /var/lib/apt/lists/*; \
+      apt-get update && apt-get install -y --no-install-recommends systemd ca-certificates passwd util-linux git procps libgcc-s1 libc-bin coreutils && rm -rf /var/lib/apt/lists/*; \
     else \
       set --; \
       if [ -f /etc/rocky-release ]; then \
