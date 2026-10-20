@@ -59,6 +59,46 @@ fn other(snapshot: &CatalogSnapshot) -> Vec<Vec<u8>> {
         .collect()
 }
 #[test]
+fn reopening_catalog_after_zero_elapsed_recovery_preserves_live_clock_progress()
+-> Result<(), Box<dyn std::error::Error>> {
+    fixture(|catalog| {
+        let (clock, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(epoch());
+        clock.recover_catalog_anchor(&catalog.pin()?)?;
+        assert_eq!(clock.governance_now_seconds()?, 100);
+        elapsed.advance(2_000_000_000)?;
+        clock.recover_catalog_anchor(&catalog.pin()?)?;
+        assert_eq!(clock.governance_now_seconds()?, 102);
+        clock.recover_catalog_anchor(&catalog.pin()?)?;
+        assert_eq!(clock.governance_now_seconds()?, 102);
+        Ok(())
+    })
+}
+
+#[test]
+fn first_catalog_recovery_reconciles_a_wall_jump_against_the_durable_anchor()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct JumpedWall;
+    impl crate::LifecycleClockSource for JumpedWall {
+        fn read(&self) -> Result<UnixNanoseconds, crate::LifecycleClockFailure> {
+            Ok(UnixNanoseconds::new(200_000_000_000))
+        }
+    }
+    fixture(|catalog| {
+        let clock = RetentionTimeAuthority::establish_with_source(
+            JumpedWall,
+            crate::LifecycleClockPolicy::new(1_000_000_000)?,
+        )?;
+        clock.recover_catalog_anchor(&catalog.pin()?)?;
+        assert_eq!(
+            clock.status().state(),
+            crate::LifecycleClockState::ClockUncertain
+        );
+        assert_eq!(clock.governance_now_seconds()?, 100);
+        Ok(())
+    })
+}
+
+#[test]
 fn cold_clock_checkpoints_accumulate_only_genuine_elapsed_time()
 -> Result<(), Box<dyn std::error::Error>> {
     fixture(|catalog| {

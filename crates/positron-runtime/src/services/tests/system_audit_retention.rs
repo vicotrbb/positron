@@ -630,7 +630,7 @@ fn audit_reclaimer_cancellation_before_physical_work_preserves_the_prefix_and_te
         .start_next_with_reservation_and_persist_for_class(
             &catalog,
             &initialized._authority,
-            1,
+            initialized.retention_time.governance_now_seconds()?,
             false,
             Some(MaintenanceTaskClass::CatalogReclamation),
         )
@@ -732,7 +732,7 @@ fn audit_reclaimer_recovers_a_prephysical_cancellation_when_its_terminal_write_f
         .start_next_with_reservation_and_persist_for_class(
             &catalog,
             &initialized._authority,
-            1,
+            initialized.retention_time.governance_now_seconds()?,
             false,
             Some(MaintenanceTaskClass::CatalogReclamation),
         )
@@ -1071,7 +1071,7 @@ fn system_audit_retention_refuses_a_successor_while_its_reclaimer_is_running()
         .start_next_with_reservation_and_persist_for_class(
             &catalog,
             &initialized._authority,
-            1,
+            initialized.retention_time.governance_now_seconds()?,
             false,
             Some(MaintenanceTaskClass::CatalogReclamation),
         )

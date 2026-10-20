@@ -614,7 +614,7 @@ impl RetentionTimeAuthority {
             .lock()
             .map_err(|_| LifecycleClockFailure::Unavailable)?;
         let local = advance_global(*safety, elapsed)?;
-        if safety.revision == 0 || safety.anchor_elapsed == 0 || record.anchor >= local {
+        if safety.revision == 0 || record.anchor >= local {
             // A newly established authority has not yet made a live
             // observation since its authenticated baseline, so the Catalog
             // anchor must become that baseline before the first wall-clock
