@@ -82,6 +82,7 @@ type BackupAuditFields = (
     Option<crate::BackupCleanupReceipt>,
     Option<crate::BackupRetentionClaimReceipt>,
     Option<[u8; 32]>,
+    Option<crate::RestoredBackupPublication>,
 );
 
 pub(super) fn decode_backup_evidence(
@@ -114,7 +115,17 @@ pub(super) fn decode_backup_evidence(
         {
             return Err(IdentityFailure);
         }
-        return Ok((repository, None, None, None, report));
+        return Ok((repository, None, None, None, report, None));
+    }
+    if tag == 5 {
+        if action != DurableOperationKind::BackupSnapshot
+            || outcome != DurableOperationStatus::Succeeded
+        {
+            return Err(IdentityFailure);
+        }
+        let publication = crate::RestoredBackupPublication::decode(cursor.take_exact(224)?)
+            .map_err(|_| IdentityFailure)?;
+        return Ok((repository, None, None, None, None, Some(publication)));
     }
     let (receipt, cleanup, claim) = match tag {
         0 => (None, None, None),
@@ -165,5 +176,5 @@ pub(super) fn decode_backup_evidence(
     {
         return Err(IdentityFailure);
     }
-    Ok((repository, receipt, cleanup, claim, None))
+    Ok((repository, receipt, cleanup, claim, None, None))
 }

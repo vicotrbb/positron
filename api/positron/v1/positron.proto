@@ -626,6 +626,9 @@ enum PublicErrorCode {
   PUBLIC_ERROR_CODE_MALFORMED_REQUEST = 4;
   PUBLIC_ERROR_CODE_REQUEST_TOO_LARGE = 5;
   PUBLIC_ERROR_CODE_UNKNOWN_FIELD = 6;
+  PUBLIC_ERROR_CODE_AUTHENTICATION_REJECTED = 7;
+  PUBLIC_ERROR_CODE_CAPACITY_UNAVAILABLE = 8;
+  PUBLIC_ERROR_CODE_QUERY_UNAVAILABLE = 9;
 }
 
 enum FailureSource {
@@ -633,6 +636,7 @@ enum FailureSource {
   FAILURE_SOURCE_CAPABILITY_NEGOTIATION = 1;
   FAILURE_SOURCE_GRPC_DECODE = 2;
   FAILURE_SOURCE_HTTP_DECODE = 3;
+  FAILURE_SOURCE_QUERY_EXECUTION = 4;
 }
 
 enum SafeDetail {
@@ -643,6 +647,9 @@ enum SafeDetail {
   SAFE_DETAIL_REQUEST_MALFORMED = 4;
   SAFE_DETAIL_REQUEST_LIMIT_EXCEEDED = 5;
   SAFE_DETAIL_FIELD_NOT_RECOGNIZED = 6;
+  SAFE_DETAIL_AUTHENTICATION_REJECTED = 7;
+  SAFE_DETAIL_CAPACITY_UNAVAILABLE = 8;
+  SAFE_DETAIL_QUERY_UNAVAILABLE = 9;
 }
 
 // Preview is read-only. Confirmation requires the exact generation-bound loss
@@ -714,6 +721,10 @@ message ProviderMigrationIdentity {
   string version = 3;
 }
 
+// Native administration uses the closed HTTP failure codes in http.json.
+// stale_generation alone identifies a rejected expected resource generation or
+// operation revision;
+// precondition_failed does not imply that retrying is safe.
 // Native Repository administration is served by the authenticated HTTP API.
 // Locator is a server-local native credential context, never a serialized secret.
 service RepositoryService {
@@ -850,6 +861,21 @@ message BackupSnapshotReceipt {
   uint64 reused_bytes = 5;
   uint64 retain_until_unix_seconds = 6;
 }
+// Historical source publication authenticated during restore. The current
+// registry head is the one observed at reconciliation, not original publication.
+// Transfer counters and original publication time are deliberately absent.
+message BackupRestoredPublication {
+  string manifest_checksum = 1;
+  string current_registry_generation_checksum = 2;
+  string source_catalog_identity = 3;
+  uint64 source_catalog_generation = 4;
+  uint64 retain_until_unix_seconds = 5;
+  string restore_origin_transaction = 6;
+  string restore_intent_digest = 7;
+  string capture_operation_id = 8;
+  string capture_request_digest = 9;
+  string restore_idempotency_key = 10;
+}
 message BackupResponse {
   RepositoryOperation operation = 1;
   optional RepositoryIdentity repository = 2;
@@ -861,6 +887,7 @@ message BackupResponse {
   optional string terminal_error_code = 8;
   optional string verification_report = 9;
   optional string verification_report_checksum = 10;
+  optional BackupRestoredPublication restored_publication = 11;
 }
 
 message BackupListRequest {
@@ -959,4 +986,121 @@ message UpgradeOperation {
  string cancellation = 6;
  string irreversible_boundary = 7;
  optional uint64 lookup_expires_at_unix_seconds = 8;
+}
+
+// Caller-lowered budgets for the bounded native Log Execute operation.
+// Server and tenant ceilings remain authoritative.
+message LogQueryBudget {
+  uint64 scanned_bytes = 1;
+  uint64 decoded_records = 2;
+  uint64 output_rows = 3;
+  uint64 output_bytes = 4;
+  uint64 memory_bytes = 5;
+  uint64 cpu_work_units = 6;
+  uint64 wall_seconds = 7;
+  uint64 maximum_time_range_nanoseconds = 8;
+}
+message LogQueryRequest {
+  string pipeline = 1;
+  LogQueryBudget budget = 2;
+}
+
+// The first external Query slice executes a finite Log pipeline. Native gRPC,
+// SQL, resume, tail, export and Trace transports remain separate incomplete work.
+service LogQueryService {
+  rpc Execute(LogQueryRequest) returns (LogQueryResponse);
+}
+message LogQueryResponse { repeated LogQueryEvent events = 1; }
+message LogQueryEvent {
+  oneof event {
+    LogQueryHeader header = 1;
+    LogQueryBatch batch = 2;
+    LogQueryTerminal terminal = 3;
+  }
+}
+message LogQueryColumn { string name = 1; string value_type = 2; bool nullable = 3; }
+message LogQuerySnapshot { bytes identity = 1; uint64 generation = 2; uint64 frontier = 3; }
+message LogQueryOrdering { string column = 1; string value_type = 2; string direction = 3; }
+message LogQueryLease { bytes identity = 1; uint64 expiry_unix_seconds = 2; }
+message LogQueryHeader {
+  repeated LogQueryColumn columns = 1;
+  LogQuerySnapshot snapshot = 2;
+  repeated LogQueryOrdering ordering = 3;
+  LogQueryBudget effective_budget = 4;
+  LogQueryLease lease = 5;
+  optional bytes initial_cursor = 6;
+}
+message LogQueryBatch {
+  uint64 sequence = 1;
+  repeated LogQueryRow rows = 2;
+  bytes prior_digest = 3;
+  bytes digest = 4;
+}
+message LogQueryRow { repeated LogQueryCell cells = 1; bool replayed = 2; }
+message LogQueryCell {
+  oneof value {
+    LogQueryValue native_value = 1;
+    LogQueryOccurrences occurrences = 2;
+    LogQueryTimestamp timestamp = 3;
+    uint64 unsigned_integer = 4;
+    LogQueryMissing missing = 5;
+  }
+}
+message LogQueryMissing {}
+message LogQueryOccurrences { repeated LogQueryValue values = 1; }
+message LogQueryTimestamp {
+  optional sint64 unix_nanoseconds = 1;
+  string provenance = 2;
+  string quality = 3;
+  optional uint64 source_value = 4;
+}
+// Tagged recursive native values preserve missing/null, floating-point bits,
+// binary data, ordered maps, occurrence sets and policy marker evidence.
+message LogQueryValue {
+  oneof value {
+    LogQueryNull null_value = 1;
+    bool boolean_value = 2;
+    sint64 integer_value = 3;
+    fixed64 float_bits = 4;
+    string text_value = 5;
+    bytes bytes_value = 6;
+    LogQueryArray array_value = 7;
+    LogQueryObject object_value = 8;
+    LogQueryMarker marker_value = 9;
+    LogQueryTruncated truncated_value = 10;
+  }
+}
+message LogQueryNull {}
+message LogQueryArray { repeated LogQueryValue values = 1; }
+message LogQueryObject { repeated LogQueryKeyValue entries = 1; }
+message LogQueryKeyValue { string key = 1; LogQueryValue value = 2; }
+message LogQueryMarker { string action = 1; string original_kind = 2; }
+message LogQueryTruncated { string action = 1; LogQueryValue value = 2; }
+message LogQueryTerminal {
+  string state = 1;
+  string reason = 2;
+  LogQueryStats stats = 3;
+  repeated LogQueryAffectedRange affected_ranges = 4;
+  optional bytes continuation_cursor = 5;
+}
+message LogQueryAffectedRange {
+  string temporal_axis = 1;
+  optional sint64 earliest_nanoseconds = 2;
+  optional sint64 latest_nanoseconds = 3;
+}
+message LogQueryStats {
+  uint64 records = 1;
+  uint64 scanned_bytes = 2;
+  uint64 decoded_records = 3;
+  uint64 output_bytes = 4;
+  uint64 memory_peak_bytes = 5;
+  uint64 cpu_work_units = 6;
+  uint64 wall_seconds = 7;
+  optional uint64 last_sequence = 8;
+  bytes result_digest = 9;
+  LogQueryBudget cumulative_budget = 10;
+  uint64 resume_count = 11;
+  uint64 repeated_batch_count = 12;
+  optional string limiting_budget = 13;
+  bool reduced_pruning = 14;
 }

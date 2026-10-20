@@ -146,7 +146,7 @@ fn runtime_backup_expiry_waits_for_retention_and_finishes_signed_cleanup()
             let due = loop {
                 match services.manage_backup(&administrator, &due_request.encode()?) {
                     Ok(response) => break response,
-                    Err(MaintenanceServiceFailure::PreconditionFailed) => {
+                    Err(MaintenanceServiceFailure::StaleGeneration) => {
                         let generation = {
                             let _gate = services.catalog_operation()?;
                             open_catalog(&initialized)?.pin()?.number()

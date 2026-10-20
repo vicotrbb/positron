@@ -17,6 +17,63 @@ use std::{
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+fn after_capacity(
+    deadline: std::time::Instant,
+    mut invoke: impl FnMut() -> TestResult<Output>,
+) -> TestResult<Output> {
+    loop {
+        let output = invoke()?;
+        if output.status.success()
+            || output.stderr
+                != b"positron: capacity unavailable; retry the same idempotent request\n"
+            || std::time::Instant::now() >= deadline
+        {
+            return Ok(output);
+        }
+        std::thread::sleep(
+            std::time::Duration::from_millis(10)
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    }
+}
+
+#[test]
+fn scope_check_retries_only_exact_capacity_within_its_admission_deadline() -> TestResult {
+    use std::os::unix::process::ExitStatusExt;
+    let capacity = "positron: capacity unavailable; retry the same idempotent request\n";
+    let scope = "positron: system administration authentication rejected\n";
+    let mut calls = 0;
+    let output = after_capacity(
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+        || {
+            calls += 1;
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: Vec::new(),
+                stderr: if calls == 1 { capacity } else { scope }
+                    .as_bytes()
+                    .to_vec(),
+            })
+        },
+    )?;
+    assert_eq!(calls, 2);
+    assert_eq!(output.stderr, scope.as_bytes());
+    for failure in [scope, "positron: administration unavailable\n", capacity] {
+        let mut calls = 0;
+        let output = after_capacity(std::time::Instant::now(), || {
+            calls += 1;
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: Vec::new(),
+                stderr: failure.as_bytes().to_vec(),
+            })
+        })?;
+        assert_eq!(calls, 1);
+        assert_eq!(output.stderr, failure.as_bytes());
+    }
+    Ok(())
+}
+
 fn command(
     endpoint: SocketAddr,
     bearer: &str,
@@ -117,16 +174,33 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
         "--aws-prefix".into(),
         "diagnostic/".into(),
     ];
-    let rejected = command(
-        endpoint,
-        claim.ingest_secret().ok_or("ingest credential")?,
-        "doctor",
-        &native,
+    let rejected = after_capacity(
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+        || {
+            command(
+                endpoint,
+                claim.ingest_secret().ok_or("ingest credential")?,
+                "doctor",
+                &native,
+            )
+        },
     )?;
     assert!(!rejected.status.success());
+    let rejected_error = String::from_utf8(rejected.stderr)?;
+    for secret in [
+        Some(claim.secret()),
+        claim.ingest_secret(),
+        claim.query_secret(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(!rejected_error.contains(secret));
+    }
+    assert!(!rejected_error.contains("123456789012"));
     assert!(
-        String::from_utf8(rejected.stderr)?
-            .contains("system administration authentication rejected")
+        rejected_error.contains("system administration authentication rejected"),
+        "repository ingest-credential CLI refusal: {rejected_error}"
     );
     let mut invalid = native;
     for value in &mut invalid {
@@ -137,9 +211,12 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
     let rejected = command(endpoint, claim.secret(), "doctor", &invalid)?;
     assert!(!rejected.status.success());
     let error = String::from_utf8(rejected.stderr)?;
-    assert!(error.contains("invalid repository request"));
     assert!(!error.contains(claim.secret()));
     assert!(!error.contains("123456789012"));
+    assert!(
+        error.contains("invalid repository request"),
+        "invalid-target repository CLI failure: {error}"
+    );
     let repository = root.join("repository");
     fs::create_dir(&repository)?;
     fs::set_permissions(&repository, fs::Permissions::from_mode(0o700))?;
@@ -154,16 +231,16 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
                     idempotency_key: None,
                     aws_s3: None,
                     google_cloud_storage: None,
-        azure_blob: None,
+                    azure_blob: None,
                     locator: None,
                     repository_id: None,
                     operation_id: None,
                 },
             ) {
                 Ok(current) => current,
-                Err(positron_api::repository::RepositoryServiceClientFailure::AdministrationUnavailable)
-                    if std::time::Instant::now() < admission_deadline =>
-                {
+                Err(
+                    positron_api::repository::RepositoryServiceClientFailure::CapacityUnavailable,
+                ) if std::time::Instant::now() < admission_deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 },
@@ -195,7 +272,7 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
             }
             let error = String::from_utf8(output.stderr)?;
             if std::time::Instant::now() >= admission_deadline
-                || !(error.contains("stale Catalog generation")
+                || !(error.contains("stale resource generation")
                     || error.contains("administration unavailable"))
             {
                 return Err(format!("repository {action} admission refused: {error}").into());

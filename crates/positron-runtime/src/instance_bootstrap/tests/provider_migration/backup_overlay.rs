@@ -112,7 +112,7 @@ async fn native_cutover_overlay_recovers_original_backup_tenant_key_after_cold_r
     instance.begin_key_provider_migration(configuration()?)?;
     instance.activate_key_provider_migration(configuration()?)?;
     instance.verify_key_provider_migration(configuration()?)?;
-    let (source, destination) = instance.backup_migration_envelopes()?;
+    let (source, destination) = instance.backup_migration_envelopes(None)?;
     assert_eq!(source.identity().family(), ProviderFamily::LocalFile);
     assert_eq!(destination.identity(), &target);
     let overlay = BackupEnvelopeOverlay::new(
@@ -153,7 +153,7 @@ async fn native_cutover_overlay_recovers_original_backup_tenant_key_after_cold_r
             &overlay.target().encode(),
         )?;
     }
-    let (cold_source, cold_target) = reopened.backup_migration_envelopes()?;
+    let (cold_source, cold_target) = reopened.backup_migration_envelopes(None)?;
     assert_eq!(cold_source, source);
     assert_eq!(cold_target, destination);
     let grant = NativeAwsResources::new(

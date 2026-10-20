@@ -11,6 +11,7 @@ homepage.workspace = true
 publish = false
 
 [dependencies]
+positron-config = { path = "../positron-config" }
 rsa = { version = "=0.9.10", default-features = false }
 pgp = { version = "=0.21.0", default-features = false }
 signed_note = "=0.2.0"

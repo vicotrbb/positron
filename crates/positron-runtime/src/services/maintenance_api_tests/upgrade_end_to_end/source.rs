@@ -194,7 +194,7 @@ pub(super) fn drain_source_case(
                 attempts += 1;
                 match client.manage(&administrator, &body) {
                     Ok(response) => break response,
-                    Err(positron_api::upgrade::UpgradeServiceClientFailure::PreconditionFailed) => {
+                    Err(positron_api::upgrade::UpgradeServiceClientFailure::StaleGeneration) => {
                         // An operator may resubmit the unchanged intent only after
                         // proving a stale basis, never after an ambiguous acceptance.
                         let services = process.services().ok_or("refresh services")?;

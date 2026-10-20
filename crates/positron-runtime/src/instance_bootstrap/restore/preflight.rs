@@ -48,10 +48,15 @@ impl InstanceBootstrap {
             &index,
         )
         .map_err(|_| failure())?;
+        let configuration_bytes = u64::try_from(configuration.redacted_effective().len())
+            .map_err(|_| failure())?
+            .checked_mul(3)
+            .ok_or_else(failure)?;
         let retained = verification
             .prospective_memory_bytes()
             .map_err(|_| failure())?
             .checked_mul(3)
+            .and_then(|bytes| bytes.checked_add(configuration_bytes))
             .and_then(|bytes| bytes.checked_add(index.len() as u64))
             .and_then(|bytes| bytes.checked_add(manifest.retained_memory_bytes().ok()?))
             .ok_or_else(failure)?;
@@ -147,6 +152,14 @@ impl InstanceBootstrap {
         publisher
             .validate_snapshot_inventory(&mut remote, &files)
             .map_err(|_| failure())?;
+        let restored_publication = positron_governance::RestoredBackupPublication::new(
+            &origin,
+            request.source,
+            request.idempotency,
+            remote.registry_generation(),
+            manifest.retain_until(),
+        )
+        .map_err(|_| failure())?;
         let source_catalog = source.clone();
         let tombstones = runtime
             .block_on(publisher.purge_tombstones())
@@ -195,9 +208,15 @@ impl InstanceBootstrap {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let objects =
+        let mut objects =
             TenantAdministration::restore_catalog_objects(origin.snapshot(), &custody, &envelopes)
                 .map_err(|_| failure())?;
+        crate::configuration_catalog::bind_restored_configuration(
+            &origin,
+            &mut objects,
+            configuration,
+            &secret,
+        )?;
         let record = execution::record(request.pin, &custody, governance)?;
         let origin = origin
             .with_restored_objects(objects)
@@ -322,6 +341,66 @@ impl InstanceBootstrap {
         let basis = catalog.pin().map_err(|_| failure())?;
         let actor = Identity::authorize_backup_restore(&basis, &custody, request.pin, now()?)
             .map_err(|_| failure())?;
+        // Resolve the exact accepted restore binding before any historical
+        // operation transition. A changed key/request cannot reconcile state.
+        if let Some(existing) =
+            DurableOperationAdministration::inspect_by_idempotency(&catalog, request.idempotency)
+                .map_err(|_| failure())?
+            && (existing.backup_restore_parameters() != Some(parameters)
+                || existing.request().principal() != actor.principal_id())
+        {
+            return Err(failure());
+        }
+        if TenantAdministration::restore_purge_exclusions(&basis).map_err(|_| failure())?
+            == planned_exclusions
+        {
+            let mut publication = restored_publication;
+            if let Some(previous) = DurableOperationAdministration::inspect(
+                &catalog,
+                positron_governance::OperationId::from_bytes(publication.capture_operation())
+                    .map_err(|_| failure())?,
+            )
+            .map_err(|_| failure())?
+            .and_then(|operation| operation.restored_backup_publication())
+                && previous != publication
+            {
+                if !previous.same_restore_binding(publication) {
+                    return Err(failure());
+                }
+                // Preserve both the source registration anchor and the stronger
+                // first committed observation. A signed older head is a rollback.
+                let anchored = BackupPublisher::new(repository.as_ref(), &identity, &signer)
+                    .with_control_resources(&resources, carry_memory)
+                    .map_err(|_| failure())?
+                    .with_trusted_generation(previous.current_registry_generation())
+                    .map_err(|_| failure())?;
+                let mut proof = runtime
+                    .block_on(anchored.begin_registry_verification(
+                        request.idempotency.to_bytes(),
+                        parameters.intent_digest(),
+                    ))
+                    .map_err(|_| failure())?;
+                while !proof.complete().map_err(|_| failure())? {
+                    runtime
+                        .block_on(anchored.registry_verification_step(&mut proof))
+                        .map_err(|_| failure())?;
+                }
+                if proof.verified_head().map_err(|_| failure())?
+                    != publication.current_registry_generation()
+                {
+                    return Err(failure());
+                }
+                publication = previous;
+            }
+            DurableOperationAdministration::reconcile_restored_backup(
+                &catalog,
+                actor,
+                publication,
+                now()?,
+            )
+            .map_err(|_| failure())?;
+        }
+        let basis = catalog.pin().map_err(|_| failure())?;
         let stale_plan_failure = if TenantAdministration::restore_purge_exclusions(&basis)
             .map_err(|_| failure())?
             != planned_exclusions

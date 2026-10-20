@@ -59,3 +59,171 @@ jobs:
 
       - name: Run native local-key bootstrap and format tests
         run: cargo test --locked -p positron-kernel --lib data_protection::local_key
+
+  native-archives:
+    name: Native archive (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target: linux-aarch64
+          - runner: macos-15-intel
+            target: macos-x86_64
+          - runner: macos-15
+            target: macos-aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Build first locked native payload
+        shell: bash
+        run: |
+          test "$(id -u)" != 0
+          export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
+          export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
+          if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-reproducible"; fi
+          cargo build --locked --release -p positron --target-dir "$RUNNER_TEMP/native-target"
+          echo "Native build flag identity and executable leaf names"
+          if [ "$(uname -s)" = Darwin ]; then
+            printf '%s' "$RUSTFLAGS" | shasum -a 256
+            if xcrun ld -v 2>&1 | head -n 4; then :; fi
+            if [ "${RC_UUID_SALT+x}" = x ]; then printf 'RC_UUID_SALT sha256='; printf '%s' "$RC_UUID_SALT" | shasum -a 256; else echo "RC_UUID_SALT absent"; fi
+          else
+            printf '%s' "$RUSTFLAGS" | sha256sum
+            ld --version | head -n 2
+          fi
+          for executable in "$RUNNER_TEMP/native-target/release/deps"/positron-*; do
+            if [ -f "$executable" ] && [ -x "$executable" ]; then basename "$executable"; fi
+          done | awk 'NR <= 8 { print }'
+          mkdir "$RUNNER_TEMP/first"
+          cp "$RUNNER_TEMP/native-target/release/positron" "$RUNNER_TEMP/first/positron"
+          "$RUNNER_TEMP/first/positron" release archive --target '${{ matrix.target }}' --binary "$RUNNER_TEMP/first/positron" --out "$RUNNER_TEMP/first/native.tar.gz"
+      - name: Independently rebuild and compare executable and archive bytes
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/independent-source"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/independent-source"
+          cargo clean --release --target-dir "$RUNNER_TEMP/native-target"
+          cd "$RUNNER_TEMP/independent-source"
+          export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
+          export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
+          if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-reproducible"; fi
+          cargo build --locked --release -p positron --target-dir "$RUNNER_TEMP/native-target"
+          echo "Native build flag identity and executable leaf names"
+          if [ "$(uname -s)" = Darwin ]; then
+            printf '%s' "$RUSTFLAGS" | shasum -a 256
+            if xcrun ld -v 2>&1 | head -n 4; then :; fi
+            if [ "${RC_UUID_SALT+x}" = x ]; then printf 'RC_UUID_SALT sha256='; printf '%s' "$RC_UUID_SALT" | shasum -a 256; else echo "RC_UUID_SALT absent"; fi
+          else
+            printf '%s' "$RUSTFLAGS" | sha256sum
+            ld --version | head -n 2
+          fi
+          for executable in "$RUNNER_TEMP/native-target/release/deps"/positron-*; do
+            if [ -f "$executable" ] && [ -x "$executable" ]; then basename "$executable"; fi
+          done | awk 'NR <= 8 { print }'
+          if ! cmp "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"; then
+            echo "Executable reproducibility mismatch: first 16 byte offsets (decimal) and values (octal)"
+            if cmp -l "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron" | awk 'NR <= 16 { print } END { print "cmp_differing_byte_count=" NR }'; then :; fi
+            if [ "$(uname -s)" = Darwin ]; then
+              echo "Last 32 differing byte offsets (decimal; no values)"
+              if cmp -l "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron" | awk '{ offsets[(NR - 1) % 32] = $1 } END { for (i = (NR > 32 ? NR - 32 : 0); i < NR; i++) print offsets[i % 32] }'; then :; fi
+            fi
+            for payload in "$RUNNER_TEMP/first/positron" "$RUNNER_TEMP/native-target/release/positron"; do
+              echo "Executable: $payload"
+              wc -c < "$payload"
+              if [ "$(uname -s)" = Darwin ]; then
+                shasum -a 256 "$payload"
+                if otool -hv -l "$payload" | head -n 256; then :; else echo "Mach-O metadata diagnostic unavailable"; fi
+                echo "Mach-O UUID and code-signature load-command fields"
+                if otool -l "$payload" | awk '$1 == "cmd" { selected = ($2 == "LC_UUID" || $2 == "LC_CODE_SIGNATURE") } selected && ($1 == "cmd" || $1 == "cmdsize" || $1 == "uuid" || $1 == "dataoff" || $1 == "datasize") && count++ < 8 { print }'; then :; else echo "Mach-O identity diagnostic unavailable"; fi
+                for section in __text __const __unwind_info __eh_frame; do
+                  echo "__TEXT/$section content hash"
+                  if otool -s __TEXT "$section" "$payload" | tail -n +3 | shasum -a 256; then :; else echo "Section diagnostic unavailable"; fi
+                done
+              else
+                sha256sum "$payload"
+                echo "Native C driver and bundled ELF linker versions"
+                if cc --version | awk 'NR <= 2 { print }'; then :; else echo "C driver version unavailable"; fi
+                if "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/ { print $2 }')/bin/rust-lld" -flavor gnu --version; then :; else echo "Bundled linker version unavailable"; fi
+                if readelf -sW "$payload" | awk '$1 ~ /^[0-9]+:$/ { print $4, $5, $6, $7, $8 }' > "$payload.symbols"; then
+                  echo "ELF symbol names: ordered and sorted unique SHA256"
+                  awk '{ print $5 }' "$payload.symbols" | sha256sum
+                  awk '{ print $5 }' "$payload.symbols" | LC_ALL=C sort -u | sha256sum
+                  echo "ELF STT_FILE names: count, ordered and sorted unique SHA256"
+                  awk '$1 == "FILE" { count++ } END { print count+0 }' "$payload.symbols"
+                  awk '$1 == "FILE" { print $5 }' "$payload.symbols" | sha256sum
+                  awk '$1 == "FILE" { print $5 }' "$payload.symbols" | LC_ALL=C sort -u | sha256sum
+                else echo "ELF symbol diagnostic unavailable"; fi
+                if readelf -h -S -n -W "$payload" | head -n 256; then :; else echo "ELF metadata diagnostic unavailable"; fi
+                echo "ELF section headers (at most 128)"
+                if readelf -SW "$payload" | awk '/^[[:space:]]*\[[[:space:]]*[0-9]+\]/ && count++ < 128 { print }'; then :; else echo "Section headers unavailable"; fi
+                while IFS= read -r section; do
+                  printf '%s ' "$section"
+                  if readelf -x "$section" "$payload" | awk '$1 ~ /^0x[0-9a-fA-F]+$/ { print }' | sha256sum | awk '{ print $1 }'; then :; else echo "Section diagnostic unavailable"; fi
+                done < <(readelf -SW "$payload" | sed -n 's/^[[:space:]]*\[[[:space:]]*[1-9][0-9]*\][[:space:]]*\([^[:space:]]*\).*/\1/p' | head -n 128)
+              fi
+            done
+            if [ "$(uname -s)" != Darwin ]; then
+              echo "First 16 changed ELF symbol metadata rows (type/binding/visibility/section/name; at most 256 characters each)"
+              if diff -U 0 "$RUNNER_TEMP/first/positron.symbols" "$RUNNER_TEMP/native-target/release/positron.symbols" | awk '/^[+-]/ && !/^---/ && !/^\+\+\+/ && count++ < 16 { print substr($0, 1, 256) }'; then :; fi
+            fi
+            if [ "$(uname -s)" != Darwin ] && command -v nm >/dev/null && command -v timeout >/dev/null; then
+              echo "Bounded existing-archive anonymous symbol owner lookup"
+              shopt -s nullglob
+              # Soft 30-second start guard; each nm/hash call has its own two-second timeout.
+              scanned=0; matches=0; scanned_bytes=0; lookup_started=$SECONDS
+              for archive_scope in project sysroot; do
+                if [ "$archive_scope" = project ]; then
+                  archives=("$RUNNER_TEMP/native-target/release/deps/"*.rlib "$RUNNER_TEMP/native-target/release/build/"*/out/*.a)
+                else
+                  if [ "$matches" -gt 0 ]; then break; fi
+                  sysroot=$(rustc --print sysroot)
+                  host=$(rustc -vV | awk '/^host:/ { print $2 }')
+                  archives=("$sysroot/lib/rustlib/$host/lib/"*.rlib)
+                fi
+                for archive in "${archives[@]}"; do
+                  if [ "$scanned" -ge 512 ] || [ "$((SECONDS - lookup_started))" -ge 30 ] || [ "$matches" -ge 16 ]; then break 2; fi
+                  if [ -L "$archive" ] || [ ! -f "$archive" ]; then echo "Archive lookup skipped nonregular input: unknown"; continue; fi
+                  if ! archive_bytes=$(stat -c %s -- "$archive"); then echo "Archive size unavailable: unknown"; continue; fi
+                  if [ "$archive_bytes" -gt 134217728 ] || [ "$((scanned_bytes + archive_bytes))" -gt 1073741824 ]; then continue; fi
+                  scanned=$((scanned + 1)); scanned_bytes=$((scanned_bytes + archive_bytes))
+                  owner_rows="$RUNNER_TEMP/anonymous-symbol-owner.rows"
+                  if timeout 2s nm -A --defined-only --no-demangle "$archive" 2>/dev/null | awk -v limit="$((16 - matches))" '$NF ~ /^anon\.53c04138b59e21e152322481f8cc7aa9\.1(\.llvm\.[0-9]+)?$/ && count++ < limit { split($1, parts, ":"); member=parts[2]; sub(/^.*\//, "", member); print substr(member, 1, 256), substr($NF, 1, 256) }' > "$owner_rows"; then
+                    if [ -s "$owner_rows" ]; then
+                      if [ "$((SECONDS - lookup_started))" -ge 30 ]; then break 2; fi
+                      if archive_hash=$(timeout 2s sha256sum "$archive" | awk '{ print $1 }'); then
+                        printf 'archive_leaf=%s sha256=%s\n' "${archive##*/}" "$archive_hash"
+                        cat "$owner_rows"
+                        matches=$((matches + $(wc -l < "$owner_rows")))
+                      else echo "Archive hash unavailable: unknown"; fi
+                    fi
+                  else echo "Archive lookup incomplete: tool refused or timed out"; fi
+                done
+              done
+              printf 'archive_lookup scanned=%s matches=%s; caps/skipped/unmatched inputs remain unknown\n' "$scanned" "$matches"
+            else echo "Archive owner lookup unavailable"; fi
+            exit 1
+          fi
+          "$RUNNER_TEMP/native-target/release/positron" release archive --target '${{ matrix.target }}' --binary "$RUNNER_TEMP/native-target/release/positron" --out "$RUNNER_TEMP/rebuilt-native.tar.gz"
+          cmp "$RUNNER_TEMP/first/native.tar.gz" "$RUNNER_TEMP/rebuilt-native.tar.gz"
+      - name: Install immutable non-root archive
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/native-install"
+          tar -xzf "$RUNNER_TEMP/first/native.tar.gz" -C "$RUNNER_TEMP/native-install"
+          chmod -R a-w "$RUNNER_TEMP/native-install/positron"
+          echo "POSITRON_TEST_NATIVE_BINARY=$RUNNER_TEMP/native-install/positron/bin/positron" >> "$GITHUB_ENV"
+      - name: Run archive and installed public lifecycle integration tests
+        run: cargo test --locked -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli
+      - name: Run installed offline integrity verification
+        run: cargo test --locked -p positron --test process_exit offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_listing_or_bytes
+      - name: Run signed archive manifest and configuration contracts
+        run: cargo test --locked -p positron-release --test native_archives

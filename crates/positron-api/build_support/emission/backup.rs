@@ -14,10 +14,14 @@ impl BackupServiceClient {{
         Ok(Self {{ http }})
     }}
     pub fn manage(&self, bearer: &str, request: &super::BackupRequest) -> Result<super::BackupResponse, super::BackupServiceClientFailure> {{
+        self.manage_with_timeout(bearer, request, crate::http_client::DEFAULT_REQUEST_TIMEOUT)
+    }}
+    /// Bounds this request by the supplied duration, capped at the default five seconds.
+    pub fn manage_with_timeout(&self, bearer: &str, request: &super::BackupRequest, timeout: std::time::Duration) -> Result<super::BackupResponse, super::BackupServiceClientFailure> {{
         use super::BackupServiceClientFailure as Failure;
         let body = request.encode().map_err(|_| Failure::InvalidRequest)?;
         if body.len() > {request_limit} {{ return Err(Failure::InvalidRequest); }}
-        let (status, bytes) = self.http.post(bearer, {path:?}, body, {response_limit}).map_err(|_| Failure::Transport)?;
+        let (status, bytes) = self.http.post_with_timeout(bearer, {path:?}, body, {response_limit}, timeout).map_err(|_| Failure::Transport)?;
         if !(200..300).contains(&status) {{
             let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
             let code = value.as_ref().and_then(|value| value.get("code")?.as_str());
@@ -26,7 +30,8 @@ impl BackupServiceClient {{
                 (401, Some("authentication_rejected")) => Failure::AuthenticationRejected,
                 (404, Some("source_unavailable")) => Failure::SourceUnavailable,
                 (404, Some("task_unavailable")) => Failure::TaskUnavailable,
-                (409, Some("precondition_failed")) => Failure::PreconditionFailed,
+                (409, Some("stale_generation")) => Failure::StaleGeneration,
+        (409, Some("precondition_failed")) => Failure::PreconditionFailed,
                 (409, Some("idempotency_conflict")) => Failure::IdempotencyConflict,
                 (503, Some("administration_unavailable")) => Failure::AdministrationUnavailable,
                 (503, Some("capacity_unavailable")) => Failure::CapacityUnavailable,
@@ -48,7 +53,8 @@ impl BackupServiceClient {{
                 (401, Some("authentication_rejected")) => Failure::AuthenticationRejected,
                 (404, Some("source_unavailable")) => Failure::SourceUnavailable,
                 (404, Some("task_unavailable")) => Failure::TaskUnavailable,
-                (409, Some("precondition_failed")) => Failure::PreconditionFailed,
+                (409, Some("stale_generation")) => Failure::StaleGeneration,
+        (409, Some("precondition_failed")) => Failure::PreconditionFailed,
                 (409, Some("idempotency_conflict")) => Failure::IdempotencyConflict,
                 (503, Some("administration_unavailable")) => Failure::AdministrationUnavailable,
                 (503, Some("capacity_unavailable")) => Failure::CapacityUnavailable,

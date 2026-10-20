@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 #[test]
 fn upgrade_bounded_verification_turns_survive_cold_service_reconstruction()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
     let fixture = crate::services::tests::schema_maintenance::Fixture::new()?;
     let (instance, _, _, administrator) = fixture.initialized_with_admin()?;
     let export = fixture.recovery_export_directory()?;
@@ -93,15 +94,80 @@ fn upgrade_bounded_verification_turns_survive_cold_service_reconstruction()
             Some(last)
         );
     }
-    let mut refused = false;
+    let stopped_resources = {
+        use crate::services::backup_administration::{StopPoint, stop_after};
+        let (instance, services) = ready_cold_services(&fixture, last.updated_at_unix_seconds())?;
+        let stop = stop_after(StopPoint::VerificationNativeFileVerified)?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut stopped = false;
+        for _ in 0..4 {
+            match services.drive_upgrade_backup_operation(last.operation_id(), deadline) {
+                Err(crate::UpgradeFailure::SnapshotUnavailable) => {
+                    assert!(
+                        stop.observed(),
+                        "only the exact native-file stop explains this refusal"
+                    );
+                    stopped = true;
+                    break;
+                },
+                Ok(operation) => {
+                    assert!(
+                        !operation.status().is_terminal(),
+                        "the native-file stop must precede completion"
+                    );
+                },
+                Err(error) => return Err(error.into()),
+            }
+        }
+        assert!(
+            stopped,
+            "the bounded turn must authenticate an actual native file"
+        );
+        let catalog = crate::services::tests::schema_maintenance::open_catalog(&instance)?;
+        last = Administration::inspect(&catalog, last.operation_id())?
+            .ok_or("stopped verification")?;
+        assert!(!last.status().is_terminal());
+        assert!(last.backup_verification_report().is_none());
+        let status = instance
+            .maintenance_coordinator()
+            .status(task)
+            .map_err(|e| format!("stopped task {e:?}"))?;
+        let checkpoint = status
+            .checkpoint()
+            .ok_or("authenticated remote checkpoint")?
+            .opaque_progress()
+            .to_vec();
+        (status.task().reservations(), checkpoint)
+    };
+    let mut expected_cold_resources = Some(stopped_resources.0);
+    let mut expected_cold_checkpoint = Some(stopped_resources.1);
     for _ in 0..32 {
         let (instance, services) = ready_cold_services(&fixture, last.updated_at_unix_seconds())?;
+        let before_resources = instance
+            .maintenance_coordinator()
+            .status(task)
+            .map_err(|e| format!("status {e:?}"))?
+            .task()
+            .reservations();
+        if let Some(expected) = expected_cold_resources {
+            assert_eq!(
+                before_resources, expected,
+                "cold reopen must retain exact readmission bounds"
+            );
+        }
         let before = instance
             .maintenance_coordinator()
             .status(task)
             .map_err(|e| format!("status {e:?}"))?
             .checkpoint()
             .map(|checkpoint| checkpoint.opaque_progress().to_vec());
+        if let Some(expected) = expected_cold_checkpoint.take() {
+            assert_eq!(
+                before.as_deref(),
+                Some(expected.as_slice()),
+                "cold reopen must retain the authenticated stopped checkpoint"
+            );
+        }
         let result = services.drive_upgrade_backup_operation(
             last.operation_id(),
             Instant::now() + Duration::from_secs(1),
@@ -125,27 +191,53 @@ fn upgrade_bounded_verification_turns_survive_cold_service_reconstruction()
                 );
                 assert_eq!(before, after, "no semantic checkpoint progress");
                 assert_eq!(
+                    status.task().reservations(),
+                    before_resources,
+                    "a refused turn cannot claim readmission progress"
+                );
+                assert_eq!(
                     status.phase(),
                     positron_kernel::MaintenanceTaskPhase::Queued
                 );
-                refused = true;
                 break;
             },
             Ok(operation) => {
+                let after_resources = status.task().reservations();
+                let readmitted = before_resources != after_resources;
+                if readmitted {
+                    assert_eq!(
+                        status.phase(),
+                        positron_kernel::MaintenanceTaskPhase::Queued
+                    );
+                    for dimension in positron_kernel::ResourceDimension::ALL {
+                        if dimension == positron_kernel::ResourceDimension::MemoryBytes {
+                            assert!(
+                                after_resources.get(dimension) > before_resources.get(dimension),
+                                "readmission must strictly grow its required memory"
+                            );
+                        } else {
+                            assert_eq!(
+                                after_resources.get(dimension),
+                                before_resources.get(dimension),
+                                "memory readmission must preserve every other dimension"
+                            );
+                        }
+                    }
+                    expected_cold_resources = Some(after_resources);
+                }
                 assert!(
-                    operation.revision() != last.revision() || before != after,
+                    operation.revision() != last.revision() || before != after || readmitted,
                     "a turn with no durable progress must report retryable capacity"
                 );
                 last = operation;
-                assert!(
-                    !last.status().is_terminal(),
-                    "fixture must exercise a short semantic turn"
-                );
+                if last.status().is_terminal() {
+                    assert_eq!(last.status(), DurableOperationStatus::Succeeded);
+                    break;
+                }
             },
             Err(error) => return Err(error.into()),
         }
     }
-    assert!(refused, "short turn must report an honest retryable limit");
     for turn in 0..4 {
         let (instance, services) = ready_cold_services(&fixture, last.updated_at_unix_seconds())?;
         last = services

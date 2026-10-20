@@ -484,7 +484,7 @@ fn authenticate(
     let hints = proxy_hints(&request, trusted_proxy, authentication_rejected)?;
     let context = services
         .authorize_logs_with_hints(bearer, hints)
-        .map_err(|_| authentication_rejected())?;
+        .map_err(service_status)?;
     let admission = services.admit_logs(context).map_err(service_status)?;
     request.extensions_mut().insert(context);
     request.extensions_mut().insert(admission);
@@ -510,7 +510,7 @@ fn authenticate_traces(
     let hints = proxy_hints(&request, trusted_proxy, trace_authentication_rejected)?;
     let context = services
         .authorize_traces_with_hints(bearer, hints)
-        .map_err(|_| trace_authentication_rejected())?;
+        .map_err(trace_service_status)?;
     let admission = services
         .admit_traces(context)
         .map_err(trace_service_status)?;

@@ -76,6 +76,9 @@ impl std::fmt::Debug for BackupKeyEnvelope {
         f.write_str("BackupKeyEnvelope { <protected> }")
     }
 }
+const MAX_KEY_PROTECTED_BYTES: usize = 16_384;
+const MAX_KEY_OBJECT_BYTES: u64 = 8 + 16 + 8 + 32 + 4 + MAX_KEY_PROTECTED_BYTES as u64;
+
 impl BackupKeyEnvelope {
     pub fn new(
         tenant: [u8; 16],
@@ -87,7 +90,7 @@ impl BackupKeyEnvelope {
             || epoch == 0
             || fingerprint == [0; 32]
             || protected.is_empty()
-            || protected.len() > 16384
+            || protected.len() > MAX_KEY_PROTECTED_BYTES
         {
             return Err(RepositoryFailure::InvalidInput);
         }
@@ -131,7 +134,7 @@ impl BackupKeyEnvelope {
         let epoch = decoder.u64()?;
         let fingerprint = decoder.array()?;
         let length = decoder.u32()? as usize;
-        if length == 0 || length > 16384 {
+        if length == 0 || length > MAX_KEY_PROTECTED_BYTES {
             return Err(RepositoryFailure::CorruptState);
         }
         let protected = decoder.take(length)?.to_vec();
@@ -457,7 +460,7 @@ impl<'a> BackupPublisher<'a> {
                 return Err(RepositoryFailure::CorruptState);
             }
             let length = decoder.u32()? as usize;
-            if length == 0 || length > 16384 {
+            if length == 0 || length > MAX_KEY_PROTECTED_BYTES {
                 return Err(RepositoryFailure::CorruptState);
             }
             decoder.take(length)?;

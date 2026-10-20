@@ -6,6 +6,121 @@ use positron_backup::{LocalRepository, RepositoryIdentity};
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn backup_catalog_open_preserves_resource_admission_refusal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _, _) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let generation = initialized.catalog_generation();
+    let before = initialized.resource_governor().inspect()?;
+    let secret = initialized.key.catalog_secret(initialized.instance)?;
+    initialized
+        ._authority
+        .with_control_contention_for_test(|| {
+            assert_eq!(
+                positron_kernel::Catalog::open(
+                    &initialized._authority,
+                    initialized.instance,
+                    secret
+                )
+                .err()
+                .map(|failure| failure.code()),
+                Some(positron_kernel::CatalogFailureCode::ResourceAdmissionRefused),
+            );
+            assert_eq!(
+                services.open_maintenance_catalog().err(),
+                Some(MaintenanceServiceFailure::CapacityUnavailable),
+            );
+        })?;
+    assert_eq!(initialized.catalog_generation(), generation);
+    let after = initialized.resource_governor().inspect()?;
+    assert_eq!(
+        after.outstanding_reservations(),
+        before.outstanding_reservations()
+    );
+    for dimension in positron_kernel::ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+    assert_eq!(
+        services
+            .open_maintenance_catalog()
+            .map_err(|_| "Catalog reopen")?
+            .pin()?
+            .number(),
+        generation
+    );
+    Ok(())
+}
+
+#[test]
+fn backup_status_identity_read_refusal_reports_only_its_closed_stage()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    let state = crate::health::ProcessState::starting();
+    services.attach_health(state.health());
+    let request = BackupRequest::decode(
+        br#"{"action":"status","operation_id":"11111111111111111111111111111111"}"#,
+    )?
+    .encode()?;
+    let invalid = "invalid-administrator-secret-canary";
+    for credential in ["", invalid] {
+        assert_eq!(
+            services.manage_backup(credential, &request),
+            Err(MaintenanceServiceFailure::AuthenticationRejected)
+        );
+    }
+    let generation = initialized.catalog_generation();
+    let before = initialized.resource_governor().inspect()?;
+    initialized
+        ._authority
+        .with_control_contention_for_test(|| {
+            assert_eq!(
+                initialized
+                    .durable_identity()
+                    .err()
+                    .map(|failure| failure.code()),
+                Some(crate::BootstrapFailureCode::ResourceUnavailable)
+            );
+            assert_eq!(
+                services.manage_backup(&administrator, &request),
+                Err(MaintenanceServiceFailure::CapacityUnavailable)
+            );
+        })?;
+    assert_eq!(initialized.catalog_generation(), generation);
+    let after = initialized.resource_governor().inspect()?;
+    assert_eq!(
+        after.outstanding_reservations(),
+        before.outstanding_reservations()
+    );
+    for dimension in positron_kernel::ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+    let rendered = state
+        .health()
+        .operational_logs_json()
+        .map_err(|_| "operational logs unavailable")?;
+    assert!(!rendered.contains(&administrator));
+    assert!(!rendered.contains(invalid));
+    let records: Vec<serde_json::Value> = serde_json::from_str(&rendered)?;
+    let failures = records
+        .iter()
+        .filter(|record| record["event"] == "backup_read_failure")
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1, "{rendered}");
+    assert_eq!(
+        failures.first().ok_or("read diagnostic")?["stage"],
+        "administrator_identity"
+    );
+    assert_eq!(
+        failures.first().ok_or("read diagnostic")?["failure"],
+        "CapacityUnavailable"
+    );
+    Ok(())
+}
+
+#[test]
 fn online_backup_requires_verified_recovery_and_publishes_reusable_ciphertext()
 -> Result<(), Box<dyn std::error::Error>> {
     let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
@@ -240,16 +355,20 @@ fn wait_for_signed_reservation(
             let resources = backup_read_resources_until(services, deadline)?;
             let publisher = positron_backup::BackupPublisher::new(&repository, identity, &signer)
                 .with_control_resources(&resources, 0)?;
-            let proof = backup_inspection_proof(&runtime, &publisher, snapshot)?;
-            let verified = publisher.with_registry_verification(&proof)?;
-            runtime.block_on(verified.cancellation_candidate(snapshot))
+            (|| {
+                let proof = backup_inspection_proof(&runtime, &publisher, snapshot)?;
+                let verified = publisher.with_registry_verification(&proof)?;
+                runtime.block_on(verified.cancellation_candidate(snapshot))
+            })()
         };
         match candidate {
             Ok(Some(candidate)) => {
                 assert_eq!(candidate.snapshot_id(), snapshot);
                 return Ok(());
             },
-            Ok(None) | Err(positron_backup::RepositoryFailure::PreconditionFailed) => {},
+            Ok(None)
+            | Err(positron_backup::RepositoryFailure::PreconditionFailed)
+            | Err(positron_backup::RepositoryFailure::Busy) => {},
             Err(failure) => return Err(failure.into()),
         }
         if std::time::Instant::now() >= deadline {
@@ -309,7 +428,7 @@ fn cancel_current(
         )?)?;
         match client.manage(bearer, &request) {
             Ok(response) => return Ok(response),
-            Err(BackupServiceClientFailure::PreconditionFailed) => {
+            Err(BackupServiceClientFailure::StaleGeneration) => {
                 if client.manage(bearer, &status)?.operation_revision == revision
                     || std::time::Instant::now() >= deadline
                 {
@@ -333,7 +452,7 @@ fn create_current(
         let request = create(services, repository, idempotency)?;
         match client.manage(bearer, &request) {
             Ok(response) => return Ok((request, response)),
-            Err(BackupServiceClientFailure::PreconditionFailed) => {
+            Err(BackupServiceClientFailure::StaleGeneration) => {
                 let _gate = services.catalog_operation()?;
                 let generation = open_catalog(&services.instance)?.pin()?.number();
                 if request.expected_catalog_generation == Some(generation)
@@ -425,7 +544,7 @@ fn finish(
                     return Ok(response);
                 }
             },
-            Err(BackupServiceClientFailure::AdministrationUnavailable) => {},
+            Err(BackupServiceClientFailure::CapacityUnavailable) => {},
             Err(failure) => return Err(failure.into()),
         }
         if std::time::Instant::now() >= deadline {
@@ -523,7 +642,7 @@ fn backup_inspection_proof(
     runtime: &tokio::runtime::Runtime,
     publisher: &positron_backup::BackupPublisher<'_>,
     owner: [u8; 16],
-) -> Result<positron_backup::BackupRegistryVerification, Box<dyn std::error::Error>> {
+) -> Result<positron_backup::BackupRegistryVerification, positron_backup::RepositoryFailure> {
     let mut proof = runtime.block_on(publisher.begin_registry_verification(owner, [0x6d; 32]))?;
     for _ in 0..4096 {
         if proof.complete()? {
@@ -532,7 +651,7 @@ fn backup_inspection_proof(
         runtime.block_on(publisher.registry_verification_step(&mut proof))?;
     }
     if !proof.complete()? {
-        return Err("fixture ancestry exceeded bounded inspection steps".into());
+        return Err(positron_backup::RepositoryFailure::LimitExceeded);
     }
     Ok(proof)
 }
@@ -548,3 +667,6 @@ mod restore;
 
 #[path = "backup_tenant_purge.rs"]
 mod tenant_purge;
+
+#[path = "backup_snapshot_authorization.rs"]
+mod snapshot_authorization;

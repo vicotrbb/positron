@@ -217,7 +217,7 @@ impl ServiceHandle {
 fn upgrade_failure(failure: crate::UpgradeFailure) -> Failure {
     use crate::UpgradeFailure as U;
     match failure {
-        U::StaleGeneration => Failure::PreconditionFailed,
+        U::StaleGeneration => Failure::StaleGeneration,
         U::IdempotencyConflict => Failure::IdempotencyConflict,
         U::AuthenticationFailed => Failure::AuthenticationRejected,
         U::InvalidRequest => Failure::InvalidRequest,
@@ -294,4 +294,19 @@ fn operation_response(
         irreversible_boundary: common.irreversible_boundary,
         lookup_expires_at_unix_seconds: common.lookup_expires_at_unix_seconds,
     })
+}
+
+#[cfg(test)]
+mod rejection_tests {
+    #[test]
+    fn unsafe_state_is_not_a_generation_retry() {
+        assert_eq!(
+            super::upgrade_failure(crate::UpgradeFailure::StaleGeneration),
+            super::Failure::StaleGeneration
+        );
+        assert_eq!(
+            super::upgrade_failure(crate::UpgradeFailure::UnsafeState),
+            super::Failure::PreconditionFailed
+        );
+    }
 }

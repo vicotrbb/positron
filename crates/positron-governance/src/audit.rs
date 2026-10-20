@@ -1049,6 +1049,7 @@ impl ConfigurationAuditEntry {
 struct BackupAuditEvidence {
     repository: BackupRepositoryAuditIdentity,
     receipt: Option<crate::BackupOperationReceipt>,
+    restored_publication: Option<crate::RestoredBackupPublication>,
     cleanup: Option<crate::BackupCleanupReceipt>,
     retention_claim: Option<crate::BackupRetentionClaimReceipt>,
     verification_report: Option<[u8; 32]>,
@@ -1074,6 +1075,12 @@ pub struct DurableOperationAuditEntry {
 }
 
 impl DurableOperationAuditEntry {
+    pub const fn restored_backup_publication(&self) -> Option<crate::RestoredBackupPublication> {
+        match &self.backup {
+            Some(evidence) => evidence.restored_publication,
+            None => None,
+        }
+    }
     pub const fn backup_verification_report(&self) -> Option<[u8; 32]> {
         match &self.backup {
             Some(evidence) => evidence.verification_report,

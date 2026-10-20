@@ -26,6 +26,19 @@ use super::MAX_API_BODY_BYTES;
 
 const MAX_CONTROL_SUPPORT_BUNDLE_REQUEST_BYTES: usize = 8 * 1024;
 
+pub(in crate::native_host) fn query_failure_response(status: u16, code: &str) -> Response {
+    match positron_api::log_query::query_rejection(status, code) {
+        Ok(body) => Response {
+            status,
+            content_type: "application/json",
+            body,
+            retry_after_seconds: (status == 429).then_some(1),
+            response_reservation: None,
+        },
+        Err(_) => Response::empty(503),
+    }
+}
+
 fn maintenance_failure_response(failure: MaintenanceServiceFailure) -> Response {
     let (status, code) = match failure {
         MaintenanceServiceFailure::InvalidRequest => (400, "invalid_request"),
@@ -33,6 +46,7 @@ fn maintenance_failure_response(failure: MaintenanceServiceFailure) -> Response 
         MaintenanceServiceFailure::TaskUnavailable => (404, "task_unavailable"),
         MaintenanceServiceFailure::SourceUnavailable => (404, "source_unavailable"),
         MaintenanceServiceFailure::IdempotencyConflict => (409, "idempotency_conflict"),
+        MaintenanceServiceFailure::StaleGeneration => (409, "stale_generation"),
         MaintenanceServiceFailure::PreconditionFailed => (409, "precondition_failed"),
         MaintenanceServiceFailure::CapacityUnavailable => (503, "capacity_unavailable"),
         MaintenanceServiceFailure::AdministrationUnavailable => (503, "administration_unavailable"),
@@ -45,6 +59,7 @@ pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
         return MAX_API_BODY_BYTES;
     }
     match path {
+        positron_api::log_query::HTTP_PATH => positron_api::log_query::MAX_REQUEST_BYTES,
         positron_api::upgrade::HTTP_PATH => positron_api::upgrade::MAX_REQUEST_BYTES,
         positron_api::backup::HTTP_PATH | positron_api::backup::LIST_HTTP_PATH => {
             positron_api::backup::MAX_REQUEST_BYTES
@@ -183,9 +198,43 @@ fn route_inner<S: Read + Write>(
         ListenerRole::Api | ListenerRole::OtlpHttp | ListenerRole::LokiPush
     ) && !health.admits_data_or_mutation()
     {
-        return Ok(Response::empty(503));
+        return Ok(
+            if role == ListenerRole::Api && head.path == positron_api::log_query::HTTP_PATH {
+                query_failure_response(503, "query_unavailable")
+            } else {
+                Response::empty(503)
+            },
+        );
     }
     match (role, head.method.as_str(), head.path.as_str()) {
+        (ListenerRole::Api, "POST", positron_api::log_query::HTTP_PATH) => {
+            let services =
+                services.ok_or_else(|| query_failure_response(503, "query_unavailable"))?;
+            if head.tenant_hint.is_some() || head.forwarded_actor.is_some() {
+                return Ok(query_failure_response(401, "authentication_rejected"));
+            }
+            let bearer = Zeroizing::new(
+                head.bearer
+                    .take()
+                    .ok_or_else(|| query_failure_response(401, "authentication_rejected"))?,
+            );
+            let body = read_body(
+                stream,
+                head.content_length,
+                positron_api::log_query::MAX_REQUEST_BYTES,
+            )
+            .map_err(|_| query_failure_response(400, "invalid_request"))?;
+            match services.execute_log_query(&bearer, &body) {
+                Ok((body, reservation)) => Ok(Response {
+                    status: 200,
+                    content_type: "application/json",
+                    body,
+                    retry_after_seconds: None,
+                    response_reservation: Some(Box::new(reservation)),
+                }),
+                Err((status, code)) => Ok(query_failure_response(status, code)),
+            }
+        },
         (ListenerRole::Api, "POST", positron_api::api_keys::HTTP_PATH) => {
             let services = services.ok_or_else(|| Response::empty(503))?;
             let bearer = Zeroizing::new(head.bearer.take().ok_or_else(|| {
@@ -204,7 +253,7 @@ fn route_inner<S: Read + Write>(
                         content_type: "application/json",
                         body,
                         retry_after_seconds: None,
-                        diagnostics_reservation: None,
+                        response_reservation: None,
                     })
                 },
                 Err((status, code)) => {
@@ -276,7 +325,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -297,7 +346,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -318,7 +367,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -339,7 +388,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -360,7 +409,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -381,7 +430,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -402,7 +451,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -423,7 +472,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -444,7 +493,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -469,7 +518,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -490,7 +539,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -511,7 +560,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -532,7 +581,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -553,7 +602,7 @@ fn route_inner<S: Read + Write>(
                     content_type: "application/json",
                     body: response.encode().map_err(|_| Response::empty(503))?,
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 }),
                 Err(failure) => Ok(maintenance_failure_response(failure)),
             }
@@ -729,7 +778,7 @@ fn route_inner<S: Read + Write>(
                         content_type: "application/octet-stream",
                         body,
                         retry_after_seconds: None,
-                        diagnostics_reservation: Some(Box::new(reservation)),
+                        response_reservation: Some(Box::new(reservation)),
                     })
                 },
                 Err(ControlDiagnosticsFailure::AuthenticationRejected) => Ok(Response::json(
@@ -783,7 +832,7 @@ fn route_inner<S: Read + Write>(
                     },
                     body: body.into_bytes(),
                     retry_after_seconds: None,
-                    diagnostics_reservation: None,
+                    response_reservation: None,
                 });
             }
             let status = status.ok_or_else(|| Response::empty(503))?;
@@ -863,6 +912,37 @@ mod tests {
         BootstrapPaths, CatalogConfigurationPublication, InitializationPlan, InstanceBootstrap,
         ListenerRole, RuntimeConfiguration, ServiceHandle, health::ProcessState,
     };
+
+    #[test]
+    fn administrative_http_preserves_exact_generation_refusal() {
+        use super::MaintenanceServiceFailure as F;
+        for (failure, code) in [
+            (F::StaleGeneration, "stale_generation"),
+            (F::PreconditionFailed, "precondition_failed"),
+        ] {
+            let response = super::maintenance_failure_response(failure);
+            assert_eq!(response.status(), 409);
+            assert_eq!(
+                response.body(),
+                format!("{{\"code\":\"{code}\"}}").as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn query_capacity_rejection_exposes_bounded_backoff() {
+        let response = super::query_failure_response(429, "capacity_unavailable");
+        assert_eq!(response.status(), 429);
+        assert_eq!(response.retry_after_seconds(), Some(1));
+        assert_eq!(
+            positron_api::log_query::decode_query_rejection(429, response.body()),
+            positron_api::log_query::LogQueryServiceClientFailure::CapacityUnavailable,
+        );
+        assert_eq!(
+            super::query_failure_response(401, "authentication_rejected").retry_after_seconds(),
+            None
+        );
+    }
 
     #[test]
     fn authenticated_status_waits_for_shared_catalog_ownership()
@@ -980,7 +1060,7 @@ mod tests {
             generation,
         )))?;
         state.set_inspection_authority(Arc::clone(&instance))?;
-        let services = ServiceHandle::new(instance)?;
+        let services = ServiceHandle::new(Arc::clone(&instance))?;
         state.set_catalog_operation(services.catalog_operation_gate())?;
         state.record_bound_listener(ListenerRole::Operations);
         state.transition(crate::ProcessPhase::Serving);
@@ -1066,6 +1146,40 @@ mod tests {
             401
         );
         assert_eq!(source_listing(&data, &secrets)?, before);
+
+        state.transition(crate::ProcessPhase::Fenced);
+        let unavailable = instance._authority.with_control_contention_for_test(|| {
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/status",
+                Some(administrator.clone()),
+            )
+        })?;
+        assert_eq!(unavailable.status(), 503);
+        assert_eq!(
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/status",
+                Some(administrator.clone()),
+            )
+            .status(),
+            200
+        );
+        assert_eq!(
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/status",
+                Some("invalid-credential".to_owned()),
+            )
+            .status(),
+            401
+        );
 
         drop(services);
         fs::remove_dir_all(root)?;

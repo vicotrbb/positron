@@ -74,6 +74,7 @@ pub enum OperationalDiagnostic {
     ConfigurationReloadAuditUnavailable,
     RuntimeCrashRecordUnavailable,
     RuntimeCleanupFailure(crate::CleanupRole),
+    BackupRepositoryRejected(positron_domain::repository::RepositoryFailure),
     MaintenanceWorkerFailure(crate::ServiceFailure),
     MaintenanceOperationFailure {
         operation: MaintenanceWorkerOperation,
@@ -101,6 +102,7 @@ impl OperationalDiagnostic {
             Self::ConfigurationReloadAuditUnavailable => "configuration_reload_audit_unavailable",
             Self::RuntimeCrashRecordUnavailable => "runtime_crash_record_unavailable",
             Self::RuntimeCleanupFailure(_) => "runtime_cleanup_failure",
+            Self::BackupRepositoryRejected(_) => "backup_repository_rejected",
             Self::MaintenanceWorkerFailure(_) | Self::MaintenanceOperationFailure { .. } => {
                 "maintenance_worker_failure"
             },
@@ -125,9 +127,39 @@ pub fn render_operational_diagnostic(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BackupReadStage {
+    AdministratorIdentity,
+    OtherAction,
+    OperationCatalogOpen,
+    OperationInspect,
+    Response,
+    VerificationReport,
+    TaskStatus,
+    CaptureExists,
+}
+impl BackupReadStage {
+    const fn token(self) -> &'static str {
+        match self {
+            Self::AdministratorIdentity => "administrator_identity",
+            Self::OtherAction => "other_action",
+            Self::OperationCatalogOpen => "operation_catalog_open",
+            Self::OperationInspect => "operation_inspect",
+            Self::Response => "response",
+            Self::VerificationReport => "verification_report",
+            Self::TaskStatus => "task_status",
+            Self::CaptureExists => "capture_exists",
+        }
+    }
+}
+
 /// Closed operational facts; arbitrary text cannot enter the process event ring.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OperationalEvent {
+    BackupReadFailure {
+        stage: BackupReadStage,
+        failure: crate::services::MaintenanceServiceFailure,
+    },
     Diagnostic(OperationalDiagnostic),
     QueryCompleted {
         outcome: RequestOutcome,
@@ -157,6 +189,7 @@ pub(crate) enum OperationalEvent {
 impl OperationalEvent {
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::BackupReadFailure { .. } => "backup_read_failure",
             Self::Diagnostic(diagnostic) => diagnostic.name(),
             Self::QueryCompleted { .. } => "query_completed",
             Self::RequestCompleted { .. } => "request_completed",
@@ -183,7 +216,7 @@ impl OperationalEvent {
                 | OperationalDiagnostic::LocalKeyCustodyWarning
                 | OperationalDiagnostic::IndependentKeyRecoveryRequired,
             ) => "warn",
-            Self::ProcessFenced | Self::Diagnostic(_) => "error",
+            Self::ProcessFenced | Self::BackupReadFailure { .. } | Self::Diagnostic(_) => "error",
             Self::RequestCompleted {
                 outcome: RequestOutcome::Unavailable,
                 ..
@@ -203,6 +236,10 @@ impl OperationalEvent {
     }
     pub(crate) fn json(self) -> serde_json::Value {
         let mut value = serde_json::json!({"event": self.name(), "severity": self.severity(), "component": "runtime"});
+        if let Self::BackupReadFailure { stage, failure } = self {
+            value["stage"] = stage.token().into();
+            value["failure"] = format!("{failure:?}").into();
+        }
         if let Self::QueryCompleted {
             outcome,
             duration_micros,
@@ -229,6 +266,9 @@ impl OperationalEvent {
                     value["category"] = crate::services::maintenance_failure_category(failure)
                         .unwrap_or("cancelled")
                         .into();
+                },
+                OperationalDiagnostic::BackupRepositoryRejected(failure) => {
+                    value["repository_failure"] = format!("{failure:?}").into();
                 },
                 OperationalDiagnostic::MaintenanceOperationFailure {
                     operation,

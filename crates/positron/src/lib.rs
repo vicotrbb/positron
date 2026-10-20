@@ -20,6 +20,7 @@ use signal_hook::iterator::Signals;
 
 mod administrative_cli;
 mod backup_cli;
+mod bootstrap_cli;
 mod config_cli;
 #[cfg(unix)]
 mod control_socket;
@@ -29,6 +30,7 @@ mod local_key_cli;
 mod maintenance_cli;
 mod policy;
 mod provider_migration_cli;
+mod query_cli;
 mod recovery_cli;
 mod release_cli;
 mod repository_cli;
@@ -75,6 +77,17 @@ pub fn run_native(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
     let mut arguments = arguments.into_iter().peekable();
+    if arguments.peek().is_some_and(|argument| argument == "query") {
+        arguments.next();
+        return query_cli::run(arguments);
+    }
+    if arguments
+        .peek()
+        .is_some_and(|argument| argument == "bootstrap")
+    {
+        arguments.next();
+        return bootstrap_cli::run(arguments, environment);
+    }
     if arguments
         .peek()
         .is_some_and(|argument| argument == "release")
@@ -512,18 +525,25 @@ fn wait_for_shutdown(
             },
             Ok(Ok(false)) => std::thread::yield_now(),
             Ok(Err(failure)) => {
-                let finding_code = if failure == positron_runtime::TaskFailure::JoinPanicked {
-                    "joined_task_panicked"
-                } else {
-                    "runtime_drain_failed"
-                };
-                return Ok(preserve_runtime_outcome(
-                    capture_draining_runtime_failure(&draining, "draining", finding_code),
-                    draining.finish(ShutdownTrigger::DeadlineExpired),
-                ));
+                return Ok(finish_draining_task_failure(draining, failure));
             },
         }
     }
+}
+
+fn finish_draining_task_failure(
+    draining: positron_runtime::DrainingProcess,
+    failure: positron_runtime::TaskFailure,
+) -> ExitOutcome {
+    let finding_code = if failure == positron_runtime::TaskFailure::JoinPanicked {
+        "joined_task_panicked"
+    } else {
+        "runtime_drain_failed"
+    };
+    preserve_runtime_outcome(
+        capture_draining_runtime_failure(&draining, "draining", finding_code),
+        draining.finish(ShutdownTrigger::DeadlineExpired),
+    )
 }
 
 fn capture_runtime_failure(
@@ -725,13 +745,13 @@ mod tests {
     // Native signals are process-wide, so their tests must own them exclusively.
     static NATIVE_SIGNAL_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     use super::{
         ExitOutcome, LaunchFailure, NativeRecovery, OperationalDiagnostic, RecoveryAttemptHost,
         RecoveryDecision, ReloadInputs, RuntimeDiagnosticDelivery, ShutdownTrigger, exit_code,
-        pending_termination_trigger, preserve_runtime_outcome, reload_rejection_category,
-        report_runtime_diagnostic_to, wait_for_shutdown,
+        finish_draining_task_failure, pending_termination_trigger, preserve_runtime_outcome,
+        reload_rejection_category, report_runtime_diagnostic_to, wait_for_shutdown,
     };
     use positron_runtime::{
         ApplicationRuntime, BootstrapFailureCode, BootstrapPaths, BoundEndpoint, BoundListener,
@@ -1037,12 +1057,10 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn owner_loop_persists_a_joined_task_panic_without_its_payload()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let _signal_guard = NATIVE_SIGNAL_TEST
-            .lock()
-            .map_err(|_| "native signal test lock poisoned")?;
+    fn joined_panic_fixture() -> Result<
+        (PathBuf, BootstrapPaths, positron_runtime::RunningProcess),
+        Box<dyn std::error::Error>,
+    > {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
@@ -1067,20 +1085,31 @@ mod tests {
             HostInputs::new(&host, &host),
         )
         .map_err(|failure| format!("start owner loop: {failure:?}"))?;
-        let signals = Signals::new([signal_hook::consts::signal::SIGTERM])?;
-        signal_hook::low_level::raise(signal_hook::consts::signal::SIGTERM)?;
-        let outcome = wait_for_shutdown(
-            process,
-            signals,
-            Duration::from_secs(1),
-            &ReloadInputs {
-                config: None,
-                environment: Vec::new(),
-                overrides: Vec::new(),
-            },
-            data.clone(),
-        )
-        .map_err(|failure| format!("owner loop: {}", failure.message()))?;
+        Ok((root, paths, process))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observed_drain_failure_persists_a_joined_task_panic_without_its_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _signal_guard = NATIVE_SIGNAL_TEST
+            .lock()
+            .map_err(|_| "native signal test lock poisoned")?;
+        let (root, paths, process) = joined_panic_fixture()?;
+        let data = root.join("data");
+        let mut draining = process.begin_shutdown();
+        let observation_deadline = Instant::now() + Duration::from_secs(1);
+        let failure = loop {
+            match draining.poll() {
+                Err(failure) => break failure,
+                Ok(_) if Instant::now() >= observation_deadline => {
+                    return Err("joined panic was not observed within the fixture bound".into());
+                },
+                Ok(_) => std::thread::yield_now(),
+            }
+        };
+        assert_eq!(failure, positron_runtime::TaskFailure::JoinPanicked);
+        let outcome = finish_draining_task_failure(draining, failure);
         assert_ne!(outcome, ExitOutcome::Graceful);
         let records = std::fs::read_dir(data.join("diagnostics/crash-records"))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1103,6 +1132,36 @@ mod tests {
         );
         assert!(rendered.contains("backtrace_identity="));
         assert!(!rendered.contains("owner-loop-private-panic-canary"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_owner_budget_forces_exit_without_fabricating_graceful_shutdown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _signal_guard = NATIVE_SIGNAL_TEST
+            .lock()
+            .map_err(|_| "native signal test lock poisoned")?;
+        let (root, paths, process) = joined_panic_fixture()?;
+        let signals = Signals::new([signal_hook::consts::signal::SIGTERM])?;
+        signal_hook::low_level::raise(signal_hook::consts::signal::SIGTERM)?;
+        let outcome = wait_for_shutdown(
+            process,
+            signals,
+            Duration::ZERO,
+            &ReloadInputs {
+                config: None,
+                environment: Vec::new(),
+                overrides: Vec::new(),
+            },
+            root.join("data"),
+        )
+        .map_err(|failure| format!("owner loop: {}", failure.message()))?;
+        assert_eq!(outcome, ExitOutcome::Forced);
+        let instance = InstanceBootstrap::reopen(&paths)?;
+        assert!(instance.graceful_shutdown_record()?.is_none());
+        drop(instance);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

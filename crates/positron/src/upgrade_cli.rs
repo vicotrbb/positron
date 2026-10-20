@@ -69,7 +69,10 @@ fn client_failure(failure: UpgradeServiceClientFailure) -> &'static str {
         F::InvalidRequest => "invalid upgrade request",
         F::AuthenticationRejected => "system administration authentication rejected",
         F::SourceUnavailable | F::TaskUnavailable => "upgrade operation unavailable",
-        F::PreconditionFailed => "stale Catalog generation; inspect current state before retrying",
+        F::StaleGeneration => "stale resource generation; inspect current state before retrying",
+        F::PreconditionFailed => {
+            "upgrade precondition failed; inspect current state before retrying"
+        },
         F::IdempotencyConflict => "idempotency key conflicts with an accepted request",
         F::AdministrationUnavailable => {
             "administration unavailable; inspect or retry the same operation"
@@ -184,6 +187,14 @@ fn parse(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn precondition_failure_does_not_claim_a_generation_race() {
+        assert_eq!(
+            super::client_failure(super::UpgradeServiceClientFailure::PreconditionFailed),
+            "upgrade precondition failed; inspect current state before retrying"
+        );
+    }
+
     #[test]
     fn online_upgrade_requires_candidate_identity_and_protected_credential_transport() {
         let base = [

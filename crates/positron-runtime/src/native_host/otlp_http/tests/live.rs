@@ -763,3 +763,101 @@ fn buffered_http_body_after_catalog_wait(
     })?;
     Ok(String::from_utf8(output)?)
 }
+
+#[test]
+fn log_authentication_preserves_identity_read_capacity_refusal()
+-> Result<(), Box<dyn std::error::Error>> {
+    authentication_preserves_identity_read_capacity_refusal(false)
+}
+
+#[test]
+fn trace_authentication_preserves_identity_read_capacity_refusal()
+-> Result<(), Box<dyn std::error::Error>> {
+    authentication_preserves_identity_read_capacity_refusal(true)
+}
+
+fn authentication_preserves_identity_read_capacity_refusal(
+    traces: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new()?;
+    let paths = roots.paths()?;
+    drop(
+        InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())
+            .map_err(|failure| format!("auth fixture initialization: {failure}"))?,
+    );
+    let bearer = InstanceBootstrap::claim(&paths)
+        .map_err(|failure| format!("auth fixture claim: {failure}"))?
+        .ingest_secret()
+        .ok_or("ingest secret missing")?
+        .to_owned();
+    let instance = std::sync::Arc::new(
+        InstanceBootstrap::reopen(&paths)
+            .map_err(|failure| format!("auth fixture reopen: {failure}"))?,
+    );
+    let services = ServiceHandle::new(std::sync::Arc::clone(&instance))?;
+    let before = instance.resource_governor().inspect()?;
+    let generation = instance.catalog_generation();
+    let receive = |credential: Option<String>| {
+        let mut body = std::io::Cursor::new(b"unread body".to_vec());
+        let head = RequestHead {
+            openmetrics: false,
+            method: "POST".to_owned(),
+            path: if traces { "/v1/traces" } else { "/v1/logs" }.to_owned(),
+            content_length: body.get_ref().len(),
+            bearer: credential,
+            content_type: Some("application/json".to_owned()),
+            content_encoding: None,
+            tenant_hint: None,
+            forwarded_for: None,
+            forwarded_actor: None,
+        };
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
+        let result = if traces {
+            super::super::receive_traces_from(&mut body, head, peer, None, &services)
+        } else {
+            super::super::receive_from(&mut body, head, peer, None, &services)
+        };
+        assert_eq!(
+            body.position(),
+            0,
+            "authentication refusal must not read the body"
+        );
+        result
+            .err()
+            .ok_or("request must be refused before ingestion")
+    };
+    for credential in [None, Some("invalid credential".to_owned())] {
+        let response = receive(credential)?;
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.retry_after_seconds(), None);
+    }
+    let response = instance._authority.with_control_contention_for_test(|| {
+        assert!(matches!(
+            if traces {
+                services.authorize_traces_with_hints(
+                    &bearer,
+                    positron_governance::CompatibilityHints::none(),
+                )
+            } else {
+                services.authorize_logs_with_hints(
+                    &bearer,
+                    positron_governance::CompatibilityHints::none(),
+                )
+            },
+            Err(crate::ServiceFailure::CapacityUnavailable)
+        ));
+        receive(Some(bearer))
+    })??;
+    assert_eq!(response.status(), 429);
+    assert_eq!(response.retry_after_seconds(), Some(1));
+    assert_eq!(instance.catalog_generation(), generation);
+    let after = instance.resource_governor().inspect()?;
+    assert_eq!(
+        after.outstanding_reservations(),
+        before.outstanding_reservations()
+    );
+    for dimension in positron_kernel::ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+    Ok(())
+}

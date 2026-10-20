@@ -85,8 +85,8 @@ fn status(
         };
         match client.manage(bearer, &request) {
             Ok(response) => return Ok(response),
-            Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::AdministrationUnavailable) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(error.into()),
+            Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::CapacityUnavailable) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(format!("provider migration status read: {error:?}").into()),
         }
     }
 }
@@ -113,13 +113,15 @@ fn wait_for_maintenance(
         loop {
             let page = match maintenance.status(bearer, &request) {
                 Ok(page) => page,
-                Err(positron_api::maintenance::MaintenanceServiceClientFailure::AdministrationUnavailable)
-                    if Instant::now() < deadline =>
-                {
+                Err(
+                    positron_api::maintenance::MaintenanceServiceClientFailure::CapacityUnavailable,
+                ) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
                     continue 'inspection;
                 },
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    return Err(format!("maintenance quiescence status read: {error:?}").into());
+                },
             };
             tasks.extend(page.tasks);
             match page.next_cursor {
@@ -200,7 +202,7 @@ fn phase(
             );
         }
         let error = String::from_utf8(output.stderr)?;
-        if Instant::now() >= admission_deadline || !error.contains("stale Catalog generation") {
+        if Instant::now() >= admission_deadline || !error.contains("stale resource generation") {
             return Err(format!("{action} admission: {error}").into());
         }
     };
@@ -334,7 +336,22 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
         ],
     )?;
     assert!(!stale.status.success());
-    assert!(String::from_utf8(stale.stderr)?.contains("stale Catalog generation"));
+    let stale_error = String::from_utf8(stale.stderr)?;
+    for secret in [
+        Some(claim.secret()),
+        claim.ingest_secret(),
+        claim.query_secret(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        assert!(!stale_error.contains(secret));
+    }
+    assert!(!stale_error.contains(&secrets.display().to_string()));
+    assert!(
+        stale_error.contains("stale resource generation"),
+        "stale-generation migration CLI failure: {stale_error}"
+    );
     let drained = wait_for_maintenance(endpoint, &client, claim.secret())?;
     let checkpoint_id: String = checkpoint
         .to_bytes()

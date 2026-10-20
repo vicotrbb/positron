@@ -102,3 +102,38 @@ fn azure_selector_matches_canonical_additive_contract() -> Result<(), Box<dyn st
     );
     Ok(())
 }
+
+#[test]
+fn generated_client_distinguishes_stale_generation_from_unsafe_preconditions()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_api::repository::{
+        RepositoryServiceClient, RepositoryServiceClientFailure as F, RepositoryTransport,
+    };
+    use std::io::{Read, Write};
+    for (code, expected) in [
+        ("stale_generation", F::StaleGeneration),
+        ("precondition_failed", F::PreconditionFailed),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = listener.local_addr()?;
+        let task = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request)?;
+            let body = format!("{{\"code\":\"{code}\"}}");
+            write!(
+                stream,
+                "HTTP/1.1 409 Conflict\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+            Ok(())
+        });
+        let client =
+            RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })
+                .map_err(|_| "client")?;
+        let request = RepositoryRequest::decode(br#"{"action":"status"}"#)?;
+        assert_eq!(client.manage("credential-canary", &request), Err(expected));
+        task.join().map_err(|_| "server panic")??;
+    }
+    Ok(())
+}

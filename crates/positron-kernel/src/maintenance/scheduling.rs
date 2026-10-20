@@ -46,9 +46,10 @@ pub(super) fn eligible_task_ids(
         let conflicts = running
             .iter()
             .any(|active| tasks_conflict(&task.task, active));
+        let task_now = snapshot_lease_time_for_task(&task.task, now, snapshot_lease_times);
         if task.phase == MaintenanceTaskPhase::Queued
-            && task.task.not_before
-                <= snapshot_lease_time_for_task(&task.task, now, snapshot_lease_times)
+            && task.submitted_at <= task_now
+            && task.task.not_before <= task_now
             && !state.pending_task_transitions.contains(identity)
             && !clock_blocks
             && !window_blocks
@@ -112,6 +113,9 @@ pub(super) fn dispatch_task(
             .ok_or(MaintenanceFailure::UnknownTask)?;
         if task.phase != MaintenanceTaskPhase::Queued {
             return Err(MaintenanceFailure::InvalidTransition);
+        }
+        if now < task.submitted_at {
+            return Err(MaintenanceFailure::PreconditionFailed);
         }
         let attempt = task
             .dispatches

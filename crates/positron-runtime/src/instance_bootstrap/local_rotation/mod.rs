@@ -5,11 +5,18 @@ use positron_kernel::{Catalog, CatalogObject, CatalogProposal, RootRewrapSession
 use sha2::{Digest, Sha256};
 use std::fmt::{Display, Formatter};
 
+#[cfg(test)]
+pub(crate) type BackupRouteRecheckHook = std::sync::Mutex<
+    Option<for<'context> fn(&InitializedInstance, RootMigrationContext<'context>)>,
+>;
+
 #[derive(Clone, Copy)]
 pub(crate) struct RootMigrationContext<'runtime> {
     pub(crate) principal: positron_domain::identity::PrincipalId,
     pub(crate) operation: positron_governance::OperationId,
     pub(crate) catalog_gate: &'runtime std::sync::Mutex<()>,
+    #[cfg(test)]
+    pub(crate) backup_route_recheck: Option<&'runtime BackupRouteRecheckHook>,
 }
 impl RootMigrationContext<'_> {
     fn transaction(

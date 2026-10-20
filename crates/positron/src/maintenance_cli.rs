@@ -303,6 +303,9 @@ fn client_failure(failure: MaintenanceServiceClientFailure) -> &'static str {
         MaintenanceServiceClientFailure::TaskUnavailable => {
             "maintenance task unavailable; inspect current state before retrying"
         },
+        MaintenanceServiceClientFailure::StaleGeneration => {
+            "stale resource generation; inspect current state before retrying"
+        },
         MaintenanceServiceClientFailure::PreconditionFailed => {
             "maintenance precondition failed; inspect current state before retrying"
         },

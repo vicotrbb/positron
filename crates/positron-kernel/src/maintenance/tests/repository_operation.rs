@@ -842,3 +842,143 @@ fn tenant_purge_start_replay_preserves_advanced_checkpoint()
     );
     Ok(())
 }
+
+#[test]
+fn backup_submission_floor_defers_exact_recovered_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    recovered_backup_submission_floor(true)
+}
+
+#[test]
+fn backup_submission_floor_defers_general_recovered_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    recovered_backup_submission_floor(false)
+}
+
+fn recovered_backup_submission_floor(exact: bool) -> Result<(), Box<dyn std::error::Error>> {
+    for native in [false, true] {
+        let root = CatalogRoot::new()?;
+        let authority =
+            crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
+                PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
+                70_000_001,
+                30_000_000,
+            )?;
+        let catalog = Catalog::open(
+            &authority,
+            InstanceId::new(nonzero_id(1))?,
+            CatalogSecret::from_owned(Box::new([0x61; 32]), Box::new([0x62; 32])),
+        )?;
+        catalog.commit(
+            catalog.pin()?.identity(),
+            CatalogProposal::new(
+                TransactionId::new(nonzero_id(2))?,
+                FormatEpoch::CATALOG_V2,
+                vec![CatalogObject::new(b"submission floor basis".to_vec())?],
+            )?,
+            None,
+        )?;
+        let original = MaintenanceCoordinator::new();
+        let binding = RepositoryOperationBinding::new([111; 16], [112; 32]).expect("binding");
+        let resources = ResourceAmounts::new([8_519_680, 1, 1, 0, 1, 0, 1, 1, 1, 8, 16_384]);
+        let task = original
+            .submit_backup_operation_with_resources_and_persist(
+                &catalog,
+                binding,
+                MaintenancePreconditions::new(catalog.pin()?.number(), 1).expect("preconditions"),
+                resources,
+                100,
+            )
+            .expect("persist submission");
+        drop(original);
+        let coordinator = MaintenanceCoordinator::restore_from_catalog(&catalog).expect("restore");
+        let before = coordinator.status(task.identity()).expect("status");
+        let generation = catalog.pin()?.number();
+        let usage = authority
+            .governor()
+            .inspect()?
+            .usage(ResourceDimension::MemoryBytes);
+        let early = if exact {
+            coordinator
+                .start_backup_operation_with_reservation_and_persist(
+                    &catalog,
+                    &authority,
+                    99,
+                    false,
+                    task.identity(),
+                )
+                .expect("exact admission")
+        } else {
+            coordinator
+                .start_next_with_reservation_and_persist(&catalog, &authority, 99, false)
+                .expect("early admission")
+        };
+        assert!(
+            early.is_none(),
+            "a recovered task cannot dispatch before its persisted submission"
+        );
+        assert_eq!(coordinator.status(task.identity()).expect("status"), before);
+        assert_eq!(catalog.pin()?.number(), generation);
+        assert_eq!(
+            authority
+                .governor()
+                .inspect()?
+                .usage(ResourceDimension::MemoryBytes),
+            usage
+        );
+        let mut execution = if exact {
+            coordinator
+                .start_backup_operation_with_reservation_and_persist(
+                    &catalog,
+                    &authority,
+                    100,
+                    false,
+                    task.identity(),
+                )
+                .expect("exact admission")
+        } else {
+            coordinator
+                .start_next_with_reservation_and_persist(&catalog, &authority, 100, false)
+                .expect("due admission")
+        }
+        .ok_or("eligible recovered Backup task")?;
+        if native {
+            drop(
+                execution
+                    .transfer_repository_resources(binding)
+                    .expect("native transfer"),
+            );
+        }
+        let larger = ResourceAmounts::new(ResourceDimension::ALL.map(|dimension| {
+            if dimension == ResourceDimension::MemoryBytes {
+                resources.get(dimension) + 4096
+            } else {
+                resources.get(dimension)
+            }
+        }));
+        execution
+            .requeue_backup_with_resources_and_persist(&coordinator, &catalog, binding, larger, 100)
+            .expect("growth requeue");
+        assert_eq!(
+            coordinator.status(task.identity()).expect("status").phase(),
+            MaintenanceTaskPhase::Queued
+        );
+        assert_eq!(
+            coordinator
+                .status(task.identity())
+                .expect("status")
+                .task()
+                .reservations(),
+            larger
+        );
+        drop(execution);
+        assert_eq!(
+            authority
+                .governor()
+                .inspect()?
+                .usage(ResourceDimension::MemoryBytes),
+            usage
+        );
+    }
+    Ok(())
+}

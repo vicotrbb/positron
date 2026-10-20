@@ -20,6 +20,35 @@ fn fresh_restore_publishes_durable_operation_and_original_query_results()
     exercise_restore(RestoreCase::Complete)
 }
 #[test]
+fn fresh_restore_binds_target_configuration_without_relaxing_initialized_immutability()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_restore(RestoreCase::Configured)
+}
+
+#[test]
+fn fresh_restore_reconciles_only_its_authenticated_self_capture()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_restore(RestoreCase::HistoricalSnapshot)
+}
+
+#[test]
+fn fresh_restore_replays_historical_completion_after_interrupted_acceptance()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_restore(RestoreCase::HistoricalInterruption)
+}
+#[test]
+fn fresh_restore_retains_historical_evidence_across_an_authenticated_registry_append()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_restore(RestoreCase::HistoricalAppend)
+}
+
+#[test]
+fn fresh_restore_preserves_unrelated_active_administrative_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    exercise_restore(RestoreCase::HistoricalUnrelated)
+}
+
+#[test]
 fn cancelled_fresh_restore_remains_offline_on_exact_cold_retry()
 -> Result<(), Box<dyn std::error::Error>> {
     exercise_restore(RestoreCase::Cancel)
@@ -88,6 +117,11 @@ fn fresh_restore_status_authenticates_existing_receipt_without_changing_target_b
 enum RestoreCase {
     OriginInterruption,
     Complete,
+    Configured,
+    HistoricalSnapshot,
+    HistoricalInterruption,
+    HistoricalAppend,
+    HistoricalUnrelated,
     Cancel,
     Tamper,
     Nonempty,
@@ -116,6 +150,7 @@ fn exercise_restore(case: RestoreCase) -> Result<(), Box<dyn std::error::Error>>
     drive_restore(RestoreTestContext {
         case,
         initialized: &fixture.initialized,
+        source_configuration: fixture.source_configuration.as_ref(),
         services: &fixture.services,
         repository_path: &fixture.repository_path,
         runtime: &fixture.runtime,
@@ -125,6 +160,7 @@ fn exercise_restore(case: RestoreCase) -> Result<(), Box<dyn std::error::Error>>
         restore: &fixture.restore,
         unlock: &fixture.unlock,
         query: &fixture.query,
+        administrator: &fixture.administrator,
         pin: fixture.pin,
         provider: fixture.provider.as_ref(),
     })
@@ -132,6 +168,7 @@ fn exercise_restore(case: RestoreCase) -> Result<(), Box<dyn std::error::Error>>
 struct RestoreTestContext<'a> {
     case: RestoreCase,
     initialized: &'a Arc<crate::InitializedInstance>,
+    source_configuration: Option<&'a (positron_config::EffectiveConfiguration, u64)>,
     services: &'a ServiceHandle,
     repository_path: &'a std::path::Path,
     runtime: &'a tokio::runtime::Runtime,
@@ -141,6 +178,7 @@ struct RestoreTestContext<'a> {
     restore: &'a crate::BackupRestoreRequest,
     unlock: &'a age::x25519::Identity,
     query: &'a str,
+    administrator: &'a str,
     pin: positron_kernel::RecoveryIdentity,
     provider: Option<&'a RestoreProviderFixture>,
 }
@@ -299,5 +337,111 @@ fn assert_corrupt_restore_failed(
         positron_governance::DurableOperationRetry::Never
     );
     assert!(failed.backup_restore_report().is_none());
+    Ok(())
+}
+
+#[test]
+fn interrupted_restore_historical_completion_refuses_another_administrative_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let fixture = RestoreTestFixture::prepare(RestoreCase::Complete)?;
+    let begin = |request: &crate::BackupRestoreRequest| {
+        crate::InstanceBootstrap::begin_restore(
+            &fixture.paths,
+            &fixture.configuration,
+            request,
+            positron_kernel::RecoveryUnlock::Identity(&fixture.unlock),
+        )
+    };
+    let interrupted = positron_kernel::with_catalog_publication_fault_after(
+        positron_kernel::CatalogPublicationFault::SynchronizeCommit,
+        1,
+        || begin(&fixture.restore),
+    );
+    assert!(interrupted.is_err());
+    let changed = crate::BackupRestoreRequest::new(
+        fixture.source,
+        fixture.pin,
+        fixture.bundle.clone(),
+        positron_governance::AdministrativeIdempotencyKey::new([0x79; 16])?,
+    )?;
+    let before = restore_target_bytes(&fixture.target)?;
+    assert!(
+        begin(&changed).is_err(),
+        "a different key cannot adopt a committed historical restore"
+    );
+    assert_eq!(restore_target_bytes(&fixture.target)?, before);
+    let original = begin(&fixture.restore)?;
+    assert_eq!(
+        original.status().kind(),
+        positron_governance::DurableOperationKind::BackupRestore
+    );
+    Ok(())
+}
+
+#[test]
+fn restored_historical_receipt_rejects_a_signed_registry_rollback_that_still_contains_the_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_backup::{CasOutcome, HeadSlot, RegistryHeadChange, Repository};
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let fixture = RestoreTestFixture::prepare(RestoreCase::Complete)?;
+    let identity = RepositoryIdentity::local(
+        [91; 16],
+        fixture.initialized.instance.to_bytes(),
+        fixture.initialized.integrity_key_fingerprint(),
+        &fixture.repository_path,
+    )?;
+    let repository = fixture
+        .runtime
+        .block_on(LocalRepository::attach(&fixture.repository_path, &identity))?;
+    let slot = HeadSlot::registry();
+    let older = fixture
+        .runtime
+        .block_on(repository.registry_head_at(slot))?
+        .ok_or("original published head")?;
+    fixture::append_snapshot(
+        &fixture.services,
+        &fixture.administrator,
+        &fixture.repository_path,
+    )?;
+    let newer = fixture
+        .runtime
+        .block_on(repository.registry_head_at(slot))?
+        .ok_or("appended head")?;
+    assert_ne!(older.version(), newer.version());
+    let begin = || {
+        crate::InstanceBootstrap::begin_restore(
+            &fixture.paths,
+            &fixture.configuration,
+            &fixture.restore,
+            positron_kernel::RecoveryUnlock::Identity(&fixture.unlock),
+        )
+    };
+    drop(begin()?);
+    let before = restore_target_bytes(&fixture.target)?;
+    assert!(matches!(
+        fixture
+            .runtime
+            .block_on(repository.compare_and_swap_head_at(
+                slot,
+                RegistryHeadChange::new(Some(newer.version()), older.bytes().to_vec())?
+            ))?,
+        CasOutcome::Published(_)
+    ));
+    assert!(
+        begin().is_err(),
+        "membership alone cannot undo the committed observed-head floor"
+    );
+    assert_eq!(restore_target_bytes(&fixture.target)?, before);
+    assert!(matches!(
+        fixture
+            .runtime
+            .block_on(repository.compare_and_swap_head_at(
+                slot,
+                RegistryHeadChange::new(Some(older.version()), newer.bytes().to_vec())?
+            ))?,
+        CasOutcome::Published(_)
+    ));
+    assert!(begin().is_ok());
     Ok(())
 }

@@ -598,7 +598,7 @@ pub(in crate::native_host) struct Response {
     pub(in crate::native_host) content_type: &'static str,
     pub(in crate::native_host) body: Vec<u8>,
     pub(in crate::native_host) retry_after_seconds: Option<u32>,
-    pub(in crate::native_host) diagnostics_reservation: Option<Box<TransferredResourceReservation>>,
+    pub(in crate::native_host) response_reservation: Option<Box<TransferredResourceReservation>>,
 }
 
 impl Drop for Response {
@@ -614,7 +614,7 @@ impl Response {
             content_type: "application/json",
             body: Vec::new(),
             retry_after_seconds: None,
-            diagnostics_reservation: None,
+            response_reservation: None,
         }
     }
 
@@ -624,7 +624,7 @@ impl Response {
             content_type: "application/json",
             body: body.into_bytes(),
             retry_after_seconds: None,
-            diagnostics_reservation: None,
+            response_reservation: None,
         }
     }
 
@@ -634,7 +634,7 @@ impl Response {
             content_type: "application/x-protobuf",
             body,
             retry_after_seconds: None,
-            diagnostics_reservation: None,
+            response_reservation: None,
         }
     }
 
@@ -702,7 +702,7 @@ pub(in crate::native_host) fn write_response<S: Write>(
     } else {
         stream.write_all(&response.body)
     };
-    drop(response.diagnostics_reservation.take());
+    drop(response.response_reservation.take());
     outcome
 }
 

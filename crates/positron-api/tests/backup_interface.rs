@@ -90,3 +90,31 @@ fn verified_receipt_roundtrips_without_private_selector() {
         assert!(BackupResponse::decode(invalid.as_bytes()).is_err());
     }
 }
+
+#[test]
+fn historical_restore_publication_has_no_transfer_counters()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_api::backup::BackupResponse;
+    let mut value = serde_json::json!({"operation_revision":4,"kind":"snapshot","cleanup_pending":false,
+        "operation":{"id":"11111111111111111111111111111111","status":"succeeded","phase":"published","progress_percent":100,"retry":"never","cancellation":"not_allowed_during_publication","irreversible_boundary":"backup_registry_published"},
+        "repository":{"repository_id":"11111111-1111-4111-8111-111111111111","instance_id":"22222222-2222-4222-8222-222222222222","provider_kind":"local_filesystem","format_epoch":1,"integrity_fingerprint":"1".repeat(64),"prefix_commitment":"2".repeat(64)},
+        "restored_publication":{"manifest_checksum":"3".repeat(64),"current_registry_generation_checksum":"4".repeat(64),"source_catalog_identity":"5".repeat(64),"source_catalog_generation":7,"retain_until_unix_seconds":800,"restore_origin_transaction":"3".repeat(32),"restore_intent_digest":"6".repeat(64),"capture_operation_id":"1".repeat(32),"capture_request_digest":"7".repeat(64),"restore_idempotency_key":"8".repeat(32)}});
+    let response = BackupResponse::decode(&serde_json::to_vec(&value)?)?;
+    let encoded: serde_json::Value = serde_json::from_slice(&response.encode()?)?;
+    assert!(
+        encoded["restored_publication"]
+            .get("uploaded_bytes")
+            .is_none()
+    );
+    assert!(
+        encoded["restored_publication"]
+            .get("reused_bytes")
+            .is_none()
+    );
+    let mut zero_key = value.clone();
+    zero_key["restored_publication"]["restore_idempotency_key"] = "0".repeat(32).into();
+    assert!(BackupResponse::decode(&serde_json::to_vec(&zero_key)?).is_err());
+    value["restored_publication"]["capture_operation_id"] = "8".repeat(32).into();
+    assert!(BackupResponse::decode(&serde_json::to_vec(&value)?).is_err());
+    Ok(())
+}

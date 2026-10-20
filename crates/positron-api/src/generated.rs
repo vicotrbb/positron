@@ -230,6 +230,12 @@ pub enum ApiErrorCode {
     RequestTooLarge = 5,
     /// Generated from `PUBLIC_ERROR_CODE_UNKNOWN_FIELD`.
     UnknownField = 6,
+    /// Generated from `PUBLIC_ERROR_CODE_AUTHENTICATION_REJECTED`.
+    AuthenticationRejected = 7,
+    /// Generated from `PUBLIC_ERROR_CODE_CAPACITY_UNAVAILABLE`.
+    CapacityUnavailable = 8,
+    /// Generated from `PUBLIC_ERROR_CODE_QUERY_UNAVAILABLE`.
+    QueryUnavailable = 9,
 }
 
 impl ApiErrorCode {
@@ -244,6 +250,9 @@ impl ApiErrorCode {
             Self::MalformedRequest => false,
             Self::RequestTooLarge => false,
             Self::UnknownField => false,
+            Self::AuthenticationRejected => false,
+            Self::CapacityUnavailable => false,
+            Self::QueryUnavailable => false,
         }
     }
 }
@@ -260,6 +269,8 @@ pub enum ApiFailureSource {
     GrpcDecode = 2,
     /// Generated from `FAILURE_SOURCE_HTTP_DECODE`.
     HttpDecode = 3,
+    /// Generated from `FAILURE_SOURCE_QUERY_EXECUTION`.
+    QueryExecution = 4,
 }
 
 impl ApiFailureSource {
@@ -271,6 +282,7 @@ impl ApiFailureSource {
             Self::CapabilityNegotiation => false,
             Self::GrpcDecode => false,
             Self::HttpDecode => false,
+            Self::QueryExecution => false,
         }
     }
 }
@@ -293,6 +305,12 @@ pub enum SafeDetail {
     RequestLimitExceeded = 5,
     /// Generated from `SAFE_DETAIL_FIELD_NOT_RECOGNIZED`.
     FieldNotRecognized = 6,
+    /// Generated from `SAFE_DETAIL_AUTHENTICATION_REJECTED`.
+    AuthenticationRejected = 7,
+    /// Generated from `SAFE_DETAIL_CAPACITY_UNAVAILABLE`.
+    CapacityUnavailable = 8,
+    /// Generated from `SAFE_DETAIL_QUERY_UNAVAILABLE`.
+    QueryUnavailable = 9,
 }
 
 impl SafeDetail {
@@ -307,6 +325,9 @@ impl SafeDetail {
             Self::RequestMalformed => false,
             Self::RequestLimitExceeded => false,
             Self::FieldNotRecognized => false,
+            Self::AuthenticationRejected => false,
+            Self::CapacityUnavailable => false,
+            Self::QueryUnavailable => false,
         }
     }
 }

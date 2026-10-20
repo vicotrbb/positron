@@ -257,6 +257,12 @@ using protected `--credential-stdin` and TLS by default. Local mutations take
 accepted operation for a bounded 1..60 seconds; expiry leaves its outcome
 unknown and instructs the caller to inspect that same operation.
 
+The shared administrative client distinguishes HTTP 409 `stale_generation`
+from `precondition_failed` and `idempotency_conflict`. Only the first proves a
+rejected expected resource generation or operation revision. Callers may refresh
+that selector within their original deadline; a different failed precondition
+does not establish that retrying is safe.
+
 These commands inspect native Repository provider behavior and immutable
 identity. Doctor uses an isolated owned probe head and objects, checks CAS,
 checksum/range, multipart recovery, and observable deletion, and removes only
@@ -453,3 +459,24 @@ Drain lifecycle. `positron upgrade offline` continues the same operation while
 holding exclusive volume ownership. Executable replacement is an explicit
 operator action. The native adapter delivered here is HTTP administration;
 shared native gRPC administration remains tracked by issue #219.
+
+## Bounded Log query HTTP subset
+
+`LogQueryService/Execute` is implemented by the native API listener at
+`POST /v1/logs:query`, the schema-generated Rust client, and `positron query`.
+It requires a tenant-bound Query credential. The request and typed event
+response use descriptor-generated standard ProtoJSON, including decimal
+64-bit integers, base64 bytes and flat oneofs. See the
+[public interface reference](../../../docs/public-api-v1.md#bounded-log-execute)
+for explicit bounds, rejection metadata, terminal semantics and remaining
+issue #219 scope. The aggregate Release 1 Query capability remains unavailable.
+
+A restored snapshot's own captured Backup Snapshot operation reports a distinct
+`restored_publication` receipt after authenticated reconciliation. It identifies
+the source manifest and Catalog, exact capture binding, target restore origin,
+restore intent and idempotency key, and registry head observed at reconciliation.
+It does not report unavailable original upload/reuse counters or completion time.
+Exact retries preserve that receipt and audit while checking current trust,
+membership, purge and revocation rules and the recorded antirollback floor.
+Other active source operations retain their normal recovery guards. The target
+remains offline until normal restore publication and bootstrap completion.

@@ -245,3 +245,85 @@ fn set_owner_only(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
+
+#[test]
+fn loki_authentication_preserves_identity_read_capacity_refusal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = TestRoots::new()?;
+    let paths = roots.paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    let bearer = InstanceBootstrap::claim(&paths)?
+        .ingest_secret()
+        .ok_or("ingest secret missing")?
+        .to_owned();
+    let instance = Arc::new(InstanceBootstrap::reopen(&paths)?);
+    let services = ServiceHandle::new(Arc::clone(&instance))?;
+    let generation = instance.catalog_generation();
+    let before = instance.resource_governor().inspect()?;
+    let receive = |credential: Option<String>| {
+        let mut body = std::io::Cursor::new(b"unread body".to_vec());
+        let head = crate::native_host::native_http::RequestHead {
+            openmetrics: false,
+            method: "POST".to_owned(),
+            path: "/loki/api/v1/push".to_owned(),
+            content_length: body.get_ref().len(),
+            bearer: credential,
+            content_type: Some("application/json".to_owned()),
+            content_encoding: None,
+            tenant_hint: None,
+            forwarded_for: None,
+            forwarded_actor: None,
+        };
+        let result = super::super::receive_push(
+            &mut body,
+            head,
+            SocketAddr::from(([127, 0, 0, 1], 1)),
+            None,
+            &services,
+        );
+        assert_eq!(
+            body.position(),
+            0,
+            "authentication refusal must not read the body"
+        );
+        result
+            .err()
+            .ok_or("request must be refused before ingestion")
+    };
+    for credential in [None, Some("invalid credential".to_owned())] {
+        let response = receive(credential)?;
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.retry_after_seconds(), None);
+    }
+    let response = instance._authority.with_control_contention_for_test(|| {
+        assert!(matches!(
+            services.authorize_logs_with_hints(
+                &bearer,
+                positron_governance::CompatibilityHints::none(),
+            ),
+            Err(crate::ServiceFailure::CapacityUnavailable)
+        ));
+        receive(Some(bearer))
+    })??;
+    assert_eq!(response.status(), 429);
+    assert_eq!(response.retry_after_seconds(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(response.body())?,
+        serde_json::json!({
+            "status": "error", "error": "Loki Push ingest capacity is unavailable",
+        })
+    );
+    assert_eq!(instance.catalog_generation(), generation);
+    let after = instance.resource_governor().inspect()?;
+    assert_eq!(
+        after.outstanding_reservations(),
+        before.outstanding_reservations()
+    );
+    for dimension in positron_kernel::ResourceDimension::ALL {
+        assert_eq!(after.usage(dimension), before.usage(dimension));
+    }
+    Ok(())
+}

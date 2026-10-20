@@ -16,3 +16,11 @@ admission while it is active, a missing legacy timestamp, or a non-monotonic
 server instant produces an unknown deadline fact, never a fabricated healthy
 result. This deadline is distinct from the existing 60-second lower-class
 queued-work priority escalation.
+
+A task is eligible only when its effective trusted scheduling time reaches its
+persisted submission timestamp as well as its `not_before` bound. Cold clock
+recovery may temporarily precede that authenticated timestamp; dispatch must
+wait for trusted time rather than claim the task with an earlier progress time.
+This chronological floor applies to every task class and does not broaden the
+`ClockUncertain` pause: other due safe integrity and reclamation work remains
+eligible.

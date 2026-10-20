@@ -45,6 +45,8 @@ fn inspect_named(
         Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(error) => return Err(storage(error)),
     };
+    #[cfg(test)]
+    super::read_interleave::after_open(root)?;
     let meta = file.metadata().map_err(io_failure)?;
     if !meta.is_file() || meta.nlink() != 1 || meta.mode() & 0o7777 != 0o600 {
         return Err(RepositoryFailure::CorruptState);

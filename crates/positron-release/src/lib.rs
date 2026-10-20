@@ -1,6 +1,8 @@
 //! Offline release construction and verification, using the canonical kernel manifest.
 #![forbid(unsafe_code)]
 
+mod native_archive;
+pub use native_archive::{NativeTarget, native_archive};
 mod archive_scan;
 pub use archive_scan::scan_release_contents;
 mod files;

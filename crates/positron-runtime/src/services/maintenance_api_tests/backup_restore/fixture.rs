@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) struct RestoreTestFixture {
     pub(super) initialized: Arc<crate::InitializedInstance>,
+    pub(super) source_configuration: Option<(positron_config::EffectiveConfiguration, u64)>,
     pub(super) services: ServiceHandle,
     pub(super) repository_path: std::path::PathBuf,
     pub(super) runtime: tokio::runtime::Runtime,
@@ -10,8 +11,11 @@ pub(super) struct RestoreTestFixture {
     pub(super) paths: crate::BootstrapPaths,
     pub(super) configuration: positron_config::EffectiveConfiguration,
     pub(super) restore: crate::BackupRestoreRequest,
+    pub(super) source: positron_governance::BackupVerificationParameters,
+    pub(super) bundle: std::path::PathBuf,
     pub(super) unlock: age::x25519::Identity,
     pub(super) query: String,
+    pub(super) administrator: String,
     pub(super) pin: positron_kernel::RecoveryIdentity,
     pub(super) provider: Option<RestoreProviderFixture>,
     pub(super) _fixture: Fixture,
@@ -21,6 +25,31 @@ impl RestoreTestFixture {
         let fixture = Fixture::new()?;
         let (initialized, ingest, query, administrator) = fixture.initialized_with_admin()?;
         let export = fixture.recovery_export_directory()?;
+        let source_configuration = if case == RestoreCase::Configured {
+            let path = export.join("source.toml");
+            let root = export.parent().ok_or("source root")?;
+            fs::write(
+                &path,
+                format!(
+                    "schema_version=1\n[storage]\ndata_directory={:?}\nsecrets_directory={:?}\n",
+                    root.join("data"),
+                    root.join("secrets")
+                ),
+            )?;
+            let configuration = positron_config::resolve(
+                positron_config::ConfigurationInputs::try_from_sources(
+                    Some(&path),
+                    [] as [(&str, &str); 0],
+                    [] as [(&str, &str); 0],
+                )
+                .map_err(|failure| format!("source configuration: {failure:?}"))?,
+            )?;
+            let generation = crate::CatalogConfigurationPublication::new(Arc::clone(&initialized))
+                .establish(&configuration)?;
+            Some((configuration, generation))
+        } else {
+            None
+        };
         let repository_path = export.join("repository");
         fs::create_dir(&repository_path)?;
         fs::set_permissions(&repository_path, fs::Permissions::from_mode(0o700))?;
@@ -45,6 +74,26 @@ impl RestoreTestFixture {
         initialized
             .verify_recovery_bundle(&bundle, positron_kernel::RecoveryUnlock::Identity(&unlock))?;
         let mut pin = initialized.recovery_identity()?;
+        if case == RestoreCase::HistoricalUnrelated {
+            let actor = initialized.attribute(
+                positron_governance::PresentedCredential::parse(&query)?,
+                positron_governance::RequestedIntent::Query,
+                positron_governance::CompatibilityHints::none(),
+            )?;
+            let catalog = open_catalog(&initialized)?;
+            let request = positron_governance::DurableOperationRequest::query_export(
+                actor.principal_id(),
+                initialized.tenant,
+                positron_governance::AdministrativeIdempotencyKey::new([0x8b; 16])?,
+                [0x8c; 16],
+                catalog.pin()?.number(),
+                initialized.retention_time.governance_now_seconds()?,
+                [0x8d; 32],
+            )?;
+            positron_governance::DurableOperationAdministration::accept_query_export(
+                &catalog, actor, request,
+            )?;
+        }
         let created = services
             .manage_backup(
                 &administrator,
@@ -263,10 +312,11 @@ impl RestoreTestFixture {
                 2,
                 key,
             )?,
-            None => crate::BackupRestoreRequest::new(source, pin, bundle, key)?,
+            None => crate::BackupRestoreRequest::new(source, pin, bundle.clone(), key)?,
         };
         Ok(Self {
             initialized,
+            source_configuration,
             services,
             repository_path,
             runtime,
@@ -274,8 +324,11 @@ impl RestoreTestFixture {
             paths,
             configuration,
             restore,
+            source,
+            bundle,
             unlock,
             query,
+            administrator,
             pin,
             provider,
             _fixture: fixture,
@@ -340,7 +393,7 @@ impl RestoreProviderFixture {
             .map_err(|error| format!("provider source activate: {error:?}"))?;
         // Registered backups require the owning migration worker for retirement;
         // this fixture retains the legitimate active provider and publishes its route.
-        let (old, new) = initialized.backup_migration_envelopes()?;
+        let (old, new) = initialized.backup_migration_envelopes(None)?;
         let catalog = open_catalog(initialized)?;
         let basis = catalog.pin()?;
         let signer = initialized.key.backup_control_signer(
@@ -383,4 +436,27 @@ impl Drop for RestoreProviderFixture {
     fn drop(&mut self) {
         self.server.abort();
     }
+}
+
+/// Publish independent source work while the restore target is offline.
+pub(super) fn append_snapshot(
+    services: &ServiceHandle,
+    administrator: &str,
+    repository: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let accepted = services
+        .manage_backup(
+            administrator,
+            &create(services, repository, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")?.encode()?,
+        )
+        .map_err(|error| format!("append backup: {error:?}"))?;
+    let cancel = crate::TaskCancellation::new();
+    let worker_services = services.clone();
+    let worker_cancel = cancel.clone();
+    let worker = std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancel));
+    let completed = retention::finish_direct(services, administrator, &accepted.operation.id);
+    cancel.cancel();
+    worker.join().map_err(|_| "append worker")??;
+    completed?;
+    Ok(())
 }

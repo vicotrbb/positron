@@ -1041,7 +1041,10 @@ from the Registry. Offline retirement cannot substitute for this live proof.
 
 Restore opens only an empty offline target, verifies the current registry chain
 and snapshot, applies Purge Tombstones, and atomically publishes the recovered
-instance. It has no merge or in-place overwrite path.
+instance. The owning configuration module binds the accepted target Effective
+Configuration in the restored origin using its canonical codec; ordinary startup
+then enforces that immutable target binding. It has no merge or in-place overwrite
+path.
 
 ### 4.14 Upgrade and Migration
 
@@ -1501,6 +1504,7 @@ flowchart TD
     query["positron-query"]
 
     app --> release
+    release --> config
     release --> kernel
     runtime --> release
     app --> runtime
@@ -1815,3 +1819,12 @@ This design remains coherent when:
 
 This is the implementation architecture Positron should build unless a
 superseding ADR changes one of its normative sources.
+
+Verified fresh restore reconciles the snapshot's exact self-captured Backup
+Snapshot intent through Governance after authenticating the target origin and
+before accepting restore work. The distinct historical publication receipt,
+terminal Kernel task replacement, and normal audit commit atomically in a
+successor transaction. Receipt-bound exact retries preserve the first observed
+registry head while reauthenticating current membership and antirollback floors.
+The receipt carries no invented original transfer counters. Unrelated active
+intents remain subject to normal recovery and admission guards (ADRs 0026, 0063).

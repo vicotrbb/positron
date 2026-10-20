@@ -1,0 +1,1 @@
+{"pipeline": "logs | range query_time 0 100 | limit 16", "budget": {"scannedBytes": "1048576", "decodedRecords": "16", "outputRows": "16", "outputBytes": "16384", "memoryBytes": "1048576", "cpuWorkUnits": "15", "wallSeconds": "5", "maximumTimeRangeNanoseconds": "100"}}

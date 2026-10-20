@@ -7,6 +7,7 @@ use positron_kernel::{BackupCaptureFileKind, BackupCaptureVerification, Maintena
 pub(in crate::services) struct VerificationWork {
     pub(super) owner: BackupOwner,
     remote: Option<BackupSnapshotVerification>,
+    remote_steps_since_checkpoint: usize,
     metadata: Option<BackupCaptureVerification>,
     catalog: Option<positron_kernel::CatalogSnapshot>,
     next_file: usize,
@@ -18,13 +19,11 @@ pub(in crate::services) struct VerificationWork {
     policy_tenants: Vec<positron_domain::identity::TenantId>,
 }
 
-pub(super) fn complete(
+fn parameters(
     services: &ServiceHandle,
-    execution: &mut MaintenanceExecution<'_>,
-    work: &mut Option<BackupWork>,
+    execution: &MaintenanceExecution<'_>,
     operation: DurableOperation,
-    cancellation: Option<&crate::TaskCancellation>,
-) -> Result<bool, ServiceFailure> {
+) -> Result<(BackupVerificationParameters, RepositoryOperationBinding), ServiceFailure> {
     require_operation(operation, services.instance.instance.to_bytes())?;
     let parameters = operation
         .backup_verification_parameters()
@@ -34,6 +33,52 @@ pub(super) fn complete(
     if parameters.intent_digest() != binding.intent_digest() {
         return Err(ServiceFailure::CorruptState);
     }
+    Ok((parameters, binding))
+}
+
+pub(super) fn prepare(
+    services: &ServiceHandle,
+    execution: &MaintenanceExecution<'_>,
+    operation: DurableOperation,
+    catalog: &positron_kernel::Catalog<'_>,
+) -> Result<positron_governance::AuthorizedContext, ServiceFailure> {
+    parameters(services, execution, operation)?;
+    let now = services
+        .maintenance_status_now()
+        .map_err(|_| ServiceFailure::StorageUnavailable)?;
+    let actor =
+        DurableOperationAdministration::resume_backup_actor(catalog, operation.operation_id(), now)
+            .map_err(|_| ServiceFailure::Unauthorized)?;
+    if operation.status() == positron_governance::DurableOperationStatus::Pending {
+        DurableOperationAdministration::begin(catalog, actor, operation.operation_id(), now)
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+    }
+    if matches!(
+        operation.phase(),
+        positron_governance::DurableOperationPhase::Accepted
+            | positron_governance::DurableOperationPhase::Preflight
+    ) {
+        DurableOperationAdministration::advance_backup_verification(
+            catalog,
+            actor,
+            operation.operation_id(),
+            false,
+            now,
+        )
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+    }
+    Ok(actor)
+}
+
+pub(super) fn complete(
+    services: &ServiceHandle,
+    execution: &mut MaintenanceExecution<'_>,
+    work: &mut Option<BackupWork>,
+    operation: DurableOperation,
+    cancellation: Option<&crate::TaskCancellation>,
+    actor: Option<positron_governance::AuthorizedContext>,
+) -> Result<bool, ServiceFailure> {
+    let (parameters, binding) = parameters(services, execution, operation)?;
     if operation.status().is_terminal() {
         *work = None;
         let _gate = services.catalog_operation()?;
@@ -55,44 +100,12 @@ pub(super) fn complete(
             .map_err(super::super::maintenance::map_failure)?;
         return Ok(true);
     }
-    let actor = {
-        let _gate = services.catalog_operation()?;
-        let catalog = services
-            .open_maintenance_catalog()
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        let now = services
-            .maintenance_status_now()
-            .map_err(|_| ServiceFailure::StorageUnavailable)?;
-        let actor = DurableOperationAdministration::resume_backup_actor(
-            &catalog,
-            operation.operation_id(),
-            now,
-        )
-        .map_err(|_| ServiceFailure::Unauthorized)?;
-        if operation.status() == positron_governance::DurableOperationStatus::Pending {
-            DurableOperationAdministration::begin(&catalog, actor, operation.operation_id(), now)
-                .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        }
-        if matches!(
-            operation.phase(),
-            positron_governance::DurableOperationPhase::Accepted
-                | positron_governance::DurableOperationPhase::Preflight
-        ) {
-            DurableOperationAdministration::advance_backup_verification(
-                &catalog,
-                actor,
-                operation.operation_id(),
-                false,
-                now,
-            )
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        }
-        actor
-    };
+    let actor = actor.ok_or(ServiceFailure::CorruptState)?;
     if !matches!(work, Some(BackupWork::Verification(_))) {
         *work = Some(BackupWork::Verification(Box::new(VerificationWork {
             owner: BackupOwner::open(services, execution, operation)?,
             remote: None,
+            remote_steps_since_checkpoint: 0,
             metadata: None,
             catalog: None,
             next_file: 0,
@@ -125,6 +138,8 @@ pub(super) fn complete(
         return Err(ServiceFailure::Cancelled);
     }
     if work.remote.is_none() {
+        #[cfg(feature = "test-support")]
+        let initialization_started = std::time::Instant::now();
         let (_, checkpoint) = execution::checkpoint::current(services, execution, binding)?;
         let (_, progress) = execution::checkpoint::unpack(&checkpoint)?;
         let remote = work
@@ -154,18 +169,49 @@ pub(super) fn complete(
             return Err(ServiceFailure::BackupRepositoryRejected);
         }
         work.remote = Some(remote);
+        #[cfg(feature = "test-support")]
+        report_state(
+            "remote_initialized",
+            Some(work),
+            None,
+            Some(initialization_started.elapsed().as_millis()),
+            None,
+        );
         return Ok(false);
     }
     let remote = work.remote.as_mut().ok_or(ServiceFailure::Internal)?;
-    if !remote.complete() {
-        work.owner
-            .runtime
-            .block_on(publisher.snapshot_verification_step(remote))
-            .map_err(provider_failure)?;
-        let progress = publisher
-            .snapshot_verification_checkpoint(remote)
-            .map_err(provider_failure)?;
-        execution::checkpoint::persist(services, execution, binding, None, Some(&progress))?;
+    if !remote.complete() || work.remote_steps_since_checkpoint > 0 {
+        // A failed publication retries the same prefix before another read.
+        if !remote.complete()
+            && work.remote_steps_since_checkpoint < execution::MAX_BACKUP_STEP_ADVANCES
+        {
+            work.owner
+                .runtime
+                .block_on(publisher.snapshot_verification_step(remote))
+                .map_err(provider_failure)?;
+            work.remote_steps_since_checkpoint += 1;
+            #[cfg(test)]
+            if work.metadata.is_some() {
+                execution::test_stops::hit(
+                    execution::test_stops::StopPoint::VerificationRemoteRangeVerified,
+                    cancellation,
+                )?;
+            }
+        }
+        if work.remote_steps_since_checkpoint >= execution::MAX_BACKUP_STEP_ADVANCES
+            || remote.complete()
+        {
+            #[cfg(test)]
+            execution::test_stops::hit(
+                execution::test_stops::StopPoint::VerificationRemoteCheckpointDue,
+                cancellation,
+            )?;
+            let progress = publisher
+                .snapshot_verification_checkpoint(remote)
+                .map_err(provider_failure)?;
+            execution::checkpoint::persist(services, execution, binding, None, Some(&progress))?;
+            work.remote_steps_since_checkpoint = 0;
+        }
         return Ok(false);
     }
     if work.metadata.is_none() && work.catalog.is_none() {
@@ -234,6 +280,11 @@ pub(super) fn complete(
                     .verify_protected_file(&secret, file.identity(), &bytes)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
                 work.next_file += 1;
+                #[cfg(test)]
+                execution::test_stops::hit(
+                    execution::test_stops::StopPoint::VerificationNativeFileVerified,
+                    cancellation,
+                )?;
                 return Ok(false);
             }
             // Ciphertext and segment/frontier identity were checked remotely and
@@ -250,29 +301,14 @@ pub(super) fn complete(
         {
             return Err(ServiceFailure::BackupRepositoryRejected);
         }
-        let object_count = snapshot.object_identities().count();
-        let mut governance_required = 0_u64;
-        for identity in snapshot.object_identities() {
-            let bytes = snapshot
-                .object(identity)
-                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?
-                .ok_or(ServiceFailure::BackupRepositoryRejected)?;
-            let memory =
-                positron_governance::Identity::catalog_object_memory_bound(bytes, object_count)
-                    .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
-            governance_required = governance_required
-                .checked_add(
-                    u64::try_from(memory).map_err(|_| ServiceFailure::CapacityUnavailable)?,
-                )
-                .ok_or(ServiceFailure::CapacityUnavailable)?;
-        }
+        let governance_required = semantic_memory_requirement(&snapshot)?;
         work.governance_required = governance_required;
         let prospective = external
             .checked_add(governance_required)
             .ok_or(ServiceFailure::CapacityUnavailable)?;
-        let _admitted = work
-            .owner
+        work.owner
             .publisher(prospective)
+            .and_then(|publisher| publisher.admit_snapshot_verification_controls(remote))
             .map_err(provider_failure)?;
         let tenants = positron_governance::TenantAdministration::restore_key_tenant_ids(&snapshot)
             .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
@@ -298,35 +334,17 @@ pub(super) fn complete(
             continue;
         }
         if bytes.starts_with(b"PSCHEMA1") {
-            let memory = positron_signals::SchemaCatalog::catalog_memory_bound(bytes)
-                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
-            let prospective = external
-                .checked_add(
-                    u64::try_from(memory).map_err(|_| ServiceFailure::CapacityUnavailable)?,
-                )
-                .ok_or(ServiceFailure::CapacityUnavailable)?;
-            // Reuse the native owner's ordinary readmission path before decoding.
-            let _admitted = work
-                .owner
-                .publisher(prospective)
-                .map_err(provider_failure)?;
+            let memory = semantic_memory_bound(bytes)?;
+            // The authenticated snapshot's maximum transient is already priced.
+            let _admitted = work.owner.publisher(external).map_err(provider_failure)?;
             let tenants =
                 positron_governance::TenantAdministration::restore_key_tenant_ids(snapshot)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
             verify_schema_object(bytes, &tenants, &mut work.schema_tenants, memory)?;
         }
         if bytes.starts_with(b"PIPACT01") {
-            let memory = positron_policy::IngestPolicy::activated_object_memory_bound(bytes)
-                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
-            let prospective = external
-                .checked_add(
-                    u64::try_from(memory).map_err(|_| ServiceFailure::CapacityUnavailable)?,
-                )
-                .ok_or(ServiceFailure::CapacityUnavailable)?;
-            let _admitted = work
-                .owner
-                .publisher(prospective)
-                .map_err(provider_failure)?;
+            semantic_memory_bound(bytes)?;
+            let _admitted = work.owner.publisher(external).map_err(provider_failure)?;
             let tenants =
                 positron_governance::TenantAdministration::restore_key_tenant_ids(snapshot)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
@@ -334,6 +352,11 @@ pub(super) fn complete(
         }
         return Ok(false);
     }
+    #[cfg(test)]
+    execution::test_stops::hit(
+        execution::test_stops::StopPoint::VerificationSemanticVerified,
+        cancellation,
+    )?;
     if work.recovered_keys < publisher.verification_key_count(remote) {
         let envelope = work
             .owner
@@ -437,6 +460,47 @@ fn verify_policy_object(
     Ok(())
 }
 
+fn semantic_memory_requirement(
+    snapshot: &positron_kernel::CatalogSnapshot,
+) -> Result<u64, ServiceFailure> {
+    let object_count = snapshot.object_identities().count();
+    let mut governance_required = 0_u64;
+    let mut semantic_transient = 0_usize;
+    for identity in snapshot.object_identities() {
+        let bytes = snapshot
+            .object(identity)
+            .map_err(|_| ServiceFailure::BackupRepositoryRejected)?
+            .ok_or(ServiceFailure::BackupRepositoryRejected)?;
+        let memory =
+            positron_governance::Identity::catalog_object_memory_bound(bytes, object_count)
+                .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
+        semantic_transient = semantic_transient.max(semantic_memory_bound(bytes)?);
+        governance_required = governance_required
+            .checked_add(u64::try_from(memory).map_err(|_| ServiceFailure::CapacityUnavailable)?)
+            .ok_or(ServiceFailure::CapacityUnavailable)?;
+    }
+    // Semantic readers run sequentially. Retain the Governance reconstruction
+    // charge plus the largest schema/policy decode peak, not their sum.
+    let governance_required = governance_required
+        .checked_add(
+            u64::try_from(semantic_transient).map_err(|_| ServiceFailure::CapacityUnavailable)?,
+        )
+        .ok_or(ServiceFailure::CapacityUnavailable)?;
+    Ok(governance_required)
+}
+
+fn semantic_memory_bound(bytes: &[u8]) -> Result<usize, ServiceFailure> {
+    if bytes.starts_with(b"PSCHEMA1") {
+        positron_signals::SchemaCatalog::catalog_memory_bound(bytes)
+            .map_err(|_| ServiceFailure::BackupRepositoryRejected)
+    } else if bytes.starts_with(b"PIPACT01") {
+        positron_policy::IngestPolicy::activated_object_memory_bound(bytes)
+            .map_err(|_| ServiceFailure::BackupRepositoryRejected)
+    } else {
+        Ok(0)
+    }
+}
+
 fn verify_schema_object(
     bytes: &[u8],
     tenants: &[positron_domain::identity::TenantId],
@@ -463,9 +527,234 @@ fn verify_schema_object(
     Ok(())
 }
 
+#[cfg(feature = "test-support")]
+pub(in crate::services) fn report_turn(stage: &'static str, work: Option<&BackupWork>) {
+    report_state(
+        stage,
+        match work {
+            Some(BackupWork::Verification(work)) => Some(work),
+            _ => None,
+        },
+        None,
+        None,
+        None,
+    );
+}
+
+#[cfg(feature = "test-support")]
+pub(in crate::services) fn report_timed_turn(
+    work: Option<&BackupWork>,
+    elapsed: std::time::Duration,
+    remaining: std::time::Duration,
+) {
+    let Some(BackupWork::Verification(work)) = work else {
+        return;
+    };
+    report_state(
+        "slow_step",
+        Some(work),
+        None,
+        Some(elapsed.as_millis()),
+        Some(remaining.as_millis()),
+    );
+}
+
+#[cfg(feature = "test-support")]
+fn take_diagnostic_permit() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static REMAINING: AtomicU8 = AtomicU8::new(64);
+    REMAINING
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1)
+        })
+        .is_ok()
+}
+
+#[cfg(feature = "test-support")]
+pub(super) fn report_snapshot_stage(
+    stage: &'static str,
+    elapsed: std::time::Duration,
+    progress: Option<&positron_backup::BackupPublicationCheck>,
+) {
+    if elapsed >= std::time::Duration::from_millis(250) && take_diagnostic_permit() {
+        eprintln!(
+            "backup_snapshot_stage stage={stage} elapsed_ms={} publication_progress={progress:?}",
+            elapsed.as_millis()
+        );
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn report_state(
+    stage: &'static str,
+    work: Option<&VerificationWork>,
+    readmission: Option<(ServiceFailure, u64, u64)>,
+    elapsed_ms: Option<u128>,
+    remaining_ms: Option<u128>,
+) {
+    if !take_diagnostic_permit() {
+        return;
+    }
+    if let Some(work) = work {
+        eprintln!(
+            "upgrade_verification_turn stage={stage} readmission_failure_requested_granted={readmission:?} remote_complete={:?} remote_progress={:?} elapsed_ms={elapsed_ms:?} remaining_ms={remaining_ms:?} native_file_index={} native_file_total={:?} catalog_ready={} schema_index={} schema_total={:?} key_index={}",
+            work.remote
+                .as_ref()
+                .map(BackupSnapshotVerification::complete),
+            work.remote.as_ref(),
+            work.next_file,
+            work.metadata
+                .as_ref()
+                .map(|metadata| metadata.files().len()),
+            work.catalog.is_some(),
+            work.next_schema,
+            work.catalog
+                .as_ref()
+                .map(|catalog| catalog.object_identities().count()),
+            work.recovered_keys
+        );
+    } else {
+        eprintln!("upgrade_verification_turn stage={stage} verification_work=false");
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub(in crate::services) fn report_readmission(
+    work: Option<&BackupWork>,
+    failure: ServiceFailure,
+    requested_memory: u64,
+    granted_memory: u64,
+) {
+    let Some(BackupWork::Verification(work)) = work else {
+        return;
+    };
+    report_state(
+        "readmission_discard",
+        Some(work),
+        Some((failure, requested_memory, granted_memory)),
+        None,
+        None,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn semantic_peak_prices_the_largest_sequential_owner_across_registered_tenants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use positron_domain::identity::{TenantId, TenantSlug};
+        use positron_governance::{
+            AdministrativeIdempotencyKey, CompatibilityHints, PresentedCredential, RequestedIntent,
+        };
+        use positron_kernel::{CatalogObject, CatalogProposal, FormatEpoch, TransactionId};
+        let fixture = crate::services::tests::schema_maintenance::Fixture::new()?;
+        let (instance, _, _, administrator) = fixture.initialized_with_admin()?;
+        let actor = instance.attribute(
+            PresentedCredential::parse(&administrator)?,
+            RequestedIntent::SystemAdministration,
+            CompatibilityHints::none(),
+        )?;
+        let secondary = TenantId::from_bytes([0xe4; 16])?;
+        instance.create_tenant(
+            actor,
+            secondary,
+            positron_governance::TenantCreateConfiguration::new(
+                TenantSlug::parse_canonical("semantic-peak")?,
+                "Semantic peak",
+                2_592_000,
+                1,
+                [
+                    32_000_000, 32, 32, 5_000_000, 2048, 32, 32, 32, 32, 32, 2_000_000,
+                ],
+            ),
+            AdministrativeIdempotencyKey::new([0xe5; 16])?,
+        )?;
+        let schema = |tenant| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            Ok(positron_signals::SchemaCatalog::new(
+                tenant,
+                positron_signals::SchemaBudget::new(16, 16_384, 16_384, 4096)?,
+            )?
+            .encode_catalog_object()?)
+        };
+        let default_schema = schema(instance.default_tenant_id())?;
+        let secondary_schema = schema(secondary)?;
+        let policy = positron_policy::IngestPolicy::reject_exact_text_body(
+            1,
+            "large-policy",
+            &"x".repeat(8192),
+        )?
+        .activated_object(secondary)?
+        .into_bytes();
+        let policy_peak = positron_policy::IngestPolicy::activated_object_memory_bound(&policy)?;
+        assert!(
+            policy_peak > positron_signals::SchemaCatalog::catalog_memory_bound(&default_schema)?
+        );
+        assert!(
+            policy_peak > positron_signals::SchemaCatalog::catalog_memory_bound(&secondary_schema)?
+        );
+        let catalog = crate::services::tests::schema_maintenance::open_catalog(&instance)?;
+        let append =
+            |extra: Vec<Vec<u8>>,
+             transaction|
+             -> Result<positron_kernel::CatalogSnapshot, Box<dyn std::error::Error>> {
+                let basis = catalog.pin()?;
+                let mut objects = Vec::new();
+                for identity in basis.object_identities() {
+                    objects.push(CatalogObject::new(
+                        basis
+                            .object(identity)?
+                            .ok_or("semantic fixture object")?
+                            .to_vec(),
+                    )?);
+                }
+                for bytes in extra {
+                    objects.push(CatalogObject::new(bytes)?);
+                }
+                catalog.commit(
+                    basis.identity(),
+                    CatalogProposal::new(
+                        TransactionId::new([transaction; 16])?,
+                        FormatEpoch::CATALOG_V1,
+                        objects,
+                    )?,
+                    None,
+                )?;
+                Ok(catalog.pin()?)
+            };
+        let first = append(vec![default_schema, policy], 0xe6)?;
+        let mut governance = 0_u64;
+        for identity in first.object_identities() {
+            let bytes = first.object(identity)?.ok_or("semantic object")?;
+            governance +=
+                u64::try_from(positron_governance::Identity::catalog_object_memory_bound(
+                    bytes,
+                    first.object_identities().count(),
+                )?)?;
+        }
+        let first_peak = semantic_memory_requirement(&first)?;
+        assert_eq!(first_peak, governance + u64::try_from(policy_peak)?);
+        drop(first);
+        let second = append(vec![secondary_schema], 0xe7)?;
+        assert_eq!(
+            semantic_memory_requirement(&second)?,
+            first_peak,
+            "a second valid tenant schema adds no simultaneous transient decode"
+        );
+        drop(second);
+        let malformed = append(vec![b"PSCHEMA1truncated".to_vec()], 0xe8)?;
+        assert_eq!(
+            semantic_memory_requirement(&malformed),
+            Err(ServiceFailure::BackupRepositoryRejected)
+        );
+        assert_eq!(
+            semantic_memory_bound(b"PIPACT01truncated"),
+            Err(ServiceFailure::BackupRepositoryRejected)
+        );
+        assert_eq!(semantic_memory_bound(b"another owner"), Ok(0));
+        Ok(())
+    }
+
     #[test]
     fn independent_verification_binds_schema_metadata_to_one_registered_tenant()
     -> Result<(), Box<dyn std::error::Error>> {

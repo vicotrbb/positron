@@ -551,6 +551,8 @@ fn delayed_retention_publication_proof_refuses_stale_frontier_and_anchor()
         scope,
         key(),
     )?;
+    let before_stale_proof = retention_time.status().safe_anchor();
+    assert_eq!(before_stale_proof, UnixNanoseconds::new(12_000_000_000));
     let coordinator = MaintenanceCoordinator::new();
     let preparation = active.prepare_retention_publication()?;
     let publication_id = preparation.task().identity();
@@ -632,7 +634,7 @@ fn delayed_retention_publication_proof_refuses_stale_frontier_and_anchor()
     );
     assert_eq!(
         retention_time.status().safe_anchor(),
-        UnixNanoseconds::new(10_000_000_000),
+        before_stale_proof,
         "a stale frontier must not install even a later durable lifecycle anchor"
     );
 
@@ -662,6 +664,11 @@ fn delayed_retention_publication_proof_refuses_stale_frontier_and_anchor()
         .complete_running_retention_publication_task(&coordinator, &execution)
         .expect_err("cached input metadata cannot prove the publication output binding");
     assert_eq!(metadata_failure.code(), LedgerFailureCode::RecoveryRequired);
+    assert_eq!(
+        retention_time.status().safe_anchor(),
+        before_stale_proof,
+        "unproven metadata must not install the later durable lifecycle anchor"
+    );
     assert_eq!(
         coordinator
             .status(publication_id)

@@ -12,6 +12,7 @@ pub struct BackupSnapshotVerification {
     request: [u8; 32],
     manifest: BackupManifest,
     registry: [u8; 32],
+    registry_control_extent: u64,
     check: BackupPublicationCheck,
     files: Vec<positron_kernel::BackupCaptureFile>,
     next_file: usize,
@@ -21,12 +22,28 @@ pub struct BackupSnapshotVerification {
     inventory_verified: bool,
     resumed_inventory: Option<([u8; 32], usize)>,
 }
+impl std::fmt::Debug for BackupSnapshotVerification {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BackupSnapshotVerification")
+            .field("publication_complete", &self.check.complete())
+            .field("publication", &self.check)
+            .field("inventory_verified", &self.inventory_verified)
+            .field("completed_files", &self.next_file)
+            .field("file_count", &self.files.len())
+            .field("object_index", &self.file_object)
+            .field("file_offset", &self.file_offset)
+            .finish()
+    }
+}
+
 impl BackupSnapshotVerification {
     fn start(
         owner: [u8; 16],
         request: [u8; 32],
         manifest: BackupManifest,
         registry: [u8; 32],
+        registry_control_extent: u64,
         check: BackupPublicationCheck,
     ) -> Self {
         Self {
@@ -34,6 +51,7 @@ impl BackupSnapshotVerification {
             request,
             manifest,
             registry,
+            registry_control_extent,
             check,
             files: Vec::new(),
             next_file: 0,
@@ -60,6 +78,7 @@ impl BackupSnapshotVerification {
         self.manifest
             .retained_memory_bytes()?
             .checked_add(self.check.retained_memory_bytes()?)
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u64>() as u64))
             .and_then(|bytes| {
                 allocation_bytes::<positron_kernel::BackupCaptureFile>(self.files.capacity())
                     .ok()
@@ -84,6 +103,9 @@ impl BackupPublisher<'_> {
         }
         self.require_identity().await?;
         let (head, generation, registry) = self.current().await?;
+        let registry_control_extent = self
+            .control_extent
+            .load(std::sync::atomic::Ordering::Relaxed);
         let generation = generation.ok_or(RepositoryFailure::NotFound)?;
         let receipt = generation
             .snapshots
@@ -162,6 +184,7 @@ impl BackupPublisher<'_> {
             request,
             manifest,
             registry.ok_or(RepositoryFailure::CorruptState)?,
+            registry_control_extent,
             check,
         ))
     }
@@ -177,6 +200,9 @@ impl BackupPublisher<'_> {
         }
         self.require_identity().await?;
         let (_, current, registry) = self.current().await?;
+        let registry_control_extent = self
+            .control_extent
+            .load(std::sync::atomic::Ordering::Relaxed);
         let generation = current.ok_or(RepositoryFailure::NotFound)?;
         let receipt = generation
             .snapshots
@@ -197,6 +223,7 @@ impl BackupPublisher<'_> {
             request,
             manifest,
             registry.ok_or(RepositoryFailure::CorruptState)?,
+            registry_control_extent,
             check,
         ))
     }
@@ -344,6 +371,19 @@ impl BackupPublisher<'_> {
         state.inventory_verified = true;
         Ok(())
     }
+    /// Admits future sequential key and Registry reads before native semantic work.
+    /// Key wire size uses the canonical codec bound; no body or authority is cached.
+    pub fn admit_snapshot_verification_controls(
+        &self,
+        state: &BackupSnapshotVerification,
+    ) -> Result<(), RepositoryFailure> {
+        let extent = if state.check.keys.is_empty() {
+            state.registry_control_extent
+        } else {
+            state.registry_control_extent.max(MAX_KEY_OBJECT_BYTES)
+        };
+        self.ensure_control_memory(extent, 0)
+    }
     pub fn verification_key_count(&self, state: &BackupSnapshotVerification) -> usize {
         state.check.keys.len()
     }
@@ -388,3 +428,6 @@ impl BackupPublisher<'_> {
         super::super::read::file_bytes(self.repository, manifest, file).await
     }
 }
+
+#[cfg(test)]
+mod control_memory_tests;

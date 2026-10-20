@@ -1,3 +1,5 @@
+mod log_query;
+pub(crate) use log_query::configure as configure_log_query;
 mod emission;
 mod operations;
 mod validation;

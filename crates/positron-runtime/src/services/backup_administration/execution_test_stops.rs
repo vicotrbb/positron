@@ -8,7 +8,11 @@ use std::sync::{
 pub(in crate::services) enum StopPoint {
     RegistryPublished,
     BackupOverlayPublished,
+    VerificationNativeFileVerified,
+    VerificationRemoteRangeVerified,
+    VerificationRemoteCheckpointDue,
     VerificationMetadataVerified,
+    VerificationSemanticVerified,
     VerificationKeyRecovered,
     VerificationReportPublished,
     CaptureCleanupBatch,

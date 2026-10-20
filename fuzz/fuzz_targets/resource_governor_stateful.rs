@@ -4,9 +4,9 @@ use libfuzzer_sys::fuzz_target;
 use positron_domain::identity::{PrincipalId, TenantId};
 use positron_kernel::{
     DetectedCapacity, DiskObservation, DiskPressureThresholds, GovernorPolicy,
-    InventoryCardinalityLimits, OperatorLimits, OrdinaryPool, OrdinaryPoolPolicy, PrincipalQuota,
-    RecoveryPoolCapacities, RecoveryReserve, RecoveryWorkClaim, RecoveryWorkKind, ResourceAmounts,
-    OperationToken, ResourceDimension, ResourceGovernor, ResourceInventory, ResourceReservation,
+    InventoryCardinalityLimits, OperationToken, OperatorLimits, OrdinaryPool, OrdinaryPoolPolicy,
+    PrincipalQuota, RecoveryPoolCapacities, RecoveryReserve, RecoveryWorkClaim, RecoveryWorkKind,
+    ResourceAmounts, ResourceDimension, ResourceGovernor, ResourceInventory, ResourceReservation,
     StorageKernelResourceAuthority, TenantQuota, WorkClaim, WorkClass, WorkKind,
 };
 

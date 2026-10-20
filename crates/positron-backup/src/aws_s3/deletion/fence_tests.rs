@@ -10,6 +10,37 @@ use std::{
 };
 #[path = "../../../tests/support/snapshot_resources.rs"]
 mod resources;
+
+async fn wait_for_delayed_put(
+    ready: &std::sync::mpsc::Receiver<()>,
+    delayed: &mut tokio::task::JoinHandle<Result<PutOutcome, RepositoryFailure>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while ready.try_recv().is_err() {
+        if delayed.is_finished() {
+            return Err(format!("delayed PUT ended before barrier: {:?}", delayed.await?).into());
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_put_failure_is_reported_before_waiting_for_the_barrier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_started, ready) = std::sync::mpsc::channel();
+    let mut delayed = tokio::spawn(async { Err(RepositoryFailure::Busy) });
+    let failure = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        wait_for_delayed_put(&ready, &mut delayed),
+    )
+    .await?
+    .expect_err("completed PUT cannot reach the barrier");
+    assert_eq!(
+        failure.to_string(),
+        "delayed PUT ended before barrier: Err(Busy)"
+    );
+    Ok(())
+}
 #[tokio::test]
 async fn occupied_signed_fence_rejects_delayed_conditional_put_and_generic_delete()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -108,8 +139,13 @@ async fn occupied_signed_fence_rejects_delayed_conditional_put_and_generic_delet
         let native = Arc::new(AwsS3Repository::from_local_simulator(target, identity, resources, address)?);
         let writer = native.clone(); let late_object = object.clone();
         // A separate provider client represents a PUT accepted before purge.
-        let delayed = tokio::spawn(async move { writer.put_if_absent(late_object).await });
-        while ready.try_recv().is_err() {tokio::task::yield_now().await;}
+        let mut delayed = tokio::spawn(async move { writer.put_if_absent(late_object).await });
+        if let Err(failure) = wait_for_delayed_put(&ready, &mut delayed).await {
+            release.store(true, Ordering::Release);
+            stopped.store(true, Ordering::Release);
+            server.join().map_err(|_| "server")?;
+            return Err(failure);
+        }
         // The same instance refuses concurrent calls; use the actual native
         // typed fence through a second independently opened provider handle.
         let cleanup = AwsS3Repository::from_local_simulator(native.target.clone(), native.identity.clone(), native.resources.clone(), address)?;

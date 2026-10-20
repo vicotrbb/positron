@@ -7,6 +7,7 @@ use std::sync::Arc;
 /// and checks every ciphertext file against `files()`. No live state is changed.
 pub struct BackupCaptureVerification {
     instance: InstanceId,
+    capture: ([u8; 16], [u8; 32]),
     generation: u64,
     catalog: [u8; 32],
     epoch: FormatEpoch,
@@ -77,6 +78,7 @@ impl BackupCaptureVerification {
             BackupCapture::decode_inventory(&plaintext, operation, request, epoch)?;
         Ok(BackupCaptureVerification {
             instance,
+            capture: (operation, request),
             generation,
             catalog,
             epoch,
@@ -397,9 +399,11 @@ impl BackupCaptureVerification {
             return Err(fail(CatalogFailureCode::InvalidInput));
         }
         let instance = self.instance;
+        let capture = self.capture;
         let (snapshot, audit, checkpoint) = self.finish_verified()?;
         Ok(super::super::restore_origin::BackupRestoreOrigin {
             instance,
+            capture,
             manifest,
             intent,
             snapshot,
@@ -513,6 +517,7 @@ mod tests {
     ) -> Result<BackupCaptureVerification, CatalogFailure> {
         Ok(BackupCaptureVerification {
             instance: InstanceId::new([1; 16])?,
+            capture: ([3; 16], [4; 32]),
             generation: 1,
             catalog: [1; 32],
             epoch: FormatEpoch::CATALOG_V2,
@@ -554,6 +559,82 @@ mod tests {
         );
         let snapshot = metadata(2, vec![second, first])?.finish()?;
         assert_eq!(snapshot.governance_audit_frontier(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn captured_catalog_rejects_mutated_audit_semantics() -> Result<(), CatalogFailure> {
+        let (record, _) = super::super::super::codec::prepare_audit(
+            types::AuditFrontier::ORIGIN,
+            TransactionId::new([9; 16])?,
+            b"authenticated intent",
+        )?;
+        let mut intent = record.clone();
+        intent.intent = Arc::from(b"substituted intent".as_slice());
+        let mut hash = record.clone();
+        hash.hash = [7; 32];
+        let mut predecessor = record.clone();
+        predecessor.predecessor_hash = [8; 32];
+        let mut position = record.clone();
+        position.position = 0;
+        let mut transaction = record;
+        transaction.transaction = TransactionId::new([10; 16])?;
+        for altered in [intent, hash, predecessor, position, transaction] {
+            let failure = metadata(1, vec![altered])?
+                .finish()
+                .err()
+                .ok_or_else(|| fail(CatalogFailureCode::InvalidInput))?;
+            assert_eq!(failure.code(), CatalogFailureCode::IntegrityCorruption);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_audit_suffix_refuses_position_overflow_after_authenticating_anchor()
+    -> Result<(), CatalogFailure> {
+        let signer = crate::AuditCheckpointSigner::from_seed(Box::new([11; 32]))?;
+        let trust = crate::AuditRetentionTrust::new(
+            InstanceId::new([1; 16])?,
+            signer.public_key(),
+            [12; 32],
+            1,
+        )?;
+        let (record, _) = super::super::super::codec::prepare_audit(
+            types::AuditFrontier {
+                position: u64::MAX - 1,
+                hash: [13; 32],
+            },
+            TransactionId::new([14; 16])?,
+            b"last representable audit position",
+        )?;
+        let anchor = crate::AuditRetentionAnchor::create(&signer, trust, &record)?;
+        let failure =
+            crate::AuditRetentionAnchor::verify_retained_suffix(&[], Some(&anchor), trust)
+                .err()
+                .ok_or_else(|| fail(CatalogFailureCode::InvalidInput))?;
+        assert_eq!(failure.code(), CatalogFailureCode::LimitExceeded);
+        let (penultimate, _) = super::super::super::codec::prepare_audit(
+            types::AuditFrontier {
+                position: u64::MAX - 2,
+                hash: [15; 32],
+            },
+            TransactionId::new([16; 16])?,
+            b"penultimate audit position",
+        )?;
+        let (last, _) = super::super::super::codec::prepare_audit(
+            types::AuditFrontier {
+                position: penultimate.position(),
+                hash: penultimate.record_hash(),
+            },
+            TransactionId::new([17; 16])?,
+            b"last linked audit position",
+        )?;
+        let anchor = crate::AuditRetentionAnchor::create(&signer, trust, &penultimate)?;
+        let failure =
+            crate::AuditRetentionAnchor::verify_retained_suffix(&[last], Some(&anchor), trust)
+                .err()
+                .ok_or_else(|| fail(CatalogFailureCode::InvalidInput))?;
+        assert_eq!(failure.code(), CatalogFailureCode::LimitExceeded);
         Ok(())
     }
 }

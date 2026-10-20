@@ -1,5 +1,7 @@
 //! Real backup owner and separate offline restore command processes.
 #![cfg(unix)]
+#[path = "support/native_binary.rs"]
+mod native_binary;
 use age::secrecy::ExposeSecret;
 use positron_api::{
     backup::{BackupRequest, BackupServiceClient, BackupTransport},
@@ -16,7 +18,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     time::{Duration, Instant},
 };
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -40,7 +42,7 @@ fn host(root: &Path, suffix: &str) -> Result<NativeHost> {
     )?))
 }
 fn command(action: &str, arguments: &[String], private: &[&str]) -> Result<Output> {
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["backup", "restore", action])
         .args(arguments)
         .output()?;
@@ -157,10 +159,28 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
     let backup_client = BackupServiceClient::new(BackupTransport::PlaintextOptOut { endpoint })?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let accepted = loop {
-        let status = repository_client.manage(
+        let status = match repository_client.manage(
             claim.secret(),
             &RepositoryRequest::decode(br#"{"action":"status"}"#)?,
-        )?;
+        ) {
+            Ok(status) => status,
+            Err(positron_api::repository::RepositoryServiceClientFailure::CapacityUnavailable)
+                if Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(5)),
+                );
+                if Instant::now() >= deadline {
+                    return Err(
+                        "source repository status exhausted the original admission deadline".into(),
+                    );
+                }
+                continue;
+            },
+            Err(error) => return Err(format!("source repository status read: {error:?}").into()),
+        };
         let request = BackupRequest::decode(&serde_json::to_vec(&serde_json::json!({
             "action":"create", "expected_catalog_generation":status.catalog_generation,
             "idempotency_key":"22222222-2222-4222-8222-222222222222", "repository_id":repository_id,
@@ -168,25 +188,80 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
         }))?)?;
         match backup_client.manage(claim.secret(), &request) {
             Ok(accepted) => break accepted,
-            Err(positron_api::backup::BackupServiceClientFailure::PreconditionFailed)
+            Err(positron_api::backup::BackupServiceClientFailure::StaleGeneration)
                 if Instant::now() < deadline => {},
             Err(error) => return Err(format!("source backup admission: {error:?}").into()),
         }
     };
-    let lookup = BackupRequest::decode(&serde_json::to_vec(
-        &serde_json::json!({"action":"status", "operation_id":accepted.operation.id}),
-    )?)?;
-    let published = loop {
-        let status = backup_client.manage(claim.secret(), &lookup)?;
-        if status.operation.status == "succeeded" {
-            break status;
+    // The canonical CLI wait uses its existing 100ms read cadence. Its own
+    // whole-second budget is rounded down; the original fixture deadline also
+    // bounds process initialization and every output wait.
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or("source backup original deadline expired before public wait")?;
+    let mut wait = Command::new(native_binary::executable())
+        .args([
+            "backup",
+            "wait",
+            "--endpoint",
+            &endpoint.to_string(),
+            "--allow-plaintext",
+            "--credential-stdin",
+            "--operation-id",
+            &accepted.operation.id,
+            "--wait-seconds",
+            &remaining.as_secs().to_string(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let supervision = (|| -> Result {
+        wait.stdin
+            .take()
+            .ok_or("source backup credential pipe")?
+            .write_all(claim.secret().as_bytes())?;
+        while wait.try_wait()?.is_none() {
+            if Instant::now() >= deadline {
+                return Err("source backup public wait exceeded its original deadline".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
-        if status.operation.status == "failed" || Instant::now() >= deadline {
-            return Err(format!("source backup did not complete: {status:?}").into());
+        Ok(())
+    })();
+    if let Err(primary) = supervision {
+        if let Err(cleanup) = wait.kill()
+            && !matches!(
+                cleanup.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+            )
+        {
+            eprintln!("source backup wait kill cleanup: {cleanup}");
         }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let receipt = published.receipt.ok_or("snapshot receipt")?;
+        if let Err(cleanup) = wait.wait() {
+            eprintln!("source backup wait reap cleanup: {cleanup}");
+        }
+        return Err(primary);
+    }
+    let published = wait.wait_with_output()?;
+    if Instant::now() >= deadline {
+        return Err(format!("source backup public wait completed after its original deadline: status={:?} phase={:?} terminal_error_code={:?}", field(&published, "status"), field(&published, "phase"), field(&published, "terminal_error_code")).into());
+    }
+    for bytes in [&published.stdout, &published.stderr] {
+        assert!(!String::from_utf8_lossy(bytes).contains(claim.secret()));
+    }
+    assert!(
+        published.status.success(),
+        "source backup public wait refused: {}; status={:?} phase={:?} terminal_error_code={:?}",
+        String::from_utf8_lossy(&published.stderr),
+        field(&published, "status"),
+        field(&published, "phase"),
+        field(&published, "terminal_error_code")
+    );
+    assert_eq!(field(&published, "operation_id")?, accepted.operation.id);
+    assert_eq!(field(&published, "status")?, "succeeded");
+    let manifest_checksum = field(&published, "manifest_checksum")?;
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         positron_runtime::ExitOutcome::Graceful
@@ -215,10 +290,7 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
             ),
             ("--repository-id", repository_id.into()),
             ("--snapshot-id", accepted.operation.id.clone()),
-            (
-                "--expected-manifest-checksum",
-                receipt.manifest_checksum.clone(),
-            ),
+            ("--expected-manifest-checksum", manifest_checksum.clone()),
             (
                 "--idempotency-key",
                 "33333333-3333-4333-8333-333333333333".into(),

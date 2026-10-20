@@ -311,7 +311,13 @@ pub(in crate::services) mod tests {
                 std::time::Instant::now() + std::time::Duration::from_secs(1),
             )
             .map_err(|failure| format!("initial one-second backup pause: {failure:?}"))?;
-        assert!(!paused.status().is_terminal());
+        assert!(
+            !paused.status().is_terminal(),
+            "initial backup pause became terminal: kind={:?} phase={:?} terminal_error={:?}",
+            paused.kind(),
+            paused.phase(),
+            paused.terminal_error()
+        );
         let task = positron_kernel::MaintenanceTaskId::new(first.operation_id().to_bytes())
             .map_err(|failure| format!("first task: {failure:?}"))?;
         assert_eq!(
@@ -333,6 +339,8 @@ pub(in crate::services) mod tests {
     fn registered_local_snapshot_and_independent_verification_use_the_existing_backup_owner()
     -> Result<(), Box<dyn std::error::Error>> {
         use positron_governance::{AdministrativeIdempotencyKey, DurableOperationStatus};
+        let _serial =
+            crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
         let fixture = crate::services::tests::schema_maintenance::Fixture::new()?;
         let (instance, ingest, query, administrator) = fixture.initialized_with_admin()?;
         let export = fixture.recovery_export_directory()?;

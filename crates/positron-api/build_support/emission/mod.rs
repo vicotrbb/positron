@@ -1,5 +1,6 @@
 mod api_key;
 mod backup;
+mod log_query;
 mod maintenance;
 mod policy_activate;
 mod policy_diff;
@@ -21,6 +22,7 @@ use std::error::Error;
 use std::path::PathBuf;
 
 pub(super) fn generate_all(operations: &ValidatedOperations) -> Result<(), Box<dyn Error>> {
+    log_query::generate(operations)?;
     api_key::generate_api_key_client(operations)?;
     maintenance::generate_maintenance_client(operations)?;
     provider_migration::generate(operations)?;

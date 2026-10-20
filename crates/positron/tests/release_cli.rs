@@ -1,7 +1,9 @@
+#[path = "support/native_binary.rs"]
+mod native_binary;
 use std::process::Command;
 #[test]
 fn native_release_cli_is_available_without_database_configuration() {
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let output = Command::new(native_binary::executable())
         .args(["release", "--help"])
         .output()
         .unwrap();
@@ -17,7 +19,7 @@ fn native_release_cli_is_available_without_database_configuration() {
 mod support;
 use positron_release::*;
 fn run(arguments: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_positron"))
+    Command::new(native_binary::executable())
         .arg("release")
         .args(arguments)
         .output()
@@ -270,7 +272,8 @@ fn native_cli_prepares_and_authenticates_a_root_signed_trust_update() {
 fn native_binary_itself_passes_inspection_with_an_independent_file_checksum() {
     use sha2::{Digest, Sha256};
     use std::io::Read;
-    let executable = std::path::Path::new(env!("CARGO_BIN_EXE_positron"));
+    let executable_path = native_binary::executable();
+    let executable = executable_path.as_path();
     let mut file = std::fs::File::open(executable).unwrap();
     let mut buffer = [0; 65536];
     let mut hash = Sha256::new();

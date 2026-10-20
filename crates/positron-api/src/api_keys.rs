@@ -44,6 +44,7 @@ pub(crate) fn read_bounded_trust_file(path: &Path) -> Result<Vec<u8>, ()> {
 /// Standard Prost output generated at build time from the canonical schema.
 pub mod protobuf {
     include!(concat!(env!("OUT_DIR"), "/positron.v1.rs"));
+    include!(concat!(env!("OUT_DIR"), "/positron.v1.serde.rs"));
 }
 pub use protobuf::{ApiKeyResponse, KeyAction, KeyDescriptor, KeyScope};
 

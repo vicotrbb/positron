@@ -8,7 +8,8 @@ with existing data.
 
 Prepare a canonical configuration file whose storage roots name those directories.
 Use the same file, source identities, recovery input and idempotency key for every
-retry. Obtain the source instance, root identity and integrity public key from
+retry. The accepted target configuration becomes active after restore; ordinary
+startup still refuses later immutable changes. Obtain the source instance, root identity and integrity public key from
 independently recorded recovery output, rather than trusting repository contents.
 Use the original snapshot ID and exact signed manifest checksum from its backup
 receipt. The repository must still retain that snapshot.
@@ -87,3 +88,13 @@ and other external secrets must be supplied independently.
 Local KMIP, GCS and Azure simulator tests exercise recovery and adapter behavior.
 They are simulation evidence and do not establish real-cloud deployment or
 credential qualification.
+
+A restored snapshot's own captured Backup Snapshot operation reports a distinct
+`restored_publication` receipt after authenticated reconciliation. It identifies
+the source manifest and Catalog, exact capture binding, target restore origin,
+restore intent and idempotency key, and registry head observed at reconciliation.
+It does not report unavailable original upload/reuse counters or completion time.
+Exact retries preserve that receipt and audit while checking current trust,
+membership, purge and revocation rules and the recorded antirollback floor.
+Other active source operations retain their normal recovery guards. The target
+remains offline until normal restore publication and bootstrap completion.

@@ -41,6 +41,14 @@ impl BackupRegistryVerification {
     pub fn complete(&self) -> Result<bool, RepositoryFailure> {
         Ok(self.get()?.stage == Stage::Complete)
     }
+    /// Exact authenticated head after the complete anchored chain walk.
+    pub fn verified_head(&self) -> Result<[u8; 32], RepositoryFailure> {
+        let cursor = self.get()?;
+        if cursor.stage != Stage::Complete || cursor.target == [0; 32] {
+            return Err(RepositoryFailure::PreconditionFailed);
+        }
+        Ok(cursor.target)
+    }
     pub const fn retained_memory_bytes(&self) -> u64 {
         0
     }

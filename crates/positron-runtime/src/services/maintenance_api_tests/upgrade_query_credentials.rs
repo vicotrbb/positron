@@ -131,7 +131,11 @@ fn check(no_queryable: bool, invalid: bool, stale: bool) -> Result<(), Box<dyn s
     } else {
         assert_eq!(
             result,
-            Err(MaintenanceServiceFailure::PreconditionFailed),
+            Err(if stale {
+                MaintenanceServiceFailure::StaleGeneration
+            } else {
+                MaintenanceServiceFailure::PreconditionFailed
+            }),
             "refused preflight must not accept intent"
         );
         assert_eq!(

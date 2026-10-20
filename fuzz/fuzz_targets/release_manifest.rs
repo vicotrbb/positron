@@ -3,6 +3,16 @@ use libfuzzer_sys::fuzz_target;
 use positron_kernel::release_manifest::{ProjectTrustRoot, SignedReleaseManifest};
 
 fuzz_target!(|data: &[u8]| {
+    if data.len() <= 65_536 {
+        for target in [positron_release::NativeTarget::LinuxX86_64,
+            positron_release::NativeTarget::LinuxAarch64,
+            positron_release::NativeTarget::MacosX86_64,
+            positron_release::NativeTarget::MacosAarch64] {
+            if let Ok(archive) = positron_release::native_archive(target, data) {
+                assert_eq!(archive, positron_release::native_archive(target, data).expect("deterministic archive"));
+            }
+        }
+    }
     if let Ok(signed) = SignedReleaseManifest::from_bytes(data) {
         let canonical = signed
             .to_bytes()

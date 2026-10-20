@@ -540,6 +540,41 @@ pub(crate) fn successor_objects(
     Ok(objects)
 }
 
+/// Rebinds deployment configuration only inside an authenticated fresh restore.
+/// The accepted restore intent already binds this exact validated configuration.
+pub(crate) fn bind_restored_configuration(
+    origin: &positron_kernel::BackupRestoreOrigin,
+    objects: &mut Vec<CatalogObject>,
+    active: &EffectiveConfiguration,
+    secret: &CatalogSecret,
+) -> Result<(), BootstrapFailure> {
+    configuration_catalog_state(origin.snapshot())?;
+    let binding = ConfigurationAuditBinding::from_configuration(secret, active)
+        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+    let object = CatalogObject::new(configuration_object(
+        origin
+            .transaction_id()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?,
+        origin.snapshot().number(),
+        active,
+        binding.private_digest,
+    ))
+    .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::CatalogUnavailable))?;
+    if let Some(existing) = objects.iter_mut().find(|object| {
+        object
+            .canonical_bytes()
+            .starts_with(&CONFIGURATION_OBJECT_MAGIC)
+    }) {
+        *existing = object;
+    } else {
+        objects
+            .try_reserve(1)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))?;
+        objects.push(object);
+    }
+    Ok(())
+}
+
 struct ConfigurationCatalogState {
     generation: u64,
     immutable_digest: [u8; 32],

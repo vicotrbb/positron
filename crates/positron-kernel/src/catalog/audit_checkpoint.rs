@@ -529,29 +529,17 @@ impl AuditRetentionAnchor {
         let anchor =
             anchor.ok_or_else(|| CatalogFailure::new(CatalogFailureCode::IntegrityCorruption))?;
         anchor.verify(trust)?;
-        let mut predecessor = anchor.record_hash;
-        let mut expected = anchor
+        let expected = anchor
             .position
             .checked_add(1)
             .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
-        for record in records {
-            if record.position != expected
-                || record.predecessor_hash != predecessor
-                || record.hash
-                    != super::codec::audit_hash(
-                        record.position,
-                        record.predecessor_hash,
-                        record.transaction,
-                        &record.intent,
-                    )?
-            {
-                return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
-            }
-            predecessor = record.hash;
-            expected = expected
+        verify_audit_links(records, expected, anchor.record_hash)?;
+        if let Some(last) = records.last() {
+            last.position
                 .checked_add(1)
                 .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
         }
+
         Ok(())
     }
 
@@ -701,26 +689,7 @@ pub(super) fn verify_chain(
     trusted_public_key: [u8; 32],
     checkpoint: Option<&GovernanceAuditCheckpoint>,
 ) -> Result<(), CatalogFailure> {
-    let mut predecessor = [0_u8; 32];
-    for (offset, record) in records.iter().enumerate() {
-        let expected_position = u64::try_from(offset)
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
-        if record.position != expected_position
-            || record.predecessor_hash != predecessor
-            || record.hash
-                != super::codec::audit_hash(
-                    record.position,
-                    record.predecessor_hash,
-                    record.transaction,
-                    &record.intent,
-                )?
-        {
-            return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
-        }
-        predecessor = record.hash;
-    }
+    verify_audit_links(records, 1, [0; 32])?;
     if let Some(checkpoint) = checkpoint {
         checkpoint.verify(trusted_public_key)?;
         let offset = checkpoint
@@ -733,6 +702,47 @@ pub(super) fn verify_chain(
         {
             return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
         }
+    }
+    Ok(())
+}
+
+/// A private authenticated view; full records remain owned by their caller.
+struct AuthenticatedAuditLink<'record>(&'record GovernanceAuditRecord);
+
+impl<'record> AuthenticatedAuditLink<'record> {
+    fn verify(
+        record: &'record GovernanceAuditRecord,
+        expected_position: u64,
+        predecessor: [u8; 32],
+    ) -> Result<Self, CatalogFailure> {
+        if record.position != expected_position
+            || record.predecessor_hash != predecessor
+            || record.hash
+                != super::codec::audit_hash(
+                    record.position,
+                    record.predecessor_hash,
+                    record.transaction,
+                    &record.intent,
+                )?
+        {
+            return Err(CatalogFailure::new(CatalogFailureCode::IntegrityCorruption));
+        }
+        Ok(Self(record))
+    }
+}
+
+fn verify_audit_links(
+    records: &[GovernanceAuditRecord],
+    first_position: u64,
+    mut predecessor: [u8; 32],
+) -> Result<(), CatalogFailure> {
+    for (offset, record) in records.iter().enumerate() {
+        let expected_position = u64::try_from(offset)
+            .ok()
+            .and_then(|offset| first_position.checked_add(offset))
+            .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let link = AuthenticatedAuditLink::verify(record, expected_position, predecessor)?;
+        predecessor = link.0.record_hash();
     }
     Ok(())
 }

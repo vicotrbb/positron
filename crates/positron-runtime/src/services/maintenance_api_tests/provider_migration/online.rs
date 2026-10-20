@@ -61,7 +61,7 @@ fn native_admin_http_migrates_while_otlp_remains_serving() -> Result<(), Box<dyn
             };
             match client.manage(&administrator, &phase) {
                 Ok(response) => break response,
-                Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::PreconditionFailed) if std::time::Instant::now() < deadline => {},
+                Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::StaleGeneration) if std::time::Instant::now() < deadline => {},
                 Err(failure) => return Err(format!("{action} admission: {failure:?}").into()),
             }
         };
@@ -107,7 +107,7 @@ fn inspect_with_backpressure(
     loop {
         match client.manage(bearer, request) {
             Ok(response) => return Ok(response),
-            Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::AdministrationUnavailable) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::CapacityUnavailable) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Err(failure) => return Err(failure.into()),
         }
     }

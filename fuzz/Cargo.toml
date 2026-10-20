@@ -481,3 +481,10 @@ path = "fuzz_targets/release_trust.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "log_query_api"
+path = "fuzz_targets/log_query_api.rs"
+test = false
+doc = false
+bench = false

@@ -159,6 +159,27 @@ impl PreparedRestore {
             access
                 .verify_restore_target(request.pin.instance(), &secret, parameters.intent_digest())
                 .map_err(storage::storage_failure)?;
+            // A committed historical successor owns its administrative key even
+            // if restore acceptance was interrupted. Inspect without recovery
+            // publication before opening a writable Catalog for a retry.
+            if Catalog::inspect_restore_origin_intent(&authority, request.pin.instance(), &secret)
+                .map_err(|_| failure())?
+                .is_some()
+            {
+                let view = Catalog::read_current_view(&authority, request.pin.instance(), secret)
+                    .map_err(|_| failure())?;
+                let (capture, _) = reader.manifest().capture_binding().ok_or_else(failure)?;
+                if let Some(evidence) = DurableOperationAdministration::inspect_snapshot(
+                    view.snapshot(),
+                    positron_governance::OperationId::from_bytes(capture).map_err(|_| failure())?,
+                )
+                .map_err(|_| failure())?
+                .and_then(|operation| operation.restored_backup_publication())
+                    && evidence.restore_idempotency_key() != request.idempotency.to_bytes()
+                {
+                    return Err(failure());
+                }
+            }
         }
         let manifest = reader.manifest().clone();
         drop(reader);

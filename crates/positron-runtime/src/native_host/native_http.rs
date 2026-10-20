@@ -13,6 +13,7 @@ use crate::{ConnectionProtection, HealthState, ListenerRole, ServiceHandle};
 use super::ControlDiagnosticsHandler;
 
 mod dispatch;
+pub(super) use dispatch::query_failure_response;
 mod io;
 #[cfg(test)]
 mod upgrade_deadline_tests;

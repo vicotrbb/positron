@@ -28,6 +28,7 @@ pub(crate) fn administrative_failure(status: u16, bytes: &[u8]) -> MaintenanceSe
         (401, Some("authentication_rejected")) => F::AuthenticationRejected,
         (404, Some("source_unavailable")) => F::SourceUnavailable,
         (404, Some("task_unavailable")) => F::TaskUnavailable,
+        (409, Some("stale_generation")) => F::StaleGeneration,
         (409, Some("precondition_failed")) => F::PreconditionFailed,
         (409, Some("idempotency_conflict")) => F::IdempotencyConflict,
         (503, Some("administration_unavailable")) => F::AdministrationUnavailable,
@@ -1133,3 +1134,22 @@ impl std::fmt::Display for MaintenanceWireFailure {
 }
 
 impl std::error::Error for MaintenanceWireFailure {}
+
+#[cfg(test)]
+mod rejection_tests {
+    use super::{MaintenanceServiceClientFailure as F, administrative_failure};
+    #[test]
+    fn stale_generation_is_distinct_from_other_preconditions() {
+        let stale = administrative_failure(409, br#"{"code":"stale_generation"}"#);
+        assert_ne!(stale, F::Transport);
+        assert_ne!(stale, F::PreconditionFailed);
+        assert_eq!(
+            administrative_failure(409, br#"{"code":"precondition_failed"}"#),
+            F::PreconditionFailed
+        );
+        assert_eq!(
+            administrative_failure(503, br#"{"code":"stale_generation"}"#),
+            F::Transport
+        );
+    }
+}

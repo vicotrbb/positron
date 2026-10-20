@@ -59,7 +59,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     config.skip_debug([".positron.v1.ApiKeyResponse"]);
     let descriptor = PathBuf::from(std::env::var("OUT_DIR")?).join("positron-v1.bin");
     config.file_descriptor_set_path(&descriptor);
-    config.compile_protos(&[schema], &["../../api"])?;
+    let messages = config.load_fds(&[schema], &["../../api"])?;
+    build_support::configure_log_query(&mut config, &messages)?;
+    config.compile_fds(messages)?;
     build_support::generate_clients(&descriptor, mapping)?;
     Ok(())
 }

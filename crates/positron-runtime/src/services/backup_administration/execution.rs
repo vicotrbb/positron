@@ -1,4 +1,6 @@
 //! One admitted Runtime turn advances one bounded capture or native upload step.
+// Existing bounded backup cadence; a failed checkpoint may replay this many advances.
+pub(super) const MAX_BACKUP_STEP_ADVANCES: usize = 8;
 #[path = "execution_cancellation.rs"]
 mod cancellation;
 #[path = "execution_capture.rs"]
@@ -24,6 +26,9 @@ use positron_governance::{
 use positron_kernel::{
     BackupCapture, BackupCapturePreparation, BackupControlSigner, MaintenanceExecution,
 };
+#[cfg(test)]
+#[path = "execution_diagnostic_tests.rs"]
+mod diagnostic_tests;
 pub(in crate::services) enum BackupWork {
     Snapshot(Box<SnapshotWork>),
     Verification(Box<super::verification::VerificationWork>),
@@ -90,25 +95,52 @@ pub(in crate::services) fn complete(
         .map_err(|_| ServiceFailure::CorruptState)?;
     let id = OperationId::from_bytes(binding.operation_id())
         .map_err(|_| ServiceFailure::CorruptState)?;
-    {
-        let operation = {
-            let _gate = services.catalog_operation()?;
-            let catalog = services
-                .open_maintenance_catalog()
-                .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-            DurableOperationAdministration::inspect(&catalog, id)
-                .map_err(|_| ServiceFailure::CorruptState)?
-                .ok_or(ServiceFailure::CorruptState)?
-        };
+    enum Prepared {
+        Verification(
+            DurableOperation,
+            Option<positron_governance::AuthorizedContext>,
+        ),
+        Retention,
+        Snapshot(
+            std::ops::ControlFlow<bool, (DurableOperation, positron_governance::AuthorizedContext)>,
+        ),
+    }
+    let prepared = {
+        let _gate = services.catalog_operation()?;
+        let catalog = services
+            .open_maintenance_catalog()
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+        let operation = DurableOperationAdministration::inspect(&catalog, id)
+            .map_err(|_| ServiceFailure::CorruptState)?
+            .ok_or(ServiceFailure::CorruptState)?;
         if operation.kind() == DurableOperationKind::BackupVerification {
-            return super::verification::complete(
-                services,
-                execution,
-                work,
-                operation,
-                cancellation,
-            );
+            let actor = if operation.status().is_terminal() {
+                None
+            } else {
+                Some(super::verification::prepare(
+                    services, execution, operation, &catalog,
+                )?)
+            };
+            Prepared::Verification(operation, actor)
+        } else if execution.task().class()
+            == positron_kernel::MaintenanceTaskClass::RepositoryCleanup
+        {
+            Prepared::Retention
+        } else {
+            Prepared::Snapshot(prepare_snapshot(
+                services, execution, work, operation, binding, &catalog,
+            )?)
         }
+    };
+    if let Prepared::Verification(operation, actor) = prepared {
+        return super::verification::complete(
+            services,
+            execution,
+            work,
+            operation,
+            cancellation,
+            actor,
+        );
     }
     if execution.task().class() == positron_kernel::MaintenanceTaskClass::RepositoryCleanup {
         let (operation, actor) = {
@@ -156,94 +188,12 @@ pub(in crate::services) fn complete(
         };
         return retention::complete(services, execution, work, operation, actor, cancellation);
     }
-    let (operation, actor) = {
-        let _gate = services.catalog_operation()?;
-        let catalog = services
-            .open_maintenance_catalog()
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        let operation = DurableOperationAdministration::inspect(&catalog, id)
-            .map_err(|_| ServiceFailure::CorruptState)?
-            .ok_or(ServiceFailure::CorruptState)?;
-        require_operation(operation, services.instance.instance.to_bytes())?;
-        if operation
-            .backup_parameters()
-            .ok_or(ServiceFailure::CorruptState)?
-            .intent_digest()
-            != binding.intent_digest()
-        {
-            return Err(ServiceFailure::CorruptState);
-        }
-        let (sequence, owner_checkpoint) = checkpoint::current(services, execution, binding)?;
-        let (registry_checkpoint, terminal_checkpoint) = checkpoint::unpack(&owner_checkpoint)?;
-        let cleanup_ack_pending = operation.status() == DurableOperationStatus::Cancelled
-            && terminal_checkpoint.starts_with(b"POSBKC02");
-        if operation.status().is_terminal()
-            && operation.status() != DurableOperationStatus::Failed
-            && !cleanup_ack_pending
-        {
-            let coordinator = services.instance.maintenance_coordinator();
-            if terminal_checkpoint != b"POSBKC01" {
-                let sequence = sequence
-                    .checked_add(1)
-                    .ok_or(ServiceFailure::CorruptState)?;
-                execution
-                    .checkpoint_and_persist(
-                        coordinator,
-                        &catalog,
-                        binding
-                            .backup_checkpoint(
-                                sequence,
-                                &checkpoint::pack(registry_checkpoint, b"POSBKC01")?,
-                            )
-                            .map_err(super::super::maintenance::map_failure)?,
-                    )
-                    .map_err(super::super::maintenance::map_failure)?;
-            }
-            *work = None;
-            if !catalog
-                .release_backup_capture(binding.operation_id(), binding.intent_digest())
-                .map_err(|_| ServiceFailure::StorageUnavailable)?
-            {
-                return Ok(false);
-            }
-            if operation.status() == DurableOperationStatus::Cancelled {
-                coordinator
-                    .cancel_and_persist(&catalog, execution.task().identity())
-                    .map_err(super::super::maintenance::map_failure)?;
-            }
-            execution
-                .complete_and_persist(
-                    services.instance.maintenance_coordinator(),
-                    &catalog,
-                    operation.status() == DurableOperationStatus::Succeeded,
-                )
-                .map_err(super::super::maintenance::map_failure)?;
-            return Ok(true);
-        }
-        let now = services
-            .maintenance_status_now()
-            .map_err(|_| ServiceFailure::StorageUnavailable)?;
-        let actor = DurableOperationAdministration::resume_backup_actor(&catalog, id, now)
-            .map_err(|_| ServiceFailure::Unauthorized)?;
-        let operation = if operation.status() == DurableOperationStatus::Pending {
-            DurableOperationAdministration::begin(&catalog, actor, id, now)
-                .map_err(|_| ServiceFailure::CatalogUnavailable)?
-        } else {
-            operation
-        };
-        let operation = if operation.phase() == DurableOperationPhase::Preflight {
-            DurableOperationAdministration::advance_backup(
-                &catalog,
-                actor,
-                id,
-                BackupOperationStage::Capturing,
-                now,
-            )
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?
-        } else {
-            operation
-        };
-        (operation, actor)
+    let Prepared::Snapshot(prepared) = prepared else {
+        return Err(ServiceFailure::CorruptState);
+    };
+    let (operation, actor) = match prepared {
+        std::ops::ControlFlow::Break(complete) => return Ok(complete),
+        std::ops::ControlFlow::Continue(prepared) => prepared,
     };
     if operation.phase() == DurableOperationPhase::BackupCancellation
         || matches!(
@@ -387,10 +337,18 @@ pub(in crate::services) fn complete(
         .checked_add(manifest.retained_memory_bytes().map_err(capture_failure)?)
         .and_then(|bytes| bytes.checked_add(verification_retained))
         .ok_or(ServiceFailure::CorruptState)?;
-    if !work
+    #[cfg(feature = "test-support")]
+    let registry_started = std::time::Instant::now();
+    let ready = work
         .owner
-        .registry_ready(services, execution, registry_retained)?
-    {
+        .registry_ready(services, execution, registry_retained)?;
+    #[cfg(feature = "test-support")]
+    super::verification::report_snapshot_stage(
+        "publication_registry_ready",
+        registry_started.elapsed(),
+        work.verification.as_ref(),
+    );
+    if !ready {
         return Ok(false);
     }
     if operation.phase() == DurableOperationPhase::BackupPublication {
@@ -459,7 +417,7 @@ pub(in crate::services) fn complete(
         }
         if (work.next_key as usize) < work.context.keys().len() {
             let started = std::time::Instant::now();
-            for _ in 0..8 {
+            for _ in 0..MAX_BACKUP_STEP_ADVANCES {
                 if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
                     return Err(ServiceFailure::Cancelled);
                 }
@@ -504,7 +462,7 @@ pub(in crate::services) fn complete(
         let mut transfer = work.transfer.ok_or(ServiceFailure::Internal)?;
         let started = std::time::Instant::now();
         let mut remaining = 4 * 1024 * 1024u64;
-        for _ in 0..8 {
+        for _ in 0..MAX_BACKUP_STEP_ADVANCES {
             if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
                 return Err(ServiceFailure::Cancelled);
             }
@@ -557,6 +515,8 @@ pub(in crate::services) fn complete(
         .publisher(external_retained_bytes)
         .map_err(provider_failure)?;
     if work.verification.is_none() {
+        #[cfg(feature = "test-support")]
+        let initialization_started = std::time::Instant::now();
         work.verification = Some(
             work.owner
                 .runtime
@@ -572,12 +532,18 @@ pub(in crate::services) fn complete(
                 .map_err(provider_failure)?,
         );
         work.saved_verification.clear();
+        #[cfg(feature = "test-support")]
+        super::verification::report_snapshot_stage(
+            "publication_initialize_resume",
+            initialization_started.elapsed(),
+            work.verification.as_ref(),
+        );
     }
     let verification = work.verification.as_mut().ok_or(ServiceFailure::Internal)?;
     let started = std::time::Instant::now();
     let mut remaining = 4 * 1024 * 1024u64;
     let mut complete = verification.complete();
-    for _ in 0..8 {
+    for _ in 0..MAX_BACKUP_STEP_ADVANCES {
         if complete {
             break;
         }
@@ -609,6 +575,10 @@ pub(in crate::services) fn complete(
             break;
         }
     }
+    #[cfg(feature = "test-support")]
+    let batch_elapsed = started.elapsed();
+    #[cfg(feature = "test-support")]
+    let checkpoint_started = std::time::Instant::now();
     let progress = checkpoint::encode(
         work.transfer.ok_or(ServiceFailure::Internal)?,
         work.next_key,
@@ -624,6 +594,20 @@ pub(in crate::services) fn complete(
         registry.as_deref(),
         Some(&progress),
     )?;
+    #[cfg(feature = "test-support")]
+    {
+        let checkpoint_elapsed = checkpoint_started.elapsed();
+        super::verification::report_snapshot_stage(
+            "publication_verify_batch",
+            batch_elapsed,
+            Some(verification),
+        );
+        super::verification::report_snapshot_stage(
+            "publication_checkpoint_publish",
+            checkpoint_elapsed,
+            Some(verification),
+        );
+    }
     if !complete {
         return Ok(false);
     }
@@ -777,7 +761,25 @@ pub(super) fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
         | RepositoryFailure::StorageUnavailable => ServiceFailure::StorageUnavailable,
         RepositoryFailure::SourceIntegrityCorruption => ServiceFailure::CorruptState,
         RepositoryFailure::InvalidInput => ServiceFailure::Internal,
-        _ => ServiceFailure::BackupRepositoryRejected,
+        _ => {
+            use std::sync::atomic::{AtomicU8, Ordering};
+            static REMAINING: AtomicU8 = AtomicU8::new(32);
+            if REMAINING
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                // The closed Repository failure carries no paths, credentials
+                // or provider error strings. Reporting cannot alter rejection.
+                match crate::write_operational_diagnostic(
+                    crate::OperationalDiagnostic::BackupRepositoryRejected(failure),
+                ) {
+                    Ok(()) | Err(_) => {},
+                }
+            }
+            ServiceFailure::BackupRepositoryRejected
+        },
     }
 }
 fn capture_failure(failure: RepositoryFailure) -> ServiceFailure {
@@ -864,4 +866,98 @@ impl BackupWork {
         }
         Ok(())
     }
+}
+
+fn prepare_snapshot(
+    services: &ServiceHandle,
+    execution: &mut MaintenanceExecution<'_>,
+    work: &mut Option<BackupWork>,
+    operation: DurableOperation,
+    binding: RepositoryOperationBinding,
+    catalog: &positron_kernel::Catalog<'_>,
+) -> Result<
+    std::ops::ControlFlow<bool, (DurableOperation, positron_governance::AuthorizedContext)>,
+    ServiceFailure,
+> {
+    let id = operation.operation_id();
+    require_operation(operation, services.instance.instance.to_bytes())?;
+    if operation
+        .backup_parameters()
+        .ok_or(ServiceFailure::CorruptState)?
+        .intent_digest()
+        != binding.intent_digest()
+    {
+        return Err(ServiceFailure::CorruptState);
+    }
+    let (sequence, owner_checkpoint) = checkpoint::current(services, execution, binding)?;
+    let (registry_checkpoint, terminal_checkpoint) = checkpoint::unpack(&owner_checkpoint)?;
+    let cleanup_ack_pending = operation.status() == DurableOperationStatus::Cancelled
+        && terminal_checkpoint.starts_with(b"POSBKC02");
+    if operation.status().is_terminal()
+        && operation.status() != DurableOperationStatus::Failed
+        && !cleanup_ack_pending
+    {
+        let coordinator = services.instance.maintenance_coordinator();
+        if terminal_checkpoint != b"POSBKC01" {
+            let sequence = sequence
+                .checked_add(1)
+                .ok_or(ServiceFailure::CorruptState)?;
+            execution
+                .checkpoint_and_persist(
+                    coordinator,
+                    catalog,
+                    binding
+                        .backup_checkpoint(
+                            sequence,
+                            &checkpoint::pack(registry_checkpoint, b"POSBKC01")?,
+                        )
+                        .map_err(super::super::maintenance::map_failure)?,
+                )
+                .map_err(super::super::maintenance::map_failure)?;
+        }
+        *work = None;
+        if !catalog
+            .release_backup_capture(binding.operation_id(), binding.intent_digest())
+            .map_err(|_| ServiceFailure::StorageUnavailable)?
+        {
+            return Ok(std::ops::ControlFlow::Break(false));
+        }
+        if operation.status() == DurableOperationStatus::Cancelled {
+            coordinator
+                .cancel_and_persist(catalog, execution.task().identity())
+                .map_err(super::super::maintenance::map_failure)?;
+        }
+        execution
+            .complete_and_persist(
+                services.instance.maintenance_coordinator(),
+                catalog,
+                operation.status() == DurableOperationStatus::Succeeded,
+            )
+            .map_err(super::super::maintenance::map_failure)?;
+        return Ok(std::ops::ControlFlow::Break(true));
+    }
+    let now = services
+        .maintenance_status_now()
+        .map_err(|_| ServiceFailure::StorageUnavailable)?;
+    let actor = DurableOperationAdministration::resume_backup_actor(catalog, id, now)
+        .map_err(|_| ServiceFailure::Unauthorized)?;
+    let operation = if operation.status() == DurableOperationStatus::Pending {
+        DurableOperationAdministration::begin(catalog, actor, id, now)
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?
+    } else {
+        operation
+    };
+    let operation = if operation.phase() == DurableOperationPhase::Preflight {
+        DurableOperationAdministration::advance_backup(
+            catalog,
+            actor,
+            id,
+            BackupOperationStage::Capturing,
+            now,
+        )
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?
+    } else {
+        operation
+    };
+    Ok(std::ops::ControlFlow::Continue((operation, actor)))
 }

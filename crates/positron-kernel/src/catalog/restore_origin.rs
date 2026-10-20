@@ -8,6 +8,7 @@ const MAX_PREFIX_RECORDS: usize = 65_536;
 /// this origin stages metadata; it does not publish a bootable instance.
 pub struct BackupRestoreOrigin {
     pub(super) instance: InstanceId,
+    pub(super) capture: ([u8; 16], [u8; 32]),
     pub(super) manifest: [u8; 32],
     pub(super) intent: [u8; 32],
     pub(super) snapshot: CatalogSnapshot,
@@ -34,6 +35,28 @@ impl BackupRestoreOrigin {
     }
     pub fn retains_segment_file(&self, file: BackupCaptureFile) -> Result<bool, CatalogFailure> {
         crate::active_segment_ledger::restore_file_is_reachable(&self.snapshot, file)
+    }
+    /// Identity of the actual target-origin transaction used by the Catalog Writer.
+    pub fn transaction_id(&self) -> Result<TransactionId, CatalogFailure> {
+        TransactionId::new(
+            self.manifest
+                .get(..16)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| fail(CatalogFailureCode::InvalidInput))?,
+        )
+    }
+    /// The portable index authenticated exactly this original capture binding.
+    pub const fn capture_binding(&self) -> ([u8; 16], [u8; 32]) {
+        self.capture
+    }
+    pub const fn manifest_checksum(&self) -> [u8; 32] {
+        self.manifest
+    }
+    pub const fn restore_intent(&self) -> [u8; 32] {
+        self.intent
+    }
+    pub const fn instance(&self) -> InstanceId {
+        self.instance
     }
     pub fn snapshot(&self) -> &CatalogSnapshot {
         &self.snapshot
@@ -114,6 +137,25 @@ impl Catalog<'_> {
             .map(|origin| origin.intent))
     }
 
+    /// Checks exact source/intent custody for a restore-only successor transaction.
+    pub fn matches_restore_origin(
+        &self,
+        manifest: [u8; 32],
+        intent: [u8; 32],
+        source: [u8; 32],
+    ) -> Result<bool, CatalogFailure> {
+        let secret = self
+            .secret
+            .lock()
+            .map_err(|_| fail(CatalogFailureCode::ConcurrentWriter))?;
+        Ok(self
+            .storage
+            .read_restore_origin(&secret, self.instance)?
+            .is_some_and(|origin| {
+                origin.manifest == manifest && origin.intent == intent && origin.source == source
+            }))
+    }
+
     /// Installs only authenticated metadata into an empty owned Catalog. The
     /// Runtime retains its offline bootstrap gate until data verification ends.
     pub fn install_restore_origin(
@@ -145,17 +187,8 @@ impl Catalog<'_> {
             .values()
             .map(|bytes| CatalogObject::new(bytes.to_vec()))
             .collect::<Result<Vec<_>, _>>()?;
-        let proposal = CatalogProposal::new(
-            TransactionId::new(
-                origin
-                    .manifest
-                    .get(..16)
-                    .and_then(|bytes| bytes.try_into().ok())
-                    .ok_or_else(|| fail(CatalogFailureCode::InvalidInput))?,
-            )?,
-            FormatEpoch::CATALOG_V2,
-            objects,
-        )?;
+        let proposal =
+            CatalogProposal::new(origin.transaction_id()?, FormatEpoch::CATALOG_V2, objects)?;
         let claim = RecoveryWorkClaim::system(
             RecoveryWorkKind::DurabilityCompletion,
             budget::commit_resource_claim(&proposal, None)?,

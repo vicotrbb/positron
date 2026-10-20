@@ -11,3 +11,22 @@ formats; the typed outcome is specific to Query export and does not create a
 general handler-result registry.
 
 For an API-key create or rotation that fails before its Catalog marker, the Catalog Writer retains one encrypted, authenticated transaction-owned prepared record before the immutable transaction digest. It binds the canonical administrative request digest to the exact generated credential verifier, audit entry, object set, commit record, and predecessor. Only the identical request may complete that exact predecessor; changed requests conflict. A missing, unauthenticated, incomplete, or no-longer-current predecessor resolves unavailable without mutation. Completion returns the original principal but never persists, derives, reconstructs, or redisplays the raw secret.
+
+For a verified fresh restore, only the signed snapshot's exact captured Backup
+Snapshot operation can receive historical publication evidence. Governance uses
+a deterministic successor transaction bound to the authenticated restore origin,
+manifest, capture/request binding, restore intent, administrative idempotency key,
+and resulting operation revision. The transaction atomically replaces the exact
+Kernel task, completes that operation, and appends ordinary governance audit.
+An exact retry returns this evidence without another transition; another key or
+request conflicts, including after a crash before restore acceptance. A generic
+terminal operation cannot authorize this reconciliation.
+
+The historical receipt identifies the authenticated registry head observed at
+first reconciliation, rather than inventing original publication statistics.
+Retries reauthenticate current membership, retention, purge and revocation rules,
+and both the source trust floor and the recorded head's antirollback floor.
+An unrelated authenticated registry append preserves the original receipt and
+audit. Prior durable-operation and audit formats remain readable; readers that
+do not recognize the added historical-evidence tag fail closed. Other active
+operations retain their ordinary recovery and admission rules.

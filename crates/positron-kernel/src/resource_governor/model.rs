@@ -90,7 +90,9 @@ impl ResourceAmounts {
         self.0.iter().all(|amount| *amount == 0)
     }
 
-    pub(super) fn is_at_most(self, other: Self) -> bool {
+    /// Whether every requested dimension fits within the other resource vector.
+    #[must_use]
+    pub fn is_at_most(self, other: Self) -> bool {
         ResourceDimension::ALL
             .iter()
             .all(|dimension| self.get(*dimension) <= other.get(*dimension))

@@ -72,6 +72,7 @@ fn online_failure(failure: MaintenanceServiceClientFailure) -> VerifyFailure {
         | MaintenanceServiceClientFailure::AuthenticationRejected
         | MaintenanceServiceClientFailure::SourceUnavailable => VerifyFailure::Usage,
         MaintenanceServiceClientFailure::TaskUnavailable
+        | MaintenanceServiceClientFailure::StaleGeneration
         | MaintenanceServiceClientFailure::PreconditionFailed
         | MaintenanceServiceClientFailure::IdempotencyConflict
         | MaintenanceServiceClientFailure::AdministrationUnavailable

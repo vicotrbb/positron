@@ -5,7 +5,7 @@ use positron_kernel::release_manifest::{
 use positron_release::*;
 use std::{collections::BTreeMap, io::Write, path::Path, process::ExitCode};
 
-const HELP: &str = "positron release inspect --directory DIR --file NAME [--canaries FILE]\npositron release construct --inventory FILE --bundle DIR --rebuild DIR --out NEW_DIR [--upgrade-from FILE] [--canaries FILE]\npositron release attach --manifest FILE --signature FILE --trust FILE --out NEW_FILE\npositron release verify --manifest FILE --inventory FILE --trust FILE --bundle DIR --rebuild DIR [--target TARGET] [--canaries FILE]\npositron release trust-message --snapshot FILE --out NEW_FILE\npositron release trust-attach --snapshot FILE --signature FILE --root FILE --out NEW_FILE\nConstruction emits unsigned inputs. Only verify authenticates a complete published release set.\n";
+const HELP: &str = "positron release archive --target TARGET --binary FILE --out NEW_FILE\npositron release inspect --directory DIR --file NAME [--canaries FILE]\npositron release construct --inventory FILE --bundle DIR --rebuild DIR --out NEW_DIR [--upgrade-from FILE] [--canaries FILE]\npositron release attach --manifest FILE --signature FILE --trust FILE --out NEW_FILE\npositron release verify --manifest FILE --inventory FILE --trust FILE --bundle DIR --rebuild DIR [--target TARGET] [--canaries FILE]\npositron release trust-message --snapshot FILE --out NEW_FILE\npositron release trust-attach --snapshot FILE --signature FILE --root FILE --out NEW_FILE\nConstruction emits unsigned inputs. Only verify authenticates a complete published release set.\n";
 pub(crate) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
     let output = execute(arguments).and_then(|bytes| {
         std::io::stdout()
@@ -31,6 +31,14 @@ fn execute(mut arguments: impl Iterator<Item = String>) -> Result<Vec<u8>, Relea
     let options = Options::parse(arguments)?;
     let canaries = options.canaries()?;
     let output = match command.as_str() {
+        "archive" => {
+            options.only(&["target", "binary", "out"])?;
+            let target = options.get("target")?.parse()?;
+            let archive = native_archive(target, &options.read("binary", 500 << 20)?)?;
+            write_release_file(Path::new(options.get("out")?), &archive)?;
+            let identity = FileIdentity::of(&archive);
+            serde_json::json!({"state":"unsigned-native-archive","sha256":hex(&identity.sha256),"size":identity.size})
+        },
         "inspect" => {
             options.only(&["directory", "file", "canaries"])?;
             let identity = inspect_file(

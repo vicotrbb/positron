@@ -282,15 +282,16 @@ impl GovernanceAuditEntry {
                 backup_cleanup_receipt,
                 backup_retention_claim,
                 backup_verification_report,
+                restored_publication,
             ) = if is_v6 {
-                let (repository, receipt, cleanup, claim, report) =
+                let (repository, receipt, cleanup, claim, report, restored) =
                     super::backup::decode_backup_evidence(
                         &mut cursor,
                         action,
                         outcome,
                         target_identity,
                     )?;
-                (Some(repository), receipt, cleanup, claim, report)
+                (Some(repository), receipt, cleanup, claim, report, restored)
             } else {
                 if matches!(
                     action,
@@ -300,7 +301,7 @@ impl GovernanceAuditEntry {
                 ) {
                     return Err(IdentityFailure);
                 }
-                (None, None, None, None, None)
+                (None, None, None, None, None, None)
             };
             let canonical_operation_id = DurableOperationRequest::operation_id_for_audit(
                 actor,
@@ -312,12 +313,25 @@ impl GovernanceAuditEntry {
                 query_export_request_digest,
             )
             .map_err(|_| IdentityFailure)?;
-            let canonical_transaction =
-                crate::durable_operation_administration::transition_transaction_bytes(
+            let canonical_transaction = match restored_publication {
+                Some(evidence) => {
+                    if evidence.capture_operation() != canonical_operation_id.to_bytes()
+                        || Some(evidence.capture_request()) != query_export_request_digest
+                        || phase != DurableOperationPhase::Published
+                    {
+                        return Err(IdentityFailure);
+                    }
+                    evidence
+                        .transaction(revision)
+                        .map_err(|_| IdentityFailure)?
+                        .to_bytes()
+                },
+                None => crate::durable_operation_administration::transition_transaction_bytes(
                     canonical_operation_id,
                     revision,
                 )
-                .map_err(|_| IdentityFailure)?;
+                .map_err(|_| IdentityFailure)?,
+            };
             if accepted_generation == 0
                 || progress_percent > 100
                 || revision == 0
@@ -352,6 +366,7 @@ impl GovernanceAuditEntry {
                     Box::new(BackupAuditEvidence {
                         repository,
                         receipt: backup_receipt,
+                        restored_publication,
                         cleanup: backup_cleanup_receipt,
                         retention_claim: backup_retention_claim,
                         verification_report: backup_verification_report,

@@ -12,6 +12,8 @@ use positron_kernel::{Catalog, TransactionId};
 use std::{sync::Arc, time::Instant};
 
 mod admission;
+#[cfg(feature = "test-support")]
+mod diagnostics;
 mod installed;
 mod reference;
 mod snapshot;
@@ -33,6 +35,18 @@ impl OfflineUpgradeSession {
     /// in-flight turn keeps its existing provider bound; unfinished durable
     /// work remains resumable and never fabricates a terminal outcome.
     pub fn advance(&mut self, deadline: Instant) -> Result<DurableOperation, UpgradeFailure> {
+        #[cfg(feature = "test-support")]
+        let before = diagnostics::capture(self);
+        let result = self.advance_checkpointed(deadline);
+        #[cfg(feature = "test-support")]
+        diagnostics::report(self, before, &result);
+        result
+    }
+
+    fn advance_checkpointed(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<DurableOperation, UpgradeFailure> {
         self.require_recovered_clock()?;
         let had_budget = Instant::now() < deadline;
         let result = self.advance_work(deadline);

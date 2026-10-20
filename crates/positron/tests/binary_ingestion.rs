@@ -1,12 +1,16 @@
-//! Real executable and HTTP clients; Rust query interfaces verify durable output.
+//! Installed native executable and HTTP clients verify durable ingestion and query.
 #![cfg(unix)]
 
-use positron_kernel::MountQualification;
-use positron_query::QueryBudget;
-use positron_runtime::{
-    ApplicationRuntime, BootstrapPaths, HostInputs, InitializationMode, InitializationPlan,
-    InstanceBootstrap, NativeBindings, NativeHost, ServeConfiguration, ShutdownTrigger,
-};
+#[path = "binary_ingestion/archive.rs"]
+mod archive;
+#[path = "support/archive_binary.rs"]
+mod archive_binary;
+#[path = "support/native_binary.rs"]
+mod native_binary;
+#[path = "binary_ingestion/recovery.rs"]
+mod recovery;
+#[path = "binary_ingestion/upgrade.rs"]
+mod upgrade;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -154,7 +158,7 @@ fn ready(port: u16) -> TestResult {
 fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestResult {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let mut fixture = Fixture {
-        root: PathBuf::from("/tmp").join(format!("p-bin-{}-{nonce}", std::process::id())),
+        root: fs::canonicalize("/tmp")?.join(format!("p-bin-{}-{nonce}", std::process::id())),
         child: None,
     };
     let data = fixture.root.join("data");
@@ -163,22 +167,15 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o700))?;
     fs::create_dir_all(&secrets)?;
     fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
-    let paths = BootstrapPaths::new(&data, &secrets, MountQualification::LocalHost)?;
-    drop(InstanceBootstrap::initialize(
-        &paths,
-        InitializationPlan::non_interactive(),
-    )?);
-    let claim = InstanceBootstrap::claim(&paths)?;
-    assert!(InstanceBootstrap::claim(&paths).is_err());
-    let bearer = format!(
-        "Bearer {}",
-        claim.ingest_secret().ok_or("missing ingest key")?
-    );
-    let admin = format!("Bearer {}", claim.secret());
-    let query = format!(
-        "Bearer {}",
-        claim.query_secret().ok_or("missing query key")?
-    );
+    let package = positron_release::native_archive(
+        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH).parse()?,
+        &fs::read(archive_binary::executable()?)?,
+    )?;
+    let installation = fixture.root.join("installation");
+    fs::create_dir(&installation)?;
+    tar::Archive::new(flate2::read::GzDecoder::new(package.as_slice())).unpack(&installation)?;
+    let mut binary = installation.join("positron/bin/positron");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o555))?;
     let probes = (0..5)
         .map(|_| TcpListener::bind(("127.0.0.1", 0)))
         .collect::<Result<Vec<_>, _>>()?;
@@ -215,22 +212,55 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         .connection_protection()
         .request_deadline();
 
+    drop(probes);
+    let operations = *ports.first().ok_or("missing operations port")?;
+    fixture.child = Some(
+        Command::new(&binary)
+            .args(["serve", "--init-if-empty", "--config"])
+            .arg(&config)
+            .spawn()?,
+    );
+    ready(operations)?;
+    archive::stop(&mut fixture.child)?;
+    let claimed = Command::new(&binary)
+        .args(["bootstrap", "claim", "--config"])
+        .arg(&config)
+        .output()?;
+    assert!(
+        claimed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&claimed.stderr)
+    );
+    assert!(claimed.stderr.is_empty());
+    let claimed = String::from_utf8(claimed.stdout)?;
+    let secret = |name: &str| -> TestResult<&str> {
+        claimed
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .ok_or_else(|| "missing bootstrap credential".into())
+    };
+    let admin_secret = secret("administrator_secret=")?;
+    let ingest_secret = secret("ingest_secret=")?;
+    let query_secret = secret("query_secret=")?;
+    let bearer = format!("Bearer {ingest_secret}");
+    let admin = format!("Bearer {admin_secret}");
+    let query = format!("Bearer {query_secret}");
+    let recovery = recovery::RecoveryFiles::create(&binary, &fixture.root)?;
     for arguments in [
         vec!["config", "validate", "--config"],
         vec!["config", "effective", "--redacted", "--config"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+        let output = Command::new(&binary)
             .args(arguments)
             .arg(&config)
             .output()?;
         assert!(output.status.success());
         let rendered = String::from_utf8(output.stdout)?;
-        assert!(!rendered.contains(claim.secret()));
-        assert!(!rendered.contains(claim.ingest_secret().ok_or("missing ingest key")?));
+        assert!(!rendered.contains(admin_secret));
+        assert!(!rendered.contains(ingest_secret));
     }
-    drop(probes);
     fixture.child = Some(
-        Command::new(env!("CARGO_BIN_EXE_positron"))
+        Command::new(&binary)
             .args(["serve", "--config"])
             .arg(&config)
             .spawn()?,
@@ -242,7 +272,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
 
     let doctor_deadline = Instant::now() + Duration::from_secs(10);
     let output = loop {
-        let mut doctor = Command::new(env!("CARGO_BIN_EXE_positron"))
+        let mut doctor = Command::new(&binary)
             .args(["doctor", "--online", "--endpoint"])
             .arg(format!("127.0.0.1:{operations}"))
             .arg("--allow-plaintext")
@@ -252,7 +282,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             .stderr(std::process::Stdio::piped())
             .spawn()?;
         let mut input = doctor.stdin.take().ok_or("missing doctor stdin")?;
-        writeln!(input, "{}", claim.secret())?;
+        writeln!(input, "{}", admin_secret)?;
         drop(input);
         while doctor.try_wait()?.is_none() {
             if Instant::now() >= doctor_deadline {
@@ -280,7 +310,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(report.contains("catalog_bootstrap="));
-    assert!(!report.contains(claim.secret()));
+    assert!(!report.contains(admin_secret));
     // Doctor truthfully reports unavailable planned families rather than claiming release readiness.
     let body = br#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"42","body":{"stringValue":"binary-otlp"}}]}]}]}"#;
     for credential in ["Bearer invalid", admin.as_str(), query.as_str()] {
@@ -330,15 +360,61 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         response.starts_with("HTTP/1.1 200 "),
         "initial Log response: {response}; public resource metrics: {diagnostic}"
     );
+    let api_endpoint = format!("127.0.0.1:{}", ports.get(1).ok_or("missing API port")?).parse()?;
+    let before_restart_digest =
+        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?;
+    archive::query_refusals(
+        &fixture.root,
+        api_endpoint,
+        query_secret,
+        admin_secret,
+        ingest_secret,
+    )?;
+    archive::stop(&mut fixture.child)?;
+    fs::remove_dir_all(&installation)?;
+    assert!(data.exists());
+    assert!(secrets.join("local-root-key.v1").exists());
+    fs::create_dir(&installation)?;
+    tar::Archive::new(flate2::read::GzDecoder::new(package.as_slice())).unpack(&installation)?;
+    fixture.child = Some(
+        Command::new(&binary)
+            .args(["serve", "--config"])
+            .arg(&config)
+            .spawn()?,
+    );
+    ready(operations)?;
+    assert_eq!(
+        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?,
+        before_restart_digest
+    );
+    binary = recovery::roundtrip(
+        &mut fixture,
+        recovery::Installed {
+            binary: &binary,
+            config: &config,
+            endpoint: api_endpoint,
+            operations,
+            admin: admin_secret,
+            query: query_secret,
+        },
+        &recovery,
+        &before_restart_digest,
+    )?;
+    let loki_response = request_with_capacity_retry(
+        loki,
+        "/loki/api/v1/push",
+        &headers,
+        br#"{"streams":[{"stream":{"app":"audit"},"values":[["43","binary-loki"]]}]}"#,
+        admission_budget,
+    )?;
     assert!(
-        request_with_capacity_retry(
-            loki,
-            "/loki/api/v1/push",
-            &headers,
-            br#"{"streams":[{"stream":{"app":"audit"},"values":[["43","binary-loki"]]}]}"#,
-            admission_budget,
-        )?
-        .starts_with("HTTP/1.1 204 No Content")
+        loki_response.starts_with("HTTP/1.1 204 No Content"),
+        "installed Loki push status: {}",
+        loki_response
+            .lines()
+            .next()
+            .filter(|status| status.starts_with("HTTP/1.1 ") && status.len() <= 64)
+            .map_or("<missing HTTP status line>", |status| status),
     );
     // A generated OTLP gRPC client drives the actual binary's HTTP/2 listener.
     let grpc = *ports.get(2).ok_or("missing gRPC port")?;
@@ -415,9 +491,10 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
             .into_bytes(),
     ] {
         let response =
-            request_with_capacity_retry(otlp, "/v1/traces", &headers, &payload, admission_budget)?;
+            request_with_capacity_retry(otlp, "/v1/traces", &headers, &payload, admission_budget)
+                .map_err(|error| format!("trace observation request failed: {error}"))?;
         let diagnostic = if response.starts_with("HTTP/1.1 200 ") {
-            String::new()
+            Ok(String::new())
         } else {
             request_with_method(
                 "GET",
@@ -425,11 +502,11 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
                 "/metrics",
                 &[("Authorization", admin.as_str())],
                 b"",
-            )?
+            )
         };
         assert!(
             response.starts_with("HTTP/1.1 200 "),
-            "trace observation response: {response}; public resource metrics: {diagnostic}"
+            "trace observation response: {response}; public resource metrics: {diagnostic:?}"
         );
     }
 
@@ -480,7 +557,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     }
     let elapsed = started.elapsed();
     eprintln!(
-        "bounded binary workload: 64 OTLP JSON logs, 16 serial requests, {} encoded bytes, {:.3}s, {:.1} records/s (debug, durable loopback)",
+        "bounded binary workload: 64 OTLP JSON logs, 16 serial requests, {} encoded bytes, {:.3}s, {:.1} records/s (release executable, durable loopback)",
         encoded_bytes,
         elapsed.as_secs_f64(),
         64.0 / elapsed.as_secs_f64()
@@ -491,12 +568,13 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     fixture.child = None;
     assert!(fixture.root.join("control.sock").exists());
     fixture.child = Some(
-        Command::new(env!("CARGO_BIN_EXE_positron"))
+        Command::new(&binary)
             .args(["serve", "--config"])
             .arg(&config)
             .spawn()?,
     );
     ready(operations)?;
+    archive::query_capacity_refusal(&binary, &fixture.root, api_endpoint, query_secret)?;
     let child = fixture.child.as_mut().ok_or("missing restarted child")?;
     assert!(
         Command::new("/bin/kill")
@@ -522,37 +600,5 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         std::thread::sleep(Duration::from_millis(25));
     }
     fixture.child = None;
-    let endpoint = "127.0.0.1:0".parse()?;
-    let host = NativeHost::new(NativeBindings::new(
-        fixture.root.join("inspect.sock"),
-        endpoint,
-        endpoint,
-        endpoint,
-        endpoint,
-        endpoint,
-    )?);
-    let process = ApplicationRuntime::start(
-        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
-        HostInputs::new(&host, &host),
-    )?;
-    // The native principal's 16-unit CPU ceiling cannot scan this complete
-    // history. Verify a truthful refusal rather than accepting partial rows;
-    // successful durable query semantics are covered by the query integration suite.
-    assert_eq!(
-        process
-            .services()
-            .ok_or("missing query services")?
-            .query_log_bodies(
-                claim.query_secret().ok_or("missing query key")?,
-                "logs | range query_time 0 2000 | limit 100",
-                QueryBudget::new(1_048_576, 100, 100, 1_048_576, 1_048_576, 60)?
-                    .with_cpu_work_units(16)?,
-            ),
-        Err(positron_runtime::ServiceFailure::CapacityUnavailable)
-    );
-    assert_eq!(
-        process.shutdown(ShutdownTrigger::FirstSignal),
-        positron_runtime::ExitOutcome::Graceful
-    );
     Ok(())
 }

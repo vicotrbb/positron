@@ -36,24 +36,53 @@ fn execute(
     let credential = crate::administrative_cli::credential()?;
     let bearer = credential.trim_end_matches(['\r', '\n']);
     let client = BackupServiceClient::new(transport).map_err(client_failure)?;
-    let mut response = client.manage(bearer, &request).map_err(client_failure)?;
-    if let Some(duration) = wait {
-        let deadline = Instant::now()
-            .checked_add(duration)
-            .ok_or("invalid wait duration")?;
-        while matches!(response.operation.status.as_str(), "pending" | "running") {
-            if Instant::now() >= deadline {
-                write_response(output, &response)?;
-                return Err(
-                    "operation outcome remains unknown; inspect the same operation ID before retrying",
-                );
+    let deadline = wait
+        .map(|duration| {
+            Instant::now()
+                .checked_add(duration)
+                .ok_or("invalid wait duration")
+        })
+        .transpose()?;
+    let mut response = None;
+    loop {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if let Some(response) = &response {
+                write_response(output, response)?;
             }
-            std::thread::sleep(Duration::from_millis(100));
-            response = client.manage(bearer, &request).map_err(client_failure)?;
+            return Err(
+                "operation outcome remains unknown; inspect the same operation ID before retrying",
+            );
         }
+        let result = match deadline {
+            Some(deadline) => client.manage_with_timeout(
+                bearer,
+                &request,
+                deadline.saturating_duration_since(Instant::now()),
+            ),
+            None => client.manage(bearer, &request),
+        };
+        match result {
+            Ok(_) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {},
+            Ok(current) => {
+                if deadline.is_none()
+                    || !matches!(current.operation.status.as_str(), "pending" | "running")
+                {
+                    return write_response(output, &current);
+                }
+                response = Some(current);
+            },
+            Err(BackupServiceClientFailure::CapacityUnavailable) if deadline.is_some() => {},
+            Err(BackupServiceClientFailure::Transport)
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {},
+            Err(failure) => return Err(client_failure(failure)),
+        }
+        let remaining = deadline
+            .ok_or("invalid wait duration")?
+            .saturating_duration_since(Instant::now());
+        std::thread::sleep(Duration::from_millis(100).min(remaining));
     }
-    write_response(output, &response)
 }
+
 fn write_response(output: &mut impl Write, response: &BackupResponse) -> Result<(), &'static str> {
     writeln!(
         output,
@@ -85,6 +114,12 @@ fn write_response(output: &mut impl Write, response: &BackupResponse) -> Result<
     if let Some(receipt) = &response.receipt {
         writeln!(output,"manifest_checksum={} catalog_generation={} catalog_identity={} uploaded_bytes={} reused_bytes={} retain_until_unix_seconds={} registry_generation_checksum={}",receipt.manifest_checksum,receipt.catalog_generation,receipt.catalog_identity,receipt.uploaded_bytes,receipt.reused_bytes,receipt.retain_until_unix_seconds,receipt.registry_generation_checksum).map_err(|_| "backup output unavailable")?;
     }
+    if let Some(evidence) = &response.restored_publication {
+        writeln!(output, "restored_publication=true manifest_checksum={} current_registry_generation_checksum={} source_catalog_identity={} source_catalog_generation={} retain_until_unix_seconds={} restore_origin_transaction={} restore_intent_digest={} capture_operation_id={} capture_request_digest={} restore_idempotency_key={}",
+            evidence.manifest_checksum, evidence.current_registry_generation_checksum, evidence.source_catalog_identity, evidence.source_catalog_generation,
+            evidence.retain_until_unix_seconds, evidence.restore_origin_transaction, evidence.restore_intent_digest, evidence.capture_operation_id, evidence.capture_request_digest, evidence.restore_idempotency_key)
+            .map_err(|_| "backup output unavailable")?;
+    }
     Ok(())
 }
 fn client_failure(failure: BackupServiceClientFailure) -> &'static str {
@@ -93,7 +128,10 @@ fn client_failure(failure: BackupServiceClientFailure) -> &'static str {
         F::InvalidRequest => "invalid backup request",
         F::AuthenticationRejected => "system administration authentication rejected",
         F::SourceUnavailable | F::TaskUnavailable => "backup operation unavailable",
-        F::PreconditionFailed => "stale Catalog generation; inspect current state before retrying",
+        F::StaleGeneration => "stale resource generation; inspect current state before retrying",
+        F::PreconditionFailed => {
+            "operation precondition failed; inspect current state before retrying"
+        },
         F::IdempotencyConflict => "idempotency key conflicts with an accepted request",
         F::AdministrationUnavailable => {
             "administration unavailable; inspect or retry the same operation"

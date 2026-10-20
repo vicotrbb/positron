@@ -248,9 +248,27 @@ impl<'authority> NativeLogBatch<'authority> {
         let amounts =
             ResourceAmounts::new([retained_peak, 1, 1, 0, record_count, 0, 0, 0, 1, 1, 0]);
         if let Some(capacity) = self.capacity.as_mut() {
-            capacity
-                .try_resize(amounts)
-                .map_err(|_| ReceiveFailure::CapacityUnavailable)?;
+            match capacity.try_resize(amounts) {
+                Ok(_) => {},
+                Err(failure)
+                    if failure.code() == positron_kernel::ResizeFailureCode::AdmissionRefused
+                        && failure.admission_code()
+                            == Some(positron_kernel::AdmissionFailureCode::GovernorContended)
+                        && failure.existing_capacity()
+                            == positron_kernel::ExistingCapacityDisposition::CapacityRetained
+                        && failure.pressure_state()
+                            == positron_kernel::DiskPressureState::Healthy
+                        && capacity.is_active()
+                        && amounts.is_at_most(capacity.granted())
+                        && capacity.governor_lifecycle()
+                            != positron_kernel::GovernorLifecycle::Fenced =>
+                {
+                    // Decoding already owns this conservative peak grant. A
+                    // contended shrink retains its complete charge; later
+                    // execution still performs its ordinary admission checks.
+                },
+                Err(_) => return Err(ReceiveFailure::CapacityUnavailable),
+            }
         }
         Ok(())
     }

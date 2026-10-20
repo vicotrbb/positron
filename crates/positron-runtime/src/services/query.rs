@@ -1,6 +1,8 @@
+mod wire;
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
+pub(super) use wire::execute;
 
 use positron_domain::routing::SignalKind;
 use positron_kernel::{ActiveSegmentLedger, Catalog, SegmentScope};
@@ -156,19 +158,42 @@ pub(super) fn query_log_bodies(
     source: &str,
     budget: QueryBudget,
 ) -> Result<Vec<String>, ServiceFailure> {
-    let _catalog_operation = services.catalog_operation()?;
+    with_log_query_events(services, bearer, shard, source, budget, |events| {
+        collect_query_bodies(events)
+    })
+}
+
+fn authorize(
+    services: &ServiceHandle,
+    bearer: &str,
+) -> Result<positron_governance::AuthorizedContext, ServiceFailure> {
     let instance = &services.instance;
     let initial_identity = instance
         .durable_identity()
         .map_err(|failure| classify_bootstrap_failure_code(failure.code()))?;
-    let context = initial_identity
+    initial_identity
         .attribute(
             &instance.key,
             PresentedCredential::parse(bearer).map_err(|_| ServiceFailure::Unauthorized)?,
             RequestedIntent::Query,
             CompatibilityHints::none(),
         )
-        .map_err(|_| ServiceFailure::Unauthorized)?;
+        .map_err(|_| ServiceFailure::Unauthorized)
+}
+
+fn with_log_query_events<T>(
+    services: &ServiceHandle,
+    bearer: &str,
+    shard: positron_domain::routing::VirtualShardId,
+    source: &str,
+    budget: QueryBudget,
+    consume: impl FnOnce(
+        &mut dyn Iterator<Item = positron_query::QueryEvent>,
+    ) -> Result<T, ServiceFailure>,
+) -> Result<T, ServiceFailure> {
+    let _catalog_operation = services.catalog_operation()?;
+    let instance = &services.instance;
+    let context = authorize(services, bearer)?;
     let catalog = Catalog::open(
         &instance._authority,
         instance.instance,
@@ -232,7 +257,7 @@ pub(super) fn query_log_bodies(
     // before yielding this stream. Wake only after that durable transition so
     // the registered worker cannot consume a pre-publication signal.
     services.notify_maintenance_worker();
-    collect_query_bodies(events.inspect(|event| {
+    consume(&mut events.inspect(|event| {
         if let positron_query::QueryEvent::Terminal(positron_query::QueryTerminal::Incomplete(
             incomplete,
         )) = event

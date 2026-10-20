@@ -69,7 +69,10 @@ fn client_failure(failure: ProviderMigrationServiceClientFailure) -> &'static st
         F::InvalidRequest => "invalid migration request",
         F::AuthenticationRejected => "system administration authentication rejected",
         F::SourceUnavailable | F::TaskUnavailable => "migration operation unavailable",
-        F::PreconditionFailed => "stale Catalog generation; inspect current state before retrying",
+        F::StaleGeneration => "stale resource generation; inspect current state before retrying",
+        F::PreconditionFailed => {
+            "operation precondition failed; inspect current state before retrying"
+        },
         F::IdempotencyConflict => "idempotency key conflicts with an accepted request",
         F::AdministrationUnavailable => {
             "administration unavailable; inspect or retry the same operation"

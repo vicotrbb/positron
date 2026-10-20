@@ -14,6 +14,7 @@ use hyper_util::server::conn::auto;
 use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
+use zeroize::Zeroize;
 
 use super::cors;
 use super::h2_observer::H2Observer;
@@ -403,6 +404,18 @@ async fn route_request(
             Err(response) => response,
         },
     };
+    let response =
+        if parts.uri.path() == positron_api::log_query::HTTP_PATH && response.body.is_empty() {
+            match response.status() {
+                400 => native_http::query_failure_response(400, "invalid_request"),
+                413 => native_http::query_failure_response(413, "request_too_large"),
+                429 => native_http::query_failure_response(429, "capacity_unavailable"),
+                503 => native_http::query_failure_response(503, "query_unavailable"),
+                _ => response,
+            }
+        } else {
+            response
+        };
     let mut response = response_from_native(response);
     cors::decorate(&mut response, &parts.headers, &context.cors_allowed_origins);
     response
@@ -518,8 +531,9 @@ async fn collect_body(mut body: Incoming, maximum: usize) -> Result<Vec<u8>, Nat
     Ok(collected)
 }
 
-fn response_from_native(response: NativeResponse) -> Response<ApiResponseBody> {
-    let mut result = Response::new(ApiResponseBody::new(&response.body));
+fn response_from_native(mut response: NativeResponse) -> Response<ApiResponseBody> {
+    let content_length = response.body.len();
+    let mut result = Response::new(ApiResponseBody::new(&mut response));
     *result.status_mut() =
         StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if let Ok(content_type) = HeaderValue::from_str(response.content_type) {
@@ -527,7 +541,7 @@ fn response_from_native(response: NativeResponse) -> Response<ApiResponseBody> {
             .headers_mut()
             .insert(http::header::CONTENT_TYPE, content_type);
     }
-    if let Ok(content_length) = HeaderValue::from_str(&response.body.len().to_string()) {
+    if let Ok(content_length) = HeaderValue::from_str(&content_length.to_string()) {
         result
             .headers_mut()
             .insert(http::header::CONTENT_LENGTH, content_length);
@@ -546,10 +560,29 @@ pub(super) struct ApiResponseBody {
     data: Option<Bytes>,
 }
 
+// The Bytes owner crosses Hyper's frame boundary. Keeping the guard only in
+// Body would release capacity while an emitted frame still waits for I/O.
+struct ApiResponseBytes {
+    data: Vec<u8>,
+    _reservation: Option<Box<positron_kernel::TransferredResourceReservation>>,
+}
+impl AsRef<[u8]> for ApiResponseBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+impl Drop for ApiResponseBytes {
+    fn drop(&mut self) {
+        self.data.zeroize();
+    }
+}
 impl ApiResponseBody {
-    fn new(data: &[u8]) -> Self {
+    fn new(response: &mut NativeResponse) -> Self {
         Self {
-            data: Some(Bytes::copy_from_slice(data)),
+            data: Some(Bytes::from_owner(ApiResponseBytes {
+                data: std::mem::take(&mut response.body),
+                _reservation: response.response_reservation.take(),
+            })),
         }
     }
 
@@ -571,3 +604,6 @@ impl Body for ApiResponseBody {
 }
 
 pub(super) struct ApiHttpFailure;
+
+#[cfg(test)]
+mod tests;
