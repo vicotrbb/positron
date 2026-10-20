@@ -1,0 +1,9 @@
+Package: positron
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Victor Bona <victor.bona@hotmail.com>
+Section: database
+Priority: optional
+Depends: libc6 (>= 2.34), libgcc-s1 (>= 3.0), libc-bin, coreutils, ca-certificates, passwd, systemd, util-linux
+Description: Standalone observability database
+ Same Positron executable and generated Configuration Contract as native archives.

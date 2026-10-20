@@ -131,13 +131,23 @@ pub(crate) fn verify_payloads(
             if bundle.same_file(rebuild, payload)? {
                 return Err(ReleaseError::Unreproducible);
             }
-            if artifact.surface != Surface::OciImage
-                && inventory.file(&artifact.file)?.identity != inventory.file(payload)?.identity
-                && (artifact.surface != Surface::SdkDotNet
-                    || FileIdentity::of(
+            let declared = &inventory.file(payload)?.identity;
+            let expected = match artifact.surface {
+                Surface::OciImage => None,
+                Surface::Rpm => Some(FileIdentity::of(crate::rpm_functional_payload(
+                    &bundle.read(&artifact.file, 64 << 20)?,
+                )?)),
+                Surface::SdkDotNet if &inventory.file(&artifact.file)?.identity != declared => {
+                    Some(FileIdentity::of(
                         &crate::nuget_zip::package(&bundle.read(&artifact.file, 64 << 20)?)?
                             .unsigned,
-                    ) != inventory.file(payload)?.identity)
+                    ))
+                },
+                _ => Some(inventory.file(&artifact.file)?.identity.clone()),
+            };
+            if expected
+                .as_ref()
+                .is_some_and(|expected| expected != declared)
             {
                 return Err(ReleaseError::Unreproducible);
             }

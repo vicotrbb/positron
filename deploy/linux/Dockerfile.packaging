@@ -1,0 +1,10 @@
+# Frozen native packagers; this image is build tooling, never a database dependency.
+FROM debian:12@sha256:2c037a04925515fdd6ea85ea14a682d0e79931f5e9f5d07b6dbfc6ba12f9e858
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    printf '%s\n' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261020T000000Z bookworm main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261020T000000Z bookworm-security main' \
+      > /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends rpm binutils tar gzip coreutils gnupg && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /source

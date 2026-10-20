@@ -25,19 +25,52 @@ const EXPORT_PATH: &str = "/opentelemetry.proto.collector.logs.v1.LogsService/Ex
 #[tokio::test(flavor = "current_thread")]
 async fn grpc_body_deadline_releases_the_single_stream_for_a_following_export()
 -> Result<(), Box<dyn std::error::Error>> {
+    body_deadline_and_capacity_reuse(Duration::ZERO, 1).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn grpc_body_deadline_observation_includes_valid_client_dispatch_delay()
+-> Result<(), Box<dyn std::error::Error>> {
+    body_deadline_and_capacity_reuse(Duration::from_millis(1100), 5).await
+}
+
+async fn body_deadline_and_capacity_reuse(
+    driver_delay: Duration,
+    header_seconds: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = live_async_test_guard().await;
-    let mut harness = GrpcHarness::start("grpc-body-deadline", "plaintext", 1, 5)?;
+    let mut harness = GrpcHarness::start_with_header_deadline(
+        "grpc-body-deadline",
+        "plaintext",
+        1,
+        5,
+        header_seconds,
+    )?;
     let stream = TcpStream::connect(harness.endpoint).await?;
     let (mut sender, connection) = client::handshake(stream).await?;
-    let connection = tokio::spawn(connection);
+    let connection = tokio::spawn(async move {
+        if !driver_delay.is_zero() {
+            tokio::time::sleep(driver_delay).await;
+        }
+        connection.await
+    });
 
     let (response, mut body) = sender.send_request(harness.request()?, false)?;
     body.send_data(Bytes::from_static(&[0, 0]), false)?;
     let started = tokio::time::Instant::now();
-    let response = tokio::time::timeout(Duration::from_secs(2), response).await??;
+    // Observe within this profile's existing request budget: the client driver
+    // must deliver HEADERS before the server can start its body deadline.
+    let response = tokio::time::timeout(harness.request_deadline, response)
+        .await
+        .map_err(|error| {
+            std::io::Error::other(format!(
+                "initial partial-body response exceeded configured request budget {:?}: {error}",
+                harness.request_deadline
+            ))
+        })??;
     assert_body_deadline(response).await?;
     assert!(
-        started.elapsed() >= Duration::from_secs(1),
+        started.elapsed() >= driver_delay + Duration::from_secs(1),
         "the request ended before the configured body deadline: {:?}",
         started.elapsed()
     );
@@ -185,6 +218,7 @@ struct GrpcHarness {
     process: Option<positron_runtime::RunningProcess>,
     endpoint: std::net::SocketAddr,
     bearer: String,
+    request_deadline: Duration,
     _roots: TestRoots,
 }
 
@@ -195,13 +229,28 @@ impl GrpcHarness {
         streams: u16,
         idle_seconds: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_with_header_deadline(label, transport, streams, idle_seconds, 1)
+    }
+
+    fn start_with_header_deadline(
+        label: &str,
+        transport: &str,
+        streams: u16,
+        idle_seconds: u16,
+        header_seconds: u16,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let roots = TestRoots::new(label)?;
-        let document = listener_document(&roots, transport, streams, idle_seconds);
+        let document = listener_document(&roots, transport, streams, idle_seconds, header_seconds);
         let effective = Arc::new(resolve(ConfigurationInputs::try_new(
             Some(&document),
             EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
             CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
         )?)?);
+        let request_deadline = effective
+            .network_listener_profile(positron_config::NetworkListenerRole::OtlpGrpc)
+            .ok_or("gRPC listener profile missing")?
+            .connection_protection()
+            .request_deadline();
         let paths = roots.paths()?;
         drop(InstanceBootstrap::initialize(
             &paths,
@@ -224,6 +273,7 @@ impl GrpcHarness {
             process: Some(process),
             endpoint,
             bearer,
+            request_deadline,
             _roots: roots,
         })
     }
@@ -568,6 +618,7 @@ fn listener_document(
     transport: &str,
     streams: u16,
     idle_seconds: u16,
+    header_seconds: u16,
 ) -> String {
     let tls = if transport == "tls" {
         let certificate = fixture("api-test-cert.pem");
@@ -581,7 +632,7 @@ fn listener_document(
         String::new()
     };
     format!(
-        "schema_version = 1\n[listener]\ncontrol_path = \"{}\"\noperations_bind_address = \"127.0.0.1:0\"\noperations_transport = \"plaintext\"\napi_bind_address = \"127.0.0.1:0\"\napi_transport = \"plaintext\"\notlp_grpc_bind_address = \"127.0.0.1:0\"\notlp_grpc_transport = \"{transport}\"\notlp_grpc_accepted_socket_limit = 1\notlp_grpc_per_address_accepted_socket_limit = 1\notlp_grpc_header_deadline_seconds = 1\notlp_grpc_body_deadline_seconds = 1\notlp_grpc_request_deadline_seconds = 5\notlp_grpc_idle_deadline_seconds = {idle_seconds}\notlp_grpc_http2_max_concurrent_streams = {streams}\notlp_grpc_http2_minimum_ping_interval_seconds = 2\n{tls}otlp_http_bind_address = \"127.0.0.1:0\"\notlp_http_transport = \"plaintext\"\nloki_push_bind_address = \"127.0.0.1:0\"\nloki_push_transport = \"plaintext\"\n",
+        "schema_version = 1\n[listener]\ncontrol_path = \"{}\"\noperations_bind_address = \"127.0.0.1:0\"\noperations_transport = \"plaintext\"\napi_bind_address = \"127.0.0.1:0\"\napi_transport = \"plaintext\"\notlp_grpc_bind_address = \"127.0.0.1:0\"\notlp_grpc_transport = \"{transport}\"\notlp_grpc_accepted_socket_limit = 1\notlp_grpc_per_address_accepted_socket_limit = 1\notlp_grpc_header_deadline_seconds = {header_seconds}\notlp_grpc_body_deadline_seconds = 1\notlp_grpc_request_deadline_seconds = 5\notlp_grpc_idle_deadline_seconds = {idle_seconds}\notlp_grpc_http2_max_concurrent_streams = {streams}\notlp_grpc_http2_minimum_ping_interval_seconds = 2\n{tls}otlp_http_bind_address = \"127.0.0.1:0\"\notlp_http_transport = \"plaintext\"\nloki_push_bind_address = \"127.0.0.1:0\"\nloki_push_transport = \"plaintext\"\n",
         roots.parent.join("control.sock").display(),
     )
 }

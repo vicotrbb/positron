@@ -2,14 +2,25 @@
 
 The archive contains the same `positron` executable used by other distributions,
 the generated Configuration Contract, license, and a service example for its
-exact platform. The native build/test platforms are Ubuntu 24.04 GNU libc
-for Linux x86_64/aarch64 and macOS 15 for x86_64/aarch64. Older libc or macOS
-versions require separately qualified compatibility; the archive does not
-bundle a libc or platform SDK. Do not run an archive built for another target.
+exact platform. Linux archives and native packages share one GNU executable per
+architecture built against the GNU libc 2.34 baseline in
+`deploy/linux/Dockerfile`; the Linux package matrix and qualification procedure
+are in `deploy/linux/README.md` in the signed source distribution. Native macOS builds target macOS 15
+for x86_64/aarch64. Older libc or macOS versions require separately qualified
+compatibility; the archive does not bundle a libc or platform SDK. Do not run an
+archive built for another target.
 
 ## Build and verify
 
-Build on each native target with the pinned Rust toolchain and locked resolution:
+Build macOS directly with the pinned Rust toolchain and locked resolution.
+Build Linux inside the frozen GNU baseline image from `deploy/linux/Dockerfile`,
+using the same locked Cargo command and build flags; use that executable for
+both the Linux archive and native packages. The CI recipe in
+`.github/workflows/checks.yml` supplies identical source/target path remaps and
+compares independent baseline builds. A host build against a newer libc is not
+the common Linux package artifact.
+
+For example, on macOS:
 
 ```console
 # Remap native C and assembly debug compilation directories.

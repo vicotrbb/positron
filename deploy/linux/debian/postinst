@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+if [ "$1" = configure ]; then
+    if ! getent group positron >/dev/null; then groupadd --system positron; fi
+    if ! getent passwd positron >/dev/null; then
+        useradd --system --gid positron --home-dir /var/lib/positron --no-create-home --shell /usr/sbin/nologin positron
+    fi
+    if [ "$(id -u positron)" -eq 0 ] || [ "$(id -g positron)" -eq 0 ] ||
+       [ "$(id -gn positron)" != positron ] || [ "$(id -G positron)" != "$(id -g positron)" ]; then
+        echo 'Positron requires a dedicated non-root service identity.' >&2
+        exit 1
+    fi
+    uid=$(id -u positron) gid=$(id -g positron)
+    accounts=$(getent passwd)
+    printf '%s\n' "$accounts" | while IFS=: read -r name password account_uid account_gid rest; do
+        if [ "$name" != positron ] && { [ "$account_uid" = "$uid" ] || [ "$account_gid" = "$gid" ]; }; then
+            echo 'Positron service UID and primary group must not be shared.' >&2
+            exit 1
+        fi
+    done
+    group=$(getent group positron)
+    case "${group##*:}" in
+        ''|positron) ;;
+        *) echo 'Positron service group must not contain other accounts.' >&2; exit 1;;
+    esac
+    case "$(getent passwd positron)" in
+        *:/usr/sbin/nologin|*:/sbin/nologin|*:/usr/bin/false|*:/bin/false) ;;
+        *) echo 'Positron service identity must have a non-login shell.' >&2; exit 1;;
+    esac
+    install -d -o root -g positron -m 0750 /etc/positron
+    if [ -e /etc/positron/positron.toml ]; then
+        chown root:positron /etc/positron/positron.toml
+        chmod 0640 /etc/positron/positron.toml
+    fi
+    install -d -o positron -g positron -m 0700 /var/lib/positron /var/lib/positron-secrets
+    if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+fi
