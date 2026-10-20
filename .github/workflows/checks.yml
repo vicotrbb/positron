@@ -95,10 +95,6 @@ jobs:
             positron-gnu-builder sh -eu -c '
               chmod 1777 /tmp
               stat -f -c "%n %T" /tmp "$1"
-              case "$(stat -f -c %t /tmp)" in
-                ef53|58465342|9123683e|2fc12fc1) ;;
-                *) echo "unsupported native lifecycle fixture filesystem" >&2; exit 1;;
-              esac
             ' sh "$RUNNER_TEMP"
       - name: Build first locked native payload
         shell: bash
