@@ -91,6 +91,15 @@ jobs:
           docker image inspect positron-gnu-builder --format '{{.Id}}'
           docker run --rm positron-gnu-builder rustc -vV
           docker run --rm positron-gnu-builder rpm -q glibc gcc binutils perl-interpreter git-core
+          docker run --rm -v "$RUNNER_TEMP:$RUNNER_TEMP:ro" -v positron-gnu-native-temp:/tmp \
+            positron-gnu-builder sh -eu -c '
+              chmod 1777 /tmp
+              stat -f -c "%n %T" /tmp "$1"
+              case "$(stat -f -c %t /tmp)" in
+                ef53|58465342|9123683e|2fc12fc1) ;;
+                *) echo "unsupported native lifecycle fixture filesystem" >&2; exit 1;;
+              esac
+            ' sh "$RUNNER_TEMP"
       - name: Build first locked native payload
         shell: bash
         run: |
@@ -250,7 +259,7 @@ jobs:
             export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
             export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
             docker run --rm --user "$(id -u):$(id -g)" -e RUSTFLAGS -e CFLAGS -e CARGO_HOME=/cargo \
-              -e POSITRON_TEST_NATIVE_BINARY -e "TMPDIR=$RUNNER_TEMP" \
+              -e POSITRON_TEST_NATIVE_BINARY -e TMPDIR=/tmp -v positron-gnu-native-temp:/tmp \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
               -v "$RUNNER_TEMP/gnu-cargo:/cargo" -w "$GITHUB_WORKSPACE" positron-gnu-builder \
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli
@@ -264,7 +273,7 @@ jobs:
             export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
             export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
             docker run --rm --user "$(id -u):$(id -g)" -e RUSTFLAGS -e CFLAGS -e CARGO_HOME=/cargo \
-              -e POSITRON_TEST_NATIVE_BINARY -e "TMPDIR=$RUNNER_TEMP" \
+              -e POSITRON_TEST_NATIVE_BINARY -e TMPDIR=/tmp -v positron-gnu-native-temp:/tmp \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
               -v "$RUNNER_TEMP/gnu-cargo:/cargo" -w "$GITHUB_WORKSPACE" positron-gnu-builder \
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron --test process_exit offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_listing_or_bytes
@@ -278,7 +287,7 @@ jobs:
             export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
             export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
             docker run --rm --user "$(id -u):$(id -g)" -e RUSTFLAGS -e CFLAGS -e CARGO_HOME=/cargo \
-              -e POSITRON_TEST_NATIVE_BINARY -e "TMPDIR=$RUNNER_TEMP" \
+              -e POSITRON_TEST_NATIVE_BINARY -e TMPDIR=/tmp -v positron-gnu-native-temp:/tmp \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
               -v "$RUNNER_TEMP/gnu-cargo:/cargo" -w "$GITHUB_WORKSPACE" positron-gnu-builder \
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron-release --test native_archives
@@ -397,3 +406,9 @@ jobs:
             docker volume rm "$container-temp" "$container-data" "$container-secrets"
             trap - EXIT
           done
+      - name: Remove private GNU lifecycle volume
+        if: always() && runner.os == 'Linux'
+        run: |
+          if docker volume inspect positron-gnu-native-temp >/dev/null 2>&1; then
+            docker volume rm positron-gnu-native-temp
+          fi
