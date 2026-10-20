@@ -27,8 +27,12 @@ fn scripted_requests(
                     Err(error) => return Err(error.to_string()),
                 }
             };
+            // Accepted sockets inherit nonblocking mode on macOS.
+            stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+            // Native maintenance clients allow five seconds for delivery;
+            // the fixture must not impose a shorter per-read deadline.
             stream
-                .set_read_timeout(Some(Duration::from_secs(1)))
+                .set_read_timeout(Some(Duration::from_secs(5)))
                 .map_err(|e| e.to_string())?;
             let mut headers = Vec::new();
             while !headers.ends_with(b"\r\n\r\n") {
@@ -107,6 +111,38 @@ fn scripted_status_server_survives_valid_client_startup_delay() -> TestResult {
                 &RepositoryRequest::decode(br#"{"action":"status"}"#)?,
             )?;
             Ok(response.catalog_generation.to_string())
+        },
+    )?;
+    assert_eq!(result?, "12");
+    assert_eq!(requests, vec![serde_json::json!({"action":"status"})]);
+    Ok(())
+}
+
+#[test]
+fn scripted_status_server_accepts_delivery_within_the_native_request_budget() -> TestResult {
+    let (result, requests) = scripted_requests(
+        &[(200, serde_json::json!({"catalog_generation":12}))],
+        |endpoint| {
+            let mut stream = TcpStream::connect(endpoint)?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            write!(
+                stream,
+                "POST {} HTTP/1.1\r\nHost: fixture\r\n",
+                positron_api::repository::HTTP_PATH
+            )?;
+            std::thread::sleep(Duration::from_millis(1100));
+            let body = br#"{"action":"status"}"#;
+            write!(stream, "Content-Length: {}\r\n\r\n", body.len())?;
+            stream.write_all(body)?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            assert!(
+                response.starts_with("HTTP/1.1 200 "),
+                "fixture response: {response:?}"
+            );
+            let (_, body) = response.split_once("\r\n\r\n").ok_or("response body")?;
+            let decoded: serde_json::Value = serde_json::from_str(body)?;
+            Ok(decoded["catalog_generation"].to_string())
         },
     )?;
     assert_eq!(result?, "12");
