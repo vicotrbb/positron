@@ -1,5 +1,7 @@
 mod fault;
 mod listing;
+#[cfg(test)]
+mod read_interleave;
 mod registry;
 #[cfg(feature = "test-support")]
 pub use fault::{LocalFault, LocalFaultEffect, LocalFaultPoint};
@@ -404,6 +406,7 @@ impl Repository for LocalRepository {
         let root = Arc::clone(&self.root);
         let expected = self.identity.clone();
         tokio::task::spawn_blocking(move || {
+            let _lock = DirectoryLock::new(&root)?;
             verify_identity(&root, &expected)?;
             registry::read(&root, slot)
         })
@@ -454,6 +457,7 @@ impl Repository for LocalRepository {
         let root = Arc::clone(&self.root);
         let expected = self.identity.clone();
         tokio::task::spawn_blocking(move || {
+            let _lock = DirectoryLock::new(&root)?;
             verify_identity(&root, &expected)?;
             Ok(upload::inspect(&root, id)?.map(|(_, state)| state))
         })
