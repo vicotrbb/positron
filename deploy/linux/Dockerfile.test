@@ -3,7 +3,7 @@ ARG RUNTIME_IMAGE
 FROM ${RUNTIME_IMAGE}
 ARG FIXTURE_UID=1001
 RUN if command -v apt-get >/dev/null; then \
-      apt-get update && apt-get install -y --no-install-recommends systemd ca-certificates passwd util-linux libgcc-s1 libc-bin coreutils && rm -rf /var/lib/apt/lists/*; \
+      apt-get update && apt-get install -y --no-install-recommends systemd ca-certificates passwd util-linux git libgcc-s1 libc-bin coreutils && rm -rf /var/lib/apt/lists/*; \
     else \
       set --; \
       if [ -f /etc/rocky-release ]; then \
@@ -14,7 +14,7 @@ RUN if command -v apt-get >/dev/null; then \
           --setopt=fixture-baseos.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9 \
           --setopt=fixture-appstream.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-Rocky-9; \
       fi; \
-      dnf "$@" install -y --allowerasing systemd ca-certificates shadow-utils util-linux libgcc glibc-common coreutils && dnf clean all; \
+      dnf "$@" install -y --allowerasing systemd ca-certificates shadow-utils util-linux git-core libgcc glibc-common coreutils && dnf clean all; \
     fi && useradd -m -u "$FIXTURE_UID" fixture
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
