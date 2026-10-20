@@ -1,4 +1,6 @@
 //! One admitted Runtime turn advances one bounded capture or native upload step.
+// Existing bounded backup cadence; a failed checkpoint may replay this many advances.
+pub(super) const MAX_BACKUP_STEP_ADVANCES: usize = 8;
 #[path = "execution_cancellation.rs"]
 mod cancellation;
 #[path = "execution_capture.rs"]
@@ -415,7 +417,7 @@ pub(in crate::services) fn complete(
         }
         if (work.next_key as usize) < work.context.keys().len() {
             let started = std::time::Instant::now();
-            for _ in 0..8 {
+            for _ in 0..MAX_BACKUP_STEP_ADVANCES {
                 if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
                     return Err(ServiceFailure::Cancelled);
                 }
@@ -460,7 +462,7 @@ pub(in crate::services) fn complete(
         let mut transfer = work.transfer.ok_or(ServiceFailure::Internal)?;
         let started = std::time::Instant::now();
         let mut remaining = 4 * 1024 * 1024u64;
-        for _ in 0..8 {
+        for _ in 0..MAX_BACKUP_STEP_ADVANCES {
             if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
                 return Err(ServiceFailure::Cancelled);
             }
@@ -541,7 +543,7 @@ pub(in crate::services) fn complete(
     let started = std::time::Instant::now();
     let mut remaining = 4 * 1024 * 1024u64;
     let mut complete = verification.complete();
-    for _ in 0..8 {
+    for _ in 0..MAX_BACKUP_STEP_ADVANCES {
         if complete {
             break;
         }

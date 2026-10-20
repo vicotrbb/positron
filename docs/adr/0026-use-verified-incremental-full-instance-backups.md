@@ -20,7 +20,13 @@ The signed `POSBSV02` verification checkpoint binds completed native-file
 checksum checks to the exact authenticated inventory and its file order. A cold
 resume restarts any partial file and revalidates the inventory before using the
 completed-file count. `POSBSV01` checkpoints remain readable and restart that
-native checksum pass. This operation checkpoint version does not change the
+native checksum pass. One admitted owner may coalesce at most eight successful
+remote verification advances before publishing their checkpoint; completion of
+each remote phase is durable before native verification proceeds. A crash or
+failed publication replays that bounded unpublished suffix and any partial file
+from the last authenticated checkpoint. Authorization, cancellation, resource
+admission, and the single-range work bound remain checked for each advance.
+This operation checkpoint version does not change the
 Backup Format Epoch or snapshot format. Native Catalog and audit verification
 still authenticates every required file and reconstructs its semantic state.
 When a bounded offline turn ends without changing the durable operation or its

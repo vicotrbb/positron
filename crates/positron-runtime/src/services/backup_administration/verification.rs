@@ -7,6 +7,7 @@ use positron_kernel::{BackupCaptureFileKind, BackupCaptureVerification, Maintena
 pub(in crate::services) struct VerificationWork {
     pub(super) owner: BackupOwner,
     remote: Option<BackupSnapshotVerification>,
+    remote_steps_since_checkpoint: usize,
     metadata: Option<BackupCaptureVerification>,
     catalog: Option<positron_kernel::CatalogSnapshot>,
     next_file: usize,
@@ -104,6 +105,7 @@ pub(super) fn complete(
         *work = Some(BackupWork::Verification(Box::new(VerificationWork {
             owner: BackupOwner::open(services, execution, operation)?,
             remote: None,
+            remote_steps_since_checkpoint: 0,
             metadata: None,
             catalog: None,
             next_file: 0,
@@ -178,15 +180,38 @@ pub(super) fn complete(
         return Ok(false);
     }
     let remote = work.remote.as_mut().ok_or(ServiceFailure::Internal)?;
-    if !remote.complete() {
-        work.owner
-            .runtime
-            .block_on(publisher.snapshot_verification_step(remote))
-            .map_err(provider_failure)?;
-        let progress = publisher
-            .snapshot_verification_checkpoint(remote)
-            .map_err(provider_failure)?;
-        execution::checkpoint::persist(services, execution, binding, None, Some(&progress))?;
+    if !remote.complete() || work.remote_steps_since_checkpoint > 0 {
+        // A failed publication retries the same prefix before another read.
+        if !remote.complete()
+            && work.remote_steps_since_checkpoint < execution::MAX_BACKUP_STEP_ADVANCES
+        {
+            work.owner
+                .runtime
+                .block_on(publisher.snapshot_verification_step(remote))
+                .map_err(provider_failure)?;
+            work.remote_steps_since_checkpoint += 1;
+            #[cfg(test)]
+            if work.metadata.is_some() {
+                execution::test_stops::hit(
+                    execution::test_stops::StopPoint::VerificationRemoteRangeVerified,
+                    cancellation,
+                )?;
+            }
+        }
+        if work.remote_steps_since_checkpoint >= execution::MAX_BACKUP_STEP_ADVANCES
+            || remote.complete()
+        {
+            #[cfg(test)]
+            execution::test_stops::hit(
+                execution::test_stops::StopPoint::VerificationRemoteCheckpointDue,
+                cancellation,
+            )?;
+            let progress = publisher
+                .snapshot_verification_checkpoint(remote)
+                .map_err(provider_failure)?;
+            execution::checkpoint::persist(services, execution, binding, None, Some(&progress))?;
+            work.remote_steps_since_checkpoint = 0;
+        }
         return Ok(false);
     }
     if work.metadata.is_none() && work.catalog.is_none() {
