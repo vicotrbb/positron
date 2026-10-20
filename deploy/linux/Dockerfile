@@ -12,5 +12,5 @@ RUN dnf --setopt=install_weak_deps=False --disablerepo='*' \
     install -y gcc make perl-interpreter binutils git-core && dnf clean all
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 COPY --from=rust /usr/local/cargo/bin /usr/local/cargo/bin
-ENV RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH
+ENV RUSTUP_HOME=/usr/local/rustup RUSTUP_TOOLCHAIN=1.96.0 PATH=/usr/local/cargo/bin:$PATH
 WORKDIR /source
