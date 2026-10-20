@@ -355,16 +355,20 @@ fn wait_for_signed_reservation(
             let resources = backup_read_resources_until(services, deadline)?;
             let publisher = positron_backup::BackupPublisher::new(&repository, identity, &signer)
                 .with_control_resources(&resources, 0)?;
-            let proof = backup_inspection_proof(&runtime, &publisher, snapshot)?;
-            let verified = publisher.with_registry_verification(&proof)?;
-            runtime.block_on(verified.cancellation_candidate(snapshot))
+            (|| {
+                let proof = backup_inspection_proof(&runtime, &publisher, snapshot)?;
+                let verified = publisher.with_registry_verification(&proof)?;
+                runtime.block_on(verified.cancellation_candidate(snapshot))
+            })()
         };
         match candidate {
             Ok(Some(candidate)) => {
                 assert_eq!(candidate.snapshot_id(), snapshot);
                 return Ok(());
             },
-            Ok(None) | Err(positron_backup::RepositoryFailure::PreconditionFailed) => {},
+            Ok(None)
+            | Err(positron_backup::RepositoryFailure::PreconditionFailed)
+            | Err(positron_backup::RepositoryFailure::Busy) => {},
             Err(failure) => return Err(failure.into()),
         }
         if std::time::Instant::now() >= deadline {
@@ -638,7 +642,7 @@ fn backup_inspection_proof(
     runtime: &tokio::runtime::Runtime,
     publisher: &positron_backup::BackupPublisher<'_>,
     owner: [u8; 16],
-) -> Result<positron_backup::BackupRegistryVerification, Box<dyn std::error::Error>> {
+) -> Result<positron_backup::BackupRegistryVerification, positron_backup::RepositoryFailure> {
     let mut proof = runtime.block_on(publisher.begin_registry_verification(owner, [0x6d; 32]))?;
     for _ in 0..4096 {
         if proof.complete()? {
@@ -647,7 +651,7 @@ fn backup_inspection_proof(
         runtime.block_on(publisher.registry_verification_step(&mut proof))?;
     }
     if !proof.complete()? {
-        return Err("fixture ancestry exceeded bounded inspection steps".into());
+        return Err(positron_backup::RepositoryFailure::LimitExceeded);
     }
     Ok(proof)
 }
