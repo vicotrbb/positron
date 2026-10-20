@@ -76,15 +76,26 @@ service examples, install it as `/usr/local/lib/positron`. Keep the prior versio
 until the explicit upgrade and recovery process completes.
 
 Create a dedicated non-login `positron` account using the host's account tools.
-Create `/etc/positron` owned by root and `/var/lib/positron`,
-`/var/lib/positron-secrets`, and `/run/positron` owned by that account. Use mode
-0700 for writable roots and 0600 for configuration and secret files. Keep data
+Create `/etc/positron` owned by `root:positron` with mode 0750 and install its
+configuration owned by `root:positron` with mode 0640. The service account can
+read and traverse this configuration tree but cannot change it. Create
+`/var/lib/positron`, `/var/lib/positron-secrets`, and `/run/positron` owned by
+`positron:positron` with mode 0700. Keep secret files owned by the service
+account with mode 0600. Keep data
 and secrets separate; preserve both in recovery. Run database commands as the
 service account, never as root. The immutable binary tree and configuration may
 be read only; the configured data, secrets, runtime and temporary paths must be
 writable. Do not place data on an unsupported network or shared filesystem.
 
-Copy `etc/positron.toml.example` to `/etc/positron/positron.toml`. Review the
+From the extracted installation directory, install the configuration using
+the host's administrative account:
+
+```console
+install -d -o root -g positron -m 0750 /etc/positron
+install -o root -g positron -m 0640 etc/positron.toml.example /etc/positron/positron.toml
+```
+
+Review the
 generated reference under `share/` and explicitly configure
 `security.local_key_file = "/var/lib/positron-secrets/local-root-key.v1"` in the
 `[security]` table. Secret-bearing fields are omitted from the public example.
