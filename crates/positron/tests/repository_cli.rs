@@ -17,6 +17,63 @@ use std::{
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+fn after_capacity(
+    deadline: std::time::Instant,
+    mut invoke: impl FnMut() -> TestResult<Output>,
+) -> TestResult<Output> {
+    loop {
+        let output = invoke()?;
+        if output.status.success()
+            || output.stderr
+                != b"positron: capacity unavailable; retry the same idempotent request\n"
+            || std::time::Instant::now() >= deadline
+        {
+            return Ok(output);
+        }
+        std::thread::sleep(
+            std::time::Duration::from_millis(10)
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    }
+}
+
+#[test]
+fn scope_check_retries_only_exact_capacity_within_its_admission_deadline() -> TestResult {
+    use std::os::unix::process::ExitStatusExt;
+    let capacity = "positron: capacity unavailable; retry the same idempotent request\n";
+    let scope = "positron: system administration authentication rejected\n";
+    let mut calls = 0;
+    let output = after_capacity(
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+        || {
+            calls += 1;
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: Vec::new(),
+                stderr: if calls == 1 { capacity } else { scope }
+                    .as_bytes()
+                    .to_vec(),
+            })
+        },
+    )?;
+    assert_eq!(calls, 2);
+    assert_eq!(output.stderr, scope.as_bytes());
+    for failure in [scope, "positron: administration unavailable\n", capacity] {
+        let mut calls = 0;
+        let output = after_capacity(std::time::Instant::now(), || {
+            calls += 1;
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: Vec::new(),
+                stderr: failure.as_bytes().to_vec(),
+            })
+        })?;
+        assert_eq!(calls, 1);
+        assert_eq!(output.stderr, failure.as_bytes());
+    }
+    Ok(())
+}
+
 fn command(
     endpoint: SocketAddr,
     bearer: &str,
@@ -117,11 +174,16 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
         "--aws-prefix".into(),
         "diagnostic/".into(),
     ];
-    let rejected = command(
-        endpoint,
-        claim.ingest_secret().ok_or("ingest credential")?,
-        "doctor",
-        &native,
+    let rejected = after_capacity(
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+        || {
+            command(
+                endpoint,
+                claim.ingest_secret().ok_or("ingest credential")?,
+                "doctor",
+                &native,
+            )
+        },
     )?;
     assert!(!rejected.status.success());
     let rejected_error = String::from_utf8(rejected.stderr)?;
