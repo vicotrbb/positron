@@ -224,6 +224,12 @@ impl positron_runtime::RunningTask for CandidateWorker {
 fn fenced_owner_retains_pending_worker_until_confirmed_termination()
 -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("pending-fenced-worker")?;
+    let paths = roots.bootstrap_paths()?;
+    drop(crate::InstanceBootstrap::initialize(
+        &paths,
+        crate::InitializationPlan::non_interactive(),
+    )?);
+    let claim = crate::InstanceBootstrap::claim(&paths)?;
     let released = std::rc::Rc::new(std::cell::Cell::new(false));
     let tasks = PendingTasks {
         released: released.clone(),
@@ -231,12 +237,15 @@ fn fenced_owner_retains_pending_worker_until_confirmed_termination()
         ordinary: ObservingTasks::default(),
     };
     let mut process = ApplicationRuntime::start(
-        ServeConfiguration::new(
-            roots.bootstrap_paths()?,
-            InitializationMode::InitializeIfEmpty,
-        ),
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
         HostInputs::new(&ObservingListeners::default(), &tasks),
     )?;
+    let health = process.health();
+    let instance = process
+        .instance
+        .as_ref()
+        .ok_or("instance authority")?
+        .clone();
     process
         .health()
         .request_integrity_fence(crate::IntegrityFenceReason::UnreliableOwnership);
@@ -247,13 +256,28 @@ fn fenced_owner_retains_pending_worker_until_confirmed_termination()
         "a pending worker must remain under the owner rather than detach"
     );
     assert_eq!(process.health().phase(), ProcessPhase::Fenced);
+    assert_eq!(
+        instance._authority.with_control_contention_for_test(|| {
+            health.with_authenticated_fenced_diagnostics(claim.secret(), |_, _, _| Ok(()))
+        })?,
+        Err(crate::FencedDiagnosticsFailure::Unavailable)
+    );
     released.set(true);
     process
         .poll()
         .map_err(|outcome| format!("owner reconciliation failed: {outcome:?}"))?;
+    drop(instance);
     assert!(
         roots.acquire_volume_again().is_ok(),
         "confirmed worker termination releases mutable ownership"
+    );
+    assert_eq!(
+        health.with_authenticated_fenced_diagnostics(claim.secret(), |_, _, _| Ok(())),
+        Ok(())
+    );
+    assert_eq!(
+        health.with_authenticated_fenced_diagnostics("invalid-credential", |_, _, _| Ok(())),
+        Err(crate::FencedDiagnosticsFailure::AuthenticationRejected)
     );
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),

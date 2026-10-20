@@ -20,7 +20,7 @@ use tokio::net::{TcpSocket, TcpStream};
 use tonic::{Code, Request};
 
 use super::support::{
-    TestRoots, address, assert_status, http, live_async_test_guard, live_test_guard, tls_http,
+    TestRoots, address, assert_status, live_async_test_guard, live_test_guard, tls_http,
 };
 
 #[tokio::test(flavor = "current_thread")]
@@ -439,7 +439,29 @@ fn old_api_generation_keeps_its_lease_until_the_held_socket_releases_drain()
     let api = address(&process.bound_endpoints(), ListenerRole::Api)?;
     let mut holder = StdTcpStream::connect_timeout(&api, Duration::from_secs(2))?;
     holder.write_all(b"GET /v1/capabilities:negotiate HTTP/1.1\r\nHost: localhost\r\n")?;
-    std::thread::sleep(Duration::from_millis(25));
+    fn probe_api(api: SocketAddr, timeout: Duration) -> std::io::Result<String> {
+        use std::io::Read;
+        let mut stream = StdTcpStream::connect_timeout(&api, timeout)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        if let Err(error) = stream.write_all(b"GET /v1/capabilities:negotiate HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") {
+            return if matches!(error.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::NotConnected | std::io::ErrorKind::ConnectionReset) {
+                Ok(String::new())
+            } else { Err(error) };
+        }
+        let mut bytes = Vec::new();
+        match stream.take(4096).read_to_end(&mut bytes) {
+            Ok(_) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {},
+            Err(error) => return Err(error),
+        }
+        String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+    assert!(
+        probe_api(api, Duration::from_secs(1))?.is_empty(),
+        "the held old-generation socket must occupy its only permit"
+    );
     let successor =
         effective_configuration(&listener_document(&roots, "plaintext", 2, 1, 128, 16))?;
 
@@ -448,7 +470,12 @@ fn old_api_generation_keeps_its_lease_until_the_held_socket_releases_drain()
         move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
-                match http(api, "GET", "/v1/capabilities:negotiate", &[], &[]) {
+                match probe_api(
+                    api,
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .max(Duration::from_millis(1)),
+                ) {
                     Ok(response) if response.starts_with("HTTP/1.1 405 ") => {
                         successor_ready
                             .send(())
@@ -470,16 +497,16 @@ fn old_api_generation_keeps_its_lease_until_the_held_socket_releases_drain()
             }
         },
     );
-    let started = Instant::now();
-    let outcome = process.reload_configuration(successor)?;
-    successor_observed.recv_timeout(Duration::from_millis(250))?;
-    assert!(started.elapsed() < Duration::from_secs(1));
-    probe
+    let outcome = process.reload_configuration(successor);
+    let observed = successor_observed.recv_timeout(Duration::from_millis(250));
+    let joined = probe
         .join()
         .map_err(|_| "reload observer panicked")?
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string());
+    observed?;
+    joined?;
     assert!(matches!(
-        outcome,
+        outcome?,
         positron_runtime::ConfigurationReloadOutcome::PublishedLive { .. }
     ));
     super::shutdown_gracefully(process, &roots)?;

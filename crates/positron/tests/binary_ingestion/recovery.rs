@@ -155,48 +155,69 @@ pub(super) fn mutate(
     let backup = BackupServiceClient::new(transport.clone()).map_err(|_| "backup client")?;
     let upgrade = UpgradeServiceClient::new(transport).map_err(|_| "upgrade client")?;
     let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
+    'fresh_status: loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err("public mutation generation watchdog expired".into());
         }
-        let status = repository
-            .manage_with_timeout(
-                admin,
-                &positron_api::repository::RepositoryRequest::decode(br#"{"action":"status"}"#)?,
-                remaining,
-            )
-            .map_err(|failure| format!("public repository status refused: {failure:?}"))?;
+        let status = match repository.manage_with_timeout(
+            admin,
+            &positron_api::repository::RepositoryRequest::decode(br#"{"action":"status"}"#)?,
+            remaining,
+        ) {
+            Ok(status) => status,
+            Err(F::CapacityUnavailable) if Instant::now() < deadline => {
+                std::thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+                continue;
+            },
+            Err(failure) => {
+                return Err(format!("public repository status refused: {failure:?}").into());
+            },
+        };
         // Generated mutation clients have the canonical five-second request bound.
         if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(5) {
             return Err("public mutation generation watchdog expired".into());
         }
         request["expected_catalog_generation"] = status.catalog_generation.into();
         let bytes = serde_json::to_vec(&request)?;
-        let result = match family {
-            "repository" => repository
-                .manage(
-                    admin,
-                    &positron_api::repository::RepositoryRequest::decode(&bytes)?,
-                )
-                .map(|response| response.operation.map(|operation| operation.id)),
-            "backup" => backup
-                .manage(admin, &positron_api::backup::BackupRequest::decode(&bytes)?)
-                .map(|response| Some(response.operation.id)),
-            "upgrade" => upgrade
-                .manage(
-                    admin,
-                    &positron_api::upgrade::UpgradeRequest::decode(&bytes)?,
-                )
-                .map(|response| response.operation.map(|operation| operation.id)),
-            _ => return Err("unknown public mutation family".into()),
-        };
-        match result {
-            Ok(operation) => return Ok(operation.ok_or("accepted operation missing")?),
-            Err(F::StaleGeneration) if Instant::now() < deadline => continue,
-            Err(failure) => {
-                return Err(format!("public {family} mutation refused: {failure:?}").into());
-            },
+        loop {
+            if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(5) {
+                return Err("public mutation generation watchdog expired".into());
+            }
+            let result = match family {
+                "repository" => repository
+                    .manage(
+                        admin,
+                        &positron_api::repository::RepositoryRequest::decode(&bytes)?,
+                    )
+                    .map(|response| response.operation.map(|operation| operation.id)),
+                "backup" => backup
+                    .manage(admin, &positron_api::backup::BackupRequest::decode(&bytes)?)
+                    .map(|response| Some(response.operation.id)),
+                "upgrade" => upgrade
+                    .manage(
+                        admin,
+                        &positron_api::upgrade::UpgradeRequest::decode(&bytes)?,
+                    )
+                    .map(|response| response.operation.map(|operation| operation.id)),
+                _ => return Err("unknown public mutation family".into()),
+            };
+            match result {
+                Ok(operation) => return Ok(operation.ok_or("accepted operation missing")?),
+                Err(F::StaleGeneration) if Instant::now() < deadline => continue 'fresh_status,
+                Err(F::CapacityUnavailable) if Instant::now() < deadline => {
+                    std::thread::sleep(
+                        Duration::from_millis(10)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                },
+                Err(failure) => {
+                    return Err(format!("public {family} mutation refused: {failure:?}").into());
+                },
+            }
         }
     }
 }
@@ -398,3 +419,6 @@ pub(super) fn roundtrip(
     ready(operations)?;
     Ok(candidate)
 }
+
+#[path = "recovery_mutation_tests.rs"]
+mod mutation_tests;

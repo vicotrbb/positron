@@ -205,22 +205,7 @@ fn contended_resource_observation_preserves_serving_admission_after_control_comp
         "only the two acknowledged requests are durable"
     );
     drop(services);
-    health.request_integrity_fence(IntegrityFenceReason::UnreliableOwnership);
-    assert!(process.apply_pending_integrity_fence());
-    let unavailable = instance
-        ._authority
-        .with_control_contention_for_test(|| status(operations, claim.secret()))??;
-    assert!(
-        unavailable.starts_with("HTTP/1.1 503 "),
-        "fenced authority unavailable: {unavailable}"
-    );
     drop(instance);
-    let reopened = status(operations, claim.secret())?;
-    assert!(
-        reopened.starts_with("HTTP/1.1 200 "),
-        "reopened fenced inspection: {reopened}"
-    );
-    assert!(status(operations, "invalid-credential")?.starts_with("HTTP/1.1 401 "));
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         ExitOutcome::Graceful

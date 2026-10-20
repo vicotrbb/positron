@@ -1060,7 +1060,7 @@ mod tests {
             generation,
         )))?;
         state.set_inspection_authority(Arc::clone(&instance))?;
-        let services = ServiceHandle::new(instance)?;
+        let services = ServiceHandle::new(Arc::clone(&instance))?;
         state.set_catalog_operation(services.catalog_operation_gate())?;
         state.record_bound_listener(ListenerRole::Operations);
         state.transition(crate::ProcessPhase::Serving);
@@ -1146,6 +1146,40 @@ mod tests {
             401
         );
         assert_eq!(source_listing(&data, &secrets)?, before);
+
+        state.transition(crate::ProcessPhase::Fenced);
+        let unavailable = instance._authority.with_control_contention_for_test(|| {
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/status",
+                Some(administrator.clone()),
+            )
+        })?;
+        assert_eq!(unavailable.status(), 503);
+        assert_eq!(
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/status",
+                Some(administrator.clone()),
+            )
+            .status(),
+            200
+        );
+        assert_eq!(
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/status",
+                Some("invalid-credential".to_owned()),
+            )
+            .status(),
+            401
+        );
 
         drop(services);
         fs::remove_dir_all(root)?;
