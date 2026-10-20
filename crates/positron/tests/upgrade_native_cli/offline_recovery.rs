@@ -103,7 +103,16 @@ fn source() -> Result<Source> {
             .ok_or("API profile")?
             .connection_protection()
             .request_deadline();
-    let response = match client.manage(claim.secret(), &input) {
+    let measured = Instant::now();
+    let initial = client.manage(claim.secret(), &input);
+    let _diagnostic_failed = writeln!(
+        std::io::stderr(),
+        "upgrade_preflight_client elapsed_ms={} outcome={:?}",
+        measured.elapsed().as_millis(),
+        initial.as_ref().map(|_| ())
+    )
+    .is_err();
+    let response = match initial {
         Ok(response) => response,
         Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport) => {
             // A lost start response is ambiguous. Inspect the same key without
@@ -280,7 +289,11 @@ fn offline_restore_reference_survives_frontiers_that_refuse_continuation() -> Re
         Ok(_) => return Err("damaged native storage admitted writable continuation".into()),
         Err(error) => error,
     };
-    eprintln!("native corruption continuation refusal: {refusal:?}");
+    let _diagnostic_failed = writeln!(
+        std::io::stderr(),
+        "native corruption continuation refusal: {refusal:?}"
+    )
+    .is_err();
     assert!(matches!(
         refusal,
         UpgradeFailure::DrainIncomplete | UpgradeFailure::UnsafeState
