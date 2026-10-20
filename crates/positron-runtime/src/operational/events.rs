@@ -74,6 +74,7 @@ pub enum OperationalDiagnostic {
     ConfigurationReloadAuditUnavailable,
     RuntimeCrashRecordUnavailable,
     RuntimeCleanupFailure(crate::CleanupRole),
+    BackupRepositoryRejected(positron_domain::repository::RepositoryFailure),
     MaintenanceWorkerFailure(crate::ServiceFailure),
     MaintenanceOperationFailure {
         operation: MaintenanceWorkerOperation,
@@ -101,6 +102,7 @@ impl OperationalDiagnostic {
             Self::ConfigurationReloadAuditUnavailable => "configuration_reload_audit_unavailable",
             Self::RuntimeCrashRecordUnavailable => "runtime_crash_record_unavailable",
             Self::RuntimeCleanupFailure(_) => "runtime_cleanup_failure",
+            Self::BackupRepositoryRejected(_) => "backup_repository_rejected",
             Self::MaintenanceWorkerFailure(_) | Self::MaintenanceOperationFailure { .. } => {
                 "maintenance_worker_failure"
             },
@@ -264,6 +266,9 @@ impl OperationalEvent {
                     value["category"] = crate::services::maintenance_failure_category(failure)
                         .unwrap_or("cancelled")
                         .into();
+                },
+                OperationalDiagnostic::BackupRepositoryRejected(failure) => {
+                    value["repository_failure"] = format!("{failure:?}").into();
                 },
                 OperationalDiagnostic::MaintenanceOperationFailure {
                     operation,

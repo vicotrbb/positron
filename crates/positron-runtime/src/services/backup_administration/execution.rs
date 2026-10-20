@@ -24,6 +24,9 @@ use positron_governance::{
 use positron_kernel::{
     BackupCapture, BackupCapturePreparation, BackupControlSigner, MaintenanceExecution,
 };
+#[cfg(test)]
+#[path = "execution_diagnostic_tests.rs"]
+mod diagnostic_tests;
 pub(in crate::services) enum BackupWork {
     Snapshot(Box<SnapshotWork>),
     Verification(Box<super::verification::VerificationWork>),
@@ -756,7 +759,25 @@ pub(super) fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
         | RepositoryFailure::StorageUnavailable => ServiceFailure::StorageUnavailable,
         RepositoryFailure::SourceIntegrityCorruption => ServiceFailure::CorruptState,
         RepositoryFailure::InvalidInput => ServiceFailure::Internal,
-        _ => ServiceFailure::BackupRepositoryRejected,
+        _ => {
+            use std::sync::atomic::{AtomicU8, Ordering};
+            static REMAINING: AtomicU8 = AtomicU8::new(32);
+            if REMAINING
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                // The closed Repository failure carries no paths, credentials
+                // or provider error strings. Reporting cannot alter rejection.
+                match crate::write_operational_diagnostic(
+                    crate::OperationalDiagnostic::BackupRepositoryRejected(failure),
+                ) {
+                    Ok(()) | Err(_) => {},
+                }
+            }
+            ServiceFailure::BackupRepositoryRejected
+        },
     }
 }
 fn capture_failure(failure: RepositoryFailure) -> ServiceFailure {
