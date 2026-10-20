@@ -144,7 +144,12 @@ pub fn fuzz_maintenance_catalog_stateful(data: &[u8]) {
             1 => {
                 let pause = || coordinator.pause_and_persist(&catalog, identity, 1, now + 4, now);
                 if fault {
-                    let _ = with_catalog_fault(fault_event(command), pause);
+                    let result = with_catalog_fault(fault_event(command), pause);
+                    if result == Err(MaintenanceFailure::CatalogUnavailable) {
+                        // Resolve the exact pause after an ambiguous publication
+                        // before comparing the live owner with cold recovery.
+                        pause().expect("exact pause retry resolves publication");
+                    }
                 } else {
                     let _ = pause();
                 }
@@ -346,6 +351,13 @@ fn fault_event(selector: u8) -> CatalogFileEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ambiguous_pause_retries_its_exact_request_before_cold_comparison() {
+        super::fuzz_maintenance_catalog_stateful(&[
+            48, 42, 50, 52, 48, 49, 252, 43, 52, 53, 197, 199, 199, 203,
+        ]);
+    }
+
     #[test]
     fn ambiguous_submission_preserves_live_and_cold_owner_agreement() {
         super::fuzz_maintenance_catalog_stateful(&[

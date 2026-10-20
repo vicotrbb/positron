@@ -255,6 +255,11 @@ pub(super) fn complete(
                     .verify_protected_file(&secret, file.identity(), &bytes)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
                 work.next_file += 1;
+                #[cfg(test)]
+                execution::test_stops::hit(
+                    execution::test_stops::StopPoint::VerificationNativeFileVerified,
+                    cancellation,
+                )?;
                 return Ok(false);
             }
             // Ciphertext and segment/frontier identity were checked remotely and

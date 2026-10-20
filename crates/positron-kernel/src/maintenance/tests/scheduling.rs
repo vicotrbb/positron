@@ -368,3 +368,43 @@ fn durability_outranks_an_aged_lower_class_without_promoting_untrusted_recovery_
     assert_eq!(event_compaction.priority(), MaintenancePriority::Required);
     assert_eq!(recovery_kind(&event_compaction), None);
 }
+
+#[test]
+fn submission_floor_does_not_block_other_due_safe_work() {
+    for clock_uncertain in [false, true] {
+        let coordinator = MaintenanceCoordinator::new();
+        let future = task(
+            111,
+            MaintenanceTaskClass::ActiveSegmentRoll,
+            MaintenanceTrigger::Event,
+            MaintenancePriority::Urgent,
+            Vec::new(),
+        );
+        let due = task(
+            112,
+            MaintenanceTaskClass::Compaction,
+            MaintenanceTrigger::Event,
+            MaintenancePriority::Ordinary,
+            Vec::new(),
+        );
+        coordinator
+            .submit_at(future.clone(), 100)
+            .expect("future task");
+        coordinator
+            .submit_at(due.clone(), 99)
+            .expect("due safe task");
+        assert_eq!(
+            coordinator
+                .start_next(99, clock_uncertain)
+                .expect("scheduler"),
+            Some(due)
+        );
+        assert_eq!(
+            coordinator
+                .status(future.identity())
+                .expect("future status")
+                .phase(),
+            MaintenanceTaskPhase::Queued
+        );
+    }
+}

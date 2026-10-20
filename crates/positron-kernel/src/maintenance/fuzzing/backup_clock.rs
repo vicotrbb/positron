@@ -44,6 +44,38 @@ pub(super) fn run(
             100,
         )
         .expect("bounded Backup task");
+    let before = coordinator.status(task.identity()).expect("submitted task");
+    let generation = catalog.pin().expect("submitted basis").number();
+    let memory = authority
+        .governor()
+        .inspect()
+        .expect("resource accounting")
+        .usage(crate::ResourceDimension::MemoryBytes);
+    assert!(
+        coordinator
+            .start_backup_operation_with_reservation_and_persist(
+                catalog,
+                authority,
+                99,
+                false,
+                task.identity(),
+            )
+            .expect("pre-submission admission")
+            .is_none()
+    );
+    assert_eq!(
+        coordinator.status(task.identity()).expect("queued task"),
+        before
+    );
+    assert_eq!(catalog.pin().expect("unchanged basis").number(), generation);
+    assert_eq!(
+        authority
+            .governor()
+            .inspect()
+            .expect("unchanged accounting")
+            .usage(crate::ResourceDimension::MemoryBytes),
+        memory
+    );
     let mut previous_time = 100;
     for (step, command) in data.iter().copied().skip(1).take(12).enumerate() {
         let (clock, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(epoch);

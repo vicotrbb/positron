@@ -2,6 +2,17 @@ use super::*;
 use crate::services::backup_administration::{StopPoint, stop_after};
 
 #[test]
+fn independent_verification_partial_native_cold_reopen_reauthenticates()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationNativeFileVerified, false, 0, None)
+}
+#[test]
+fn independent_verification_partial_native_cancel_preserves_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    restart_at(StopPoint::VerificationNativeFileVerified, true, 0, None)
+}
+
+#[test]
 fn independent_verification_rebuilds_native_metadata_after_cold_stop()
 -> Result<(), Box<dyn std::error::Error>> {
     restart_at(StopPoint::VerificationMetadataVerified, false, 0, None)
