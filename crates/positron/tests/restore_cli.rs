@@ -159,12 +159,28 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
     let backup_client = BackupServiceClient::new(BackupTransport::PlaintextOptOut { endpoint })?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let accepted = loop {
-        let status = repository_client
-            .manage(
-                claim.secret(),
-                &RepositoryRequest::decode(br#"{"action":"status"}"#)?,
-            )
-            .map_err(|error| format!("source repository status read: {error:?}"))?;
+        let status = match repository_client.manage(
+            claim.secret(),
+            &RepositoryRequest::decode(br#"{"action":"status"}"#)?,
+        ) {
+            Ok(status) => status,
+            Err(positron_api::repository::RepositoryServiceClientFailure::CapacityUnavailable)
+                if Instant::now() < deadline =>
+            {
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(5)),
+                );
+                if Instant::now() >= deadline {
+                    return Err(
+                        "source repository status exhausted the original admission deadline".into(),
+                    );
+                }
+                continue;
+            },
+            Err(error) => return Err(format!("source repository status read: {error:?}").into()),
+        };
         let request = BackupRequest::decode(&serde_json::to_vec(&serde_json::json!({
             "action":"create", "expected_catalog_generation":status.catalog_generation,
             "idempotency_key":"22222222-2222-4222-8222-222222222222", "repository_id":repository_id,
