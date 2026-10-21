@@ -1,6 +1,8 @@
-{ pkgs, src, toolchain }:
+{ pkgs, src, toolchain,
+  version ? (builtins.fromTOML (builtins.readFile (src + /Cargo.toml))).workspace.package.version,
+  lockFile ? src + /Cargo.lock
+}:
 let
-  manifest = builtins.fromTOML (builtins.readFile (src + /Cargo.toml));
   target = {
     x86_64-linux = "linux-x86_64";
     aarch64-linux = "linux-aarch64";
@@ -10,9 +12,8 @@ let
 in
 (pkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; }).buildRustPackage {
   pname = "positron";
-  version = manifest.workspace.package.version;
-  inherit src;
-  cargoLock.lockFile = src + /Cargo.lock;
+  inherit src version;
+  cargoLock.lockFile = lockFile;
   cargoBuildFlags = [ "--package" "positron" ];
   preBuild = ''
     export CFLAGS="''${CFLAGS:-} -fdebug-prefix-map=$PWD=/positron-source"

@@ -30,12 +30,11 @@ pub(super) fn run(
     let original = fs::read_to_string(installed.config)?;
     let (_, digest) = release::configuration(
         target,
+        native_binary::distribution()?,
         positron_kernel::FormatEpoch::CATALOG_V2.value(),
         installed.query,
-        installed.binary,
-        &executable,
-        &candidate.source_commit,
-        &candidate.candidate_commit,
+        (installed.binary, &executable),
+        (&candidate.source_commit, &candidate.candidate_commit),
     )?;
     let generated = fs::read_to_string(installed.config)?;
     let (_, section) = generated

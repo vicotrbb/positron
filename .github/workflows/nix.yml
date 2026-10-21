@@ -45,6 +45,7 @@ jobs:
       - name: Run public CLI lifecycle against installed output
         env:
           POSITRON_TEST_NATIVE_BINARY: ${{ github.workspace }}/result/bin/positron
+          POSITRON_TEST_EXECUTABLE_DISTRIBUTION: nix
         run: |
           nix develop --no-update-lock-file --command cargo test --locked --release -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli
           nix develop --no-update-lock-file --command cargo test --locked --release -p positron --test process_exit offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_listing_or_bytes

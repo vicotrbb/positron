@@ -52,6 +52,7 @@ fn source() -> Result<Source> {
     drop(instance);
     let (_, candidate) = configuration(
         &root,
+        positron_config::ExecutableDistribution::Nix,
         epoch,
         claim.query_secret().ok_or("Query credential")?,
     )?;

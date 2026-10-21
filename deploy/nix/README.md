@@ -139,3 +139,13 @@ Disabling the service or removing its package retains configuration, data,
 secrets, trust and backups. Explicitly authorize and perform any later deletion
 only after validating recovery. Nix garbage collection removes package store
 paths, not these durable directories.
+
+The Linux service check boots NixOS and uses the real service sandbox. It
+acknowledges telemetry, verifies independent key recovery, creates a backup,
+and drives signed database Upgrade through Drain, authenticated snapshot and
+offline publication. A private next-patch fixture uses the same workspace,
+lockfile dependencies and pinned toolchain with only package versions changed.
+The existing Release Trust fixture signer binds its measured Nix executable
+identity. Switching the module's package generation then checks target startup
+attestation and the original record, followed by restore into empty roots and
+removal/reinstallation. This fixture signing does not publish a release.

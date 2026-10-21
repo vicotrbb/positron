@@ -17,7 +17,15 @@ fn release_one_inventory_has_a_fixed_complete_surface_and_target_matrix() {
     assert!(required.contains(&(Surface::SdkDotNet, "any")));
     assert!(required.contains(&(Surface::NativeExecutable, "macos-aarch64")));
     assert!(required.contains(&(Surface::OciImage, "linux-aarch64")));
-    assert_eq!(required.len(), 32);
+    for target in [
+        "nix-linux-x86_64",
+        "nix-linux-aarch64",
+        "nix-macos-x86_64",
+        "nix-macos-aarch64",
+    ] {
+        assert!(required.contains(&(Surface::NativeExecutable, target)));
+    }
+    assert_eq!(required.len(), 36);
 }
 
 mod support;

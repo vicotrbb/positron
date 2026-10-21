@@ -46,8 +46,14 @@
             touch "$out"
           '';
         } // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
-          service = import ./deploy/nix/test.nix {
+          service = let upgrade = import ./deploy/nix/upgrade-check.nix {
             inherit pkgs;
+            src = self;
+            toolchain = toolchainFor system;
+            package = self.packages.${system}.positron;
+          }; in import ./deploy/nix/test.nix {
+            inherit pkgs;
+            inherit (upgrade) candidate fixture commit;
             package = self.packages.${system}.positron;
             module = self.nixosModules.default;
           };

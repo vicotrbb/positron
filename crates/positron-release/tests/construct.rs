@@ -16,7 +16,46 @@ fn construction_binds_the_full_set_to_the_existing_canonical_manifest() {
         construction.manifest.source_commit,
         support::keyless::SOURCE_COMMIT
     );
-    assert_eq!(construction.manifest.artifacts.len(), 9);
+    use positron_kernel::release_manifest::ArtifactRole;
+    let mut executables: Vec<_> = construction
+        .manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.role == ArtifactRole::NativeExecutable)
+        .map(|artifact| artifact.platform.as_str())
+        .collect();
+    executables.sort_unstable();
+    assert_eq!(
+        executables,
+        [
+            "linux-aarch64",
+            "linux-x86_64",
+            "macos-aarch64",
+            "macos-x86_64",
+            "nix-linux-aarch64",
+            "nix-linux-x86_64",
+            "nix-macos-aarch64",
+            "nix-macos-x86_64"
+        ]
+    );
+    assert_eq!(construction.manifest.artifacts.len(), 13);
+    for role in [
+        ArtifactRole::Schema,
+        ArtifactRole::CompatibilityManifest,
+        ArtifactRole::Sbom,
+        ArtifactRole::Provenance,
+        ArtifactRole::ReleaseInventory,
+    ] {
+        assert_eq!(
+            construction
+                .manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.role == role)
+                .count(),
+            1
+        );
+    }
     assert_ne!(
         construction.signing_message().unwrap(),
         construction.manifest.canonical_bytes().unwrap()

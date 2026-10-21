@@ -30,7 +30,7 @@ fn path(path: &std::path::Path) -> &str {
 }
 fn installed(fixture: &support::Fixture, now: u64) -> (InstalledReleaseTrust, TrustSnapshot) {
     let key = fixture.key();
-    let snapshot = TrustSnapshot {
+    let mut snapshot = TrustSnapshot {
         format: 1,
         sequence: 2,
         current_version: fixture.inventory.version,
@@ -54,6 +54,12 @@ fn installed(fixture: &support::Fixture, now: u64) -> (InstalledReleaseTrust, Tr
         revoked_manifests: vec![],
         revoked_artifacts: vec![],
     };
+    snapshot.identities.push(SigningIdentity {
+        public_key: support::nix_cache::key(),
+        purpose: KeyPurpose::Publisher,
+        not_before_unix: 100,
+        expires_unix: now + 3600,
+    });
     (
         InstalledReleaseTrust {
             format: 1,
@@ -155,7 +161,7 @@ fn native_cli_constructs_attaches_and_verifies_a_complete_offline_fixture() {
     );
     let report: serde_json::Value = serde_json::from_slice(&verified.stdout).unwrap();
     assert_eq!(report["state"], "verified-complete-published-set");
-    assert_eq!(report["artifacts"], 35);
+    assert_eq!(report["artifacts"], 39);
     assert!(report["verified_at_unix_seconds"].as_u64().unwrap() >= now);
     assert!(
         !run(&[
