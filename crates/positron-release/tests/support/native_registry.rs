@@ -160,26 +160,29 @@ pub fn fixtures(version: &str, source_commit: &str) -> Vec<NativeArtifactFixture
         source_commit,
         None,
     );
+    vec![
+        rust,
+        go,
+        npm,
+        python,
+        homebrew(b"unmeasured local formula fixture".to_vec()),
+    ]
+}
+
+pub(super) fn homebrew(contents: Vec<u8>) -> NativeArtifactFixture {
     let tap_repository = "https://github.com/vicotrbb/homebrew-positron";
     let tap_commit = "a93b5bd7d3985809503963ae400594ea16df31cf";
-    // Fixture README: this source URL and digest describe synthetic local test contents;
-    // they are not a downloaded release or evidence of live Homebrew publication.
-    let formula = format!(
-        "class Positron < Formula\n  desc \"Positron observability backend\"\n  homepage \"https://github.com/vicotrbb/positron\"\n  url \"https://github.com/vicotrbb/positron/archive/refs/tags/v{version}.tar.gz\"\n  sha256 \"{}\"\n  version \"{version}\"\n  license \"Apache-2.0\"\n\n  def install\n    system \"cargo\", \"install\", *std_cargo_args(path: \"crates/positron\")\n  end\n\n  service do\n    run [opt_bin/\"positron\", \"serve\", \"--config\", etc/\"positron/positron.toml\"]\n    keep_alive true\n  end\nend\n",
-        hex(&Sha256::digest(b"fixture upstream source archive"))
-    );
-    let homebrew = keyless_artifact(
+    keyless_artifact(
         Surface::Homebrew,
         "positron.rb".into(),
-        formula.into_bytes(),
+        contents,
         tap_repository,
         "positron.rb".into(),
         NativePublicationKind::HomebrewTap,
         tap_repository,
         tap_commit,
         Some(tap_commit.into()),
-    );
-    vec![rust, go, npm, python, homebrew]
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -249,6 +249,7 @@ impl Fixture {
         native.extend(native_packages::fixtures("1.0.0"));
         native.extend(native_rpm::fixtures());
         fixture.install_native(native);
+        fixture.refresh_homebrew();
         fixture
     }
     fn install_native(&mut self, native: Vec<native_registry::NativeArtifactFixture>) {
@@ -330,6 +331,21 @@ impl Fixture {
         });
         id
     }
+    fn refresh_homebrew(&mut self) {
+        let index = self
+            .inventory
+            .artifacts
+            .iter()
+            .position(|artifact| artifact.surface == Surface::Homebrew)
+            .unwrap();
+        let formula = homebrew_formula(&self.inventory).unwrap();
+        self.replace_artifact(index, formula.as_bytes(), formula.as_bytes());
+        *self
+            .native_artifacts
+            .iter_mut()
+            .find(|artifact| artifact.surface == Surface::Homebrew)
+            .unwrap() = native_registry::homebrew(formula.into_bytes());
+    }
     pub fn replace_artifact(&mut self, index: usize, bytes: &[u8], payload: &[u8]) {
         let artifact = self.inventory.artifacts[index].clone();
         let old = hex(&self.inventory.file(&artifact.file).unwrap().identity.sha256);
@@ -371,6 +387,9 @@ impl Fixture {
         self.inventory.artifacts[index]
             .publication
             .immutable_identity = format!("sha256:{new}");
+        if artifact.surface == Surface::NativeArchive {
+            self.refresh_homebrew();
+        }
     }
     pub fn key(&self) -> [u8; 32] {
         self.pair.public_key().as_ref().try_into().unwrap()

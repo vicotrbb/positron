@@ -1,6 +1,8 @@
 //! Offline release construction and verification, using the canonical kernel manifest.
 #![forbid(unsafe_code)]
 
+mod homebrew;
+pub use homebrew::homebrew_formula;
 mod native_archive;
 pub use native_archive::{NativeTarget, native_archive};
 mod archive_scan;

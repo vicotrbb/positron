@@ -13,6 +13,14 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let mut fixture = support::Fixture::new();
+    if let Ok(inventory) = serde_json::from_slice::<ReleaseInventory>(data) {
+        let _formula = homebrew_formula(&inventory);
+    }
+    let mut formula_input = fixture.inventory.clone();
+    if let Some(archive) = formula_input.artifacts.iter_mut().find(|artifact| artifact.surface == Surface::NativeArchive) {
+        archive.file = String::from_utf8_lossy(data).into_owned();
+    }
+    let _formula = homebrew_formula(&formula_input);
     std::fs::write(fixture.root.join("bundle").join("fuzz-archive"), data).expect("fuzz input");
     let _decoded = scan_release_contents(&fixture.root.join("bundle"), "fuzz-archive", &[]);
     assert_token_predicate_compatibility(&fixture, data);
