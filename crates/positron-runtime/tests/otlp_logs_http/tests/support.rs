@@ -214,6 +214,15 @@ impl LiveHttpHarness {
         headers: &[(&str, String)],
         body: &[u8],
     ) -> Result<HttpResponse, TestError> {
+        self.request_before(headers, body, None)
+    }
+
+    pub(super) fn request_before(
+        &self,
+        headers: &[(&str, String)],
+        body: &[u8],
+        deadline: Option<Instant>,
+    ) -> Result<HttpResponse, TestError> {
         let mut request = format!(
             "POST /v1/logs HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n",
             body.len()
@@ -225,7 +234,7 @@ impl LiveHttpHarness {
             request.push_str("\r\n");
         }
         request.push_str("\r\n");
-        let response = transport::exchange(self.endpoint, request.as_bytes(), body)?;
+        let response = transport::exchange(self.endpoint, request.as_bytes(), body, deadline)?;
         parse_response(&response)
     }
 

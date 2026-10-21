@@ -61,14 +61,18 @@ in pkgs.testers.runNixOSTest {
   testScript = ''
     start_all()
     machine.wait_for_unit("positron.service")
+    machine.succeed("test -r /sys/fs/cgroup/system.slice/positron.service/cpu.max")
     machine.wait_until_succeeds("curl --fail http://127.0.0.1:4310/health/ready")
     machine.succeed("test $(systemctl show -p User --value positron) = positron")
     for path in ["/var/lib/positron", "/var/lib/positron-secrets", "/run/positron"]:
         machine.succeed(f"test $(stat -c %a {path}) = 700")
         machine.succeed(f"test $(stat -c %U {path}) = positron")
     machine.fail("su -s /bin/sh nobody -c 'cat /var/lib/positron-secrets/local-root-key.v1'")
+    machine.succeed("systemctl stop positron")
     machine.succeed("umask 077; su -s /bin/sh positron -c 'positron bootstrap claim --config /etc/positron/positron.toml' > /root/positron-claim")
     machine.fail("su -s /bin/sh positron -c 'positron bootstrap claim --config /etc/positron/positron.toml'")
+    machine.succeed("systemctl start positron")
+    machine.wait_until_succeeds("curl --fail http://127.0.0.1:4310/health/ready")
     machine.succeed("sha256sum /var/lib/positron-secrets/local-root-key.v1 > /root/key.sha256")
     machine.succeed("python /etc/positron-service-check.py ingest")
     machine.succeed("python /etc/positron-service-check.py query")

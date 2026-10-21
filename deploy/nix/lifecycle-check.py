@@ -53,6 +53,12 @@ if sys.argv[1] == "recovery":
     identity = str(directory / "owner.txt")
     run(["age-keygen", "-o", identity], owner=True)
     recipient = run(["age-keygen", "-y", identity], owner=True).strip()
+    # The CLI's bounded protected reference contains one native X25519 key.
+    identity_file = pathlib.Path(identity)
+    keys = [line for line in identity_file.read_text().splitlines()
+            if line.startswith("AGE-SECRET-KEY-")]
+    assert len(keys) == 1
+    identity_file.write_text(keys[0] + "\n")
     common = ["--data-dir", "/var/lib/positron", "--secrets-dir", "/var/lib/positron-secrets",
               "--bundle", str(directory / "instance.age")]
     pin = fields(run(["positron", "keys", "recovery", "create"] + common +

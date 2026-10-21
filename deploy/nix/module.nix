@@ -58,6 +58,8 @@ in {
         );
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
+        # Expose cpu.max for the canonical resource observer without a CPU quota.
+        CPUWeight = 100;
         KillSignal = "SIGTERM";
         # Covers the Configuration Contract's maximum 3600-second Drain deadline.
         TimeoutStopSec = 3605;
