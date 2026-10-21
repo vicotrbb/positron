@@ -102,6 +102,9 @@ fn migration_overlay(interrupt: bool, corrupt: bool) -> Result<(), Box<dyn std::
         if action == "verify" && interrupt {
             services = ServiceHandle::new(Arc::clone(&initialized))?;
             let stop = crate::services::backup_administration::stop_after(
+                services.instance.instance.to_bytes(),
+                crate::services::maintenance_verification::decode_fixed_hex(&operation)
+                    .ok_or("stop operation identity")?,
                 crate::services::backup_administration::StopPoint::BackupOverlayPublished,
             )?;
             let cancellation = crate::TaskCancellation::new();

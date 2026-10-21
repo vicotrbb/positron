@@ -193,6 +193,8 @@ pub(super) fn complete(
             #[cfg(test)]
             if work.metadata.is_some() {
                 execution::test_stops::hit(
+                    services.instance.instance.to_bytes(),
+                    binding.operation_id(),
                     execution::test_stops::StopPoint::VerificationRemoteRangeVerified,
                     cancellation,
                 )?;
@@ -203,6 +205,8 @@ pub(super) fn complete(
         {
             #[cfg(test)]
             execution::test_stops::hit(
+                services.instance.instance.to_bytes(),
+                binding.operation_id(),
                 execution::test_stops::StopPoint::VerificationRemoteCheckpointDue,
                 cancellation,
             )?;
@@ -282,6 +286,8 @@ pub(super) fn complete(
                 work.next_file += 1;
                 #[cfg(test)]
                 execution::test_stops::hit(
+                    services.instance.instance.to_bytes(),
+                    binding.operation_id(),
                     execution::test_stops::StopPoint::VerificationNativeFileVerified,
                     cancellation,
                 )?;
@@ -318,6 +324,8 @@ pub(super) fn complete(
         work.catalog = Some(snapshot);
         #[cfg(test)]
         execution::test_stops::hit(
+            services.instance.instance.to_bytes(),
+            binding.operation_id(),
             execution::test_stops::StopPoint::VerificationMetadataVerified,
             cancellation,
         )?;
@@ -354,6 +362,8 @@ pub(super) fn complete(
     }
     #[cfg(test)]
     execution::test_stops::hit(
+        services.instance.instance.to_bytes(),
+        binding.operation_id(),
         execution::test_stops::StopPoint::VerificationSemanticVerified,
         cancellation,
     )?;
@@ -389,6 +399,8 @@ pub(super) fn complete(
         work.recovered_keys += 1;
         #[cfg(test)]
         execution::test_stops::hit(
+            services.instance.instance.to_bytes(),
+            binding.operation_id(),
             execution::test_stops::StopPoint::VerificationKeyRecovered,
             cancellation,
         )?;
@@ -429,6 +441,8 @@ pub(super) fn complete(
     .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     #[cfg(test)]
     execution::test_stops::hit(
+        services.instance.instance.to_bytes(),
+        binding.operation_id(),
         execution::test_stops::StopPoint::VerificationReportPublished,
         cancellation,
     )?;

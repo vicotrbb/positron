@@ -97,7 +97,11 @@ fn upgrade_bounded_verification_turns_survive_cold_service_reconstruction()
     let stopped_resources = {
         use crate::services::backup_administration::{StopPoint, stop_after};
         let (instance, services) = ready_cold_services(&fixture, last.updated_at_unix_seconds())?;
-        let stop = stop_after(StopPoint::VerificationNativeFileVerified)?;
+        let stop = stop_after(
+            services.instance.instance.to_bytes(),
+            last.operation_id().to_bytes(),
+            StopPoint::VerificationNativeFileVerified,
+        )?;
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut stopped = false;
         for _ in 0..4 {

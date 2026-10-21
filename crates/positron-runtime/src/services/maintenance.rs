@@ -644,6 +644,8 @@ fn complete_installed_maintenance(
                 .map_err(map_failure)?;
             #[cfg(test)]
             super::backup_administration::hit_stop(
+                services.instance.instance.to_bytes(),
+                binding.operation_id(),
                 super::backup_administration::StopPoint::ResourcesRequeued,
                 cancellation,
             )?;

@@ -89,7 +89,11 @@ fn restart_at(
         .status(task)
         .map_err(|failure| format!("task status: {failure:?}"))?;
     let before = initialized.resource_governor().inspect()?;
-    let stop = crate::services::backup_administration::stop_after(point)?;
+    let stop = crate::services::backup_administration::stop_after(
+        services.instance.instance.to_bytes(),
+        task.to_bytes(),
+        point,
+    )?;
     let cancellation = crate::TaskCancellation::new();
     let worker_services = services.clone();
     let worker_cancellation = cancellation.clone();

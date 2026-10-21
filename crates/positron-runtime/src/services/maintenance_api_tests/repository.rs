@@ -302,6 +302,40 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         .find(|endpoint| endpoint.role() == crate::ListenerRole::Api)
         .and_then(|endpoint| endpoint.socket_address())
         .ok_or("API endpoint")?;
+    // Dispatch opens its Catalog before reserving the provider peak. Prove
+    // the canonical authority admits that overlap with native listeners live.
+    let services = process.services().ok_or("native repository services")?;
+    {
+        let _gate = services.catalog_operation()?;
+        let catalog = open_catalog(&services.instance)?;
+        let resources = crate::services::repository_administration::repository_resources(
+            positron_governance::RepositoryProviderKind::LocalFilesystem,
+        );
+        let claim = positron_kernel::WorkClaim::backup_repository_read(resources)?;
+        let governor = services.instance.resource_governor();
+        let admission_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let reservation = loop {
+            match governor.reserve(claim.clone()) {
+                Ok(reservation) => break reservation,
+                Err(failure)
+                    if failure.code() == positron_kernel::AdmissionFailureCode::GovernorContended
+                        && failure.completion_state()
+                            == positron_kernel::AdmissionCompletionState::RejectedBeforeReservation
+                        && std::time::Instant::now() < admission_deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                },
+                Err(failure) => {
+                    return Err(format!(
+                        "canonical native repository dispatch admission: {failure:?}"
+                    )
+                    .into());
+                },
+            }
+        };
+        drop(reservation);
+        drop(catalog);
+    }
     let client = RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })?;
     let status = RepositoryRequest {
         action: "status".into(),
@@ -367,7 +401,21 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         .is_some_and(|operation| matches!(operation.status.as_str(), "pending" | "running"))
     {
         if std::time::Instant::now() >= deadline {
-            return Err("Repository HTTP completion deadline".into());
+            let _gate = services.catalog_operation()?;
+            let catalog = open_catalog(&services.instance)?;
+            let claim = positron_kernel::WorkClaim::backup_repository_read(
+                crate::services::repository_administration::repository_resources(
+                    positron_governance::RepositoryProviderKind::LocalFilesystem,
+                ),
+            )?;
+            let governor = services.instance.resource_governor();
+            let admission = governor.reserve(claim);
+            return Err(format!(
+                "Repository HTTP completion deadline; native admission={:?}; tasks={:?}; catalog_generation={}",
+                admission.as_ref().err(),
+                services.instance.maintenance_coordinator().statuses(),
+                catalog.pin()?.number(),
+            ).into());
         }
         std::thread::sleep(Duration::from_millis(25));
         accepted = client
@@ -401,6 +449,7 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
     assert!(!output.contains(path.to_string_lossy().as_ref()));
     assert!(!output.contains(&administrator));
     assert!(!output.contains(&ingest));
+    drop(services);
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         crate::ExitOutcome::Graceful

@@ -50,6 +50,9 @@ fn published_backup_reconciles_after_cold_restart_without_new_recovery_readiness
         )
         .map_err(|failure| format!("accept backup: {failure:?}"))?;
     let stop = crate::services::backup_administration::stop_after(
+        services.instance.instance.to_bytes(),
+        crate::services::maintenance_verification::decode_fixed_hex(&accepted.operation.id)
+            .ok_or("stop operation identity")?,
         crate::services::backup_administration::StopPoint::RegistryPublished,
     )?;
     let cancellation = crate::TaskCancellation::new();
@@ -260,7 +263,12 @@ fn cancellation_restart_at(
             .encode()?,
         )
         .map_err(|failure| format!("accept backup: {failure:?}"))?;
-    let stop = crate::services::backup_administration::stop_after(point)?;
+    let stop = crate::services::backup_administration::stop_after(
+        services.instance.instance.to_bytes(),
+        crate::services::maintenance_verification::decode_fixed_hex(&accepted.operation.id)
+            .ok_or("stop operation identity")?,
+        point,
+    )?;
     let cancellation = crate::TaskCancellation::new();
     let worker_services = services.clone();
     let worker_cancellation = cancellation.clone();

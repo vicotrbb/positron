@@ -20,7 +20,10 @@ def run(arguments, credential=None, owner=False):
     command = (["runuser", "-u", "positron", "--"] if owner else []) + arguments
     result = subprocess.run(command, input=credential, capture_output=True, timeout=180)
     if result.returncode:
-        raise RuntimeError("native lifecycle command failed: " + " ".join(command))
+        detail = (result.stdout + result.stderr).decode(errors="replace")
+        for secret in claim.values():
+            detail = detail.replace(secret, "<redacted>")
+        raise RuntimeError("native lifecycle command failed: " + " ".join(command) + ": " + detail[:4096])
     return result.stdout.decode()
 
 
