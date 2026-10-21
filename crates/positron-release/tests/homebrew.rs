@@ -178,3 +178,26 @@ fn generated_formula_requires_authenticated_tap_revision_rebuild_and_secret_scre
         Some(ReleaseError::SecretDetected)
     );
 }
+
+#[test]
+fn homebrew_formula_cannot_omit_its_independent_reproducible_payload() {
+    let mut fixture = support::Fixture::new();
+    fixture
+        .inventory
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.surface == Surface::Homebrew)
+        .unwrap()
+        .payload = None;
+    assert_eq!(
+        construct_release(
+            &fixture.inventory,
+            &fixture.root.join("bundle"),
+            &fixture.rebuild,
+            &[],
+            vec![]
+        )
+        .err(),
+        Some(ReleaseError::Unreproducible)
+    );
+}

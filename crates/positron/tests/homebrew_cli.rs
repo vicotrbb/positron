@@ -213,10 +213,112 @@ fn homebrew_service_drains_restarts_and_retains_state_across_uninstall() {
         .output()
         .unwrap();
     assert!(claimed.status.success());
+    let claimed = String::from_utf8(claimed.stdout).unwrap();
+    let query_secret = claimed
+        .lines()
+        .find_map(|line| line.strip_prefix("query_secret="))
+        .unwrap();
+    let request = config_dir.join("retained-query.json");
+    fs::write(&request, br#"{"pipeline":"logs | range query_time 0 100 | limit 16","budget":{"scannedBytes":"1048576","decodedRecords":"16","outputRows":"16","outputBytes":"16384","memoryBytes":"1048576","cpuWorkUnits":"15","wallSeconds":"5","maximumTimeRangeNanoseconds":"100"}}"#).unwrap();
+    let record_visible = || {
+        use positron_api::log_query::{
+            LogQueryResponse, log_query_cell::Value as Cell, log_query_event::Event,
+            log_query_value::Value,
+        };
+        let mut child = Command::new(&binary)
+            .args([
+                "query",
+                "--endpoint",
+                &format!("127.0.0.1:{}", ports[1]),
+                "--credential-stdin",
+                "--allow-plaintext",
+                "--request",
+            ])
+            .arg(&request)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(query_secret.as_bytes())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("public query deadline");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "query failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response = LogQueryResponse::decode(&output.stdout).unwrap();
+        let complete = response.events.last().and_then(|event| event.event.as_ref()).is_some_and(|event| matches!(event, Event::Terminal(terminal) if terminal.state == "complete" && terminal.stats.as_ref().is_some_and(|stats| stats.records == 1)));
+        let mut found = false;
+        for event in response.events {
+            if let Some(Event::Batch(batch)) = event.event {
+                for row in batch.rows {
+                    for cell in row.cells {
+                        if let Some(Cell::NativeValue(value)) = cell.value
+                            && let Some(Value::TextValue(text)) = value.value
+                            && text == "homebrew-retained-116"
+                        {
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        complete && found
+    };
+    let mut observations = Vec::new();
     let key = fs::read(secrets.join("local-root-key.v1")).unwrap();
     for action in ["start", "restart"] {
         brew(&["services".as_ref(), action.as_ref(), &formula]);
         ready();
+        if action == "start" {
+            let ingest_secret = claimed
+                .lines()
+                .find_map(|line| line.strip_prefix("ingest_secret="))
+                .unwrap();
+            let body = br#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"42","body":{"stringValue":"homebrew-retained-116"}}]}]}]}"#;
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let mut stream =
+                    TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, ports[3])).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                write!(stream, "POST /v1/logs HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ingest_secret}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                stream.write_all(body).unwrap();
+                let mut response = String::new();
+                stream.take(65_537).read_to_string(&mut response).unwrap();
+                assert!(response.len() <= 65_536);
+                if response.starts_with("HTTP/1.1 200 ") {
+                    break;
+                }
+                assert!(
+                    response.starts_with("HTTP/1.1 429 ")
+                        && response.to_ascii_lowercase().contains("retry-after: 1")
+                        && Instant::now() + Duration::from_secs(1) < deadline,
+                    "ingest refused: {response}"
+                );
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        observations.push(record_visible());
     }
     brew(&["services".as_ref(), "stop".as_ref(), &formula]);
     let deadline = Instant::now() + Duration::from_secs(70);
@@ -255,6 +357,7 @@ fn homebrew_service_drains_restarts_and_retains_state_across_uninstall() {
     );
     brew(&["services".as_ref(), "start".as_ref(), &formula]);
     ready();
+    observations.push(record_visible());
     brew(&["services".as_ref(), "stop".as_ref(), &formula]);
     let deadline = Instant::now() + Duration::from_secs(70);
     while TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, ports[0])).is_ok() {
@@ -266,4 +369,9 @@ fn homebrew_service_drains_restarts_and_retains_state_across_uninstall() {
         assert!(path.exists());
         fs::remove_dir_all(path).unwrap();
     }
+    assert_eq!(
+        observations,
+        [true, true, true],
+        "acknowledged telemetry must survive service restart and brew uninstall/reinstall"
+    );
 }
