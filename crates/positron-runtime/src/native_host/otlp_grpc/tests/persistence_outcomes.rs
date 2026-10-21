@@ -406,12 +406,33 @@ impl TestRoots {
             .duration_since(UNIX_EPOCH)
             .map_err(std::io::Error::other)?
             .as_nanos();
-        let parent =
-            PathBuf::from("/tmp").join(format!("p-grpc-private-{}-{nonce}", std::process::id()));
+        Self::with_nonce(nonce)
+    }
+
+    fn with_nonce(nonce: u128) -> Result<Self, std::io::Error> {
+        let parent = (0..64)
+            .find_map(|attempt| {
+                let parent = PathBuf::from("/tmp").join(format!(
+                    "p-grpc-private-{}-{nonce}-{attempt}",
+                    std::process::id()
+                ));
+                match fs::create_dir(&parent) {
+                    Ok(()) => Some(Ok(parent)),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .transpose()?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "test root collision bound exhausted",
+                )
+            })?;
         let data = parent.join("data");
         let secrets = parent.join("secrets");
-        fs::create_dir_all(&data)?;
-        fs::create_dir_all(&secrets)?;
+        fs::create_dir(&data)?;
+        fs::create_dir(&secrets)?;
         set_owner_only(&secrets)?;
         Ok(Self {
             parent,
@@ -423,6 +444,38 @@ impl TestRoots {
     fn paths(&self) -> Result<BootstrapPaths, crate::BootstrapFailure> {
         BootstrapPaths::new(&self.data, &self.secrets, MountQualification::LocalHost)
     }
+}
+
+#[test]
+fn coincident_fixture_clocks_keep_bootstrap_and_cleanup_ownership_separate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let first = TestRoots::with_nonce(0)?;
+    let first_instance =
+        InstanceBootstrap::initialize(&first.paths()?, InitializationPlan::non_interactive())?;
+    let sentinel = first.parent.join("owner-sentinel");
+    fs::write(&sentinel, b"first owner")?;
+    let second = TestRoots::with_nonce(0)?;
+    let second_instance =
+        InstanceBootstrap::initialize(&second.paths()?, InitializationPlan::non_interactive())?;
+    drop(second_instance);
+    drop(second);
+    assert_eq!(fs::read(&sentinel)?, b"first owner");
+    drop(first_instance);
+    Ok(())
+}
+
+#[test]
+fn occupied_fixture_candidates_fail_without_adopting_or_removing_an_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    let owners = (0..64)
+        .map(|_| TestRoots::with_nonce(1))
+        .collect::<Result<Vec<_>, _>>()?;
+    let sentinel = owners.first().ok_or("first owner")?.parent.join("sentinel");
+    fs::write(&sentinel, b"existing owner")?;
+    let failure = TestRoots::with_nonce(1).err().ok_or("collision bound")?;
+    assert_eq!(failure.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read(&sentinel)?, b"existing owner");
+    Ok(())
 }
 
 impl Drop for TestRoots {
