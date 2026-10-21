@@ -306,11 +306,8 @@ pub(in crate::services) mod tests {
             )
             .map_err(|failure| format!("initial backup: {failure:?}"))?;
         let paused = services
-            .drive_upgrade_backup_operation(
-                first.operation_id(),
-                std::time::Instant::now() + std::time::Duration::from_secs(1),
-            )
-            .map_err(|failure| format!("initial one-second backup pause: {failure:?}"))?;
+            .drive_upgrade_backup_operation(first.operation_id(), std::time::Instant::now())
+            .map_err(|failure| format!("initial expired-deadline backup pause: {failure:?}"))?;
         assert!(
             !paused.status().is_terminal(),
             "initial backup pause became terminal: kind={:?} phase={:?} terminal_error={:?}",

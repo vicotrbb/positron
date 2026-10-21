@@ -157,7 +157,10 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
     let repository_client =
         RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })?;
     let backup_client = BackupServiceClient::new(BackupTransport::PlaintextOptOut { endpoint })?;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // The Intel hosted runner exceeded 30 seconds while backup verification
+    // still advanced. Keep one bounded setup deadline and one accepted
+    // operation through the canonical public wait.
+    let deadline = Instant::now() + Duration::from_secs(60);
     let accepted = loop {
         let status = match repository_client.manage(
             claim.secret(),
