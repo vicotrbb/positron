@@ -202,13 +202,14 @@ pub(super) fn query_refusals(
         &body,
     )?;
     assert!(response.starts_with("HTTP/1.1 401 "));
-    let response = request(
+    let response = request_with_capacity_retry(
         endpoint.port(),
         HTTP_PATH,
         &[("Authorization", &bearer)],
         br#"{"pipeline":"logs","unknown":1}"#,
+        Duration::from_secs(5),
     )?;
-    assert!(response.starts_with("HTTP/1.1 400 "));
+    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
     let (_, payload) = response
         .split_once("\r\n\r\n")
         .ok_or("missing invalid request body")?;
