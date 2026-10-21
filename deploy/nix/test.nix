@@ -10,6 +10,11 @@ let
         otlp_grpc_bind_address = "127.0.0.1:4312"
         otlp_http_bind_address = "127.0.0.1:4313"
         loki_push_bind_address = "127.0.0.1:4314"
+        operations_transport = "plaintext"
+        api_transport = "plaintext"
+        otlp_grpc_transport = "plaintext"
+        otlp_http_transport = "plaintext"
+        loki_push_transport = "plaintext"
       '';
 in pkgs.testers.runNixOSTest {
   name = "positron-service";
