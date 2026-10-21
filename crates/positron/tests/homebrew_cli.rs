@@ -2,6 +2,11 @@ use std::{fs, process::Command};
 #[path = "../../positron-release/tests/support/mod.rs"]
 mod support;
 
+#[path = "support/homebrew_http.rs"]
+mod homebrew_http;
+#[cfg(target_os = "macos")]
+use homebrew_http::{ingest_response, service_log_diagnostic};
+
 #[test]
 fn release_cli_generates_formula_without_configuration_and_refuses_overwrite() {
     let fixture = support::Fixture::new();
@@ -225,37 +230,48 @@ fn homebrew_service_drains_restarts_and_retains_state_across_uninstall() {
             LogQueryResponse, log_query_cell::Value as Cell, log_query_event::Event,
             log_query_value::Value,
         };
-        let mut child = Command::new(&binary)
-            .args([
-                "query",
-                "--endpoint",
-                &format!("127.0.0.1:{}", ports[1]),
-                "--credential-stdin",
-                "--allow-plaintext",
-                "--request",
-            ])
-            .arg(&request)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(query_secret.as_bytes())
-            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while child.try_wait().unwrap().is_none() {
-            if Instant::now() >= deadline {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("public query deadline");
+        let output = loop {
+            let mut child = Command::new(&binary)
+                .args([
+                    "query",
+                    "--endpoint",
+                    &format!("127.0.0.1:{}", ports[1]),
+                    "--credential-stdin",
+                    "--allow-plaintext",
+                    "--request",
+                ])
+                .arg(&request)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(query_secret.as_bytes())
+                .unwrap();
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("public query deadline");
+                }
+                std::thread::sleep(Duration::from_millis(25));
             }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let output = child.wait_with_output().unwrap();
+            let output = child.wait_with_output().unwrap();
+            if !output.status.success()
+                && output.stdout.is_empty()
+                && output.stderr == b"positron: query capacity unavailable; retry after backoff\n"
+                && Instant::now() + Duration::from_secs(1) < deadline
+            {
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            break output;
+        };
         assert!(
             output.status.success(),
             "query failed: {}",
@@ -303,9 +319,17 @@ fn homebrew_service_drains_restarts_and_retains_state_across_uninstall() {
                     .unwrap();
                 write!(stream, "POST /v1/logs HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ingest_secret}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
                 stream.write_all(body).unwrap();
-                let mut response = String::new();
-                stream.take(65_537).read_to_string(&mut response).unwrap();
-                assert!(response.len() <= 65_536);
+                let response = ingest_response(stream).unwrap_or_else(|failure| {
+                    for name in ["stdout.log", "stderr.log"] {
+                        match fs::File::open(runtime.join(name))
+                            .and_then(|file| service_log_diagnostic(file, &claimed))
+                        {
+                            Ok(log) => eprintln!("bounded service {name}: {log}"),
+                            Err(error) => eprintln!("bounded service {name} read: {error}"),
+                        }
+                    }
+                    panic!("ingest response incomplete; outcome unknown: {failure}");
+                });
                 if response.starts_with("HTTP/1.1 200 ") {
                     break;
                 }
