@@ -18,6 +18,16 @@ pub(crate) fn verify_native(
 ) -> Result<(), ReleaseError> {
     verify_registry_metadata(artifact, inventory)?;
     let authorization = trust.native_publisher(&artifact.publication.registry)?;
+    if artifact.surface == Surface::Nix {
+        return crate::native_nix::verify(
+            proof,
+            artifact,
+            inventory,
+            files,
+            trust,
+            &authorization.policy,
+        );
+    }
     let eligible = match (artifact.surface, &authorization.policy) {
         (Surface::Rpm, NativePublisherPolicy::Rpm { .. }) => true,
         (Surface::Rpm, _) => false,

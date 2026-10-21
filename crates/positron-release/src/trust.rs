@@ -54,6 +54,7 @@ pub enum NativePublisherPolicy {
     Rpm { trusted_root_sha256: [u8; 32] },
     GoChecksum { trusted_root_sha256: [u8; 32] },
     CratesIo { repository: String },
+    NixCache { key_name: String, key_hint: String },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,7 +78,7 @@ impl NativePublisherPolicy {
             | Self::GoChecksum {
                 trusted_root_sha256,
             } => Some(trusted_root_sha256),
-            Self::CratesIo { .. } => None,
+            Self::CratesIo { .. } | Self::NixCache { .. } => None,
         }
     }
 }
@@ -133,6 +134,17 @@ impl TrustSnapshot {
                 .any(|value| invalid_text(value)),
                 NativePublisherPolicy::CratesIo { repository } => {
                     invalid_text(repository) || repository.split('/').count() != 2
+                },
+                NativePublisherPolicy::NixCache { key_name, key_hint } => {
+                    key_name.is_empty()
+                        || key_name.len() > 128
+                        || !key_name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                        || key_hint.len() != 64
+                        || !key_hint
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
                 },
                 _ => false,
             };

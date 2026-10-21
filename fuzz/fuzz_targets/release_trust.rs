@@ -48,6 +48,10 @@ fuzz_target!(|data: &[u8]| {
                 return;
             }
             let parameters = &mut statement["predicate"]["buildDefinition"]["externalParameters"];
+            if artifact.surface == Surface::Nix && !package_mutated {
+                parameters["native"]["narinfo"] = String::from_utf8_lossy(data).into_owned().into();
+                return;
+            }
             if package_mutated {
                 if artifact.surface == Surface::SdkRust {
                     parameters["native"]["index"]["cksum"] = support::hex(

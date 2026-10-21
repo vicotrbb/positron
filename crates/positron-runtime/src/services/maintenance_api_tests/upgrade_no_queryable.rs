@@ -45,7 +45,11 @@ fn start_target(
 ) -> Result<crate::RunningProcess, Box<dyn std::error::Error>> {
     let listeners = crate::process_lifecycle::ObservingListeners::default();
     let tasks = crate::process_lifecycle::ObservingTasks::default();
-    let mut verification = crate::UpgradeStartupVerification::new(drained.target.clone(), None)?;
+    let mut verification = crate::UpgradeStartupVerification::new(
+        positron_config::ExecutableDistribution::Native,
+        drained.target.clone(),
+        None,
+    )?;
     // Synthetic target version metadata only; executable measurement stays real.
     verification.fixture_version = Some(drained.version);
     Ok(ApplicationRuntime::start(
@@ -213,7 +217,11 @@ fn old_artifact_remains_fenced(
     let tasks = crate::process_lifecycle::ObservingTasks::default();
     // No version override: the actual source executable is 0.0.0, whereas
     // the retained authenticated publication requires synthetic target 0.0.1.
-    let verification = crate::UpgradeStartupVerification::new(drained.target.clone(), None)?;
+    let verification = crate::UpgradeStartupVerification::new(
+        positron_config::ExecutableDistribution::Native,
+        drained.target.clone(),
+        None,
+    )?;
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(drained.fixture.paths()?, InitializationMode::ExistingOnly)
             .with_effective_configuration(Arc::clone(&drained.configuration))

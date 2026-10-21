@@ -224,6 +224,10 @@ pub fn required_release_one() -> &'static [(Surface, &'static str)] {
         (NativeExecutable, "linux-aarch64"),
         (NativeExecutable, "macos-x86_64"),
         (NativeExecutable, "macos-aarch64"),
+        (NativeExecutable, "nix-linux-x86_64"),
+        (NativeExecutable, "nix-linux-aarch64"),
+        (NativeExecutable, "nix-macos-x86_64"),
+        (NativeExecutable, "nix-macos-aarch64"),
         (NativeArchive, "linux-x86_64"),
         (NativeArchive, "linux-aarch64"),
         (NativeArchive, "macos-x86_64"),
@@ -317,8 +321,10 @@ impl ReleaseInventory {
         }
         for artifact in &self.artifacts {
             use Surface::*;
-            if (matches!(artifact.surface, Api | OciImage | Homebrew)
-                || (artifact.surface == NativeExecutable && artifact.target.starts_with("linux-")))
+            if (matches!(artifact.surface, Api | OciImage | Homebrew | Nix)
+                || (artifact.surface == NativeExecutable
+                    && (artifact.target.starts_with("linux-")
+                        || artifact.target.starts_with("nix-"))))
                 && artifact.payload.is_none()
             {
                 return Err(ReleaseError::Unreproducible);

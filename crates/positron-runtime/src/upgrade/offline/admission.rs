@@ -160,6 +160,10 @@ impl OfflineUpgradeSession {
         let services =
             ServiceHandle::new(Arc::clone(&instance)).map_err(|_| UpgradeFailure::UnsafeState)?;
         Ok(Self {
+            distribution: configuration.installed_release().map_or(
+                positron_config::ExecutableDistribution::Native,
+                |installation| installation.executable_distribution(),
+            ),
             instance,
             services,
             id,

@@ -35,3 +35,14 @@ Actions SLSA evidence under the installed Fulcio, CT, and Rekor roots, plus the
 separate project publication assertion binding the final Release Manifest.
 These private fixture authorities and package bytes are not published Debian
 packages or database lifecycle acceptance evidence.
+
+`positron.nar` is a 312-byte NAR made with upstream Nix 2.31.2's
+`nix-store --dump`. Its root directory contains one regular file named `payload`
+with the project-owned ASCII bytes `positron-native-nar-fixture`, without a
+newline. The independent Nix CLI's SHA-256 Nix32 result is
+`08v2cp827lzq42q6y5ngn7w9zi71f44xmf8wlfqhgd1fbbs77a5h`.
+This is a native encoding/hash protocol vector, not a Positron executable or
+platform acceptance result. The signature fingerprint follows upstream
+[Nix 2.31.2 path-info.cc](https://github.com/NixOS/nix/blob/2.31.2/src/libstore/path-info.cc),
+and the transport fields follow
+[nar-info.cc](https://github.com/NixOS/nix/blob/2.31.2/src/libstore/nar-info.cc).

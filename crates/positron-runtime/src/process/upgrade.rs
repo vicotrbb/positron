@@ -293,6 +293,7 @@ mod tests {
         )?;
         let qualified = crate::upgrade::qualified_fixture_target(&target)?;
         let request = UpgradeRequest::new(
+            positron_config::ExecutableDistribution::Native,
             (source, qualified),
             vec![],
             [0x75; 16],

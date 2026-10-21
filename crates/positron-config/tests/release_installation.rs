@@ -120,3 +120,29 @@ fn full_release_startup_can_reference_the_current_authenticated_inventory()
     );
     Ok(())
 }
+#[test]
+fn nix_executable_distribution_is_explicit_and_closed() {
+    let base = "schema_version=1\n[release.installation]\nproject_trust_root_file='/release/root'\ncurrent_manifest_file='/release/current'\n";
+    assert_eq!(
+        configuration(base)
+            .unwrap()
+            .installed_release()
+            .unwrap()
+            .executable_distribution(),
+        positron_config::ExecutableDistribution::Native
+    );
+    for selected in ["native", "nix"] {
+        assert!(configuration(&format!("{base}executable_distribution='{selected}'\n")).is_ok());
+    }
+    let default = configuration(base).unwrap();
+    let native = configuration(&format!("{base}executable_distribution='native'\n")).unwrap();
+    let nix = configuration(&format!("{base}executable_distribution='nix'\n")).unwrap();
+    assert_eq!(
+        default.audit_binding_digest(),
+        native.audit_binding_digest()
+    );
+    assert_ne!(default.audit_binding_digest(), nix.audit_binding_digest());
+    for selected in ["", "auto", "Nix", "linux"] {
+        assert!(configuration(&format!("{base}executable_distribution='{selected}'\n")).is_err());
+    }
+}
