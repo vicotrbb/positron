@@ -165,6 +165,12 @@ pub(crate) fn verify_payloads(
         return Err(ReleaseError::IdentityMismatch);
     }
     for artifact in &inventory.artifacts {
+        if artifact.surface == Surface::Homebrew
+            && bundle.read(&artifact.file, 65_536)?
+                != crate::homebrew_formula(inventory)?.as_bytes()
+        {
+            return Err(ReleaseError::IdentityMismatch);
+        }
         crate::archive_scan::scan_bundle_contents(bundle, &artifact.file, canaries)?;
         if let Some(payload) = &artifact.payload {
             crate::archive_scan::scan_bundle_contents(bundle, payload, canaries)?;

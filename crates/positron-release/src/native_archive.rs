@@ -109,6 +109,11 @@ pub fn native_archive(target: NativeTarget, binary: &[u8]) -> Result<Vec<u8>, Re
             include_bytes!("../../../docs/operations/local-key-recovery.md").as_slice(),
             0o644,
         ),
+        (
+            "docs/operations/homebrew.md",
+            include_bytes!("../../../docs/operations/homebrew.md").as_slice(),
+            0o644,
+        ),
         ("share/config.schema.json", schema.as_bytes(), 0o644),
         ("share/configuration.md", reference.as_bytes(), 0o644),
         if target.linux() {

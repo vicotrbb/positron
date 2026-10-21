@@ -10,6 +10,10 @@ checksums, SBOMs, provenance, and independent rebuilds.
 preserve the common GNU executable and generated contract, and add an explicit
 systemd lifecycle with retained data and keys.
 
+[Homebrew](../docs/operations/homebrew.md) derives its formula from the canonical
+Release Inventory, installs the macOS archives unchanged, and runs an explicit
+user LaunchAgent with retained configuration, data and keys.
+
 Every surface uses the same Positron artifact and storage format. OCI, packages,
 Compose, Nix, Helm, Kubernetes and other surface implementation tickets must not
 introduce their own database behavior.

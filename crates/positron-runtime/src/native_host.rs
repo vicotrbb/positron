@@ -1263,10 +1263,14 @@ fn register_staged_tasks(
 
 impl TaskRegistrar for NativeHost {
     fn register(&self, role: TaskRole) -> Result<Box<dyn RegisteredTask>, TaskFailure> {
+        let admission = match role {
+            TaskRole::Maintenance | TaskRole::OperationalTelemetry => None,
+            _ => Some(current_admission(&self.admissions, listener_role(role)?)?),
+        };
         Ok(Box::new(NativeRegisteredTask {
             role,
             admissions: Arc::clone(&self.admissions),
-            admission: None,
+            admission,
             gate: None,
         }))
     }
@@ -1344,7 +1348,6 @@ impl RegisteredTask for NativeRegisteredTask {
         let task_cancellation = cancellation.clone();
         let force = TaskCancellation::new();
         let force_cancellation = force.clone();
-        let admissions = Arc::clone(&self.admissions);
         let admission = self.admission.as_ref().map(Arc::clone);
         let gate = self.gate.as_ref().map(Arc::clone);
         let handle = std::thread::Builder::new()
@@ -1359,9 +1362,9 @@ impl RegisteredTask for NativeRegisteredTask {
                     health,
                     services,
                 ),
-                (None, None) => serve_listener_role(
+                (Some(admission), None) => serve_registered_listener(
                     listener_role,
-                    admissions,
+                    admission,
                     task_cancellation,
                     force_cancellation,
                     health,
@@ -1521,18 +1524,17 @@ fn serve_exact_listener_role(
     }
 }
 
-fn serve_listener_role(
+fn serve_registered_listener(
     role: ListenerRole,
-    admissions: AdmissionRegistry,
+    admission: Arc<Admission>,
     cancellation: TaskCancellation,
     force: TaskCancellation,
     health: HealthState,
     services: Option<ServiceHandle>,
 ) -> Result<(), TaskFailure> {
-    if cancellation.is_cancelled() {
+    if cancellation.is_cancelled() || !admission.is_accepting() {
         return Ok(());
     }
-    let admission = current_admission(&admissions, role)?;
     if role == ListenerRole::OtlpGrpc {
         otlp_grpc::serve(
             Arc::clone(&admission),
@@ -1676,6 +1678,49 @@ mod listener_generation_tests {
         ListenerFactory, ListenerFailure, ListenerGeneration, ListenerProfile, ListenerRole,
         ValidatedListenerSet, health::ProcessState,
     };
+
+    #[test]
+    fn registered_worker_retires_cleanly_when_listener_closes_before_it_starts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::TaskRegistrar;
+        let endpoint = "127.0.0.1:0".parse()?;
+        let host = NativeHost::new(NativeBindings::new(
+            std::env::temp_dir().join("unused-delayed-worker.sock"),
+            endpoint,
+            endpoint,
+            endpoint,
+            endpoint,
+            endpoint,
+        )?);
+        let state = ProcessState::starting();
+        for role in [
+            ListenerRole::Api,
+            ListenerRole::OtlpGrpc,
+            ListenerRole::OtlpHttp,
+            ListenerRole::LokiPush,
+        ] {
+            for replace in [false, true] {
+                let mut listener = host.bind(crate::ListenerRequest::new(role, state.health()))?;
+                let registered = host.register(super::task_role(role))?;
+                // Shutdown removes the listener before it cancels the worker token.
+                // A worker may first be scheduled in that interval.
+                listener.close()?;
+                drop(listener);
+                let successor = replace
+                    .then(|| host.bind(crate::ListenerRequest::new(role, state.health())))
+                    .transpose()?;
+                let mut task =
+                    registered.spawn(crate::TaskCancellation::new(), state.health(), None)?;
+                assert_eq!(
+                    task.join_within(std::time::Duration::from_secs(1)),
+                    Ok(crate::TaskJoinOutcome::Joined),
+                    "retired {role:?} worker must neither lose nor replace its admission"
+                );
+                drop(successor);
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn same_endpoint_candidate_reuses_native_descriptors_before_old_admission_stops()

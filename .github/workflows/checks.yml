@@ -248,6 +248,30 @@ jobs:
           tar -xzf "$RUNNER_TEMP/first/native.tar.gz" -C "$RUNNER_TEMP/native-install"
           chmod -R a-w "$RUNNER_TEMP/native-install/positron"
           echo "POSITRON_TEST_NATIVE_BINARY=$RUNNER_TEMP/native-install/positron/bin/positron" >> "$GITHUB_ENV"
+      - name: Install the exact native payload through Homebrew
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: |
+          export POSITRON_TEST_HOMEBREW_ARCHIVE="$RUNNER_TEMP/first/native.tar.gz"
+          export POSITRON_TEST_HOMEBREW_OUTPUT="$RUNNER_TEMP/homebrew-fixture"
+          cargo test --locked -p positron --test homebrew_cli prepare_native_homebrew_installation_fixture_when_requested
+          tap_root="$(brew --repository)/Library/Taps/positronqualification/homebrew-native"
+          test ! -e "$tap_root"
+          mkdir -p "$tap_root/Formula"
+          cp "$RUNNER_TEMP/homebrew-fixture/positron.rb" "$tap_root/Formula/positron.rb"
+          formula=positronqualification/native/positron
+          brew ruby -- -c "$tap_root/Formula/positron.rb"
+          cached=$(brew --cache --build-from-source "$formula")
+          mkdir -p "$(dirname "$cached")"
+          cp "$RUNNER_TEMP/first/native.tar.gz" "$cached"
+          brew install --build-from-source "$formula"
+          cmp "$RUNNER_TEMP/first/positron" "$(brew --prefix positron)/bin/positron"
+          cmp "$RUNNER_TEMP/native-install/positron/etc/positron.toml.example" "$(brew --prefix positron)/share/positron/config/positron.toml.example"
+          brew test "$formula"
+          echo "POSITRON_TEST_NATIVE_BINARY=$(brew --prefix positron)/bin/positron" >> "$GITHUB_ENV"
       - name: Run archive and installed public lifecycle integration tests
         shell: bash
         run: |
@@ -290,6 +314,16 @@ jobs:
           else
             cargo test --locked -p positron-release --test native_archives
           fi
+      - name: Qualify the Homebrew LaunchAgent and retained state
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+          POSITRON_TEST_HOMEBREW_FORMULA: positronqualification/native/positron
+        run: |
+          cargo test --locked -p positron --test homebrew_cli homebrew_service_drains_restarts_and_retains_state_across_uninstall -- --test-threads=1
+          rm -r "$(brew --repository)/Library/Taps/positronqualification/homebrew-native"
       - name: Build Linux native packages twice
         if: runner.os == 'Linux'
         shell: bash
