@@ -222,3 +222,6 @@ fn acknowledged_logs_have_typed_native_query_headers_rows_and_terminal_truth()
     shutdown_gracefully(process, &roots)?;
     Ok(())
 }
+
+#[path = "log_query/projections.rs"]
+mod projections;
