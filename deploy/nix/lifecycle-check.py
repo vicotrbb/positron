@@ -79,9 +79,20 @@ elif sys.argv[1] == "backup":
     assert completed["status"] == "succeeded"
     accepted = admit("backup", "create", common +
         ["--retention-seconds", "3600", "--idempotency-key", "33333333-3333-4333-8333-333333333333"])
-    completed = fields(run(["positron", "backup", "wait"] + transport +
-        ["--operation-id", accepted["operation_id"], "--wait-seconds", "60"], credential))
+    while True:
+        result = subprocess.run(["positron", "backup", "wait"] + transport +
+            ["--operation-id", accepted["operation_id"], "--wait-seconds", "60"],
+            input=credential, capture_output=True, timeout=180)
+        completed = fields(result.stdout.decode())
+        if result.returncode == 0:
+            break
+        if (completed.get("operation_id") != accepted["operation_id"]
+                or completed.get("status") not in ["pending", "running"]
+                or b"operation outcome remains unknown; inspect the same operation ID before retrying" not in result.stderr):
+            raise RuntimeError("same-operation backup wait refused without a resumable pending outcome")
     assert completed["status"] == "succeeded"
+    assert completed["operation_id"] == accepted["operation_id"]
+    assert completed["manifest_checksum"]
     state["snapshot"] = accepted["operation_id"]
     state["checksum"] = completed["manifest_checksum"]
     state_path.write_text(json.dumps(state))

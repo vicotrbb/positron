@@ -4,6 +4,7 @@ import io
 import json
 import pathlib
 import runpy
+import subprocess
 import sys
 import types
 import unittest
@@ -84,3 +85,76 @@ class IngestAcknowledgment(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_ingest(response)
         self.assertEqual(len(self.requests), 1)
+
+
+class BackupOutcomeKnowledge(unittest.TestCase):
+    def run_backup(self, responses):
+        self.commands = []
+        self.saved = []
+
+        def execute(command, **options):
+            self.commands.append(command)
+            self.assertNotIn("test-only", command)
+            action = command[1:3]
+            if action == ["repository", "status"]:
+                output = "catalog_generation=1"
+            elif action == ["repository", "init"]:
+                output = "operation_id=repository"
+            elif action == ["repository", "wait"]:
+                output = "operation_id=repository status=succeeded"
+            elif action == ["backup", "create"]:
+                output = "operation_id=snapshot"
+            elif action == ["backup", "wait"]:
+                response = responses.pop(0)
+                if isinstance(response, BaseException):
+                    raise response
+                return response
+            else:
+                raise AssertionError("unexpected lifecycle command")
+            return types.SimpleNamespace(returncode=0, stdout=output.encode(), stderr=b"")
+
+        def read(path):
+            return "administrator_secret=test-only" if path.name == "positron-claim" else "{}"
+
+        def write(path, document):
+            self.saved.append(json.loads(document))
+
+        with mock.patch.object(pathlib.Path, "read_text", autospec=True, side_effect=read), \
+                mock.patch.object(pathlib.Path, "write_text", autospec=True, side_effect=write), \
+                mock.patch.object(sys, "argv", ["lifecycle-check.py", "backup"]), \
+                mock.patch("subprocess.run", side_effect=execute):
+            runpy.run_path(str(pathlib.Path(__file__).with_name("lifecycle-check.py")))
+
+    @staticmethod
+    def outcome(status, operation="snapshot", checksum="", unknown=False):
+        output = f"operation_id={operation} status={status} manifest_checksum={checksum}"
+        return types.SimpleNamespace(returncode=int(unknown), stdout=output.encode(), stderr=(
+            b"positron: operation outcome remains unknown; inspect the same operation ID before retrying"
+            if unknown else b""))
+
+    def test_pending_knowledge_window_continues_same_backup_until_success(self):
+        self.run_backup([self.outcome("running", unknown=True),
+                         self.outcome("succeeded", checksum="verified")])
+        creates = [command for command in self.commands if command[1:3] == ["backup", "create"]]
+        waits = [command for command in self.commands if command[1:3] == ["backup", "wait"]]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(len(waits), 2)
+        self.assertEqual(waits[0], waits[1])
+        self.assertEqual(waits[0][-4:], ["--operation-id", "snapshot", "--wait-seconds", "60"])
+        self.assertEqual(self.saved[-1], {"snapshot": "snapshot", "checksum": "verified"})
+
+    def test_mismatched_terminal_or_transport_outcomes_never_repeat_admission(self):
+        unavailable = types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"HTTP 503")
+        failures = [self.outcome("running", operation="other", unknown=True),
+                    self.outcome("succeeded", operation="other", checksum="verified"),
+                    self.outcome("failed"), self.outcome("succeeded"), unavailable,
+                    subprocess.TimeoutExpired("positron backup wait", 180)]
+        for response in failures:
+            with self.subTest(response=response):
+                with self.assertRaises((RuntimeError, AssertionError, subprocess.TimeoutExpired)):
+                    self.run_backup([response])
+                self.assertEqual(sum(command[1:3] == ["backup", "create"]
+                                     for command in self.commands), 1)
+                self.assertEqual(sum(command[1:3] == ["backup", "wait"]
+                                     for command in self.commands), 1)
+                self.assertEqual(self.saved, [])
