@@ -678,3 +678,6 @@ fn path(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
     path.to_str()
         .ok_or_else(|| "test path was not UTF-8".into())
 }
+
+#[path = "configuration_cli/listener_failures.rs"]
+mod listener_failures;
