@@ -41,6 +41,7 @@
         let pkgs = pkgsFor system; in {
           package = self.packages.${system}.positron;
           configuration = pkgs.runCommand "positron-configuration-parity" { } ''
+            ${pkgs.python3}/bin/python -m unittest discover -s ${./deploy/nix} -p test_service_check.py
             ${self.packages.${system}.positron}/bin/positron config validate \
               --config ${self.packages.${system}.positron}/share/positron/positron.toml.example
             touch "$out"
