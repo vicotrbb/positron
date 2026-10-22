@@ -22,6 +22,7 @@ include!("configuration_foundation/contract.rs");
 include!("configuration_foundation/export_destinations.rs");
 include!("configuration_foundation/resolution.rs");
 include!("configuration_foundation/planning.rs");
+include!("configuration_foundation/semantic_diff.rs");
 include!("configuration_foundation/bounds.rs");
 include!("configuration_foundation/preflight.rs");
 include!("configuration_foundation/quoting.rs");
