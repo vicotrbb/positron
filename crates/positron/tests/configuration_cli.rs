@@ -681,3 +681,6 @@ fn path(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
 
 #[path = "configuration_cli/listener_failures.rs"]
 mod listener_failures;
+
+#[path = "configuration_cli/listener_profile_failures.rs"]
+mod listener_profile_failures;
