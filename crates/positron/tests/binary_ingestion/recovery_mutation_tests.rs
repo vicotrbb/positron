@@ -4,6 +4,23 @@ fn scripted_requests(
     responses: &[(u16, serde_json::Value)],
     request: impl FnOnce(std::net::SocketAddr) -> TestResult<String>,
 ) -> TestResult<(TestResult<String>, Vec<serde_json::Value>)> {
+    let (result, requests, response_error) =
+        scripted_requests_with_writer(responses, request, |stream, bytes| stream.write_all(bytes))?;
+    if let Some(error) = response_error {
+        return Err(error.into());
+    }
+    Ok((result, requests))
+}
+
+fn scripted_requests_with_writer(
+    responses: &[(u16, serde_json::Value)],
+    request: impl FnOnce(std::net::SocketAddr) -> TestResult<String>,
+    mut write_response: impl FnMut(&mut TcpStream, &[u8]) -> std::io::Result<()> + Send + 'static,
+) -> TestResult<(
+    TestResult<String>,
+    Vec<serde_json::Value>,
+    Option<std::io::Error>,
+)> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let endpoint = listener.local_addr()?;
@@ -20,7 +37,7 @@ fn scripted_requests(
                             finished.try_recv(),
                             Err(std::sync::mpsc::TryRecvError::Disconnected)
                         ) {
-                            return Ok(requests);
+                            return Ok((requests, None));
                         }
                         std::thread::sleep(Duration::from_millis(5));
                     },
@@ -68,10 +85,13 @@ fn scripted_requests(
             } else {
                 ""
             };
-            write!(stream, "HTTP/1.1 {status} Result\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).map_err(|e| e.to_string())?;
-            stream.write_all(&bytes).map_err(|e| e.to_string())?;
+            let mut response = format!("HTTP/1.1 {status} Result\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).into_bytes();
+            response.extend_from_slice(&bytes);
+            if let Err(error) = write_response(&mut stream, &response) {
+                return Ok((requests, Some(error)));
+            }
         }
-        Ok(requests)
+        Ok((requests, None))
     });
     // The caller already bounds its request; keep this fixture alive through
     // CLI startup and join it even if the caller fails or panics.
@@ -82,8 +102,8 @@ fn scripted_requests(
         Ok(result) => result,
         Err(panic) => std::panic::resume_unwind(panic),
     };
-    let requests = joined.map_err(|_| "script server panic")??;
-    Ok((result, requests))
+    let (requests, response_error) = joined.map_err(|_| "script server panic")??;
+    Ok((result, requests, response_error))
 }
 fn scripted_mutation(
     responses: &[(u16, serde_json::Value)],
