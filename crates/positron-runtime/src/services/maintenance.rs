@@ -22,6 +22,15 @@ use positron_signals::{
 
 use super::{ServiceFailure, classify_catalog_failure_code, maintenance_failure_category};
 
+#[cfg(test)]
+thread_local! {
+    // One driving test thread pauses recovery while a real foreground gate user runs.
+    pub(super) static DISPATCH_RECOVERY_INTERLEAVE: std::cell::RefCell<Option<(
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>> = const { std::cell::RefCell::new(None) };
+}
+
 use crate::{IntegrityScrubFailureStage, MaintenanceWorkerOperation, OperationalDiagnostic};
 
 #[derive(Clone, Copy)]
@@ -390,27 +399,31 @@ fn start_installed_maintenance<'authority>(
     if cancellation.is_some_and(crate::TaskCancellation::is_cancelled) {
         return Err(ServiceFailure::Cancelled);
     }
-    super::tenant_purge::recover_accepted_task(services)?;
-    super::provider_migration::recover_accepted_task(services)?;
-    super::repository_administration::recover_accepted_task(services)?;
-    super::backup_administration::recover_accepted_task(services)?;
     let Some(_catalog_operation) = services.try_catalog_operation()? else {
         return Err(ServiceFailure::CatalogBusy);
     };
+    let catalog = services
+        .open_maintenance_catalog()
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+    super::tenant_purge::recover_accepted_task(services, &catalog)?;
+    #[cfg(test)]
+    DISPATCH_RECOVERY_INTERLEAVE.with(|slot| {
+        if let Some((reached, resume)) = slot.borrow_mut().take() {
+            reached.send(()).map_err(|_| ServiceFailure::Internal)?;
+            resume
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| ServiceFailure::Internal)?;
+        }
+        Ok::<_, ServiceFailure>(())
+    })?;
+    super::provider_migration::recover_accepted_task(services, &catalog)?;
+    super::repository_administration::recover_accepted_task(services, &catalog)?;
+    super::backup_administration::recover_accepted_task(services, &catalog)?;
     let instance = &services.instance;
     let now = instance
         .retention_time
         .governance_now_seconds()
         .map_err(|_| ServiceFailure::StorageUnavailable)?;
-    let catalog = Catalog::open(
-        &instance._authority,
-        instance.instance,
-        instance
-            .key
-            .catalog_secret(instance.instance)
-            .map_err(|_| ServiceFailure::KeyUnavailable)?,
-    )
-    .map_err(|failure| classify_catalog_failure_code(failure.code()))?;
     let coordinator = instance.maintenance_coordinator();
     let snapshot_lease_times = snapshot_lease_schedule_times(services)?;
     let retention_pending = coordinator

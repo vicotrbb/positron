@@ -2,6 +2,96 @@ use super::*;
 use crate::services::repository_administration::RepositoryAdmission;
 use positron_governance::{AdministrativeIdempotencyKey, DurableOperationStatus, RepositoryAction};
 use std::os::unix::fs::PermissionsExt;
+
+#[test]
+fn accepted_repository_dispatch_survives_a_foreground_catalog_interleave()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let repository_path = fixture.control_socket_path().with_file_name("repository");
+    fs::create_dir(&repository_path)?;
+    fs::set_permissions(&repository_path, fs::Permissions::from_mode(0o700))?;
+    let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(initialized)?;
+    let generation = services
+        .open_maintenance_catalog()
+        .expect("catalog")
+        .pin()?
+        .number();
+    let accepted = services
+        .accept_repository_operation(
+            &administrator,
+            RepositoryAdmission {
+                action: RepositoryAction::Initialize,
+                locator: crate::services::repository_administration::RepositoryLocation::Local(
+                    &repository_path,
+                ),
+                repository: [81; 16],
+                expected_generation: generation,
+                idempotency: AdministrativeIdempotencyKey::new([82; 16])?,
+            },
+        )
+        .expect("accepted repository initialization");
+    for _ in 0..32 {
+        if services
+            .repository_operation_status(&administrator, accepted.operation_id())
+            .expect("repository status")
+            .status()
+            .is_terminal()
+        {
+            break;
+        }
+        let gate = services.catalog_operation_gate();
+        let (reached, foreground) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        crate::services::maintenance::DISPATCH_RECOVERY_INTERLEAVE.with(|slot| {
+            *slot.borrow_mut() = Some((reached, resumed));
+        });
+        let dispatched = std::thread::scope(|scope| {
+            let foreground = scope.spawn(move || -> Result<(), String> {
+                foreground
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|failure| failure.to_string())?;
+                let operation = match gate.try_lock() {
+                    Ok(operation) => Some(operation),
+                    Err(std::sync::TryLockError::WouldBlock) => None,
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        return Err("catalog gate poisoned".into());
+                    },
+                };
+                resume.send(()).map_err(|failure| failure.to_string())?;
+                released
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|failure| failure.to_string())?;
+                drop(operation);
+                Ok(())
+            });
+            let dispatched =
+                crate::services::maintenance::wake_runtime_maintenance(&services, None);
+            release
+                .send(())
+                .expect("release foreground Catalog operation");
+            foreground
+                .join()
+                .expect("foreground Catalog thread")
+                .expect("foreground Catalog operation");
+            dispatched
+        });
+        match dispatched {
+            Ok(_) | Err(crate::ServiceFailure::CatalogBusy) => {},
+            Err(failure) => return Err(failure.into()),
+        }
+    }
+    assert_eq!(
+        services
+            .repository_operation_status(&administrator, accepted.operation_id())
+            .expect("repository status")
+            .status(),
+        DurableOperationStatus::Succeeded,
+    );
+    Ok(())
+}
+
 #[test]
 fn repository_status_recovers_after_catalog_writer_contention()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -34,11 +124,16 @@ fn repository_status_recovers_after_catalog_writer_contention()
         .ok_or("API endpoint")?;
     let client = RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })?;
     let request = RepositoryRequest::decode(br#"{"action":"status"}"#)?;
-    assert_eq!(
-        client.manage(&ingest, &request),
-        Err(RepositoryServiceClientFailure::AuthenticationRejected),
-    );
     let services = process.services().ok_or("serving services")?;
+    {
+        // Attribution reads an authenticated snapshot without this writer gate.
+        // Keep unrelated maintenance recovery from competing for its grant.
+        let _gate = services.catalog_operation()?;
+        assert_eq!(
+            client.manage(&ingest, &request),
+            Err(RepositoryServiceClientFailure::AuthenticationRejected),
+        );
+    }
     // Retain the actual sole-writer lease, without retaining the API gate.
     // The diagnostic read must expose temporary unavailability, not replace
     // that writer or misclassify the already valid credential.

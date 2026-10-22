@@ -51,17 +51,12 @@ pub(in crate::services) struct SnapshotWork {
 }
 pub(in crate::services) fn recover_accepted_task(
     services: &ServiceHandle,
+    catalog: &positron_kernel::Catalog<'_>,
 ) -> Result<(), ServiceFailure> {
-    let Some(_gate) = services.try_catalog_operation()? else {
-        return Err(ServiceFailure::CatalogBusy);
-    };
-    let catalog = services
-        .open_maintenance_catalog()
-        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     let coordinator = services.instance.maintenance_coordinator();
     let mut after = None;
     while let Some(operation) =
-        DurableOperationAdministration::next_backup_operation(&catalog, after)
+        DurableOperationAdministration::next_backup_operation(catalog, after)
             .map_err(|_| ServiceFailure::CorruptState)?
     {
         require_operation(operation, services.instance.instance.to_bytes())?;
@@ -75,7 +70,7 @@ pub(in crate::services) fn recover_accepted_task(
         }
         submit(
             &services.instance,
-            &catalog,
+            catalog,
             operation,
             services
                 .maintenance_status_now()

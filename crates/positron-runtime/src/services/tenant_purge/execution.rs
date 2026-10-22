@@ -6,14 +6,9 @@ use positron_kernel::{ActiveSegmentLedger, MaintenanceExecution};
 
 pub(in crate::services) fn recover_accepted_task(
     services: &ServiceHandle,
+    catalog: &positron_kernel::Catalog<'_>,
 ) -> Result<(), ServiceFailure> {
-    let Some(_gate) = services.try_catalog_operation()? else {
-        return Err(ServiceFailure::CatalogBusy);
-    };
-    let catalog = services
-        .open_maintenance_catalog()
-        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-    if let Some(operation) = DurableOperationAdministration::next_tenant_purge(&catalog)
+    if let Some(operation) = DurableOperationAdministration::next_tenant_purge(catalog)
         .map_err(|_| ServiceFailure::CorruptState)?
     {
         let task = positron_kernel::MaintenanceTaskId::new(operation.operation_id().to_bytes())
@@ -22,7 +17,7 @@ pub(in crate::services) fn recover_accepted_task(
             Ok(_) => {},
             Err(positron_kernel::MaintenanceFailure::UnknownTask) => submit(
                 services,
-                &catalog,
+                catalog,
                 operation,
                 services
                     .maintenance_status_now()

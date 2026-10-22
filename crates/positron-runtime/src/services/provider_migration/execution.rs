@@ -4,18 +4,13 @@ use super::*;
 /// worker turn remains bounded; existing tasks retain their exact association.
 pub(in crate::services) fn recover_accepted_task(
     services: &ServiceHandle,
+    catalog: &positron_kernel::Catalog<'_>,
 ) -> Result<(), crate::ServiceFailure> {
     use crate::ServiceFailure;
-    let Some(_gate) = services.try_catalog_operation()? else {
-        return Err(ServiceFailure::CatalogBusy);
-    };
-    let catalog = services
-        .open_maintenance_catalog()
-        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     let coordinator = services.instance.maintenance_coordinator();
     let mut after = None;
     while let Some(operation) =
-        DurableOperationAdministration::next_key_provider_migration_operation(&catalog, after)
+        DurableOperationAdministration::next_key_provider_migration_operation(catalog, after)
             .map_err(|_| ServiceFailure::CorruptState)?
     {
         require_root_operation(operation, services.instance.instance.to_bytes())
@@ -43,7 +38,7 @@ pub(in crate::services) fn recover_accepted_task(
             .ok_or(ServiceFailure::CorruptState)?;
         coordinator
             .submit_root_provider_migration_and_persist(
-                &catalog,
+                catalog,
                 binding,
                 MaintenancePreconditions::new(generation, 1)
                     .map_err(crate::services::maintenance::map_failure)?,
