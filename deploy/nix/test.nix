@@ -1,5 +1,90 @@
 { pkgs, package, module, candidate, fixture, commit }:
 let
+  ttyEventParser = pkgs.writeText "positron-tty-events.awk" ''
+    function emit(message) {
+      if (output_bytes + length(message) + 32 > 3968) fail("output-limit")
+      print "positron-tty-event-observation " message
+      output_bytes += length(message) + 32
+      fflush()
+    }
+    function fail(reason) {
+      failed = 1
+      print "positron-tty-event-observation INCOMPLETE " reason
+      fflush()
+      exit 1
+    }
+    function reset_event() {
+      delete values
+      delete seen
+      device = source = stamp = ""
+      invalid = 0
+    }
+    function finish_event() {
+      if (source == "") return
+      if (++events > 4096) fail("event-limit")
+      if (device != "") {
+        if (invalid || !("ACTION" in values) || !("SEQNUM" in values)) fail("invalid-target-event")
+        if (++target_events > 32) fail("target-event-limit")
+        emit("EVENT source=" source " device=" device " time=" stamp " action=" values["ACTION"] \
+          " seq=" values["SEQNUM"] " initialized=" values["USEC_INITIALIZED"] \
+          " processing=" values["ID_PROCESSING"] " ready=" values["SYSTEMD_READY"] \
+          " systemd_tag=" values["TAGS"] " current_systemd_tag=" values["CURRENT_TAGS"] \
+          " worker_failed=" values["UDEV_WORKER_FAILED"] " errno=" values["UDEV_WORKER_ERRNO"] \
+          " exit_status=" values["UDEV_WORKER_EXIT_STATUS"] " signal=" values["UDEV_WORKER_SIGNAL"])
+      }
+      reset_event()
+    }
+    {
+      input_bytes += length($0) + 1
+      if (length($0) > 4096 || input_bytes > 1048576 || NR > 16384) fail("input-limit")
+    }
+    $0 == "POSITRON_MONITOR_DIAGNOSTIC" {
+      if (!loss) emit("INCOMPLETE monitor-diagnostic")
+      loss = 1
+      next
+    }
+    !ready && $0 == "UDEV - the event which udev sends out after rule processing" { udev = 1; next }
+    !ready && $0 == "KERNEL - the kernel uevent" { kernel = 1; next }
+    !ready && $0 == "" && udev && kernel {
+      if (system("timeout --kill-after=1s 2s systemd-notify --ready >/dev/null 2>&1") != 0) fail("notify-unavailable")
+      ready = 1
+      emit("SUBSCRIBED stage2-only")
+      next
+    }
+    !ready { next }
+    /^(KERNEL|UDEV) *\[[0-9]+\.[0-9]+\] / {
+      finish_event()
+      source = substr($0, 1, 6)
+      gsub(/ /, "", source)
+      match($0, /\[[0-9]+\.[0-9]+\]/)
+      stamp = substr($0, RSTART + 1, RLENGTH - 2)
+      next
+    }
+    $0 == "" { finish_event(); next }
+    source != "" && index($0, "=") {
+      separator = index($0, "=")
+      key = substr($0, 1, separator - 1)
+      value = substr($0, separator + 1)
+      if (key == "DEVNAME") {
+        if (++seen[key] > 1) invalid = 1
+        if (value == "/dev/hvc0" || value == "hvc0") device = "hvc0"
+        else if (value == "/dev/ttyAMA0" || value == "ttyAMA0") device = "ttyAMA0"
+      } else if (key == "ACTION") {
+        if (++seen[key] > 1 || value !~ /^(add|remove|change|move|online|offline|bind|unbind)$/) invalid = 1
+        else values[key] = value
+      } else if (key == "TAGS" || key == "CURRENT_TAGS") {
+        if (++seen[key] > 1) invalid = 1
+        values[key] = value ~ /(^|:)systemd(:|$)/ ? 1 : 0
+      } else if (key ~ /^(SEQNUM|USEC_INITIALIZED|ID_PROCESSING|SYSTEMD_READY|UDEV_WORKER_FAILED|UDEV_WORKER_ERRNO|UDEV_WORKER_EXIT_STATUS|UDEV_WORKER_SIGNAL)$/) {
+        if (++seen[key] > 1 || value !~ /^[0-9]+$/ || length(value) > 20) invalid = 1
+        else values[key] = value
+      }
+    }
+    END {
+      if (!failed && !ready) fail("subscription-unavailable")
+      if (!failed) { finish_event(); emit("PARSER-END"); if (loss) exit 1; }
+    }
+  '';
   configuration = pkgs.writeText "positron-service.toml" ''
         schema_version = 1
         [runtime]
@@ -22,8 +107,65 @@ in pkgs.testers.runNixOSTest {
   requiredFeatures.kvm = false;
   nodes.machine = { ... }: {
     imports = [ module ];
-    # Finite serial-visible observations also run when the driver backdoor
-    # cannot start. They neither gate nor change any observed unit or device.
+    # The early subscriber gates the normal stage2 trigger only until subscribed.
+    # Initrd events are outside this history, and subscription/ptrace can perturb timing.
+    systemd.services.positron-tty-event-observation = {
+      wantedBy = [ "sysinit.target" ];
+      before = [ "systemd-udev-trigger.service" ];
+      after = [ "systemd-journald.socket" ];
+      unitConfig.DefaultDependencies = false;
+      path = [ pkgs.coreutils pkgs.systemd pkgs.gawk ];
+      serviceConfig = {
+        Type = "notify";
+        NotifyAccess = "all";
+        TimeoutStartSec = 15;
+        TimeoutStopSec = 1;
+        RuntimeMaxSec = 400;
+        KillMode = "control-group";
+        StandardOutput = "journal";
+        StandardError = "journal";
+      };
+      script = ''
+        set +e
+        monitor_pid=""
+        parser_pid=""
+        cleanup() {
+          trap - EXIT TERM INT
+          for pid in "$monitor_pid" "$parser_pid"; do
+            if test -n "$pid"; then kill -TERM "$pid" 2>/dev/null || true; fi
+          done
+          for pid in "$monitor_pid" "$parser_pid"; do
+            if test -n "$pid"; then wait "$pid" 2>/dev/null; fi
+          done
+        }
+        trap cleanup EXIT
+        trap 'echo "positron-tty-event-observation INCOMPLETE interrupted"; exit 143' TERM INT
+        exec {events}< <(exec timeout --kill-after=1s 400s udevadm monitor --kernel --udev --subsystem-match=tty --property 2> >(
+          if LC_ALL=C IFS= read -r -n 1 -d ""; then
+            printf '\nPOSITRON_MONITOR_DIAGNOSTIC\n'
+            cat >/dev/null
+          fi
+        ))
+        monitor_pid=$!
+        awk -f ${ttyEventParser} <&"$events" &
+        parser_pid=$!
+        exec {events}<&-
+        wait "$parser_pid"
+        parser_status=$?
+        parser_pid=""
+        kill -TERM "$monitor_pid" 2>/dev/null || true
+        wait "$monitor_pid"
+        monitor_status=$?
+        monitor_pid=""
+        if test "$parser_status" -eq 0 && test "$monitor_status" -eq 124; then
+          echo "positron-tty-event-observation WINDOW-END"
+        else
+          echo "positron-tty-event-observation UNAVAILABLE-OR-LOSS parser=$parser_status monitor=$monitor_status"
+          exit 1
+        fi
+      '';
+    };
+    # Late serial-visible observations also run without the backdoor and do not gate devices.
     systemd.services.positron-device-observation = {
       path = [ pkgs.coreutils pkgs.systemd pkgs.procps pkgs.gawk pkgs.strace ];
       serviceConfig = {
