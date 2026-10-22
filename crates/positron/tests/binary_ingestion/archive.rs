@@ -176,23 +176,8 @@ pub(super) fn query_refusals(
 ) -> TestResult {
     use positron_api::log_query::*;
     let body = fs::read(root.join("query-request.json"))?;
-    for credential in ["", admin, ingest] {
-        let bearer = format!("Bearer {credential}");
-        let response = request(
-            endpoint.port(),
-            HTTP_PATH,
-            &[("Authorization", &bearer)],
-            &body,
-        )?;
-        assert!(response.starts_with("HTTP/1.1 401 "));
-        let (_, payload) = response
-            .split_once("\r\n\r\n")
-            .ok_or("missing rejection body")?;
-        assert_eq!(
-            decode_query_rejection(401, payload.as_bytes()),
-            LogQueryServiceClientFailure::AuthenticationRejected
-        );
-        assert!(!response.contains(query));
+    for (case, credential) in ["", admin, ingest].into_iter().enumerate() {
+        query_authentication_refusal(endpoint, &body, credential, [query, admin, ingest], case)?;
     }
     let bearer = format!("Bearer {query}");
     let response = request(
@@ -258,4 +243,70 @@ pub(super) fn query_refusals(
         Some("output_bytes")
     );
     Ok(())
+}
+
+pub(super) fn query_authentication_refusal(
+    endpoint: std::net::SocketAddr,
+    body: &[u8],
+    credential: &str,
+    secrets: [&str; 3],
+    case: usize,
+) -> TestResult {
+    use positron_api::log_query::*;
+    let bearer = format!("Bearer {credential}");
+    let response = request_with_capacity_retry(
+        endpoint.port(),
+        HTTP_PATH,
+        &[("Authorization", &bearer)],
+        body,
+        Duration::from_secs(5),
+    )?;
+    let diagnostic = refusal_diagnostic(&response, secrets);
+    if !response.starts_with("HTTP/1.1 401 ") {
+        return Err(format!("query authentication case {case}: {diagnostic}").into());
+    }
+    let (_, payload) = response
+        .split_once("\r\n\r\n")
+        .ok_or("missing rejection body")?;
+    if decode_query_rejection(401, payload.as_bytes())
+        != LogQueryServiceClientFailure::AuthenticationRejected
+    {
+        return Err(
+            format!("query authentication case {case} typed rejection: {diagnostic}").into(),
+        );
+    }
+    assert!(!response.contains(secrets[0]));
+    Ok(())
+}
+
+fn refusal_diagnostic(response: &str, secrets: [&str; 3]) -> String {
+    let mut diagnostic = response.to_owned();
+    for secret in secrets.into_iter().filter(|secret| !secret.is_empty()) {
+        diagnostic = diagnostic.replace(secret, "[REDACTED]");
+    }
+    diagnostic.chars().take(2048).collect()
+}
+
+#[test]
+fn query_refusal_diagnostic_redacts_all_claims_before_truncation() {
+    let secrets = [
+        "query-credential-canary",
+        "administrator-credential-canary",
+        "ingest-credential-canary",
+    ];
+    let response = format!(
+        "HTTP/1.1 429 Capacity\r\nRetry-After: 1\r\n\r\n{} {} {}",
+        secrets[0], secrets[1], secrets[2]
+    );
+    assert_eq!(
+        refusal_diagnostic(&response, secrets),
+        "HTTP/1.1 429 Capacity\r\nRetry-After: 1\r\n\r\n[REDACTED] [REDACTED] [REDACTED]"
+    );
+    for secret in secrets {
+        let crossing = format!("{}{secret} outside-bound", "x".repeat(2040));
+        assert_eq!(
+            refusal_diagnostic(&crossing, secrets),
+            format!("{}[REDACTE", "x".repeat(2040))
+        );
+    }
 }

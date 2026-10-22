@@ -63,7 +63,12 @@ fn scripted_requests(
                 continue;
             }
             let bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
-            write!(stream, "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).map_err(|e| e.to_string())?;
+            let retry = if status == 429 {
+                "Retry-After: 1\r\n"
+            } else {
+                ""
+            };
+            write!(stream, "HTTP/1.1 {status} Result\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).map_err(|e| e.to_string())?;
             stream.write_all(&bytes).map_err(|e| e.to_string())?;
         }
         Ok(requests)
@@ -285,3 +290,6 @@ fn mutation_refuses_terminal_error_without_retry() -> TestResult {
 
 #[path = "upgrade_status_tests.rs"]
 mod upgrade_status_tests;
+
+#[path = "query_refusal_tests.rs"]
+mod query_refusal_tests;

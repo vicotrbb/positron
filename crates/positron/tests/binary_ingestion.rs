@@ -58,7 +58,12 @@ fn request_with_capacity_retry(
             head.lines()
                 .any(|line| line.eq_ignore_ascii_case("Retry-After: 1"))
         });
-        if !response.starts_with("HTTP/1.1 429 ") || !retry_after_one_second {
+        let query_capacity = path != positron_api::log_query::HTTP_PATH
+            || response.split_once("\r\n\r\n").is_some_and(|(_, payload)| {
+                positron_api::log_query::decode_query_rejection(429, payload.as_bytes())
+                    == positron_api::log_query::LogQueryServiceClientFailure::CapacityUnavailable
+            });
+        if !response.starts_with("HTTP/1.1 429 ") || !retry_after_one_second || !query_capacity {
             break;
         }
         if Instant::now() + Duration::from_secs(1) >= deadline {
