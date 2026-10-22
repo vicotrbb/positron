@@ -142,10 +142,79 @@ pub(super) fn run(
         )?,
         expected
     );
-    let mut arguments = online("upgrade", "status", installed.endpoint);
-    arguments.extend(["--operation-id".into(), operation]);
-    let status = execute(&executable, &arguments, Some(installed.admin))?;
-    assert_eq!(field(&status, "status")?, "succeeded");
+    inspect_succeeded(
+        &executable,
+        installed.endpoint,
+        installed.admin,
+        &operation,
+        watchdog,
+    )?;
     archive::stop(&mut fixture.child)?;
     Ok(executable)
+}
+
+pub(super) fn inspect_succeeded(
+    binary: &Path,
+    endpoint: std::net::SocketAddr,
+    credential: &str,
+    operation: &str,
+    deadline: Instant,
+) -> TestResult<String> {
+    let mut arguments = online("upgrade", "status", endpoint);
+    arguments.extend(["--operation-id".into(), operation.into()]);
+    // Inspection shares the existing offline publication watchdog. The native
+    // client's five-second HTTP timeout excludes process startup; it is not a
+    // five-second deadline for an installed command and its capacity backoff.
+    let output = loop {
+        if Instant::now() >= deadline {
+            return Err("candidate Upgrade status exceeded its publication watchdog".into());
+        }
+        let mut child = Command::new(binary)
+            .args(&arguments)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or("missing status credential pipe")?
+            .write_all(credential.as_bytes())?;
+        let output = loop {
+            let exited = child.try_wait()?.is_some();
+            if Instant::now() >= deadline {
+                if !exited {
+                    child.kill()?;
+                }
+                child.wait()?;
+                return Err("candidate Upgrade status exceeded its publication watchdog".into());
+            }
+            if exited {
+                let output = child.wait_with_output()?;
+                if Instant::now() >= deadline {
+                    return Err("candidate Upgrade status exceeded its publication watchdog".into());
+                }
+                break output;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(credential));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(credential));
+        if output.status.success() {
+            break output;
+        }
+        if !output.stdout.is_empty()
+            || output.stderr
+                != b"positron: capacity unavailable; retry the same idempotent request\n"
+        {
+            return Err(
+                "candidate Upgrade status refused without a capacity retry instruction".into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    if field(&output, "operation_id")? != operation || field(&output, "status")? != "succeeded" {
+        return Err("candidate Upgrade did not report the same succeeded operation".into());
+    }
+    Ok(operation.into())
 }

@@ -282,3 +282,6 @@ fn mutation_refuses_terminal_error_without_retry() -> TestResult {
     assert_eq!(requests.len(), 2);
     Ok(())
 }
+
+#[path = "upgrade_status_tests.rs"]
+mod upgrade_status_tests;
