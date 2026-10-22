@@ -367,12 +367,34 @@ fn verified_snapshot(
     let mut session = begin_session(case, id)?;
     // The operator API advances in bounded thirty-second calls. This is a
     // correctness-test watchdog, not a total Backup/Verification product SLO.
-    let watchdog = Instant::now() + Duration::from_secs(300);
+    let started = Instant::now();
+    let watchdog = started + Duration::from_secs(300);
     let initial = session.status()?;
     let mut revision = initial.revision();
+    let mut turn_index = 0_u32;
     loop {
-        let turn = (Instant::now() + Duration::from_secs(30)).min(watchdog);
-        let operation = match session.advance(turn) {
+        let turn_started = Instant::now();
+        let turn = (turn_started + Duration::from_secs(30)).min(watchdog);
+        let result = session.advance(turn);
+        if turn_index < 32 {
+            eprintln!(
+                "offline_snapshot_turn index={turn_index} elapsed_ms={} remaining_ms={} advance_ms={} outcome={:?}",
+                started.elapsed().as_millis(),
+                watchdog
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
+                turn_started.elapsed().as_millis(),
+                result
+                    .as_ref()
+                    .map(|operation| (
+                        operation.status(),
+                        operation.upgrade_stage(),
+                        operation.revision()
+                    ))
+                    .map_err(|failure| *failure),
+            );
+        }
+        let operation = match result {
             Ok(operation) => operation,
             Err(positron_runtime::UpgradeFailure::CapacityUnavailable) => {
                 // The bounded operator call explicitly permits a retry when
@@ -400,7 +422,20 @@ fn verified_snapshot(
         // Each real offline CLI command releases its owner before the next
         // invocation resumes the same durable operation.
         drop(session);
-        session = begin_session(case, id)?;
+        let reopen_started = Instant::now();
+        let reopened = begin_session(case, id);
+        if turn_index < 32 {
+            eprintln!(
+                "offline_snapshot_reopen index={turn_index} elapsed_ms={} remaining_ms={} success={}",
+                reopen_started.elapsed().as_millis(),
+                watchdog
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
+                reopened.is_ok()
+            );
+        }
+        session = reopened?;
+        turn_index = turn_index.saturating_add(1);
         // A stable parent revision makes no claim about either child's progress.
         std::thread::sleep(Duration::from_millis(20));
     }

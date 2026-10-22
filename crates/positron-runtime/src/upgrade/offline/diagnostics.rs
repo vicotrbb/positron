@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 static CAPTURE_BUDGET: AtomicU8 = AtomicU8::new(32);
 
 pub(super) struct Context {
+    started: std::time::Instant,
     children: Result<[String; 2], &'static str>,
     clock: String,
 }
@@ -23,6 +24,7 @@ pub(super) fn capture(session: &OfflineUpgradeSession) -> Option<Context> {
 
 fn context(session: &OfflineUpgradeSession) -> Context {
     Context {
+        started: std::time::Instant::now(),
         children: children(session),
         clock: format!(
             "state={:?} now={:?}",
@@ -101,11 +103,13 @@ pub(super) fn report(
         return;
     };
     let after = context(session);
-    if result.is_err() || before.children == after.children {
-        let outcome = result.as_ref().map(|_| ()).map_err(|failure| *failure);
-        eprintln!(
-            "offline_upgrade_turn outcome={outcome:?} before_children={:?} before_clock={} after_children={:?} after_clock={}",
-            before.children, before.clock, after.children, after.clock
-        );
-    }
+    let outcome = result.as_ref().map(|_| ()).map_err(|failure| *failure);
+    eprintln!(
+        "offline_upgrade_turn outcome={outcome:?} elapsed_ms={} before_children={:?} before_clock={} after_children={:?} after_clock={}",
+        before.started.elapsed().as_millis(),
+        before.children,
+        before.clock,
+        after.children,
+        after.clock
+    );
 }

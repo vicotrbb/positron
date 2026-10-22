@@ -557,20 +557,33 @@ pub(in crate::services) fn report_turn(stage: &'static str, work: Option<&Backup
 
 #[cfg(feature = "test-support")]
 pub(in crate::services) fn report_timed_turn(
+    stage: &'static str,
     work: Option<&BackupWork>,
     elapsed: std::time::Duration,
     remaining: std::time::Duration,
 ) {
-    let Some(BackupWork::Verification(work)) = work else {
-        return;
-    };
-    report_state(
-        "slow_step",
-        Some(work),
-        None,
-        Some(elapsed.as_millis()),
-        Some(remaining.as_millis()),
-    );
+    if let Some(BackupWork::Verification(work)) = work {
+        report_state(
+            stage,
+            Some(work),
+            None,
+            Some(elapsed.as_millis()),
+            Some(remaining.as_millis()),
+        );
+    } else if take_diagnostic_permit() {
+        let kind = match work {
+            Some(BackupWork::Snapshot(_)) => "snapshot",
+            Some(BackupWork::Cancellation(_)) => "cancellation",
+            Some(BackupWork::Retention(_)) => "retention",
+            Some(BackupWork::Verification(_)) => "verification",
+            None => "none",
+        };
+        eprintln!(
+            "upgrade_verification_turn stage={stage} work_kind={kind} elapsed_ms={} remaining_ms={}",
+            elapsed.as_millis(),
+            remaining.as_millis()
+        );
+    }
 }
 
 #[cfg(feature = "test-support")]
