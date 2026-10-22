@@ -22,6 +22,68 @@ in pkgs.testers.runNixOSTest {
   requiredFeatures.kvm = false;
   nodes.machine = { ... }: {
     imports = [ module ];
+    # Finite serial-visible observations also run when the driver backdoor
+    # cannot start. They neither gate nor change any observed unit or device.
+    systemd.services.positron-device-observation = {
+      path = [ pkgs.coreutils pkgs.systemd pkgs.procps pkgs.gawk ];
+      serviceConfig = {
+        Type = "oneshot";
+        TimeoutStartSec = 15;
+        TimeoutStopSec = 1;
+        StandardOutput = "journal";
+        StandardError = "journal";
+      };
+      script = ''
+        set +e
+        trap 'echo "positron-device-observation SNAPSHOT-INCOMPLETE"; exit 143' TERM INT
+        observe() {
+          label="$1"
+          shift
+          printf 'positron-device-observation BEGIN %s\n' "$label"
+          timeout --kill-after=1s 2s "$@" 2>&1 | head -c 4096
+          result="''${PIPESTATUS[0]}"
+          printf '\npositron-device-observation END %s status=%s\n' "$label" "$result"
+          if test "$result" -ne 0; then
+            printf 'positron-device-observation ERROR %s\n' "$label"
+          fi
+        }
+        observe units systemctl show --no-pager \
+          --property=Names,ActiveState,SubState,SysFSPath,Result,Job,MainPID,TasksCurrent \
+          dev-hvc0.device dev-ttyAMA0.device systemd-udevd.service
+        for tty in hvc0 ttyAMA0; do
+          observe "$tty-sysfs" ${pkgs.runtimeShell} -c '
+            if test -r "/sys/class/tty/$1/uevent"; then
+              cat "/sys/class/tty/$1/uevent"
+            else
+              echo "MISSING tty sysfs uevent"
+            fi
+          ' sh "$tty"
+          observe "$tty-udev" ${pkgs.runtimeShell} -c '
+            udevadm info --query=property --path="/sys/class/tty/$1" 2>&1 |
+              awk "/^(DEVPATH|DEVNAME|SUBSYSTEM|TAGS|CURRENT_TAGS|SYSTEMD_READY|ID_PROCESSING)=/"
+            exit "''${PIPESTATUS[0]}"
+          ' sh "$tty"
+        done
+        pid=$(timeout --kill-after=1s 2s systemctl show --property=MainPID --value systemd-udevd.service)
+        case "$pid" in
+          ""|0|*[!0-9]*) echo "positron-device-observation MISSING udevd PID" ;;
+          *)
+            observe udevd-status awk '/^(State|Threads):/' "/proc/$pid/status"
+            observe udevd-threads ps -L -p "$pid" -o pid,lwp,stat,wchan,time
+            observe udevd-children ps --ppid "$pid" -o pid,ppid,stat,wchan,time
+            ;;
+        esac
+        echo "positron-device-observation SNAPSHOT-END"
+      '';
+    };
+    systemd.timers.positron-device-observation-first = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = { OnBootSec = "180s"; AccuracySec = "1s"; Unit = "positron-device-observation.service"; };
+    };
+    systemd.timers.positron-device-observation-second = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = { OnBootSec = "380s"; AccuracySec = "1s"; Unit = "positron-device-observation.service"; };
+    };
     virtualisation.memorySize = 2048;
     services.positron = {
       enable = true;
