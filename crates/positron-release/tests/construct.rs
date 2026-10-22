@@ -235,3 +235,51 @@ fn signed_nuget_wrap_binds_the_actual_unsigned_rebuilt_zip() {
         Some(ReleaseError::Unreproducible)
     );
 }
+
+#[test]
+fn full_release_construction_still_requires_every_validation_evidence_result() {
+    for result in [
+        "unit",
+        "integration",
+        "fuzz",
+        "conformance",
+        "fault",
+        "security",
+        "dependency_policy",
+        "secret_scan",
+    ] {
+        for missing in [false, true] {
+            let mut fixture = support::Fixture::new();
+            let id = fixture.inventory.artifacts[0].evidence.clone();
+            let path = fixture.root.join("bundle").join(&id);
+            let mut evidence: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if missing {
+                evidence["results"].as_object_mut().unwrap().remove(result);
+            } else {
+                evidence["results"][result] = serde_json::json!(false);
+            }
+            let bytes = serde_json::to_vec(&evidence).unwrap();
+            std::fs::write(path, &bytes).unwrap();
+            fixture
+                .inventory
+                .files
+                .iter_mut()
+                .find(|file| file.id == id)
+                .unwrap()
+                .identity = FileIdentity::of(&bytes);
+            assert_eq!(
+                construct_release(
+                    &fixture.inventory,
+                    &fixture.root.join("bundle"),
+                    &fixture.rebuild,
+                    &[],
+                    vec![]
+                )
+                .err(),
+                Some(ReleaseError::Unsupported),
+                "{result} missing={missing}"
+            );
+        }
+    }
+}

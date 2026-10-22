@@ -52,6 +52,8 @@ jobs:
       - name: Capture functional output and declared closure
         run: |
           mkdir qualification
+          date -u +%Y-%m-%dT%H:%M:%SZ > qualification/created.txt
+          echo "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.platform.target }}-${{ matrix.build }}" > qualification/build-identity.txt
           cp result/bin/positron qualification/positron
           nix-store --dump "$(readlink result)" > qualification/positron.nar
           umask 077
@@ -64,6 +66,8 @@ jobs:
           nix path-info --recursive --json .#positron > qualification/closure.json
           nix develop --no-update-lock-file --command rustc -vV > qualification/toolchain.txt
           cp flake.lock Cargo.lock rust-toolchain.toml qualification/
+          nix develop --no-update-lock-file --command cargo metadata --locked --format-version 1 > qualification/cargo-metadata.json
+          POSITRON_TEST_NIX_CAPTURE="$PWD/qualification" nix develop --no-update-lock-file --command cargo test --locked --release -p positron-release --lib nix_qualification::capture_nix_build_metadata -- --ignored --exact
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nix-${{ matrix.platform.target }}-${{ matrix.build }}
@@ -99,3 +103,17 @@ jobs:
             POSITRON_TEST_NIX_BINARY_REBUILD="$PWD/qualification/nix-$target-two/positron" \
               cargo test --locked -p positron-release --test built_nix -- --ignored
           done
+      - name: Bind actual current-build staged metadata without claiming publication
+        run: |
+          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+            POSITRON_TEST_TARGET="$target" \
+            POSITRON_TEST_NIX_CAPTURE="$PWD/qualification/nix-$target-one" \
+            POSITRON_TEST_NIX_CAPTURE_REBUILD="$PWD/qualification/nix-$target-two" \
+            POSITRON_TEST_NIX_METADATA_OUT="$PWD/metadata/$target" \
+              cargo test --locked -p positron-release --lib nix_qualification::actual_nix_metadata_is_bound_offline_to_current_build -- --ignored --exact
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nix-current-build-staged-metadata
+          path: metadata/
+          retention-days: 7

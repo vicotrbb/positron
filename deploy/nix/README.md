@@ -58,6 +58,33 @@ SBOMs, license notices, source/toolchain identity, build provenance and detached
 signature through the existing inventory and manifest. Do not substitute the
 recipe for the output NAR or treat package construction as publication.
 
+The native CI comparison also uploads `nix-current-build-staged-metadata`.
+For each exact target it contains the measured executable and NAR, actual Git
+source archive and commit, lockfiles, compiler identity, Cargo package metadata,
+Nix closure, generated SPDX/CycloneDX documents, provenance, and a test-signed
+canonical Kernel manifest referencing the staged inventory. Dependency licenses
+come from captured Cargo metadata; unknown closure licenses remain unknown.
+Compatibility fingerprints identify the captured API, query and receiver source
+definitions and the accepted CRD/operator contracts. They do not assert that a
+not-yet-published compatibility matrix has passed. The format declarations retain
+Catalog Epochs 1/2 readability, current Catalog Epoch 2 writes, and the ADR-0060
+native Backup Epoch 2 mapping.
+
+This is offline current-build identity qualification, with an explicitly public
+test key. It does not install trust, publish artifacts, create an Upgrade target,
+or assert the full release validation evidence closure. The complete synthetic
+release fixture separately tests native cache verification and release-wide
+integration; its synthetic source/version are not current-build provenance.
+Full release construction and verification continue to require every distribution
+surface, all validation evidence, and authorized publication proofs.
+The captured source archive remains an exact hashed build input, not an accepted
+`Source` release artifact. It contains committed TLS/provider test keys, adversarial
+PEM fuzz seeds and credential-shaped upstream examples. The unchanged full scanner
+reports `SecretDetected`; `source-input-scan.json` retains that result. Staged
+qualification measures those input bytes and scans every shipped executable, NAR,
+API and metadata file. It does not turn the source refusal into a successful full
+release secret scan.
+
 Run the independently trusted CLI's complete offline release verification
 before trusting any downloaded output:
 
