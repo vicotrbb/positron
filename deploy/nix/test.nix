@@ -25,7 +25,7 @@ in pkgs.testers.runNixOSTest {
     # Finite serial-visible observations also run when the driver backdoor
     # cannot start. They neither gate nor change any observed unit or device.
     systemd.services.positron-device-observation = {
-      path = [ pkgs.coreutils pkgs.systemd pkgs.procps pkgs.gawk ];
+      path = [ pkgs.coreutils pkgs.systemd pkgs.procps pkgs.gawk pkgs.strace ];
       serviceConfig = {
         Type = "oneshot";
         TimeoutStartSec = 15;
@@ -60,8 +60,21 @@ in pkgs.testers.runNixOSTest {
           ' sh "$tty"
           observe "$tty-udev" ${pkgs.runtimeShell} -c '
             udevadm info --query=property --path="/sys/class/tty/$1" 2>&1 |
-              awk "/^(DEVPATH|DEVNAME|SUBSYSTEM|TAGS|CURRENT_TAGS|SYSTEMD_READY|ID_PROCESSING)=/"
+              awk "/^(DEVPATH|DEVNAME|SUBSYSTEM|TAGS|CURRENT_TAGS|SYSTEMD_READY|ID_PROCESSING|USEC_INITIALIZED)=/"
             exit "''${PIPESTATUS[0]}"
+          ' sh "$tty"
+          observe "$tty-database" ${pkgs.runtimeShell} -c '
+            device=$(cat "/sys/class/tty/$1/dev")
+            case "$device" in
+              ""|*[!0-9:]*) echo "MISSING tty device number" ;;
+              *)
+                if test -r "/run/udev/data/c$device"; then
+                  awk "/^(I:[0-9]+|G:systemd|Q:systemd|E:SYSTEMD_READY=[01])$/" "/run/udev/data/c$device"
+                else
+                  echo "MISSING tty device database"
+                fi
+                ;;
+            esac
           ' sh "$tty"
         done
         pid=$(timeout --kill-after=1s 2s systemctl show --property=MainPID --value systemd-udevd.service)
@@ -69,6 +82,10 @@ in pkgs.testers.runNixOSTest {
           ""|0|*[!0-9]*) echo "positron-device-observation MISSING udevd PID" ;;
           *)
             observe udevd-status awk '/^(State|Threads):/' "/proc/$pid/status"
+            # Only syscall counts for the manager: no child tracing or arguments.
+            # SIGINT first detaches and prints the summary; timeout/error labels
+            # remain visible if attach or bounded summary collection fails.
+            observe udevd-syscalls timeout --signal=INT --kill-after=1s 1s strace -c -p "$pid"
             observe udevd-threads ps -L -p "$pid" -o pid,lwp,stat,wchan,time
             observe udevd-children ps --ppid "$pid" -o pid,ppid,stat,wchan,time
             ;;
