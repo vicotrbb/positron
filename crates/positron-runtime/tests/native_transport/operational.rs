@@ -224,7 +224,8 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
             ("Accept", "application/openmetrics-text; version=1.0.0"),
         ],
         b"",
-    )?;
+    )
+    .map_err(|error| format!("operational metrics scrape: {error}"))?;
     assert_status(scrape.clone(), 200);
     assert!(scrape.ends_with("# EOF\n"));
     assert!(scrape.contains(&format!(
@@ -272,17 +273,26 @@ fn operational_probe(
             .filter(|remaining| !remaining.is_zero())
             .ok_or("operational probe deadline")
     };
-    let mut stream = TcpStream::connect_timeout(&address, remaining()?)?;
+    let mut stream = TcpStream::connect_timeout(&address, remaining()?)
+        .map_err(|error| format!("operational probe connect: {error}"))?;
     let method = if body.is_empty() { "GET" } else { "POST" };
     let mut request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
     request.extend_from_slice(body);
-    stream.set_write_timeout(Some(remaining()?))?;
-    stream.write_all(&request)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    stream
+        .set_write_timeout(Some(remaining()?))
+        .map_err(|error| format!("operational probe write timeout: {error}"))?;
+    stream
+        .write_all(&request)
+        .map_err(|error| format!("operational probe write: {error}"))?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|error| format!("operational probe shutdown: {error}"))?;
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {
-        stream.set_read_timeout(Some(remaining()?))?;
+        stream
+            .set_read_timeout(Some(remaining()?))
+            .map_err(|error| format!("operational probe read timeout: {error}"))?;
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
@@ -292,7 +302,7 @@ fn operational_probe(
                 bytes.extend_from_slice(&buffer[..count]);
             },
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(format!("operational probe read: {error}").into()),
         }
     }
     Ok(String::from_utf8(bytes)?)
