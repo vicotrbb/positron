@@ -122,9 +122,80 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
             .query_log_bodies(
                 &query,
                 "logs | range query_time 0 100 | limit 16",
-                QueryBudget::new(1, 16, 16, 1_048_576, 1_048_576, 60)?
+                QueryBudget::new(1_048_576, 16, 16, 1_048_576, 20_000_000, 60)?
             ),
         Err(positron_runtime::ServiceFailure::CapacityUnavailable)
+    );
+    let admission_scrape = http(
+        operations,
+        "GET",
+        "/metrics",
+        &[
+            ("Authorization", &format!("Bearer {administrator}")),
+            ("Accept", "application/openmetrics-text; version=1.0.0"),
+        ],
+        b"",
+    )
+    .map_err(|error| format!("operational admission metrics scrape: {error}"))?;
+    assert_status(admission_scrape.clone(), 200);
+    assert!(
+        admission_scrape
+            .lines()
+            .filter(|line| line.starts_with("positron_query_budget_failures_total{"))
+            .all(|line| line
+                .rsplit_once(' ')
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+                == Some(0)),
+        "an admission-refused query must not be credited with an execution budget dimension"
+    );
+
+    use positron_api::log_query as log_api;
+    let budget_response =
+        log_api::LogQueryServiceClient::new(log_api::LogQueryTransport::PlaintextOptOut {
+            endpoint: api,
+        })?
+        .execute(
+            &query,
+            &log_api::LogQueryRequest {
+                pipeline: "logs | range query_time 0 100 | limit 16".into(),
+                budget: Some(log_api::LogQueryBudget {
+                    scanned_bytes: 1,
+                    decoded_records: 16,
+                    output_rows: 16,
+                    output_bytes: 16_384,
+                    memory_bytes: 1_048_576,
+                    cpu_work_units: 15,
+                    wall_seconds: 5,
+                    maximum_time_range_nanoseconds: 100,
+                }),
+            },
+        )?;
+    let rendered = format!("{budget_response:?}");
+    for secret in [&administrator, &ingest, &query] {
+        assert!(
+            !rendered.contains(secret.as_str()),
+            "query response exposed a credential"
+        );
+    }
+    let Some(log_api::log_query_event::Event::Terminal(terminal)) = budget_response
+        .events
+        .last()
+        .and_then(|event| event.event.as_ref())
+    else {
+        return Err("missing actual query budget terminal".into());
+    };
+    assert_eq!(
+        (terminal.state.as_str(), terminal.reason.as_str()),
+        ("incomplete", "budget_exhausted")
+    );
+    assert_eq!(
+        terminal
+            .stats
+            .as_ref()
+            .ok_or("missing query budget stats")?
+            .limiting_budget
+            .as_deref(),
+        Some("scanned_bytes")
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut completed_requests = 0;
@@ -164,7 +235,7 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
                         assert_eq!(
                             process.services().ok_or("query services")?.query_log_bodies(
                                 &query, "logs | range query_time 0 100 | limit 16",
-                                QueryBudget::new(1, 16, 16, 1_048_576, 1_048_576, 60)?
+                                QueryBudget::new(1_048_576, 16, 16, 1_048_576, 20_000_000, 60)?
                             ),
                             Err(positron_runtime::ServiceFailure::CapacityUnavailable)
                         );
@@ -234,9 +305,31 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
     assert!(scrape.contains(&format!(
         "positron_queries_total{{outcome=\"capacity_rejected\"}} {query_requests}\n"
     )));
-    assert!(scrape.contains(&format!(
-        "positron_query_budget_failures_total{{dimension=\"scanned_bytes\"}} {query_requests}\n"
-    )));
+    assert!(scrape.contains("positron_queries_total{outcome=\"success\"} 1\n"));
+    assert!(
+        scrape
+            .lines()
+            .filter(
+                |line| line.starts_with("positron_query_budget_failures_total{")
+                    && !line.starts_with(
+                        "positron_query_budget_failures_total{dimension=\"scanned_bytes\"}"
+                    )
+            )
+            .all(|line| line
+                .rsplit_once(' ')
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+                == Some(0)),
+        "no other execution budget dimension was exercised"
+    );
+    let scanned_budget_failures = scrape.lines().find_map(|line| {
+        line.strip_prefix("positron_query_budget_failures_total{dimension=\"scanned_bytes\"} ")
+            .and_then(|value| value.parse::<u64>().ok())
+    });
+    assert_eq!(
+        scanned_budget_failures,
+        Some(1),
+        "only the proven scanned-budget execution must increment its dimension counter"
+    );
     assert!(scrape.contains("positron_security_warning{warning=\"otlp_http_plaintext\"} 1\n"));
     assert!(
         scrape
