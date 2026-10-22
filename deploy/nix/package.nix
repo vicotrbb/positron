@@ -16,8 +16,8 @@ in
   cargoLock.lockFile = lockFile;
   cargoBuildFlags = [ "--package" "positron" ];
   preBuild = ''
-    export CFLAGS="''${CFLAGS:-} -fdebug-prefix-map=$PWD=/positron-source"
-    export RUSTFLAGS="''${RUSTFLAGS:-} --remap-path-prefix=$PWD=/positron-source ${pkgs.lib.optionalString pkgs.stdenv.isDarwin "-C link-arg=-Wl,-reproducible"}"
+    export CFLAGS="''${CFLAGS:-} -ffile-prefix-map=$NIX_BUILD_TOP=/positron-build"
+    export RUSTFLAGS="''${RUSTFLAGS:-} --remap-path-prefix=$NIX_BUILD_TOP=/positron-build ${pkgs.lib.optionalString pkgs.stdenv.isDarwin "-C link-arg=-Wl,-reproducible -C link-arg=-Wl,-oso_prefix,$NIX_BUILD_TOP"}"
   '';
   # These public contracts run within the sandbox without host service access.
   checkPhase = ''
