@@ -1,6 +1,6 @@
 use super::*;
 
-fn assert_profile_refusal(
+pub(super) fn assert_profile_refusal(
     document_path: &std::path::Path,
     document: &str,
     source: &str,

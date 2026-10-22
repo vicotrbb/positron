@@ -684,3 +684,6 @@ mod listener_failures;
 
 #[path = "configuration_cli/listener_profile_failures.rs"]
 mod listener_profile_failures;
+
+#[path = "configuration_cli/operator_safety_failures.rs"]
+mod operator_safety_failures;
