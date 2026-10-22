@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "repository/status_http.rs"]
+mod status_http;
 use crate::services::repository_administration::RepositoryAdmission;
 use positron_governance::{AdministrativeIdempotencyKey, DurableOperationStatus, RepositoryAction};
 use std::os::unix::fs::PermissionsExt;
@@ -444,8 +447,8 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         operation_id: None,
     };
     assert!(client.manage(&ingest, &status).is_err());
-    let current = client
-        .manage(&administrator, &status)
+    let admission_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let current = status_http::inspect(&client, &administrator, &status, admission_deadline)
         .map_err(|failure| format!("repository HTTP stage=initial-status: {failure:?}"))?;
     let mut request = RepositoryRequest {
         action: "init".into(),
@@ -458,16 +461,22 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         repository_id: Some("62626262-6262-4262-8262-626262626262".into()),
         operation_id: None,
     };
-    let admission_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut accepted = loop {
-        match client.manage(&administrator, &request) {
+        let remaining = admission_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("repository HTTP admission deadline".into());
+        }
+        let result = client.manage_with_timeout(&administrator, &request, remaining);
+        if std::time::Instant::now() >= admission_deadline {
+            return Err("repository HTTP admission deadline".into());
+        }
+        match result {
             Ok(accepted) => break accepted,
             Err(positron_api::repository::RepositoryServiceClientFailure::StaleGeneration)
                 if std::time::Instant::now() < admission_deadline =>
             {
                 request.expected_catalog_generation = Some(
-                    client
-                        .manage(&administrator, &status)
+                    status_http::inspect(&client, &administrator, &status, admission_deadline)
                         .map_err(|failure| {
                             format!("repository HTTP stage=generation-refresh: {failure:?}")
                         })?
@@ -513,8 +522,7 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
             ).into());
         }
         std::thread::sleep(Duration::from_millis(25));
-        accepted = client
-            .manage(&administrator, &query)
+        accepted = status_http::inspect(&client, &administrator, &query, deadline)
             .map_err(|failure| format!("repository HTTP stage=operation-status: {failure:?}"))?;
     }
     assert_eq!(
