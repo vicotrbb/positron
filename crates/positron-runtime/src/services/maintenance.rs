@@ -1879,22 +1879,11 @@ pub(super) fn drive_upgrade_backup(
     // Recovery intentionally retains the authenticated lifecycle anchor. An
     // accepted operation may be ahead of that conservative clock after restart;
     // only the clock owner can make its next transition eligible.
-    #[cfg(feature = "test-support")]
-    let lifecycle_started = std::time::Instant::now();
     let lifecycle_time = crate::upgrade::await_lifecycle_time(
         &services.instance,
         operation.updated_at_unix_seconds(),
         deadline,
     );
-    #[cfg(feature = "test-support")]
-    if lifecycle_started.elapsed() >= std::time::Duration::from_secs(1) {
-        super::backup_administration::report_verification_timed_turn(
-            "trusted_time",
-            None,
-            lifecycle_started.elapsed(),
-            deadline.saturating_duration_since(std::time::Instant::now()),
-        );
-    }
     #[cfg(test)]
     if lifecycle_time == Err(UpgradeFailure::CapacityUnavailable) {
         eprintln!("upgrade-backup-capacity stage=trusted-time-wait");
@@ -1910,8 +1899,6 @@ pub(super) fn drive_upgrade_backup(
         .map_err(|_| UpgradeFailure::PersistenceUnavailable)?
         .checkpoint()
         .map(|checkpoint| checkpoint.opaque_progress().to_vec());
-    #[cfg(feature = "test-support")]
-    let admission_started = std::time::Instant::now();
     let execution = {
         let _gate = services
             .catalog_operation()
@@ -1931,15 +1918,6 @@ pub(super) fn drive_upgrade_backup(
                 .map_err(|_| UpgradeFailure::InvalidRequest)?,
         )
     };
-    #[cfg(feature = "test-support")]
-    if admission_started.elapsed() >= std::time::Duration::from_secs(1) {
-        super::backup_administration::report_verification_timed_turn(
-            "coordinator_admission",
-            None,
-            admission_started.elapsed(),
-            deadline.saturating_duration_since(std::time::Instant::now()),
-        );
-    }
     #[cfg(feature = "test-support")]
     if execution.is_err() {
         super::backup_administration::report_verification_turn("coordinator_start_refused", None);
@@ -1966,7 +1944,6 @@ pub(super) fn drive_upgrade_backup(
                     _ => None,
                 };
                 super::backup_administration::report_verification_timed_turn(
-                    "step",
                     work,
                     elapsed,
                     deadline.saturating_duration_since(std::time::Instant::now()),
@@ -1989,11 +1966,9 @@ pub(super) fn drive_upgrade_backup(
         }
         if std::time::Instant::now() >= deadline {
             #[cfg(feature = "test-support")]
-            super::backup_administration::report_verification_timed_turn(
+            super::backup_administration::report_verification_turn(
                 "deadline_discard",
                 work.as_ref(),
-                step_started.elapsed(),
-                deadline.saturating_duration_since(std::time::Instant::now()),
             );
             *work = None;
             let binding = positron_kernel::RepositoryOperationBinding::from_execution(owner)
