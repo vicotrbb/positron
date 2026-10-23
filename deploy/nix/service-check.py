@@ -1,6 +1,9 @@
 """Public telemetry outcomes for the NixOS VM. Credentials never enter argv or logs."""
 import json
+import os
 import pathlib
+import re
+import select
 import subprocess
 import sys
 import time
@@ -55,6 +58,46 @@ else:
             assert response["events"][-1]["terminal"]["state"] == "complete", "query did not complete"
             break
         if time.monotonic() >= deadline or b"capacity unavailable" not in result.stderr:
+            # This is the first selected admitted wire query in each server process,
+            # not necessarily this failed attempt after earlier capacity retries.
+            # Missing records never prove that query execution was not reached.
+            elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
+            records = []
+            collection = "unavailable"
+            if time.monotonic() < deadline:
+                try:
+                    with subprocess.Popen(["journalctl", "--unit=positron.service", "--output=cat",
+                        "--no-pager", "--lines=1", "--follow", "--grep=^positron-query-phase-probe pid=[0-9]{1,10} gate_us=[0-9]{1,20} setup_us=[0-9]{1,20} query_us=[0-9]{1,20} terminal=[0-3] wall_seconds=[0-9]{1,20} limiting=[0-8]$"],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as journal:
+                        captured = bytearray()
+                        try:
+                            while len(captured) < 512:
+                                remaining = deadline - time.monotonic()
+                                if remaining <= 0 or not select.select([journal.stdout], [], [], remaining)[0]:
+                                    break
+                                chunk = os.read(journal.stdout.fileno(), 512 - len(captured))
+                                if not chunk:
+                                    break
+                                captured.extend(chunk)
+                                if captured.endswith(b"\n"):
+                                    break
+                        finally:
+                            if journal.poll() is None:
+                                journal.kill()
+                            journal.wait()
+                    records = bytes(captured).splitlines()
+                    if len(captured) < 512 and captured.endswith(b"\n") and len(records) == 1 and all(
+                        re.fullmatch(rb"positron-query-phase-probe pid=[0-9]{1,10} gate_us=[0-9]{1,20} setup_us=[0-9]{1,20} query_us=[0-9]{1,20} terminal=[0-3] wall_seconds=[0-9]{1,20} limiting=[0-8]", line)
+                        for line in records):
+                        collection = "complete"
+                    else:
+                        records = []
+                except (OSError, ValueError):
+                    records = []
+            for line in records:
+                print(line.decode("ascii"), file=sys.stderr)
+            if collection != "complete":
+                print(f"positron-query-phase-probe collection={collection}", file=sys.stderr)
             failure = {
                 b"positron: invalid bounded query request": "invalid_request",
                 b"positron: query authentication rejected": "authentication_rejected",
@@ -62,7 +105,6 @@ else:
                 b"positron: query unavailable; inspect instance readiness": "query_unavailable",
                 b"positron: query transport or response unavailable": "transport",
             }.get(result.stderr.strip(), "other")
-            elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
             raise RuntimeError(f"public query failed: code={failure} returncode={result.returncode} "
                 f"attempt={attempt} elapsed_ms={elapsed_ms}")
         time.sleep(1)

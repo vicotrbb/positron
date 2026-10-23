@@ -53,12 +53,19 @@ pub(in crate::services) fn execute(
         .map_err(|_| ServiceFailure::CapacityUnavailable)?;
     // Revalidation in the shared executor closes revocation races after bounded
     // request decoding and response admission, without a second authority.
+    static PROBE_SELECTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let probe_started = (std::env::var_os("POSITRON_117_QUERY_PHASE_PROBE").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+        && !PROBE_SELECTED.swap(true, std::sync::atomic::Ordering::Relaxed))
+    .then(std::time::Instant::now);
     let bytes = super::with_log_query_events(
         services,
         bearer,
         services.instance.logs_shard,
         &request.pipeline,
         budget,
+        probe_started,
         render,
     )?;
     Ok((bytes, reservation.transfer()))
