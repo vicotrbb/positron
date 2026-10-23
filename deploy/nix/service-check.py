@@ -43,7 +43,9 @@ else:
         "scannedBytes": "1048576", "decodedRecords": "16", "outputRows": "16",
         "outputBytes": "16384", "memoryBytes": "1048576", "cpuWorkUnits": "15",
         "wallSeconds": "5", "maximumTimeRangeNanoseconds": "100"}}))
+    attempt = 0
     while True:
+        attempt += 1
         result = subprocess.run(["positron", "query", "--endpoint", "127.0.0.1:4311",
             "--credential-stdin", "--allow-plaintext", "--request", str(query)],
             input=claim["query_secret"].encode(), capture_output=True, timeout=10)
@@ -52,5 +54,14 @@ else:
             assert b"complete" in result.stdout, "query did not complete"
             break
         if time.monotonic() >= deadline or b"capacity unavailable" not in result.stderr:
-            raise RuntimeError("public query failed")
+            failure = {
+                b"positron: invalid bounded query request": "invalid_request",
+                b"positron: query authentication rejected": "authentication_rejected",
+                b"positron: query capacity unavailable; retry after backoff": "capacity_unavailable",
+                b"positron: query unavailable; inspect instance readiness": "query_unavailable",
+                b"positron: query transport or response unavailable": "transport",
+            }.get(result.stderr.strip(), "other")
+            elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
+            raise RuntimeError(f"public query failed: code={failure} returncode={result.returncode} "
+                f"attempt={attempt} elapsed_ms={elapsed_ms}")
         time.sleep(1)
