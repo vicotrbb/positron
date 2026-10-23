@@ -10,7 +10,7 @@ pub(crate) struct Candidate {
     pub source_commit: String,
     pub candidate_commit: String,
 }
-fn checked(command: &mut Command) -> Result<std::process::Output> {
+pub(super) fn checked(command: &mut Command) -> Result<std::process::Output> {
     let output = command.output()?;
     if !output.status.success() {
         return Err(format!(
@@ -27,7 +27,7 @@ pub(crate) fn prepare() -> Result<Candidate> {
         .canonicalize()?;
     prepare_in(&workspace)
 }
-fn prepare_in(workspace: &Path) -> Result<Candidate> {
+pub(super) fn prepare_in(workspace: &Path) -> Result<Candidate> {
     let commit = String::from_utf8(
         checked(
             Command::new("git")
@@ -163,7 +163,3 @@ fn prepare_in(workspace: &Path) -> Result<Candidate> {
         candidate_commit,
     })
 }
-
-#[cfg(test)]
-#[path = "upgrade_candidate_tests.rs"]
-mod tests;

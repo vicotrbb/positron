@@ -14,7 +14,7 @@ fn workspace(wrapper: Option<&str>) -> Result<crate::Fixture> {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir(&root)?;
-    let fixture = crate::Fixture { root, child: None };
+    let fixture = crate::Fixture { root };
     fs::create_dir(fixture.root.join("src"))?;
     fs::write(
         fixture.root.join("Cargo.toml"),
