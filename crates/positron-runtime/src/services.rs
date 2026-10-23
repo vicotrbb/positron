@@ -824,6 +824,18 @@ impl ServiceHandle {
         body: &[u8],
     ) -> Result<(Vec<u8>, TransferredResourceReservation), (u16, &'static str)> {
         let started = std::time::Instant::now();
+        static QUERY_OWNER_PROBE_SELECTED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let probe_selected = std::env::var_os("POSITRON_117_QUERY_OWNER_PROBE").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+            && !QUERY_OWNER_PROBE_SELECTED.swap(true, std::sync::atomic::Ordering::Relaxed);
+        let probe_entry_written = probe_selected && {
+            let record = format!(
+                "\npositron-query-owner-probe stage=entry elapsed_us=0 pid={}\n",
+                std::process::id()
+            );
+            std::io::Write::write_all(&mut std::io::stderr().lock(), record.as_bytes()).is_ok()
+        };
         let result = query::execute(self, bearer, body).map_err(|failure| match failure {
             ServiceFailure::Unauthorized => (401, "authentication_rejected"),
             ServiceFailure::InvalidRequest
@@ -840,6 +852,19 @@ impl ServiceHandle {
                 crate::operational::RequestOutcome::from_status(status),
                 started.elapsed(),
             );
+        }
+        if probe_selected {
+            let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let record = format!(
+                "\npositron-query-owner-probe stage=return elapsed_us={elapsed_us} pid={} entry_written={probe_entry_written}\n",
+                std::process::id()
+            );
+            // Diagnostic delivery is best effort; even its failure preserves the
+            // original query result and the existing telemetry behavior.
+            if std::io::Write::write_all(&mut std::io::stderr().lock(), record.as_bytes()).is_err()
+            {
+                return result;
+            }
         }
         result
     }

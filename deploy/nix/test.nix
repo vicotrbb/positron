@@ -28,6 +28,7 @@ in pkgs.testers.runNixOSTest {
   requiredFeatures.kvm = false;
   nodes.machine = { lib, ... }: {
     imports = [ module ];
+    systemd.services.positron.environment.POSITRON_117_QUERY_OWNER_PROBE = "1";
     systemd.services.systemd-udevd.serviceConfig.ExecStart = lib.mkForce [
       ""
       "${serviceUdev}/lib/systemd/systemd-udevd"

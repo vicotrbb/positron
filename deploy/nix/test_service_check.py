@@ -195,3 +195,80 @@ class BackupOutcomeKnowledge(unittest.TestCase):
                 self.assertEqual(sum(command[1:3] == ["backup", "wait"]
                                      for command in self.commands), 1)
                 self.assertEqual(self.saved, [])
+
+
+class QueryOwnerDiagnostics(unittest.TestCase):
+    entry = b"positron-query-owner-probe stage=entry elapsed_us=0 pid=123"
+    returned = b"positron-query-owner-probe stage=return elapsed_us=5001000 pid=123 entry_written=true"
+
+    def run_query(self, queries, journal):
+        commands = []
+        output = io.StringIO()
+        clock = [0]
+
+        def execute(command, **options):
+            commands.append((command, options))
+            if command[0] == "positron":
+                return queries.pop(0)
+            self.assertEqual(command[0], "journalctl")
+            if isinstance(journal, BaseException):
+                raise journal
+            return journal
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        failure = None
+        with mock.patch.object(pathlib.Path, "read_text", return_value="query_secret=test-only\n"), \
+                mock.patch.object(pathlib.Path, "write_text"), \
+                mock.patch.object(sys, "argv", ["service-check.py", "query"]), \
+                mock.patch("subprocess.run", side_effect=execute), \
+                mock.patch("time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("time.sleep", side_effect=sleep), contextlib.redirect_stderr(output):
+            try:
+                runpy.run_path(str(pathlib.Path(__file__).with_name("service-check.py")))
+            except RuntimeError as error:
+                failure = str(error)
+        return failure, output.getvalue(), commands
+
+    @staticmethod
+    def result(code=2, stdout=b"", stderr=b"positron: query transport or response unavailable"):
+        return types.SimpleNamespace(returncode=code, stdout=stdout, stderr=stderr)
+
+    def test_forwards_only_two_closed_records_and_preserves_original_failure(self):
+        failure, output, commands = self.run_query([self.result()],
+            self.result(0, self.entry + b"\n" + self.returned + b"\n"))
+        self.assertEqual(output.splitlines(), [self.entry.decode(), self.returned.decode()])
+        self.assertEqual(failure, "public query failed: code=transport returncode=2 attempt=1 elapsed_ms=0")
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0][1]["timeout"], 10)
+        self.assertEqual(commands[1][1]["timeout"], 3)
+        self.assertIn("--lines=2", commands[1][0])
+
+    def test_excess_unknown_and_raw_canary_records_never_escape(self):
+        for records in [self.entry + b"\n" + self.returned + b"\n" + self.entry,
+                        b"secret-canary", self.entry + b" secret-canary", b""]:
+            with self.subTest(kind="untrusted journal output"):
+                failure, output, _ = self.run_query([self.result()], self.result(0, records))
+                self.assertNotIn("secret-canary", output)
+                self.assertEqual(output, "positron-query-owner-probe collection=unavailable\n")
+                self.assertIn("code=transport", failure)
+
+    def test_timeout_oserror_and_journal_failure_remain_unavailable(self):
+        for journal in [subprocess.TimeoutExpired("journalctl", 3), OSError("secret-canary"),
+                        self.result(1, self.entry, b"secret-canary")]:
+            with self.subTest(kind=type(journal).__name__):
+                failure, output, _ = self.run_query([self.result()], journal)
+                self.assertNotIn("secret-canary", output)
+                self.assertEqual(output, "positron-query-owner-probe collection=unavailable\n")
+                self.assertIn("code=transport", failure)
+
+    def test_capacity_retries_identical_query_and_success_never_collects(self):
+        complete = self.result(0, json.dumps(QueryCompletion.response("complete")).encode(), b"")
+        failure, output, commands = self.run_query([
+            self.result(stderr=b"positron: query capacity unavailable; retry after backoff"), complete],
+            OSError("journal must not run"))
+        self.assertIsNone(failure)
+        self.assertEqual(output, "")
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0], commands[1])

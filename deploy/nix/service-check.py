@@ -1,6 +1,7 @@
 """Public telemetry outcomes for the NixOS VM. Credentials never enter argv or logs."""
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -55,6 +56,24 @@ else:
             assert response["events"][-1]["terminal"]["state"] == "complete", "query did not complete"
             break
         if time.monotonic() >= deadline or b"capacity unavailable" not in result.stderr:
+            # These are the first selected public query in each server process,
+            # not necessarily this failed attempt after earlier capacity retries.
+            # Missing records never prove that query execution was not reached.
+            try:
+                journal = subprocess.run(["journalctl", "--unit=positron.service", "--output=cat",
+                    "--no-pager", "--lines=2", "--grep=^positron-query-owner-probe stage=(entry|return) elapsed_us=[0-9]{1,20} pid=[0-9]{1,10}( entry_written=(true|false))?$"],
+                    capture_output=True, timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                print("positron-query-owner-probe collection=unavailable", file=sys.stderr)
+            else:
+                records = journal.stdout.splitlines()
+                if journal.returncode != 0 or not records or len(records) > 2 or any(
+                    re.fullmatch(rb"positron-query-owner-probe stage=(entry|return) elapsed_us=[0-9]{1,20} pid=[0-9]{1,10}( entry_written=(true|false))?", line) is None
+                    for line in records):
+                    print("positron-query-owner-probe collection=unavailable", file=sys.stderr)
+                else:
+                    for line in records:
+                        print(line.decode("ascii"), file=sys.stderr)
             failure = {
                 b"positron: invalid bounded query request": "invalid_request",
                 b"positron: query authentication rejected": "authentication_rejected",
