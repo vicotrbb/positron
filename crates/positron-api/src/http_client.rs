@@ -78,9 +78,6 @@ impl HttpClient {
         if timeout.is_zero() {
             return Err(());
         }
-        let query_probe = path == crate::log_query::HTTP_PATH
-            && std::env::var_os("POSITRON_117_QUERY_PROBE").as_deref()
-                == Some(std::ffi::OsStr::new("1"));
         let response = self
             .client
             .post(format!("{}{path}", self.endpoint))
@@ -89,14 +86,6 @@ impl HttpClient {
             .body(body)
             .timeout(timeout.min(DEFAULT_REQUEST_TIMEOUT))
             .send()
-            .inspect_err(|error| {
-                if query_probe {
-                    eprintln!(
-                        "positron-query-probe stage=send timeout={}",
-                        error.is_timeout()
-                    );
-                }
-            })
             .map_err(|_| ())?;
         let status = response.status().as_u16();
         let limit = response_limit
@@ -107,17 +96,6 @@ impl HttpClient {
         response
             .take(limit)
             .read_to_end(&mut bytes)
-            .inspect_err(|error| {
-                if query_probe {
-                    let timeout = error
-                        .get_ref()
-                        .and_then(|source| source.downcast_ref::<reqwest::Error>())
-                        .map_or("unknown", |source| {
-                            if source.is_timeout() { "true" } else { "false" }
-                        });
-                    eprintln!("positron-query-probe stage=read timeout={timeout}");
-                }
-            })
             .map_err(|_| ())?;
         if bytes.len() > response_limit {
             return Err(());

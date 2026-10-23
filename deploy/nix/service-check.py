@@ -1,8 +1,6 @@
 """Public telemetry outcomes for the NixOS VM. Credentials never enter argv or logs."""
 import json
 import pathlib
-import os
-import re
 import subprocess
 import sys
 import time
@@ -50,29 +48,20 @@ else:
         attempt += 1
         result = subprocess.run(["positron", "query", "--endpoint", "127.0.0.1:4311",
             "--credential-stdin", "--allow-plaintext", "--request", str(query)],
-            input=claim["query_secret"].encode(), capture_output=True, timeout=10,
-            env={**os.environ, "POSITRON_117_QUERY_PROBE": "1"})
+            input=claim["query_secret"].encode(), capture_output=True, timeout=10)
         if result.returncode == 0:
             assert result.stdout.count(marker.encode()) == 1, "acknowledged record missing or duplicated"
             response = json.loads(result.stdout)
             assert response["events"][-1]["terminal"]["state"] == "complete", "query did not complete"
             break
         if time.monotonic() >= deadline or b"capacity unavailable" not in result.stderr:
-            probe_lines = [line for line in result.stderr.splitlines()
-                if re.fullmatch(rb"positron-query-probe stage=(send|read) timeout=(true|false|unknown)", line)]
-            if len(probe_lines) == 1:
-                print(probe_lines[0].decode("ascii"), file=sys.stderr)
-            elif len(probe_lines) > 1:
-                print("positron-query-probe incomplete=multiple", file=sys.stderr)
-            classification_stderr = b"\n".join(line for line in result.stderr.splitlines()
-                if line not in probe_lines)
             failure = {
                 b"positron: invalid bounded query request": "invalid_request",
                 b"positron: query authentication rejected": "authentication_rejected",
                 b"positron: query capacity unavailable; retry after backoff": "capacity_unavailable",
                 b"positron: query unavailable; inspect instance readiness": "query_unavailable",
                 b"positron: query transport or response unavailable": "transport",
-            }.get(classification_stderr.strip(), "other")
+            }.get(result.stderr.strip(), "other")
             elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
             raise RuntimeError(f"public query failed: code={failure} returncode={result.returncode} "
                 f"attempt={attempt} elapsed_ms={elapsed_ms}")
