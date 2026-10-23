@@ -158,7 +158,7 @@ pub(super) fn query_log_bodies(
     source: &str,
     budget: QueryBudget,
 ) -> Result<Vec<String>, ServiceFailure> {
-    with_log_query_events(services, bearer, shard, source, budget, None, |events| {
+    with_log_query_events(services, bearer, shard, source, budget, |events| {
         collect_query_bodies(events)
     })
 }
@@ -187,13 +187,11 @@ fn with_log_query_events<T>(
     shard: positron_domain::routing::VirtualShardId,
     source: &str,
     budget: QueryBudget,
-    probe_started: Option<std::time::Instant>,
     consume: impl FnOnce(
         &mut dyn Iterator<Item = positron_query::QueryEvent>,
     ) -> Result<T, ServiceFailure>,
 ) -> Result<T, ServiceFailure> {
     let _catalog_operation = services.catalog_operation()?;
-    let gate_elapsed = probe_started.map(|started| started.elapsed());
     let instance = &services.instance;
     let context = authorize(services, bearer)?;
     let catalog = Catalog::open(
@@ -231,7 +229,6 @@ fn with_log_query_events<T>(
         Some(resolver) => service.with_export_destination_resolver(Arc::clone(resolver)),
         None => service,
     };
-    let setup_elapsed = probe_started.map(|started| started.elapsed());
     let query = service
         .plan_pipeline(context, source, budget)
         .map_err(|failure| {
@@ -260,69 +257,12 @@ fn with_log_query_events<T>(
     // before yielding this stream. Wake only after that durable transition so
     // the registered worker cannot consume a pre-publication signal.
     services.notify_maintenance_worker();
-    let mut terminal = 0_u8;
-    let mut wall_seconds = 0_u64;
-    let mut limiting = 0_u8;
-    let result = consume(&mut events.inspect(|event| {
+    consume(&mut events.inspect(|event| {
         if let positron_query::QueryEvent::Terminal(positron_query::QueryTerminal::Incomplete(
             incomplete,
         )) = event
         {
             services.record_query_budget(incomplete.stats().limiting_budget());
         }
-        if probe_started.is_some() {
-            let stats = match event {
-                positron_query::QueryEvent::Terminal(positron_query::QueryTerminal::Complete(
-                    stats,
-                )) => {
-                    terminal = 1;
-                    Some(*stats)
-                },
-                positron_query::QueryEvent::Terminal(
-                    positron_query::QueryTerminal::Incomplete(value),
-                ) => {
-                    terminal = 2;
-                    Some(value.stats())
-                },
-                positron_query::QueryEvent::Terminal(positron_query::QueryTerminal::Continued(
-                    _,
-                )) => {
-                    terminal = 3;
-                    None
-                },
-                _ => None,
-            };
-            if let Some(stats) = stats {
-                wall_seconds = stats.wall_seconds();
-                limiting = match stats.limiting_budget() {
-                    None => 0,
-                    Some(positron_query::QueryBudgetDimension::ScannedBytes) => 1,
-                    Some(positron_query::QueryBudgetDimension::DecodedRecords) => 2,
-                    Some(positron_query::QueryBudgetDimension::OutputRows) => 3,
-                    Some(positron_query::QueryBudgetDimension::OutputBytes) => 4,
-                    Some(positron_query::QueryBudgetDimension::MemoryBytes) => 5,
-                    Some(positron_query::QueryBudgetDimension::CpuWorkUnits) => 6,
-                    Some(positron_query::QueryBudgetDimension::WallSeconds) => 7,
-                    Some(positron_query::QueryBudgetDimension::MaximumTimeRangeNanoseconds) => 8,
-                };
-            }
-        }
-    }));
-    if let (Some(started), Some(gate), Some(setup)) = (probe_started, gate_elapsed, setup_elapsed) {
-        let micros =
-            |duration: std::time::Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
-        let gate_us = micros(gate);
-        let setup_us = micros(setup.saturating_sub(gate));
-        // This includes planning, schema, lease publication, lazy execution and
-        // response consumption; it is not a pure executor CPU/wall measurement.
-        let query_us = micros(started.elapsed().saturating_sub(setup));
-        let record = format!(
-            "\npositron-query-phase-probe pid={} gate_us={gate_us} setup_us={setup_us} query_us={query_us} terminal={terminal} wall_seconds={wall_seconds} limiting={limiting}\n",
-            std::process::id()
-        );
-        if std::io::Write::write_all(&mut std::io::stderr().lock(), record.as_bytes()).is_err() {
-            return result;
-        }
-    }
-    result
+    }))
 }

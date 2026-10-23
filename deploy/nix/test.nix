@@ -26,11 +26,8 @@ in pkgs.testers.runNixOSTest {
   name = "positron-service";
   # Exercise the same guest on builders without nested virtualization as well.
   requiredFeatures.kvm = false;
-  nodes.machine = { lib, config, ... }: {
+  nodes.machine = { lib, ... }: {
     imports = [ module ];
-    systemd.services.positron = lib.mkIf config.services.positron.enable {
-      environment.POSITRON_117_QUERY_PHASE_PROBE = "1";
-    };
     systemd.services.systemd-udevd.serviceConfig.ExecStart = lib.mkForce [
       ""
       "${serviceUdev}/lib/systemd/systemd-udevd"
