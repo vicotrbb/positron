@@ -110,17 +110,7 @@ fn query_response(
             .take()
             .ok_or("missing query credential pipe")?
             .write_all(query_secret.as_bytes())?;
-        let output = loop {
-            if child.try_wait()?.is_some() {
-                break child.wait_with_output()?;
-            }
-            if Instant::now() >= deadline {
-                child.kill()?;
-                child.wait()?;
-                return Err("public query exceeded its original wall budget".into());
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
+        let output = collect_query(child, deadline)?;
         if output.status.success() {
             break output;
         }
@@ -309,4 +299,13 @@ fn query_refusal_diagnostic_redacts_all_claims_before_truncation() {
             format!("{}[REDACTE", "x".repeat(2040))
         );
     }
+}
+
+pub(super) fn collect_query(child: Child, deadline: Instant) -> TestResult<std::process::Output> {
+    Ok(child_output::wait_before(
+        child,
+        deadline,
+        Duration::from_millis(10),
+        "public query exceeded its original wall budget",
+    )?)
 }

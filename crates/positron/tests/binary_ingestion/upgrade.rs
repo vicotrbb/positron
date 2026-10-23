@@ -202,66 +202,13 @@ pub(super) fn inspect_succeeded(
     Ok(operation.into())
 }
 
-const CAPTURE_LIMIT: u64 = 1024 * 1024;
-
-fn capture(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    pipe.by_ref()
-        .take(CAPTURE_LIMIT + 1)
-        .read_to_end(&mut bytes)?;
-    // Retain a bounded diagnostic, but never block the child on excess output.
-    std::io::copy(&mut pipe, &mut std::io::sink())?;
-    Ok(bytes)
-}
-
-fn wait_before(mut child: Child, deadline: Instant) -> TestResult<std::process::Output> {
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let (Some(stdout), Some(stderr)) = (stdout, stderr) else {
-        child.kill()?;
-        child.wait()?;
-        return Err("missing status output pipes".into());
-    };
-    std::thread::scope(|scope| {
-        let stdout = scope.spawn(|| capture(stdout));
-        let stderr = scope.spawn(|| capture(stderr));
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Ok(status),
-                Ok(None) if Instant::now() < deadline => {},
-                Ok(None) => {
-                    break Err("candidate Upgrade status exceeded its publication watchdog".into());
-                },
-                Err(error) => break Err(Box::<dyn std::error::Error>::from(error)),
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        // Reap before joining readers, including on a polling error or expiry.
-        let cleanup = if status.is_err() {
-            let killed = child.kill();
-            let waited = child.wait();
-            killed.and(waited.map(|_| ()))
-        } else {
-            Ok(())
-        };
-        let stdout = stdout.join();
-        let stderr = stderr.join();
-        cleanup?;
-        let status = status?;
-        let stdout = stdout.map_err(|_| "status stdout reader panicked")??;
-        let stderr = stderr.map_err(|_| "status stderr reader panicked")??;
-        if Instant::now() >= deadline {
-            return Err("candidate Upgrade status exceeded its publication watchdog".into());
-        }
-        if stdout.len() as u64 > CAPTURE_LIMIT || stderr.len() as u64 > CAPTURE_LIMIT {
-            return Err("status output exceeded fixture capture bound".into());
-        }
-        Ok(std::process::Output {
-            status,
-            stdout,
-            stderr,
-        })
-    })
+fn wait_before(child: Child, deadline: Instant) -> TestResult<std::process::Output> {
+    Ok(child_output::wait_before(
+        child,
+        deadline,
+        Duration::from_millis(10),
+        "candidate Upgrade status exceeded its publication watchdog",
+    )?)
 }
 
 #[path = "upgrade_output_tests.rs"]

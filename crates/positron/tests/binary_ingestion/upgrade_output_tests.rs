@@ -2,16 +2,7 @@ use super::*;
 
 #[test]
 fn status_capture_drains_both_streams_before_waiting_for_exit() -> TestResult {
-    let chunk = "x".repeat(1024);
-    let script = format!(
-        "i=0; while [ $i -lt 256 ]; do printf '%s' '{chunk}'; printf '%s' '{chunk}' >&2; i=$((i+1)); done"
-    );
-    let child = Command::new("/bin/sh")
-        .args(["-c", &script])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+    let child = output_pressure::child()?;
     let output = wait_before(child, Instant::now() + Duration::from_secs(5))?;
     assert!(output.status.success());
     assert!(
@@ -50,11 +41,47 @@ fn status_capture_drains_overflow_before_reporting_the_bound() -> TestResult {
         .expect_err("oversized capture must be refused after draining");
     assert_eq!(
         error.to_string(),
-        "status output exceeded fixture capture bound"
+        "child output exceeded fixture capture bound"
     );
     assert!(
         fs::read(&marker)? == b"done",
         "overflow child did not finish writing both streams"
+    );
+    Ok(())
+}
+
+#[test]
+fn binary_doctor_capture_drains_both_streams_before_waiting_for_exit() -> TestResult {
+    let output = super::super::collect_doctor(
+        output_pressure::child()?,
+        Instant::now() + Duration::from_secs(10),
+    )?;
+    assert!(output.status.success());
+    assert!(
+        output.stdout == vec![b'x'; 256 * 1024],
+        "stdout capture changed"
+    );
+    assert!(
+        output.stderr == vec![b'x'; 256 * 1024],
+        "stderr capture changed"
+    );
+    Ok(())
+}
+
+#[test]
+fn archive_query_capture_drains_both_streams_before_waiting_for_exit() -> TestResult {
+    let output = archive::collect_query(
+        output_pressure::child()?,
+        Instant::now() + Duration::from_secs(5),
+    )?;
+    assert!(output.status.success());
+    assert!(
+        output.stdout == vec![b'x'; 256 * 1024],
+        "stdout capture changed"
+    );
+    assert!(
+        output.stderr == vec![b'x'; 256 * 1024],
+        "stderr capture changed"
     );
     Ok(())
 }

@@ -5,8 +5,12 @@
 mod archive;
 #[path = "support/archive_binary.rs"]
 mod archive_binary;
+#[path = "support/bounded_child_output.rs"]
+mod child_output;
 #[path = "support/native_binary.rs"]
 mod native_binary;
+#[path = "support/output_pressure.rs"]
+mod output_pressure;
 #[path = "binary_ingestion/recovery.rs"]
 mod recovery;
 #[path = "binary_ingestion/upgrade.rs"]
@@ -289,15 +293,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         let mut input = doctor.stdin.take().ok_or("missing doctor stdin")?;
         writeln!(input, "{}", admin_secret)?;
         drop(input);
-        while doctor.try_wait()?.is_none() {
-            if Instant::now() >= doctor_deadline {
-                doctor.kill()?;
-                doctor.wait()?;
-                return Err("doctor deadline expired".into());
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let output = doctor.wait_with_output()?;
+        let output = collect_doctor(doctor, doctor_deadline)?;
         if String::from_utf8_lossy(&output.stdout)
             .lines()
             .any(|line| line == "finding_code=DOCTOR_ONLINE_INSPECTION_UNAVAILABLE")
@@ -606,4 +602,13 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     }
     fixture.child = None;
     Ok(())
+}
+
+fn collect_doctor(doctor: Child, deadline: Instant) -> TestResult<std::process::Output> {
+    Ok(child_output::wait_before(
+        doctor,
+        deadline,
+        Duration::from_millis(25),
+        "doctor deadline expired",
+    )?)
 }
