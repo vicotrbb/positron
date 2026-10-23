@@ -51,7 +51,8 @@ else:
             input=claim["query_secret"].encode(), capture_output=True, timeout=10)
         if result.returncode == 0:
             assert result.stdout.count(marker.encode()) == 1, "acknowledged record missing or duplicated"
-            assert b"complete" in result.stdout, "query did not complete"
+            response = json.loads(result.stdout)
+            assert response["events"][-1]["terminal"]["state"] == "complete", "query did not complete"
             break
         if time.monotonic() >= deadline or b"capacity unavailable" not in result.stderr:
             failure = {

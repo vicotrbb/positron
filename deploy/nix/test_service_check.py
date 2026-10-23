@@ -87,6 +87,43 @@ class IngestAcknowledgment(unittest.TestCase):
         self.assertEqual(len(self.requests), 1)
 
 
+class QueryCompletion(unittest.TestCase):
+    @staticmethod
+    def response(state):
+        # Mock the captured CLI output shape, not the API's response validator.
+        return {"events": [
+            {"batch": {"rows": [{"cells": [{"nativeValue": {"textValue": "nix-retained-117"}}]}]}},
+            {"terminal": {"state": state}},
+        ]}
+
+    def run_query(self, output):
+        result = types.SimpleNamespace(returncode=0, stdout=output, stderr=b"")
+        with mock.patch.object(pathlib.Path, "read_text", return_value="query_secret=test-only\n"), \
+                mock.patch.object(pathlib.Path, "write_text"), \
+                mock.patch.object(sys, "argv", ["service-check.py", "query"]), \
+                mock.patch("subprocess.run", return_value=result) as execute:
+            try:
+                runpy.run_path(str(pathlib.Path(__file__).with_name("service-check.py")))
+            finally:
+                self.assertEqual(execute.call_count, 1)
+
+    def test_accepts_complete_and_refuses_incomplete_with_the_same_retained_record(self):
+        self.run_query(json.dumps(self.response("complete")).encode())
+        with self.assertRaisesRegex(AssertionError, "query did not complete"):
+            self.run_query(json.dumps(self.response("incomplete")).encode())
+
+    def test_missing_unknown_or_malformed_terminal_fails_closed(self):
+        missing = self.response("complete")
+        del missing["events"][-1]["terminal"]
+        responses = [json.dumps(missing).encode(),
+                     json.dumps(self.response("future")).encode(),
+                     b'{"events": [{"marker": "nix-retained-117", "state": "complete"}']
+        for output in responses:
+            with self.subTest(output_kind="invalid response"):
+                with self.assertRaises((AssertionError, KeyError, json.JSONDecodeError)):
+                    self.run_query(output)
+
+
 class BackupOutcomeKnowledge(unittest.TestCase):
     def run_backup(self, responses):
         self.commands = []
