@@ -5,6 +5,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const QUERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::api_keys::{ApiKeyTransport, read_bounded_trust_file};
 
@@ -75,6 +76,33 @@ impl HttpClient {
         response_limit: usize,
         timeout: Duration,
     ) -> Result<(u16, Zeroizing<Vec<u8>>), ()> {
+        self.post_bounded(
+            bearer,
+            path,
+            body,
+            response_limit,
+            timeout.min(DEFAULT_REQUEST_TIMEOUT),
+        )
+    }
+
+    pub(crate) fn post_query(
+        &self,
+        bearer: &str,
+        path: &str,
+        body: Vec<u8>,
+        response_limit: usize,
+    ) -> Result<(u16, Zeroizing<Vec<u8>>), ()> {
+        self.post_bounded(bearer, path, body, response_limit, QUERY_REQUEST_TIMEOUT)
+    }
+
+    fn post_bounded(
+        &self,
+        bearer: &str,
+        path: &str,
+        body: Vec<u8>,
+        response_limit: usize,
+        timeout: Duration,
+    ) -> Result<(u16, Zeroizing<Vec<u8>>), ()> {
         if timeout.is_zero() {
             return Err(());
         }
@@ -84,7 +112,7 @@ impl HttpClient {
             .bearer_auth(bearer)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
-            .timeout(timeout.min(DEFAULT_REQUEST_TIMEOUT))
+            .timeout(timeout)
             .send()
             .map_err(|_| ())?;
         let status = response.status().as_u16();

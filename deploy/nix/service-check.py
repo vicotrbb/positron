@@ -45,16 +45,23 @@ else:
         "wallSeconds": "5", "maximumTimeRangeNanoseconds": "100"}}))
     attempt = 0
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("query deadline elapsed")
         attempt += 1
         result = subprocess.run(["positron", "query", "--endpoint", "127.0.0.1:4311",
             "--credential-stdin", "--allow-plaintext", "--request", str(query)],
-            input=claim["query_secret"].encode(), capture_output=True, timeout=10)
+            input=claim["query_secret"].encode(), capture_output=True, timeout=remaining)
         if result.returncode == 0:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("query deadline elapsed")
             assert result.stdout.count(marker.encode()) == 1, "acknowledged record missing or duplicated"
             response = json.loads(result.stdout)
             assert response["events"][-1]["terminal"]["state"] == "complete", "query did not complete"
+            if time.monotonic() >= deadline:
+                raise RuntimeError("query deadline elapsed")
             break
-        if time.monotonic() >= deadline or b"capacity unavailable" not in result.stderr:
+        if time.monotonic() + 1 >= deadline or b"capacity unavailable" not in result.stderr:
             failure = {
                 b"positron: invalid bounded query request": "invalid_request",
                 b"positron: query authentication rejected": "authentication_rejected",

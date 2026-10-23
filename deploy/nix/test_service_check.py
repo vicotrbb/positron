@@ -124,6 +124,70 @@ class QueryCompletion(unittest.TestCase):
                     self.run_query(output)
 
 
+class QueryDeadline(unittest.TestCase):
+    def run_query(self, responses, validation_elapsed=0):
+        self.clock = 0
+        self.commands = []
+        decode = json.loads
+
+        def validate(value):
+            self.clock += validation_elapsed
+            return decode(value)
+
+        def execute(command, **options):
+            self.commands.append((command, options))
+            elapsed, result = responses.pop(0)
+            self.clock += elapsed
+            return result
+
+        def sleep(seconds):
+            self.clock += seconds
+
+        with mock.patch.object(pathlib.Path, "read_text", return_value="query_secret=test-only\n"), \
+                mock.patch.object(pathlib.Path, "write_text"), \
+                mock.patch.object(sys, "argv", ["service-check.py", "query"]), \
+                mock.patch("subprocess.run", side_effect=execute), \
+                mock.patch("json.loads", side_effect=validate), \
+                mock.patch("time.monotonic", side_effect=lambda: self.clock), \
+                mock.patch("time.sleep", side_effect=sleep):
+            runpy.run_path(str(pathlib.Path(__file__).with_name("service-check.py")))
+
+    @staticmethod
+    def complete():
+        return types.SimpleNamespace(returncode=0,
+            stdout=json.dumps(QueryCompletion.response("complete")).encode(), stderr=b"")
+
+    @staticmethod
+    def refused(message=b"positron: query capacity unavailable; retry after backoff"):
+        return types.SimpleNamespace(returncode=2, stdout=b"", stderr=message)
+
+    def test_capacity_retry_uses_only_remaining_original_thirty_seconds(self):
+        self.run_query([(20, self.refused()), (1, self.complete())])
+        self.assertEqual([options["timeout"] for _, options in self.commands], [30, 9])
+        self.assertEqual(self.commands[0][0], self.commands[1][0])
+        self.assertEqual(self.commands[0][1]["input"], self.commands[1][1]["input"])
+
+    def test_complete_response_after_original_deadline_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "query deadline elapsed"):
+            self.run_query([(31, self.complete())])
+        self.assertEqual(len(self.commands), 1)
+
+    def test_local_validation_crossing_original_deadline_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "query deadline elapsed"):
+            self.run_query([(0, self.complete())], validation_elapsed=31)
+        self.assertEqual(len(self.commands), 1)
+
+    def test_capacity_backoff_cannot_begin_an_attempt_after_original_deadline(self):
+        with self.assertRaises(RuntimeError):
+            self.run_query([(29.5, self.refused()), (0, self.complete())])
+        self.assertEqual(len(self.commands), 1)
+
+    def test_transport_failure_never_retries(self):
+        with self.assertRaisesRegex(RuntimeError, "code=transport"):
+            self.run_query([(1, self.refused(b"positron: query transport or response unavailable"))])
+        self.assertEqual(len(self.commands), 1)
+
+
 class BackupOutcomeKnowledge(unittest.TestCase):
     def run_backup(self, responses):
         self.commands = []
