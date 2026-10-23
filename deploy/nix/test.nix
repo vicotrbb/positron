@@ -1,5 +1,196 @@
 { pkgs, package, module, candidate, fixture, commit }:
 let
+  # Diagnostic only: replace stage-2 udevd, retaining original PID1/initrd/journald.
+  # Target 0=hvc0, 1=ttyAMA0. Stages: 1=receive, 2=queued, 3=blocked,
+  # 4=unblocked, 5=attached, 6=notified, 7=worker-exit, 8=run-error, 9=queue-error.
+  diagnosticSystemd = assert pkgs.systemd.version == "260.5";
+    pkgs.systemd.overrideAttrs (old: {
+      patches = (old.patches or []) ++ [ (pkgs.writeText "positron-udev-manager.patch" ''
+        --- a/src/udev/udev-manager.c
+        +++ b/src/udev/udev-manager.c
+        @@ -48,6 +48,59 @@
+         #define EVENT_REQUEUE_INTERVAL_USEC (200 * USEC_PER_MSEC)
+         #define EVENT_REQUEUE_TIMEOUT_USEC  (3 * USEC_PER_MINUTE)
+         
+        +
+        +/* Temporary issue117 diagnostic: fixed tty identities, no device paths/properties. */
+        +typedef struct PositronTtyObservation {
+        +        unsigned stage;
+        +        uint64_t seqnum, blocker;
+        +        pid_t pid;
+        +        int status, code;
+        +        bool processed, again;
+        +} PositronTtyObservation;
+        +
+        +static void positron_tty_observe(sd_device *dev, unsigned stage, uint64_t blocker, pid_t pid,
+        +                                int status, int code, bool processed, bool again) {
+        +        static PositronTtyObservation last[2];
+        +        static unsigned records;
+        +        const char *name, *subsystem;
+        +        uint64_t seqnum = 0;
+        +        unsigned target;
+        +
+        +        if (!dev || sd_device_get_subsystem(dev, &subsystem) < 0 || !streq(subsystem, "tty") ||
+        +            sd_device_get_sysname(dev, &name) < 0)
+        +                return;
+        +        if (streq(name, "hvc0"))
+        +                target = 0;
+        +        else if (streq(name, "ttyAMA0"))
+        +                target = 1;
+        +        else
+        +                return;
+        +        (void) sd_device_get_seqnum(dev, &seqnum);
+        +        PositronTtyObservation *previous = &last[target];
+        +        if (previous->stage == stage && previous->seqnum == seqnum && previous->blocker == blocker &&
+        +            previous->pid == pid && previous->status == status && previous->code == code &&
+        +            previous->processed == processed && previous->again == again)
+        +                return;
+        +        *previous = (PositronTtyObservation) { stage, seqnum, blocker, pid, status, code, processed, again };
+        +        if (records >= 64)
+        +                return;
+        +        log_info("POSITRON-UDEV target=%u stage=%u seq=%"PRIu64" blocker=%"PRIu64" pid="PID_FMT" status=%i code=%i processed=%u again=%u",
+        +                 target, stage, seqnum, blocker, pid, status, code, processed ? 1U : 0U, again ? 1U : 0U);
+        +        if (++records == 64)
+        +                log_info("POSITRON-UDEV INCOMPLETE target-record-cap");
+        +}
+        +
+        +static void positron_manager_observe(unsigned stage) {
+        +        static unsigned records[2], previous[2];
+        +        unsigned group = stage == 3;
+        +        if (previous[group] == stage || records[group] >= 16)
+        +                return;
+        +        previous[group] = stage;
+        +        log_info("POSITRON-UDEV manager-stage=%u", stage);
+        +        if (++records[group] == 16)
+        +                log_info("POSITRON-UDEV INCOMPLETE manager-record-cap group=%u", group);
+        +}
+        +
+         static void event_unset_whole_disk(Event *event) {
+                 Manager *manager = ASSERT_PTR(ASSERT_PTR(event)->manager);
+         
+        @@ -321,6 +374,7 @@
+                          * when explicitly requested or at least one .rules file or friend is updated. */
+                         return;
+         
+        +        positron_manager_observe(1); /* reload-enter */
+                 (void) notify_reloading();
+         
+                 flags |= manager_reload_config(manager);
+        @@ -339,6 +393,7 @@
+                 }
+         
+                 notify_ready(manager);
+        +        positron_manager_observe(2); /* reload-exit */
+         }
+         
+         void manager_revert(Manager *manager) {
+        @@ -385,6 +440,7 @@
+                 worker->event = event;
+                 event->state = EVENT_RUNNING;
+                 event->worker = worker;
+        +        positron_tty_observe(event->dev, 5, 0, worker->pidref.pid, 0, 0, false, false); /* attached */
+         
+                 (void) event_reset_time_relative(
+                                 manager->event,
+        @@ -433,6 +489,7 @@
+                 sd_device *dev = event ? ASSERT_PTR(event->dev) : NULL;
+         
+                 assert(si);
+        +        positron_tty_observe(dev, 7, 0, si->si_pid, si->si_status, si->si_code, false, false); /* worker-exit */
+         
+                 switch (si->si_code) {
+                 case CLD_EXITED:
+        @@ -620,9 +677,11 @@
+         
+                 /* lookup event for identical, parent, child device */
+         
+        -        if (event->blocker && event->blocker->state != EVENT_PROCESSED)
+        +        if (event->blocker && event->blocker->state != EVENT_PROCESSED) {
+                         /* Previously found blocker is not processed yet. */
+        +                positron_tty_observe(event->dev, 3, event->blocker->seqnum, 0, 0, 0, false, false);
+                         return;
+        +        }
+         
+                 /* If we have not found blocker yet, or the previously found blocker has been processed, let's find
+                  * (another) blocker for this event. */
+        @@ -641,12 +700,14 @@
+                                          event->seqnum, e->seqnum);
+         
+                         unref_and_replace_full(event->blocker, e, event_ref, event_unref);
+        +                positron_tty_observe(event->dev, 3, e->seqnum, 0, 0, 0, false, false);
+                         return;
+                 }
+         
+                 /* No new blocker is found, and if set, previously found blocker has been processed. Clear the
+                  * previous blocker if set. */
+                 event->blocker = event_unref(event->blocker);
+        +        positron_tty_observe(event->dev, 4, 0, 0, 0, 0, false, false); /* unblocked */
+         }
+         
+         static bool manager_can_process_event(Manager *manager) {
+        @@ -671,6 +732,7 @@
+                         children_max_reached_logged = true;
+                 }
+         
+        +        positron_manager_observe(3); /* worker-limit */
+                 return false;
+         
+         yes_we_can:
+        @@ -710,8 +772,10 @@
+                                 continue;
+         
+                         r = event_run(event);
+        -                if (r < 0)
+        +                if (r < 0) {
+        +                        positron_tty_observe(event->dev, 8, 0, 0, r, 0, false, false);
+                                 return r;
+        +                }
+         
+                         /* A worker is activated now. Let's check if we can process more events. */
+                         if (!manager_can_process_event(manager))
+        @@ -931,6 +995,7 @@
+                                          manager->last_event->seqnum, event->seqnum);
+         
+                 event->manager = manager;
+        +        positron_tty_observe(dev, 2, 0, 0, 0, 0, false, false); /* queued */
+                 TAKE_PTR(event);
+                 log_device_uevent(dev, "Device is queued");
+         
+        @@ -1044,6 +1109,7 @@
+                 int r;
+         
+                 DEVICE_TRACE_POINT(kernel_uevent_received, dev);
+        +        positron_tty_observe(dev, 1, 0, 0, 0, 0, false, false); /* received */
+         
+                 (void) manager_create_queue_file(manager);
+         
+        @@ -1051,6 +1117,7 @@
+         
+                 r = event_queue_insert(manager, dev);
+                 if (r < 0) {
+        +                positron_tty_observe(dev, 9, 0, 0, r, 0, false, false);
+                         log_device_error_errno(dev, r, "Failed to insert device into event queue: %m");
+                         return 1;
+                 }
+        @@ -1110,6 +1177,7 @@
+                 if (r < 0)
+                         return log_error_errno(r, "Failed to set priority to device monitor: %m");
+         
+        +        log_info("POSITRON-UDEV READY manager-monitor-started");
+                 return 0;
+         }
+         
+        @@ -1176,6 +1244,8 @@
+                         return 0;
+                 }
+         
+        +        positron_tty_observe(worker->event ? worker->event->dev : NULL, 6, 0, sender.pid, 0, 0,
+        +                             strv_contains(l, "PROCESSED=1"), strv_contains(l, "TRY_AGAIN=1"));
+                 _cleanup_(event_enter_processedp) Event *event = worker_detach_event(worker);
+         
+                 if (strv_contains(l, "TRY_AGAIN=1")) {
+      '') ];
+    });
   ttyEventParser = pkgs.writeText "positron-tty-events.awk" ''
     function emit(message) {
       if (output_bytes + length(message) + 32 > 3968) fail("output-limit")
@@ -105,10 +296,16 @@ in pkgs.testers.runNixOSTest {
   name = "positron-service";
   # Exercise the same guest on builders without nested virtualization as well.
   requiredFeatures.kvm = false;
-  nodes.machine = { ... }: {
+  nodes.machine = { lib, ... }: {
     imports = [ module ];
     # The early subscriber gates the normal stage2 trigger only until subscribed.
     # Initrd events are outside this history, and subscription/ptrace can perturb timing.
+    # Preserve the multicall daemon basename and its own same-source shared library.
+    # This instrumentation is observation-only and does not qualify original udevd.
+    systemd.services.systemd-udevd.serviceConfig.ExecStart = lib.mkForce [
+      ""
+      "${diagnosticSystemd}/lib/systemd/systemd-udevd"
+    ];
     systemd.services.positron-tty-event-observation = {
       wantedBy = [ "sysinit.target" ];
       before = [ "systemd-udev-trigger.service" ];
