@@ -46,7 +46,7 @@ fn native_admin_http_migrates_while_otlp_remains_serving() -> Result<(), Box<dyn
     };
     assert_eq!(client.manage(&ingest, &status_request), Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::AuthenticationRejected));
     let services = process.services().ok_or("serving data services")?;
-    ingest_over_http(otlp, &ingest, "before-online-cutover")?;
+    ingest_over_http(otlp, &ingest, "before-online-cutover", IngestPhase::Before)?;
     for (index, action) in ["prepare", "activate"].into_iter().enumerate() {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let accepted = loop {
@@ -84,7 +84,7 @@ fn native_admin_http_migrates_while_otlp_remains_serving() -> Result<(), Box<dyn
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    ingest_over_http(otlp, &ingest, "after-online-cutover")?;
+    ingest_over_http(otlp, &ingest, "after-online-cutover", IngestPhase::After)?;
     let final_status = client.manage(&administrator, &status_request)?;
     assert_eq!(final_status.active_epoch, 2);
     assert_eq!(final_status.predecessor_epoch, Some(1));
@@ -113,10 +113,17 @@ fn inspect_with_backpressure(
     }
 }
 
+#[derive(Debug)]
+enum IngestPhase {
+    Before,
+    After,
+}
+
 fn ingest_over_http(
     endpoint: SocketAddr,
     bearer: &str,
     text: &str,
+    phase: IngestPhase,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bytes = request(text).encode_to_vec();
     let mut stream = TcpStream::connect(endpoint)?;
@@ -129,9 +136,24 @@ fn ingest_over_http(
     stream.write_all(&bytes)?;
     let mut response = String::new();
     stream.take(4096).read_to_string(&mut response)?;
-    assert!(
-        response.starts_with("HTTP/1.1 200"),
-        "OTLP request did not succeed"
-    );
+    let succeeded = response.starts_with("HTTP/1.1 200");
+    if !succeeded {
+        let status = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or(0);
+        let retry_after_one = response.split_once("\r\n\r\n").is_some_and(|(headers, _)| {
+            headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("Retry-After: 1"))
+        });
+        let canonical_capacity = response.split_once("\r\n\r\n").is_some_and(|(_, body)| serde_json::from_str::<serde_json::Value>(body).is_ok_and(|value| value == serde_json::json!({"code":14,"message":"OTLP Logs ingest capacity is unavailable"})));
+        assert!(
+            succeeded,
+            "OTLP request did not succeed: phase={phase:?} status={status:?} retry_after_one={retry_after_one} canonical_capacity={canonical_capacity}"
+        );
+    }
     Ok(())
 }
