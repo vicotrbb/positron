@@ -39,6 +39,47 @@ permissions, bootstrap claim destruction, reload, restart, graceful stop,
 offline verification and retained data after removal. Build each target on its
 matching builder. Linux emulation does not qualify a macOS executable.
 
+## Linux acceptance-platform baseline
+
+The service VM uses the locked systemd 260.5 source and nixpkgs patches, with
+`systemd-260.5-udev-rule-path.patch` (SHA-256
+`0c56d1c7684a5ea455b5d4f6bdc1e154771e2d04a44903e650a3a52304abbe77`).
+The patch corrects one udev rules stat-cache key and adds native owner regression
+tests. Loading rules must use the same resolved path keys as the subsequent
+reload check. Unpatched 260.5 stores directory aliases when loading but resolved
+paths when checking, so a symlinked rules directory can repeatedly appear
+changed without a file mutation. NixOS exposes its generated rules through such
+a directory symlink. This baseline qualifies the corrected dependency; it does
+not establish reliable boot with the unpatched dependency.
+
+Only the acceptance VM's stage2 `systemd-udevd` executable and its matching
+private library use that corrected build. PID1, initrd, journald, the exported
+Positron module and consumer host packages retain their original dependencies.
+The VM uses its original resources, deadlines and lifecycle assertions, without
+udev diagnostic instrumentation, event observers or extra boot ordering.
+Normal package output-reference checks remain enabled. The separate native
+proof build enables upstream `tests` and `install-tests`; its installed test
+scripts require Bash, so only that proof artifact's `out` and dependent `dev`
+outputs permit those two existing Bash requisites.
+
+The native regression runs the actual rules loader and reload checker for a
+direct directory and a directory symlink. Each case checks unchanged rules,
+a genuine size-changing rule mutation, reload and convergence. With the native
+test artifact built, run the existing harness in a disposable root container
+with a read-only Nix store, no source mount or network, and only the additional
+`SYS_ADMIN` capability needed for its private mount namespace and proc mount:
+
+```console
+TESTFUNCS=test_udev_rules_reload_direct_directory:test_udev_rules_reload_symlink_directory timeout --signal=KILL 90s "$systemd_test_output/lib/systemd/tests/unit-tests/test-udev-rules"
+```
+
+Each child also has a 30-second bound. Missing namespace/mount privilege is a
+proof failure, not a skipped test. The unpatched control passed while the alias
+case failed at the initial unchanged-rules assertion; the one-line correction
+passed both cases, including mutation detection. These native tests establish
+the dependency correction; the complete uninstrumented service VM remains the
+installation and lifecycle qualification.
+
 ## Verify release identity
 
 Before installation, authenticate the source archive, `flake.nix`, `flake.lock`,
