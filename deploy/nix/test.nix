@@ -8,10 +8,42 @@ let
       patches = (old.patches or []) ++ [ (pkgs.writeText "positron-udev-manager.patch" ''
         --- a/src/udev/udev-manager.c
         +++ b/src/udev/udev-manager.c
-        @@ -48,6 +48,59 @@
+        @@ -48,6 +48,136 @@
          #define EVENT_REQUEUE_INTERVAL_USEC (200 * USEC_PER_MSEC)
          #define EVENT_REQUEUE_TIMEOUT_USEC  (3 * USEC_PER_MINUTE)
          
+        +
+        +/* Cumulative window: first target enqueue through both first attachments. No reset. */
+        +static struct {
+        +        bool pending[2], seen[2], attached[2];
+        +        uint64_t calls, empty, stopped, pre_capacity, visited, started, post_capacity;
+        +        uint64_t reloads, reload_usec, reload_max_usec, reload_call_usec, reload_call_max_usec, kill_requests;
+        +        unsigned reload_flags, records;
+        +} positron_queue;
+        +
+        +static bool positron_queue_pending(void) {
+        +        return (positron_queue.seen[0] || positron_queue.seen[1]) &&
+        +               !(positron_queue.attached[0] && positron_queue.attached[1]);
+        +}
+        +
+        +static void positron_queue_report(Manager *manager, unsigned stage, unsigned target) {
+        +        /* First enqueue/attach summaries are reserved independently of 16 interim records. */
+        +        if (stage == 2 && positron_queue.records >= 16)
+        +                return;
+        +        log_info("POSITRON-UDEV queue-stage=%u target=%u calls=%"PRIu64" empty=%"PRIu64" stopped=%"PRIu64
+        +                 " pre_capacity=%"PRIu64" visited=%"PRIu64" started=%"PRIu64" post_capacity=%"PRIu64
+        +                 " workers=%u maximum=%u reloads=%"PRIu64" reload_body_usec=%"PRIu64" reload_body_max_usec=%"PRIu64
+        +                 " reload_call_usec=%"PRIu64" reload_call_max_usec=%"PRIu64
+        +                 " kill_requests=%"PRIu64" reload_flags=%u monotonic_usec=%"PRIu64,
+        +                 stage, target, positron_queue.calls, positron_queue.empty, positron_queue.stopped,
+        +                 positron_queue.pre_capacity, positron_queue.visited, positron_queue.started,
+        +                 positron_queue.post_capacity, hashmap_size(manager->workers), manager->config.children_max,
+        +                 positron_queue.reloads, positron_queue.reload_usec, positron_queue.reload_max_usec,
+        +                 positron_queue.reload_call_usec, positron_queue.reload_call_max_usec,
+        +                 positron_queue.kill_requests, positron_queue.reload_flags, now(CLOCK_MONOTONIC));
+        +        if (stage == 2 && ++positron_queue.records == 16)
+        +                log_info("POSITRON-UDEV INCOMPLETE queue-interim-cap");
+        +}
         +
         +/* Temporary issue117 diagnostic: fixed tty identities, no device paths/properties. */
         +typedef struct PositronTtyObservation {
@@ -54,6 +86,51 @@ let
         +                log_info("POSITRON-UDEV INCOMPLETE target-record-cap");
         +}
         +
+        +static void positron_queue_target(Manager *manager, sd_device *dev, bool attached) {
+        +        const char *name, *subsystem;
+        +        unsigned target;
+        +        if (sd_device_get_subsystem(dev, &subsystem) < 0 || !streq(subsystem, "tty") ||
+        +            sd_device_get_sysname(dev, &name) < 0)
+        +                return;
+        +        if (streq(name, "hvc0"))
+        +                target = 0;
+        +        else if (streq(name, "ttyAMA0"))
+        +                target = 1;
+        +        else
+        +                return;
+        +        if (!attached && !positron_queue.seen[target]) {
+        +                positron_queue.seen[target] = positron_queue.pending[target] = true;
+        +                positron_queue_report(manager, 1, target);
+        +        } else if (attached && positron_queue.pending[target]) {
+        +                positron_queue_report(manager, 3, target);
+        +                positron_queue.pending[target] = false;
+        +                positron_queue.attached[target] = true;
+        +        }
+        +}
+        +
+        +static void positron_reload_observe(bool force, unsigned builtin_flags, bool rules_reload,
+        +                                    unsigned initial_flags, unsigned config_flags, unsigned final_flags) {
+        +        static bool seen, previous_force, previous_rules;
+        +        static unsigned previous_builtin, previous_initial, previous_config, previous_final, records;
+        +        if (seen && previous_force == force && previous_rules == rules_reload &&
+        +            previous_builtin == builtin_flags && previous_initial == initial_flags &&
+        +            previous_config == config_flags && previous_final == final_flags)
+        +                return;
+        +        seen = true;
+        +        previous_force = force;
+        +        previous_rules = rules_reload;
+        +        previous_builtin = builtin_flags;
+        +        previous_initial = initial_flags;
+        +        previous_config = config_flags;
+        +        previous_final = final_flags;
+        +        if (records >= 32)
+        +                return;
+        +        log_info("POSITRON-UDEV reload-origin force=%u builtin_flags=%u rules_reload=%u initial_flags=%u config_flags=%u final_flags=%u",
+        +                 force ? 1U : 0U, builtin_flags, rules_reload ? 1U : 0U, initial_flags, config_flags, final_flags);
+        +        if (++records == 32)
+        +                log_info("POSITRON-UDEV INCOMPLETE reload-origin-cap");
+        +}
+        +
         +static void positron_manager_observe(unsigned stage) {
         +        static unsigned records[2], previous[2];
         +        unsigned group = stage == 3;
@@ -68,31 +145,63 @@ let
          static void event_unset_whole_disk(Event *event) {
                  Manager *manager = ASSERT_PTR(ASSERT_PTR(event)->manager);
          
-        @@ -321,6 +374,7 @@
+        @@ -313,7 +443,9 @@
+                 mac_selinux_maybe_reload();
+         
+                 UdevReloadFlags flags = udev_builtin_should_reload();
+        -        if (udev_rules_should_reload(manager->rules))
+        +        UdevReloadFlags builtin_flags = flags;
+        +        bool rules_reload = udev_rules_should_reload(manager->rules);
+        +        if (rules_reload)
+                         flags |= UDEV_RELOAD_RULES | UDEV_RELOAD_KILL_WORKERS;
+                 if (flags == 0 && !force)
+                         /* Neither .rules files nor config files for builtins e.g. .link files changed. It is not
+        @@ -321,9 +453,21 @@
                           * when explicitly requested or at least one .rules file or friend is updated. */
                          return;
          
+        +        usec_t positron_reload_start = now(CLOCK_MONOTONIC);
+        +        bool positron_pending = positron_queue_pending();
         +        positron_manager_observe(1); /* reload-enter */
                  (void) notify_reloading();
          
-                 flags |= manager_reload_config(manager);
-        @@ -339,6 +393,7 @@
+        -        flags |= manager_reload_config(manager);
+        +        UdevReloadFlags initial_flags = flags;
+        +        UdevReloadFlags config_flags = manager_reload_config(manager);
+        +        flags |= config_flags;
+        +        positron_reload_observe(force, (unsigned) builtin_flags, rules_reload,
+        +                                (unsigned) initial_flags, (unsigned) config_flags, (unsigned) flags);
+        +        if (positron_pending) {
+        +                positron_queue.reloads++;
+        +                positron_queue.reload_flags |= (unsigned) flags;
+        +                positron_queue.kill_requests += FLAGS_SET(flags, UDEV_RELOAD_KILL_WORKERS);
+        +        }
+         
+                 if (FLAGS_SET(flags, UDEV_RELOAD_KILL_WORKERS))
+                         manager_kill_workers(manager, SIGTERM);
+        @@ -339,6 +483,12 @@
                  }
          
                  notify_ready(manager);
         +        positron_manager_observe(2); /* reload-exit */
+        +        if (positron_pending) {
+        +                usec_t elapsed = usec_sub_unsigned(now(CLOCK_MONOTONIC), positron_reload_start);
+        +                positron_queue.reload_usec += elapsed;
+        +                positron_queue.reload_max_usec = MAX(positron_queue.reload_max_usec, elapsed);
+        +        }
          }
          
          void manager_revert(Manager *manager) {
-        @@ -385,6 +440,7 @@
+        @@ -385,6 +535,8 @@
                  worker->event = event;
                  event->state = EVENT_RUNNING;
                  event->worker = worker;
+        +        positron_queue_target(manager, event->dev, true);
         +        positron_tty_observe(event->dev, 5, 0, worker->pidref.pid, 0, 0, false, false); /* attached */
          
                  (void) event_reset_time_relative(
                                  manager->event,
-        @@ -433,6 +489,7 @@
+        @@ -433,6 +585,7 @@
                  sd_device *dev = event ? ASSERT_PTR(event->dev) : NULL;
          
                  assert(si);
@@ -100,24 +209,28 @@ let
          
                  switch (si->si_code) {
                  case CLD_EXITED:
-        @@ -620,9 +677,11 @@
+        @@ -620,9 +773,13 @@
          
                  /* lookup event for identical, parent, child device */
          
         -        if (event->blocker && event->blocker->state != EVENT_PROCESSED)
         +        if (event->blocker && event->blocker->state != EVENT_PROCESSED) {
                          /* Previously found blocker is not processed yet. */
-        +                positron_tty_observe(event->dev, 3, event->blocker->seqnum, 0, 0, 0, false, false);
-                         return;
+        -                return;
+        +                positron_tty_observe(event->dev, 3, event->blocker->seqnum,
+        +                                     event->blocker->worker ? event->blocker->worker->pidref.pid : 0,
+        +                                     event->blocker->state, 0, false, false);
+        +                return;
         +        }
          
                  /* If we have not found blocker yet, or the previously found blocker has been processed, let's find
                   * (another) blocker for this event. */
-        @@ -641,12 +700,14 @@
+        @@ -641,12 +798,15 @@
                                           event->seqnum, e->seqnum);
          
                          unref_and_replace_full(event->blocker, e, event_ref, event_unref);
-        +                positron_tty_observe(event->dev, 3, e->seqnum, 0, 0, 0, false, false);
+        +                positron_tty_observe(event->dev, 3, e->seqnum, e->worker ? e->worker->pidref.pid : 0,
+        +                                     e->state, 0, false, false);
                          return;
                  }
          
@@ -128,7 +241,7 @@ let
          }
          
          static bool manager_can_process_event(Manager *manager) {
-        @@ -671,6 +732,7 @@
+        @@ -671,6 +831,7 @@
                          children_max_reached_logged = true;
                  }
          
@@ -136,7 +249,56 @@ let
                  return false;
          
          yes_we_can:
-        @@ -710,8 +772,10 @@
+        @@ -685,24 +846,46 @@
+                 assert(manager);
+                 assert(!manager->exit);
+         
+        -        if (!manager->events || manager->stop_exec_queue)
+        +        bool observing = positron_queue_pending();
+        +        if (observing)
+        +                positron_queue.calls++;
+        +        if (!manager->events || manager->stop_exec_queue) {
+        +                if (observing) {
+        +                        positron_queue.empty += !manager->events;
+        +                        positron_queue.stopped += manager->stop_exec_queue;
+        +                        positron_queue_report(manager, 2, 2);
+        +                }
+                         return 0;
+        +        }
+         
+                 r = event_source_disable(manager->kill_workers_event);
+                 if (r < 0)
+                         log_warning_errno(r, "Failed to disable event source for cleaning up idle workers, ignoring: %m");
+         
+        +        usec_t reload_start = observing ? now(CLOCK_MONOTONIC) : 0;
+                 manager_reload(manager, /* force= */ false);
+        +        if (observing) {
+        +                usec_t elapsed = usec_sub_unsigned(now(CLOCK_MONOTONIC), reload_start);
+        +                positron_queue.reload_call_usec += elapsed;
+        +                positron_queue.reload_call_max_usec = MAX(positron_queue.reload_call_max_usec, elapsed);
+        +        }
+         
+                 /* manager_reload() may kill idle workers, hence we may not be possible to start processing an event.
+                  * Let's check that and return earlier if we cannot. */
+        -        if (!manager_can_process_event(manager))
+        +        if (!manager_can_process_event(manager)) {
+        +                if (observing) {
+        +                        positron_queue.pre_capacity++;
+        +                        positron_queue_report(manager, 2, 2);
+        +                }
+                         return 0;
+        +        }
+         
+                 LIST_FOREACH(event, event, manager->events) {
+                         if (event->state != EVENT_QUEUED)
+                                 continue;
+         
+        +                if (observing)
+        +                        positron_queue.visited++;
+                         event_find_blocker(event);
+         
+                         /* do not start event if parent or child event is still running or queued */
+        @@ -710,14 +893,24 @@
                                  continue;
          
                          r = event_run(event);
@@ -145,18 +307,36 @@ let
         +                        positron_tty_observe(event->dev, 8, 0, 0, r, 0, false, false);
                                  return r;
         +                }
+        +
+        +                if (observing && event->state == EVENT_RUNNING)
+        +                        positron_queue.started++;
          
                          /* A worker is activated now. Let's check if we can process more events. */
-                         if (!manager_can_process_event(manager))
-        @@ -931,6 +995,7 @@
+        -                if (!manager_can_process_event(manager))
+        +                if (!manager_can_process_event(manager)) {
+        +                        if (observing)
+        +                                positron_queue.post_capacity++;
+                                 break;
+        -        }
+        -
+        +                }
+        +        }
+        +
+        +        if (observing)
+        +                positron_queue_report(manager, 2, 2);
+                 return 0;
+         }
+         
+        @@ -931,6 +1124,8 @@
                                           manager->last_event->seqnum, event->seqnum);
          
                  event->manager = manager;
+        +        positron_queue_target(manager, dev, false);
         +        positron_tty_observe(dev, 2, 0, 0, 0, 0, false, false); /* queued */
                  TAKE_PTR(event);
                  log_device_uevent(dev, "Device is queued");
          
-        @@ -1044,6 +1109,7 @@
+        @@ -1044,6 +1239,7 @@
                  int r;
          
                  DEVICE_TRACE_POINT(kernel_uevent_received, dev);
@@ -164,7 +344,7 @@ let
          
                  (void) manager_create_queue_file(manager);
          
-        @@ -1051,6 +1117,7 @@
+        @@ -1051,6 +1247,7 @@
          
                  r = event_queue_insert(manager, dev);
                  if (r < 0) {
@@ -172,7 +352,7 @@ let
                          log_device_error_errno(dev, r, "Failed to insert device into event queue: %m");
                          return 1;
                  }
-        @@ -1110,6 +1177,7 @@
+        @@ -1110,6 +1307,7 @@
                  if (r < 0)
                          return log_error_errno(r, "Failed to set priority to device monitor: %m");
          
@@ -180,7 +360,7 @@ let
                  return 0;
          }
          
-        @@ -1176,6 +1244,8 @@
+        @@ -1176,6 +1374,8 @@
                          return 0;
                  }
          
@@ -189,6 +369,60 @@ let
                  _cleanup_(event_enter_processedp) Event *event = worker_detach_event(worker);
          
                  if (strv_contains(l, "TRY_AGAIN=1")) {
+        --- a/src/udev/udev-rules.c
+        +++ b/src/udev/udev-rules.c
+        @@ -1859,24 +1859,50 @@
+                 return 0;
+         }
+         
+        +/* Closed reasons: 0=equal, 1=no loaded rules, 2=stat collection error, 3=map mismatch. */
+        +static void positron_rules_observe(unsigned reason, unsigned old_count, unsigned new_count, int error) {
+        +        static bool seen;
+        +        static unsigned previous_reason, previous_old, previous_new, records;
+        +        static int previous_error;
+        +        if (seen && previous_reason == reason && previous_old == old_count &&
+        +            previous_new == new_count && previous_error == error)
+        +                return;
+        +        seen = true;
+        +        previous_reason = reason;
+        +        previous_old = old_count;
+        +        previous_new = new_count;
+        +        previous_error = error;
+        +        if (records >= 32)
+        +                return;
+        +        log_info("POSITRON-UDEV rules-check reason=%u old_count=%u new_count=%u error=%i",
+        +                 reason, old_count, new_count, error);
+        +        if (++records == 32)
+        +                log_info("POSITRON-UDEV INCOMPLETE rules-check-cap");
+        +}
+        +
+         bool udev_rules_should_reload(UdevRules *rules) {
+                 _cleanup_hashmap_free_ Hashmap *stats_by_path = NULL;
+                 int r;
+         
+        -        if (!rules)
+        +        if (!rules) {
+        +                positron_rules_observe(1, 0, 0, 0);
+                         return true;
+        +        }
+         
+                 r = config_get_stats_by_path(".rules", NULL, 0, RULES_DIRS, /* check_dropins= */ false, &stats_by_path);
+                 if (r < 0) {
+        +                positron_rules_observe(2, hashmap_size(rules->stats_by_path), 0, r);
+                         log_warning_errno(r, "Failed to get stats of udev rules, ignoring: %m");
+                         return true;
+                 }
+         
+                 if (!stats_by_path_equal(rules->stats_by_path, stats_by_path)) {
+        +                positron_rules_observe(3, hashmap_size(rules->stats_by_path), hashmap_size(stats_by_path), 0);
+                         log_debug("Udev rules need reloading");
+                         return true;
+                 }
+         
+        +        positron_rules_observe(0, hashmap_size(rules->stats_by_path), hashmap_size(stats_by_path), 0);
+                 return false;
+         }
+         
       '') ];
     });
   ttyEventParser = pkgs.writeText "positron-tty-events.awk" ''
