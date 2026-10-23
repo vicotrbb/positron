@@ -5,7 +5,9 @@ fn scripted_requests(
     request: impl FnOnce(std::net::SocketAddr) -> TestResult<String>,
 ) -> TestResult<(TestResult<String>, Vec<serde_json::Value>)> {
     let (result, requests, response_error) =
-        scripted_requests_with_writer(responses, request, |stream, bytes| stream.write_all(bytes))?;
+        scripted_requests_with_writer(responses, request, |stream, bytes, _| {
+            stream.write_all(bytes)
+        })?;
     if let Some(error) = response_error {
         return Err(error.into());
     }
@@ -15,7 +17,7 @@ fn scripted_requests(
 fn scripted_requests_with_writer(
     responses: &[(u16, serde_json::Value)],
     request: impl FnOnce(std::net::SocketAddr) -> TestResult<String>,
-    mut write_response: impl FnMut(&mut TcpStream, &[u8]) -> std::io::Result<()> + Send + 'static,
+    mut write_response: impl FnMut(&mut TcpStream, &[u8], &[u8]) -> std::io::Result<()> + Send + 'static,
 ) -> TestResult<(
     TestResult<String>,
     Vec<serde_json::Value>,
@@ -73,9 +75,11 @@ fn scripted_requests_with_writer(
             if length > 4096 {
                 return Err("request body exceeded bound".into());
             }
-            let mut bytes = vec![0; length];
-            stream.read_exact(&mut bytes).map_err(|e| e.to_string())?;
-            requests.push(serde_json::from_slice(&bytes).map_err(|e| e.to_string())?);
+            let mut request_body = vec![0; length];
+            stream
+                .read_exact(&mut request_body)
+                .map_err(|e| e.to_string())?;
+            requests.push(serde_json::from_slice(&request_body).map_err(|e| e.to_string())?);
             if status == 0 {
                 continue;
             }
@@ -87,7 +91,7 @@ fn scripted_requests_with_writer(
             };
             let mut response = format!("HTTP/1.1 {status} Result\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).into_bytes();
             response.extend_from_slice(&bytes);
-            if let Err(error) = write_response(&mut stream, &response) {
+            if let Err(error) = write_response(&mut stream, &response, &request_body) {
                 return Ok((requests, Some(error)));
             }
         }

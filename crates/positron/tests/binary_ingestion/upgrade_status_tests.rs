@@ -106,7 +106,7 @@ fn candidate_status_exhausts_the_supplied_publication_watchdog() -> TestResult {
                 Instant::now() + Duration::from_secs(5),
             )
         },
-        |stream, bytes| stream.write_all(bytes),
+        |stream, bytes, _| stream.write_all(bytes),
     )?;
     let (result, requests) = publication_expiry(outcome)?;
     assert_eq!(
@@ -177,7 +177,7 @@ fn publication_watchdog_preserves_expiry_after_recorded_request_is_cancelled() -
                 cancelled.send(())?;
                 Err(caller_error.into())
             },
-            move |_, _| {
+            move |_, _, _| {
                 entered.send(()).map_err(std::io::Error::other)?;
                 cancellation
                     .recv_timeout(Duration::from_secs(2))

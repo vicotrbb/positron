@@ -212,8 +212,40 @@ pub(super) fn query_refusals(
         .as_mut()
         .ok_or("missing budget")?
         .output_bytes = 1;
-    let response = LogQueryServiceClient::new(LogQueryTransport::PlaintextOptOut { endpoint })?
-        .execute(query, &request)?;
+    query_output_bytes_incomplete(endpoint, query, &request)
+}
+
+pub(super) fn query_output_bytes_incomplete(
+    endpoint: std::net::SocketAddr,
+    credential: &str,
+    request: &positron_api::log_query::LogQueryRequest,
+) -> TestResult {
+    use positron_api::log_query::*;
+    // This assertion requires an executed budget outcome, not a pre-admission
+    // capacity refusal. Keep the same encoded request and original wall budget.
+    let body = request.encode()?;
+    let bearer = format!("Bearer {credential}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let response = request_with_capacity_retry(
+        endpoint.port(),
+        HTTP_PATH,
+        &[
+            ("Authorization", &bearer),
+            ("Content-Type", "application/json"),
+        ],
+        &body,
+        Duration::from_secs(5),
+    )?;
+    if Instant::now() >= deadline {
+        return Err("budget query exceeded its original wall budget".into());
+    }
+    if !response.starts_with("HTTP/1.1 200 ") {
+        return Err("budget query did not execute successfully".into());
+    }
+    let (_, payload) = response
+        .split_once("\r\n\r\n")
+        .ok_or("missing budget query response body")?;
+    let response = LogQueryResponse::decode(payload.as_bytes())?;
     let Some(log_query_event::Event::Terminal(terminal)) = response
         .events
         .last()
