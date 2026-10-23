@@ -36,8 +36,6 @@ fn acknowledged_absent_attribute_is_missing_in_the_public_query_response()
         )?,
         200,
     );
-    let client =
-        api::LogQueryServiceClient::new(api::LogQueryTransport::PlaintextOptOut { endpoint })?;
     let projected_request = api::LogQueryRequest {
         pipeline:
             r#"pipeline:v1 logs | range query_time 0 100 | project record["absent"] | limit 2"#
@@ -53,7 +51,8 @@ fn acknowledged_absent_attribute_is_missing_in_the_public_query_response()
             maximum_time_range_nanoseconds: 100,
         }),
     };
-    let absent = client.execute(
+    let absent = execute_query(
+        endpoint,
         claim.query_secret().ok_or("missing query credential")?,
         &projected_request,
     )?;
@@ -113,3 +112,70 @@ fn acknowledged_absent_attribute_is_missing_in_the_public_query_response()
     shutdown_gracefully(process, &roots)?;
     Ok(())
 }
+
+fn execute_query(
+    endpoint: SocketAddr,
+    bearer: &str,
+    request: &api::LogQueryRequest,
+) -> Result<api::LogQueryResponse, Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let body = request.encode().map_err(|_| "invalid projection query")?;
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|_| "projection query transport setup failed")?;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or("projection query deadline expired")?;
+        let response = client
+            .post(format!("http://{endpoint}{}", api::HTTP_PATH))
+            .bearer_auth(bearer)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.clone())
+            .timeout(remaining)
+            .send()
+            .map_err(|_| "projection query transport failed")?;
+        let status = response.status().as_u16();
+        let retry_after_one = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .is_some_and(|value| value.as_bytes() == b"1");
+        let mut bytes = Vec::new();
+        response
+            .take((api::MAX_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "projection query response unavailable")?;
+        if std::time::Instant::now() >= deadline {
+            return Err("projection query deadline expired".into());
+        }
+        if bytes.len() > api::MAX_RESPONSE_BYTES {
+            return Err("projection query response exceeded canonical bound".into());
+        }
+        if status == 200 {
+            let response = api::LogQueryResponse::decode(&bytes)
+                .map_err(|_| "invalid canonical projection response")?;
+            if std::time::Instant::now() >= deadline {
+                return Err("projection query deadline expired".into());
+            }
+            return Ok(response);
+        }
+        let failure = api::decode_query_rejection(status, &bytes);
+        if status != 429
+            || !retry_after_one
+            || failure != api::LogQueryServiceClientFailure::CapacityUnavailable
+        {
+            return Err(failure.into());
+        }
+        if deadline.saturating_duration_since(std::time::Instant::now()) <= Duration::from_secs(1) {
+            return Err("projection query deadline expired".into());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[path = "projections/capacity.rs"]
+mod capacity;
