@@ -124,6 +124,56 @@ class QueryCompletion(unittest.TestCase):
                     self.run_query(output)
 
 
+class QueryProbeDiagnostics(unittest.TestCase):
+    def run_query(self, stderr, success=False):
+        output = json.dumps(QueryCompletion.response("complete")).encode() if success else b""
+        result = types.SimpleNamespace(returncode=0 if success else 2, stdout=output, stderr=stderr)
+        captured = io.StringIO()
+        failure = None
+        with mock.patch.object(pathlib.Path, "read_text", return_value="query_secret=test-only\n"), \
+                mock.patch.object(pathlib.Path, "write_text"), \
+                mock.patch.object(sys, "argv", ["service-check.py", "query"]), \
+                mock.patch("subprocess.run", return_value=result) as execute, \
+                contextlib.redirect_stderr(captured):
+            try:
+                runpy.run_path(str(pathlib.Path(__file__).with_name("service-check.py")))
+            except RuntimeError as error:
+                failure = str(error)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(execute.call_args.kwargs["env"]["POSITRON_117_QUERY_PROBE"], "1")
+        return captured.getvalue(), failure
+
+    def test_forwards_only_exact_owned_stage_and_timeout_flags(self):
+        for stage, timeout in [("send", "true"), ("read", "false"), ("read", "unknown")]:
+            line = f"positron-query-probe stage={stage} timeout={timeout}"
+            with self.subTest(stage=stage, timeout=timeout):
+                output, failure = self.run_query((line + "\npositron: query transport or response unavailable\n").encode())
+                self.assertEqual(output, line + "\n")
+                self.assertIn("code=transport returncode=2 attempt=1", failure)
+
+    def test_unowned_canary_or_extended_lines_never_echo(self):
+        for line in ["PRIVATE-CANARY-117",
+                     "positron-query-probe stage=send timeout=true PRIVATE-CANARY-117",
+                     "positron-query-probe stage=secret timeout=true"]:
+            output, failure = self.run_query((line + "\npositron: query transport or response unavailable\n").encode())
+            self.assertEqual(output, "")
+            self.assertTrue("PRIVATE-CANARY-117" not in failure, "diagnostic echoed input")
+            self.assertIn("code=other returncode=2 attempt=1", failure)
+
+    def test_multiple_owned_lines_emit_one_fixed_incomplete_marker(self):
+        output, failure = self.run_query(
+            b"positron-query-probe stage=send timeout=true\n"
+            b"positron-query-probe stage=read timeout=false\n"
+            b"positron: query transport or response unavailable\n")
+        self.assertEqual(output, "positron-query-probe incomplete=multiple\n")
+        self.assertIn("code=transport returncode=2 attempt=1", failure)
+
+    def test_success_does_not_forward_diagnostic_output(self):
+        output, failure = self.run_query(b"positron-query-probe stage=send timeout=true\n", success=True)
+        self.assertEqual(output, "")
+        self.assertIsNone(failure)
+
+
 class BackupOutcomeKnowledge(unittest.TestCase):
     def run_backup(self, responses):
         self.commands = []
