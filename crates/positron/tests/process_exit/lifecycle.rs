@@ -239,15 +239,27 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
         &config_path,
         format!("{base_configuration}\n[diagnostics]\nlog_level = \"debug\"\n"),
     )?;
+    let debug_candidate = resolve_probe_configuration(&config_path).map_err(|error| {
+        format!(
+            "debug candidate resolution failed: {error}; {}",
+            terminate_and_describe_child(&mut child, &authorization)
+        )
+    })?;
+    let debug_digest = probe_configuration_digest(&debug_candidate);
     assert!(
         Command::new("/bin/kill")
             .args(["-HUP", &child.id().to_string()])
             .status()?
             .success()
     );
-    std::thread::sleep(Duration::from_millis(100));
-    assert!(child.try_wait()?.is_none());
-    if let Err(error) = wait_for_ready(operations_port) {
+    let debug_publication = wait_for_published_configuration(
+        operations_port,
+        &authorization,
+        &debug_digest,
+        &debug_digest,
+        false,
+    );
+    if let Err(error) = debug_publication.and_then(|_| wait_for_ready(operations_port)) {
         let status = configuration_status(operations_port, &authorization)
             .map(|response| bounded_redacted_observation(&response, &authorization))
             .unwrap_or_else(|status_error| format!("status_request={status_error}"));
@@ -258,26 +270,42 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
         .into());
     }
 
+    assert!(child.try_wait()?.is_none());
+
     let restart_required_configuration = base_configuration.replacen(
         "shutdown_grace_seconds = 2",
         "shutdown_grace_seconds = 60",
         1,
     );
     fs::write(&config_path, restart_required_configuration)?;
+    let restart_candidate = resolve_probe_configuration(&config_path).map_err(|error| {
+        format!(
+            "restart candidate resolution failed: {error}; {}",
+            terminate_and_describe_child(&mut child, &authorization)
+        )
+    })?;
+    let pending_effective_digest =
+        probe_configuration_digest(&debug_candidate.with_live_changes_from(&restart_candidate));
+    let pending_desired_digest = probe_configuration_digest(&restart_candidate);
     assert!(
         Command::new("/bin/kill")
             .args(["-HUP", &child.id().to_string()])
             .status()?
             .success()
     );
-    let pending_status = wait_for_configuration_status(
+    let pending_status = wait_for_published_configuration(
         operations_port,
         &authorization,
-        &[
-            "\"pending_restart\":true",
-            "\"drift_disposition\":\"reconcile\"",
-        ],
-    )?;
+        &pending_effective_digest,
+        &pending_desired_digest,
+        true,
+    )
+    .map_err(|error| {
+        format!(
+            "restart candidate publication failed: {error}; {}",
+            terminate_and_describe_child(&mut child, &authorization)
+        )
+    })?;
     let pending = ConfigurationStatus::from_response(&pending_status)?;
     assert_eq!(pending.phase, "serving");
     assert!(pending.pending_restart);
@@ -1005,4 +1033,146 @@ fn blocked_shutdown_child_fixture() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         3
     });
+}
+
+#[cfg(unix)]
+fn resolve_probe_configuration(
+    path: &std::path::Path,
+) -> Result<positron_config::EffectiveConfiguration, Box<dyn std::error::Error>> {
+    let inputs = positron_config::ConfigurationInputs::try_from_sources(
+        Some(path),
+        std::env::vars(),
+        [] as [(&str, &str); 0],
+    )
+    .map_err(|_| "configuration probe inputs unavailable")?;
+    positron_config::resolve(inputs).map_err(|_| "configuration probe candidate invalid".into())
+}
+
+#[cfg(unix)]
+fn probe_configuration_digest(configuration: &positron_config::EffectiveConfiguration) -> String {
+    use sha2::Digest;
+    format!(
+        "{:x}",
+        sha2::Sha256::digest(configuration.redacted_effective().as_bytes())
+    )
+}
+
+#[cfg(unix)]
+fn wait_for_published_configuration(
+    port: u16,
+    authorization: &str,
+    effective_digest: &str,
+    desired_digest: &str,
+    pending_restart: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    wait_for_configuration_status(
+        port,
+        authorization,
+        &[
+            "\"phase\":\"serving\"",
+            &format!("\"pending_restart\":{pending_restart}"),
+            &format!(
+                "\"drift_disposition\":\"{}\"",
+                if pending_restart { "reconcile" } else { "none" }
+            ),
+            &format!("\"effective_digest\":\"{effective_digest}\""),
+            &format!("\"desired_digest\":\"{desired_digest}\""),
+        ],
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn configuration_publication_barrier_rejects_readiness_and_unrelated_pending_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    listener.set_nonblocking(true)?;
+    let responses = [
+        configuration_status_response("serving", "1", "base", "base", "none", false)?,
+        configuration_status_response("serving", "1", "base", "base", "none", false)?,
+        configuration_status_response("serving", "2", "unrelated", "candidate", "reconcile", true)?,
+        configuration_status_response("serving", "3", "debug", "debug", "none", false)?,
+        configuration_status_response("serving", "3", "debug", "debug", "none", false)?,
+        configuration_status_response("serving", "4", "unrelated", "candidate", "reconcile", true)?,
+        configuration_status_response("serving", "4", "active", "restart", "reconcile", true)?,
+    ];
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || -> std::io::Result<usize> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut delivered = 0;
+        for response in responses {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stopped.try_recv().is_ok() {
+                            return Ok(delivered);
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "publication peer accept deadline",
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    },
+                    Err(error) => return Err(error),
+                }
+            };
+            stream.set_nonblocking(false)?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "publication peer deadline",
+                ));
+            }
+            stream.set_read_timeout(Some(remaining))?;
+            stream.set_write_timeout(Some(remaining))?;
+            let mut reader = BufReader::new(&mut stream);
+            let mut request_bytes = 0;
+            loop {
+                let mut line = Vec::new();
+                let read = reader.by_ref().take(8193).read_until(b'\n', &mut line)?;
+                request_bytes += read;
+                if read == 0 || request_bytes > 8192 {
+                    return Err(std::io::Error::other("publication peer request bound"));
+                }
+                if line == b"\r\n" {
+                    break;
+                }
+            }
+            drop(reader);
+            stream.write_all(response.as_bytes())?;
+            delivered += 1;
+        }
+        Ok(delivered)
+    });
+    // Readiness is already true before the requested configuration is active.
+    let ready = wait_for_ready(port);
+    let published = ready.and_then(|()| {
+        wait_for_published_configuration(port, "Bearer test-token", "debug", "debug", false)
+    });
+    let pending = match published {
+        Ok(_) => {
+            wait_for_published_configuration(port, "Bearer test-token", "active", "restart", true)
+        },
+        Err(_) => Err("debug publication barrier failed".into()),
+    };
+    let _ = stop.send(());
+    let delivered = peer.join().map_err(|_| "publication peer panicked")??;
+    let published = ConfigurationStatus::from_response(&published?)?;
+    let pending = ConfigurationStatus::from_response(&pending?)?;
+    assert_eq!(published.effective_digest, "debug");
+    assert_eq!(delivered, 7);
+    assert_eq!(pending.effective_digest, "active");
+    assert_eq!(pending.desired_digest, "restart");
+    assert!(pending.pending_restart);
+    assert_eq!(published.observed_generation, "3");
+    assert_eq!(published.effective_digest, "debug");
+    assert!(published.is_restored());
+    Ok(())
 }
