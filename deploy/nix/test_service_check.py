@@ -405,3 +405,189 @@ class RepositoryAdmissionReconciliation(unittest.TestCase):
                 self.assertEqual(str(failure.exception),
                                  "repository admission reconciliation refused: code=" + category)
                 self.assertEqual(len(self.calls), 2)
+
+
+class RestartReadinessObservation(unittest.TestCase):
+    """Run the actual VM test script with its machine boundary mocked."""
+
+    @staticmethod
+    def status():
+        return {"phase": "serving", "integrity_degraded": False,
+                "maintenance": {"clock_uncertain": True},
+                "doctor": {"required_families": {"storage": {
+                    "disk_pressure": "healthy", "usable_disk_bytes": 123456}}},
+                "unrelated": "protected-canary"}
+
+    def invoke(self, response=None, failure=True, collector_error=False, systemd_output=None, collector_result=None):
+        import textwrap
+        self.observations = []
+        self.http = []
+        self.reads = []
+        self.systemd = []
+        self.waits = []
+        original = RuntimeError("original readiness assertion")
+        owner = self
+
+        class Machine:
+            restarted = False
+
+            def succeed(self, command):
+                if command == "systemctl restart positron":
+                    self.restarted = True
+                return ""
+
+            def fail(self, command):
+                return ""
+
+            def wait_for_unit(self, unit):
+                return None
+
+            def wait_until_succeeds(self, command, **options):
+                owner.waits.append((command, options.copy()))
+                if self.restarted and failure:
+                    raise original
+                return ""
+
+            def execute(self, command, **options):
+                owner.observations.append((command, options.copy()))
+                if collector_error:
+                    raise OSError("protected-canary")
+                if collector_result is not None:
+                    return collector_result
+                owner.assertEqual(command,
+                    "timeout --kill-after=1s 14s python /etc/positron-service-check.py readiness-diagnostics")
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    runpy.run_path(str(pathlib.Path(__file__).with_name("service-check.py")))
+                return 0, output.getvalue()
+
+        def request(value, timeout):
+            self.http.append((value, timeout))
+            if isinstance(response, BaseException):
+                raise response
+            encoded = json.dumps(self.status()).encode() if response is None else response
+            class Response(io.BytesIO):
+                status = 200
+
+                def read(inner, size=-1):
+                    result = super().read(size)
+                    owner.reads.append((size, len(result)))
+                    return result
+
+            stream = Response(encoded)
+            return contextlib.closing(stream)
+
+        def systemd(command, **options):
+            self.systemd.append((command, options))
+            return types.SimpleNamespace(returncode=0, stdout=systemd_output if systemd_output is not None else (
+                b"ActiveState=active\nSubState=running\nMainPID=123\n"
+                b"ExecMainStatus=0\nNRestarts=0\n"), stderr=b"protected-canary")
+
+        directory = pathlib.Path(__file__).parent
+        source = (directory / "test.nix").read_text()
+        script = textwrap.dedent(source.split("  testScript = ''\n", 1)[1].rsplit("  '';", 1)[0])
+        output = io.StringIO()
+        caught = None
+        with mock.patch.object(pathlib.Path, "read_text", return_value=(
+                "administrator_secret=protected-canary\ningest_secret=protected-ingest\n"
+                "query_secret=protected-query\n")), \
+                mock.patch.object(sys, "argv", ["service-check.py", "readiness-diagnostics"]), \
+                mock.patch("urllib.request.urlopen", side_effect=request), \
+                mock.patch("subprocess.run", side_effect=systemd), \
+                contextlib.redirect_stdout(output):
+            try:
+                exec(compile(script, "test.nix:testScript", "exec"),
+                     {"machine": Machine(), "start_all": lambda: None})
+            except BaseException as error:
+                caught = error
+        self.output = output.getvalue()
+        if failure:
+            self.assertIs(caught, original)
+        elif caught is not None:
+            raise caught
+        return self.output
+
+    def observed(self):
+        self.assertEqual(len(self.observations), 1,
+                         "readiness failure must collect one bounded observation before cleanup")
+        self.assertEqual(self.observations[0][1], {})
+        self.assertEqual(len(self.http), 1)
+        request, timeout = self.http[0]
+        self.assertEqual(request.full_url, "http://127.0.0.1:4310/status")
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 5)
+        self.assertNotIn("protected", request.full_url)
+        self.assertNotIn("protected", self.output)
+        self.assertTrue(all(0 < size <= 65537 for size, _ in self.reads),
+                        "status reads must specify a bounded size including one sentinel")
+        self.assertLessEqual(sum(count for _, count in self.reads), 65537)
+        self.assertTrue(all(not options for _, options in self.waits),
+                        "preserve the driver's original readiness timeout")
+
+    def test_failure_observes_closed_clock_and_resource_facts_before_same_exception(self):
+        output = self.invoke()
+        self.observed()
+        records = [json.loads(line) for line in output.splitlines()]
+        status = next(record for record in records if record.get("event") == "readiness_status")
+        self.assertEqual(status, {"event": "readiness_status", "outcome": "observed",
+            "phase": "serving", "integrity_degraded": False, "clock_uncertain": True,
+            "disk_pressure": "healthy", "usable_disk_bytes": 123456})
+        self.assertTrue(self.reads)
+        self.assertIn({"event": "readiness_systemd", "outcome": "observed",
+            "ActiveState": "active", "SubState": "running", "MainPID": 123,
+            "ExecMainStatus": 0, "NRestarts": 0}, records)
+        self.assertEqual(len(self.systemd), 1)
+        command, options = self.systemd[0]
+        self.assertEqual(command, ["systemctl", "show", "positron", "--property="
+            "ActiveState,SubState,MainPID,ExecMainStatus,NRestarts"])
+        self.assertGreater(options["timeout"], 0)
+        self.assertLessEqual(options["timeout"], 3)
+
+    def test_systemd_untrusted_values_are_not_rendered(self):
+        for value in [b"ActiveState=protected-canary\n", b"x" * 4097,
+                      b"ActiveState=active\nSubState=running\nMainPID=protected-canary\n",
+                      b"ActiveState=active\nSubState=running\nMainPID=123\n"
+                      b"ExecMainStatus=0\nNRestarts=0\nExtra=protected-canary\n"]:
+            with self.subTest(kind="invalid systemd observation"):
+                self.invoke(systemd_output=value)
+                self.observed()
+                records = [json.loads(line) for line in self.output.splitlines()]
+                self.assertIn({"event": "readiness_systemd", "outcome": "unavailable"}, records)
+
+    def test_success_path_never_observes_or_changes_lifecycle(self):
+        self.invoke(failure=False)
+        self.assertEqual(self.observations, [])
+        self.assertEqual(self.http, [])
+        self.assertEqual(self.systemd, [])
+
+    def test_collector_error_cannot_replace_original_readiness_failure(self):
+        self.invoke(collector_error=True)
+        self.assertEqual(len(self.observations), 1)
+        self.assertNotIn("protected", self.output)
+
+    def test_collector_kill_result_never_leaks_output_or_replaces_original_failure(self):
+        self.invoke(collector_result=(137, "protected-canary"))
+        self.assertEqual(len(self.observations), 1)
+        self.assertNotIn("protected", self.output)
+        self.assertIn('"outcome":"unavailable"', self.output)
+
+    def test_invalid_or_oversized_status_never_prints_untrusted_fields(self):
+        for response in [b"protected-canary", b"x" * 65537,
+                         json.dumps({"phase": "protected-canary"}).encode(),
+                         json.dumps({**self.status(), "integrity_degraded": "protected-canary"}).encode()]:
+            with self.subTest(kind="invalid status"):
+                self.invoke(response=response)
+                self.observed()
+                self.assertIn('"outcome": "unavailable"', self.output)
+
+    def test_auth_refusal_and_timeout_are_distinct_and_never_retried(self):
+        cases = [(urllib.error.HTTPError("http://localhost/status", 401, "protected-canary", {},
+                    io.BytesIO(b"protected-canary")), "authentication_rejected"),
+                 (urllib.error.HTTPError("http://localhost/status", 503, "protected-canary", {},
+                    io.BytesIO(b"protected-canary")), "refused"),
+                 (TimeoutError("protected-canary"), "timeout")]
+        for response, expected in cases:
+            with self.subTest(outcome=expected):
+                self.invoke(response=response)
+                self.observed()
+                self.assertIn('"outcome": "' + expected + '"', self.output)

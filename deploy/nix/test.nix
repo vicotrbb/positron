@@ -93,7 +93,18 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("python /etc/positron-lifecycle-check.py backup")
     machine.succeed("systemctl reload positron")
     machine.succeed("systemctl restart positron")
-    machine.wait_until_succeeds("curl --fail http://127.0.0.1:4310/health/ready")
+    try:
+        machine.wait_until_succeeds("curl --fail http://127.0.0.1:4310/health/ready")
+    except Exception:
+        try:
+            code, observation = machine.execute("timeout --kill-after=1s 14s python /etc/positron-service-check.py readiness-diagnostics")
+            if code == 0:
+                print(observation, end="")
+            else:
+                print('{"event":"readiness_observation","outcome":"unavailable"}')
+        except Exception:
+            print('{"event":"readiness_observation","outcome":"unavailable"}')
+        raise
     machine.succeed("sha256sum --check /root/key.sha256")
     machine.succeed("python /etc/positron-service-check.py query")
     machine.succeed("systemctl stop positron")
