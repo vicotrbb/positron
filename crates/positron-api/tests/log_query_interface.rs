@@ -428,3 +428,6 @@ fn decoder_enforces_declared_cell_type_and_nullability() {
         }
     }
 }
+
+#[path = "log_query_interface/protojson_contract.rs"]
+mod protojson_contract;

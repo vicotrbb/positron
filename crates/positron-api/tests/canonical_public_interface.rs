@@ -1090,3 +1090,6 @@ fn public_failures_expose_only_closed_safe_details() -> Result<(), std::io::Erro
     assert!(!format!("{error:?}").contains("do-not-reflect"));
     Ok(())
 }
+
+#[path = "canonical_public_interface/enum_names.rs"]
+mod enum_names;
