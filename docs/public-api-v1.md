@@ -80,12 +80,13 @@ matches the API listener's default request deadline and includes setup and
 response transfer in addition to the query's requested execution budget (at most
 five seconds for this route).
 It does not promise completion under a custom server deadline. Other generated
-clients retain their five-second default transport bound. Repository and Backup
+clients retain their five-second default transport bound. Repository, Backup and Upgrade
 clients also provide an explicit `manage_with_default_listener_timeout` opt-in,
 which bounds request encoding, HTTP exchange, and canonical response decoding
 by the supplied duration, capped at 30 seconds, without negotiating the server's
-configured deadline. Their existing `manage` and `manage_with_timeout` methods
-retain the five-second cap. The native `repository` and `backup` management
+configured deadline. Their existing `manage` methods retain the five-second cap, as do the existing
+Repository and Backup `manage_with_timeout` methods. The native `repository`,
+`backup`, and `upgrade` management
 commands use this opt-in; a wait command further bounds each request by its
 remaining original wait duration. Connection setup remains capped at five
 seconds. Transport failures are not retried automatically.

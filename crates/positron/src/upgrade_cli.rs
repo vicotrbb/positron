@@ -29,25 +29,45 @@ fn execute(
     let (transport, request, wait) = parse(arguments)?;
     let credential = crate::administrative_cli::credential()?;
     let bearer = credential.trim_end_matches(['\r', '\n']);
+    let deadline = wait
+        .map(|duration| {
+            Instant::now()
+                .checked_add(duration)
+                .ok_or("invalid wait duration")
+        })
+        .transpose()?;
+    let remaining = || {
+        deadline.map_or(Duration::from_secs(30), |deadline| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(30))
+        })
+    };
     let client = UpgradeServiceClient::new(transport).map_err(client_failure)?;
-    let mut response = client.manage(bearer, &request).map_err(client_failure)?;
-    if let Some(duration) = wait {
-        let deadline = Instant::now()
-            .checked_add(duration)
-            .ok_or("invalid wait duration")?;
-        while response
-            .operation
-            .as_ref()
-            .is_some_and(|operation| matches!(operation.status.as_str(), "pending" | "running"))
-        {
+    let mut response = client
+        .manage_with_default_listener_timeout(bearer, &request, remaining())
+        .map_err(client_failure)?;
+    if let Some(deadline) = deadline {
+        loop {
             if Instant::now() >= deadline {
                 write_response(output, &response)?;
                 return Err(
                     "operation outcome remains unknown; inspect the same operation ID before retrying",
                 );
             }
-            std::thread::sleep(Duration::from_millis(100));
-            response = client.manage(bearer, &request).map_err(client_failure)?;
+            if !response
+                .operation
+                .as_ref()
+                .is_some_and(|operation| matches!(operation.status.as_str(), "pending" | "running"))
+            {
+                break;
+            }
+            std::thread::sleep(
+                Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
+            );
+            response = client
+                .manage_with_default_listener_timeout(bearer, &request, remaining())
+                .map_err(client_failure)?;
         }
     }
     write_response(output, &response)
