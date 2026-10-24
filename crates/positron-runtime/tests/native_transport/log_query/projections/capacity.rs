@@ -311,3 +311,125 @@ fn response_capture_retains_the_canonical_bound() -> TestResult<()> {
     assert_eq!(bodies.len(), 1);
     Ok(())
 }
+
+fn generated_capacity_then_terminal(incomplete: bool) -> TestResult<()> {
+    let request = request();
+    let mut expected = missing_response()?;
+    if incomplete {
+        let Some(Event::Terminal(terminal)) = expected
+            .events
+            .last_mut()
+            .and_then(|event| event.event.as_mut())
+        else {
+            return Err("fixture terminal missing".into());
+        };
+        terminal.state = "incomplete".into();
+        terminal.reason = "budget_exhausted".into();
+        terminal
+            .stats
+            .as_mut()
+            .ok_or("fixture stats missing")?
+            .limiting_budget = Some("scanned_bytes".into());
+    }
+    let bytes = expected.encode()?;
+    let (result, bodies) = scripted(
+        vec![
+            (
+                reply(
+                    429,
+                    &api::query_rejection(429, "capacity_unavailable")?,
+                    true,
+                ),
+                false,
+            ),
+            (reply(200, &bytes, false), false),
+        ],
+        |endpoint| {
+            let client =
+                api::LogQueryServiceClient::new(api::LogQueryTransport::PlaintextOptOut {
+                    endpoint,
+                })?;
+            super::super::execute_admitted_query(&client, "query-canary", &request)
+        },
+    )?;
+    assert_eq!(result?, expected);
+    assert_eq!(bodies, vec![request.encode()?; 2]);
+    Ok(())
+}
+
+#[test]
+fn generated_capacity_then_complete_preserves_the_encoded_query() -> TestResult<()> {
+    generated_capacity_then_terminal(false)
+}
+
+#[test]
+fn generated_capacity_then_incomplete_preserves_the_encoded_query() -> TestResult<()> {
+    generated_capacity_then_terminal(true)
+}
+
+#[test]
+fn generated_admission_does_not_retry_auth_unavailable_or_transport() -> TestResult<()> {
+    let request = request();
+    for first in [
+        Vec::new(),
+        reply(
+            401,
+            &api::query_rejection(401, "authentication_rejected")?,
+            false,
+        ),
+        reply(503, &api::query_rejection(503, "query_unavailable")?, false),
+        reply(429, br#"{"code":"unknown"}"#, true),
+    ] {
+        let (result, bodies) = scripted(
+            vec![
+                (first, false),
+                (reply(200, &missing_response()?.encode()?, false), false),
+            ],
+            |endpoint| {
+                let client =
+                    api::LogQueryServiceClient::new(api::LogQueryTransport::PlaintextOptOut {
+                        endpoint,
+                    })?;
+                super::super::execute_admitted_query(&client, "query-canary", &request)
+            },
+        )?;
+        let error = result
+            .err()
+            .ok_or("invalid refusal unexpectedly succeeded")?;
+        assert!(
+            !error.to_string().contains("query-canary"),
+            "query error exposed credential"
+        );
+        assert_eq!(bodies, vec![request.encode()?]);
+    }
+    Ok(())
+}
+
+#[test]
+fn generated_repeated_capacity_expires_admission_without_a_late_attempt() -> TestResult<()> {
+    let request = request();
+    let capacity = reply(
+        429,
+        &api::query_rejection(429, "capacity_unavailable")?,
+        true,
+    );
+    let (result, bodies) = scripted(vec![(capacity, false); 8], |endpoint| {
+        let client =
+            api::LogQueryServiceClient::new(api::LogQueryTransport::PlaintextOptOut { endpoint })?;
+        super::super::execute_admitted_query(&client, "query-canary", &request)
+    })?;
+    assert_eq!(
+        result
+            .err()
+            .ok_or("capacity unexpectedly succeeded")?
+            .to_string(),
+        "typed query admission window expired"
+    );
+    assert!(
+        !bodies.is_empty() && bodies.len() <= 5,
+        "admission replay exceeded its bounded attempt window"
+    );
+    let expected = request.encode()?;
+    assert!(bodies.iter().all(|body| *body == expected));
+    Ok(())
+}
