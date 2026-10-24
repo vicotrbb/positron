@@ -317,3 +317,6 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[path = "repository_cli/transport_deadline.rs"]
+mod transport_deadline;
