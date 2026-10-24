@@ -1,3 +1,5 @@
+mod lifecycle_clock;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +48,7 @@ pub(super) fn fuzz_catalog_stateful(data: &[u8]) {
     if data.len() > 128 {
         return;
     }
+    lifecycle_clock::exercise(data);
     let Some(root) = FuzzRoot::new() else {
         return;
     };
