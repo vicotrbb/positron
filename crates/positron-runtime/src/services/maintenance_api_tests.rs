@@ -141,3 +141,6 @@ mod upgrade_crash_resume;
 
 #[path = "maintenance_api_tests/upgrade_rollback.rs"]
 mod upgrade_rollback;
+
+#[path = "maintenance_api_tests/query_observation.rs"]
+mod query_observation;

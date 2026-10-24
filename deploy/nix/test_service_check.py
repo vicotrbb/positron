@@ -591,3 +591,41 @@ class RestartReadinessObservation(unittest.TestCase):
                 self.invoke(response=response)
                 self.observed()
                 self.assertIn('"outcome": "' + expected + '"', self.output)
+
+
+class UpgradeAdmissionObservation(unittest.TestCase):
+    def test_upgrade_unknown_fatal_preserves_the_original_decision_and_closed_class(self):
+        owner = RepositoryAdmissionReconciliation()
+        with self.assertRaisesRegex(RuntimeError, "code=transport_unknown"):
+            owner.invoke([owner.response(code=2, error=owner.unknown)], kind="upgrade", action="start")
+        self.assertEqual(len(owner.calls), 1)
+
+
+    def test_upgrade_fatal_whitelist_does_not_render_unknown_input(self):
+        cases = [(b"positron: invalid upgrade request", "invalid_request"),
+            (b"positron: system administration authentication rejected", "authentication_rejected"),
+            (b"positron: upgrade operation unavailable", "operation_unavailable"),
+            (b"positron: upgrade precondition failed; inspect current state before retrying", "precondition_failed"),
+            (b"positron: idempotency key conflicts with an accepted request", "idempotency_conflict"),
+            (b"protected-secret-canary", "other")]
+        for error, category in cases:
+            owner = RepositoryAdmissionReconciliation()
+            with self.subTest(category=category), self.assertRaises(RuntimeError) as raised:
+                owner.invoke([owner.response(code=2, error=error)], kind="upgrade", action="start")
+            self.assertEqual(str(raised.exception), "native service refused lifecycle admission: code=" + category)
+            self.assertNotIn("protected-secret-canary", str(raised.exception))
+            self.assertEqual(len(owner.calls), 1)
+
+
+    def test_upgrade_success_and_existing_capacity_retry_keep_their_original_binding(self):
+        owner = RepositoryAdmissionReconciliation()
+        capacity = b"positron: capacity unavailable; retry the same idempotent request"
+        with mock.patch("time.sleep") as sleep:
+            receipt = owner.invoke([owner.response(code=2, error=capacity), owner.response()],
+                kind="upgrade", action="start")
+        self.assertEqual(receipt["operation_id"], owner.operation_id)
+        self.assertEqual(len(owner.calls), 2)
+        # Existing admission refreshes generation between canonical refusals.
+        self.assertEqual(owner.calls[0][0][:-1], owner.calls[1][0][:-1])
+        self.assertEqual(owner.calls[0][1], owner.calls[1][1])
+        sleep.assert_called_once_with(0.1)

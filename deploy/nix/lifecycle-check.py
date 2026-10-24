@@ -106,6 +106,19 @@ def admit(kind, action, arguments):
             return replayed
         retryable = any(message in result.stderr for message in [b"stale resource generation", b"administration unavailable", b"capacity unavailable"])
         if not retryable or time.monotonic() >= deadline:
+            if kind == "upgrade" and action == "start":
+                category = {
+                    b"positron: invalid upgrade request": "invalid_request",
+                    b"positron: system administration authentication rejected": "authentication_rejected",
+                    b"positron: upgrade operation unavailable": "operation_unavailable",
+                    b"positron: stale resource generation; inspect current state before retrying": "stale_generation",
+                    b"positron: upgrade precondition failed; inspect current state before retrying": "precondition_failed",
+                    b"positron: idempotency key conflicts with an accepted request": "idempotency_conflict",
+                    b"positron: administration unavailable; inspect or retry the same operation": "administration_unavailable",
+                    b"positron: capacity unavailable; retry the same idempotent request": "capacity_unavailable",
+                    b"positron: transport outcome unknown; inspect the same operation or idempotency key before retrying": "transport_unknown",
+                }.get(result.stderr.strip(), "other")
+                raise RuntimeError("native service refused lifecycle admission: code=" + category)
             raise RuntimeError("native service refused lifecycle admission")
         time.sleep(0.1)
 
