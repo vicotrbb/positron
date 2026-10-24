@@ -1,6 +1,9 @@
 use super::*;
 use std::error::Error;
 
+#[path = "release/grpc_peer.rs"]
+mod grpc_peer;
+
 const RELEASE_WINDOW: Duration = Duration::from_secs(2);
 const PROBE_BACKOFF: Duration = Duration::from_millis(5);
 
@@ -135,31 +138,17 @@ async fn generated_grpc_replacement_distinguishes_transport_close_from_wire_unkn
             accepted += 1;
             let mut connection =
                 tokio::time::timeout_at(deadline, h2::server::handshake(stream)).await??;
-            let (mut request, mut reply) = tokio::time::timeout_at(deadline, connection.accept())
+            let (request, reply) = tokio::time::timeout_at(deadline, connection.accept())
                 .await?
                 .ok_or("replacement peer missing RPC")??;
-            while let Some(bytes) =
-                tokio::time::timeout_at(deadline, request.body_mut().data()).await?
-            {
-                let bytes = bytes?;
-                request
-                    .body_mut()
-                    .flow_control()
-                    .release_capacity(bytes.len())?;
-            }
-            reply.send_response(
-                http::Response::builder()
-                    .status(200)
-                    .header("content-type", "application/grpc")
-                    .header("grpc-status", status)
-                    .body(())?,
-                true,
-            )?;
+            grpc_peer::reply_after_body(&mut connection, request, reply, status, deadline).await?;
             let _ = tokio::time::timeout_at(deadline, connection.accept()).await;
             Ok::<_, Box<dyn Error + Send + Sync>>(accepted)
         });
         let result = grpc_after_release(endpoint).await;
-        let accepted = peer.await?.map_err(|_| "replacement peer failed")?;
+        let accepted = peer
+            .await?
+            .map_err(|error| format!("replacement peer failed: {error}"))?;
         if reset_first {
             assert_eq!(result?.code(), Code::Unauthenticated);
             assert_eq!(accepted, 2);
