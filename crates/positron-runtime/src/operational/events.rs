@@ -164,6 +164,7 @@ pub(crate) enum OperationalEvent {
     QueryCompleted {
         outcome: RequestOutcome,
         duration_micros: u64,
+        failure: Option<crate::services::ServiceFailure>,
     },
     RequestCompleted {
         role: crate::ListenerRole,
@@ -243,10 +244,15 @@ impl OperationalEvent {
         if let Self::QueryCompleted {
             outcome,
             duration_micros,
+            failure,
         } = self
         {
             value["outcome"] = outcome.label().into();
             value["duration_micros"] = duration_micros.into();
+            if let Some(category) = failure.and_then(crate::services::maintenance_failure_category)
+            {
+                value["failure"] = category.into();
+            }
         }
         if let Self::Diagnostic(diagnostic) = self {
             match diagnostic {

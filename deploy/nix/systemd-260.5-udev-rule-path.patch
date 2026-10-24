@@ -1,0 +1,106 @@
+--- a/src/udev/udev-rules.c
++++ b/src/udev/udev-rules.c
+@@ -1696,7 +1696,7 @@
+                 return log_warning_errno(errno, "Failed to open %s, ignoring: %m", c->original_path);
+         }
+ 
+-        r = hashmap_put_stats_by_path(&rules->stats_by_path, c->original_path, &c->st);
++        r = hashmap_put_stats_by_path(&rules->stats_by_path, c->result, &c->st);
+         if (r < 0)
+                 return log_warning_errno(r, "Failed to save stat for %s, ignoring: %m", c->original_path);
+ 
+--- a/src/udev/test-udev-rules.c
++++ b/src/udev/test-udev-rules.c
+@@ -1,6 +1,16 @@
+ /* SPDX-License-Identifier: LGPL-2.1-or-later */
+ 
++#include <errno.h>
++#include <sys/mount.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++#include "fileio.h"
++#include "mkdir.h"
++#include "namespace-util.h"
++#include "rm-rf.h"
+ #include "string-util.h"
++#include "tmpfile-util.h"
+ #include "tests.h"
+ #include "udev-rules.h"
+ 
+@@ -92,4 +102,75 @@
+         test_udev_rule_parse_value_one("a\"\"", NULL, /* expected_case_insensitive= */ false, -EINVAL);
+ }
+ 
++
++/* Runs only in the explicit root + CAP_SYS_ADMIN disposable proof container.
++ * Each child receives a private mount namespace and fresh root; host /etc and
++ * the container's /etc are never modified. Missing privilege is a hard failure. */
++static void test_reload_directory(bool alias) {
++        _cleanup_(rm_rf_physical_and_freep) char *root = NULL;
++        int status = 0;
++        pid_t pid, waited;
++
++        ASSERT_EQ(geteuid(), 0);
++        ASSERT_OK(mkdtemp_malloc("/tmp/test-udev-rule-alias-XXXXXX", &root));
++        ASSERT_OK(mkdir_p(strjoina(root, "/etc/udev"), 0755));
++        ASSERT_OK(mkdir_p(strjoina(root, "/proc"), 0755));
++        if (alias) {
++                ASSERT_OK(mkdir_p(strjoina(root, "/rules-store"), 0755));
++                ASSERT_OK_ERRNO(symlink("/rules-store", strjoina(root, "/etc/udev/rules.d")));
++                ASSERT_OK(write_string_file(strjoina(root, "/rules-store/50-test.rules"),
++                                           "SUBSYSTEM==\"tty\", TAG+=\"systemd\"\n",
++                                           WRITE_STRING_FILE_CREATE | WRITE_STRING_FILE_TRUNCATE));
++        } else {
++                ASSERT_OK(mkdir_p(strjoina(root, "/etc/udev/rules.d"), 0755));
++                ASSERT_OK(write_string_file(strjoina(root, "/etc/udev/rules.d/50-test.rules"),
++                                           "SUBSYSTEM==\"tty\", TAG+=\"systemd\"\n",
++                                           WRITE_STRING_FILE_CREATE | WRITE_STRING_FILE_TRUNCATE));
++        }
++
++        pid = fork();
++        ASSERT_GE(pid, 0);
++        if (pid == 0) {
++                _cleanup_(udev_rules_freep) UdevRules *rules = NULL;
++
++                (void) alarm(30);
++                ASSERT_OK(detach_mount_namespace());
++                ASSERT_OK_ERRNO(mount("proc", strjoina(root, "/proc"), "proc",
++                                      MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL));
++                ASSERT_OK_ERRNO(chroot(root));
++                ASSERT_OK_ERRNO(chdir("/"));
++                ASSERT_OK(udev_rules_load(&rules, RESOLVE_NAME_NEVER, NULL));
++                ASSERT_FALSE(udev_rules_should_reload(rules));
++
++                /* Size changes deterministically; no clock sleeps or mtime assumptions. */
++                ASSERT_OK(write_string_file("/etc/udev/rules.d/50-test.rules",
++                                           "SUBSYSTEM==\"block\", TAG+=\"changed-rule\"\n",
++                                           WRITE_STRING_FILE_TRUNCATE));
++                ASSERT_TRUE(udev_rules_should_reload(rules));
++                rules = udev_rules_free(rules);
++                ASSERT_OK(udev_rules_load(&rules, RESOLVE_NAME_NEVER, NULL));
++                ASSERT_FALSE(udev_rules_should_reload(rules));
++                _exit(EXIT_SUCCESS);
++        }
++
++        do
++                waited = waitpid(pid, &status, 0);
++        while (waited < 0 && errno == EINTR);
++        ASSERT_EQ(waited, pid);
++        /* Always remove fixture files before a RED assertion can abort the parent.
++         * The child namespace (and its proc mount) is already gone at this point. */
++        int cleanup = rm_rf(root, REMOVE_ROOT | REMOVE_PHYSICAL);
++        ASSERT_OK(cleanup);
++        ASSERT_TRUE(WIFEXITED(status));
++        ASSERT_EQ(WEXITSTATUS(status), EXIT_SUCCESS);
++}
++
++TEST(udev_rules_reload_direct_directory) {
++        test_reload_directory(false);
++}
++
++TEST(udev_rules_reload_symlink_directory) {
++        test_reload_directory(true);
++}
++
+ DEFINE_TEST_MAIN(LOG_DEBUG);

@@ -1030,15 +1030,16 @@ async fn tls_grpc_forces_shutdown_when_an_authenticated_request_exceeds_the_drai
     );
     let stalled_channel = channel.clone();
     let stalled = tokio::spawn(async move {
-        Grpc::new(stalled_channel)
-            .streaming(
-                request,
-                PathAndQuery::from_static(
-                    "/opentelemetry.proto.collector.logs.v1.LogsService/Export",
-                ),
-                OtlpLogCodec,
-            )
-            .await
+        let mut grpc = Grpc::new(stalled_channel);
+        grpc.ready().await.map_err(|error| {
+            tonic::Status::unavailable(format!("stalled client readiness: {error}"))
+        })?;
+        grpc.streaming(
+            request,
+            PathAndQuery::from_static("/opentelemetry.proto.collector.logs.v1.LogsService/Export"),
+            OtlpLogCodec,
+        )
+        .await
     });
     tokio::time::sleep(Duration::from_millis(25)).await;
     let shutdown_started = Instant::now();
@@ -1049,7 +1050,9 @@ async fn tls_grpc_forces_shutdown_when_an_authenticated_request_exceeds_the_drai
     );
     assert_eq!(outcome, positron_runtime::ExitOutcome::Forced);
     stalled.abort();
-    drop(stalled.await);
+    if let Err(error) = stalled.await {
+        assert!(error.is_cancelled(), "stalled client task failed: {error}");
+    }
     drop(channel);
     Ok(())
 }

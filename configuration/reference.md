@@ -169,6 +169,11 @@ project_trust_root_file = "/opt/positron/trust/project-ed25519.pub"
 current_manifest_file = "/opt/positron/releases/current.manifest"
 ```
 
+`executable_distribution` selects the signed NativeExecutable platform: `native`
+(the default) uses the OS/architecture identity; `nix` uses its `nix-` prefix.
+Set `executable_distribution = "nix"` for a Nix installation. NAR store-output
+identity remains separate from executable identity in the same release manifest.
+
 The root file is an InstalledReleaseTrust v1 JSON document. It pins the Project
 Trust Root, selected delegated target release signer, minimum revocation sequence,
 and root-signed current authorization and revocation snapshot. Raw-key files

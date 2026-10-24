@@ -2,6 +2,18 @@ use super::*;
 #[test]
 fn repository_task_reopens_exact_owned_dispatch_binding() -> Result<(), Box<dyn std::error::Error>>
 {
+    repository_task_reopens_dispatch_binding(false)
+}
+
+#[test]
+fn installed_handler_dispatches_the_reopened_repository_binding()
+-> Result<(), Box<dyn std::error::Error>> {
+    repository_task_reopens_dispatch_binding(true)
+}
+
+fn repository_task_reopens_dispatch_binding(
+    installed: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = CatalogRoot::new()?;
     let authority = crate::catalog::tests::support::establish_catalog_authority_with_pool_units(
         PrimaryDataVolume::acquire(&root.0, MountQualification::LocalHost)?,
@@ -41,16 +53,26 @@ fn repository_task_reopens_exact_owned_dispatch_binding() -> Result<(), Box<dyn 
         task
     );
     let restored = MaintenanceCoordinator::restore_from_catalog(&catalog).expect("restore");
-    let execution = restored
-        .start_next_with_reservation_and_persist_for_class(
+    let execution = if installed {
+        restored.start_next_with_root_migration_handler_and_snapshot_lease_times(
+            &catalog,
+            &authority,
+            8,
+            false,
+            &[MaintenanceTaskClass::RepositoryVerification],
+            &std::collections::BTreeMap::new(),
+        )
+    } else {
+        restored.start_next_with_reservation_and_persist_for_class(
             &catalog,
             &authority,
             8,
             false,
             Some(MaintenanceTaskClass::RepositoryVerification),
         )
-        .expect("admission")
-        .ok_or("no dispatched repository task")?;
+    }
+    .expect("admission")
+    .ok_or("no dispatched repository task")?;
     assert_eq!(
         RepositoryOperationBinding::from_execution(&execution).expect("owned dispatch"),
         binding

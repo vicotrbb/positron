@@ -137,3 +137,6 @@ fn generated_client_distinguishes_stale_generation_from_unsafe_preconditions()
     }
     Ok(())
 }
+
+#[path = "repository_interface/transport_deadline.rs"]
+mod transport_deadline;

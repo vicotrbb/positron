@@ -62,7 +62,12 @@ pub(crate) struct OperationalTelemetry {
     pub(crate) trace_refused: std::sync::atomic::AtomicU64,
 }
 impl OperationalTelemetry {
-    pub(crate) fn record_query(&self, outcome: RequestOutcome, elapsed: std::time::Duration) {
+    pub(crate) fn record_query(
+        &self,
+        outcome: RequestOutcome,
+        elapsed: std::time::Duration,
+        failure: Option<crate::services::ServiceFailure>,
+    ) {
         let duration_micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         match self.buffer.lock() {
             Ok(mut buffer) => {
@@ -80,6 +85,7 @@ impl OperationalTelemetry {
         self.record(OperationalEvent::QueryCompleted {
             outcome,
             duration_micros,
+            failure,
         });
     }
     pub(crate) fn record_query_budget(&self, dimension: positron_query::QueryBudgetDimension) {

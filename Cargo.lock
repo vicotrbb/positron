@@ -3865,6 +3865,7 @@ dependencies = [
  "positron-release",
  "positron-signals",
  "prost 0.14.3",
+ "reqwest 0.12.28",
  "ring",
  "rustix",
  "rustls",

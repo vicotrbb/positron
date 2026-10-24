@@ -1,7 +1,100 @@
 use super::*;
+
+#[path = "repository/status_http.rs"]
+mod status_http;
 use crate::services::repository_administration::RepositoryAdmission;
 use positron_governance::{AdministrativeIdempotencyKey, DurableOperationStatus, RepositoryAction};
 use std::os::unix::fs::PermissionsExt;
+
+#[test]
+fn accepted_repository_dispatch_survives_a_foreground_catalog_interleave()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let repository_path = fixture.control_socket_path().with_file_name("repository");
+    fs::create_dir(&repository_path)?;
+    fs::set_permissions(&repository_path, fs::Permissions::from_mode(0o700))?;
+    let (initialized, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(initialized)?;
+    let generation = services
+        .open_maintenance_catalog()
+        .expect("catalog")
+        .pin()?
+        .number();
+    let accepted = services
+        .accept_repository_operation(
+            &administrator,
+            RepositoryAdmission {
+                action: RepositoryAction::Initialize,
+                locator: crate::services::repository_administration::RepositoryLocation::Local(
+                    &repository_path,
+                ),
+                repository: [81; 16],
+                expected_generation: generation,
+                idempotency: AdministrativeIdempotencyKey::new([82; 16])?,
+            },
+        )
+        .expect("accepted repository initialization");
+    for _ in 0..32 {
+        if services
+            .repository_operation_status(&administrator, accepted.operation_id())
+            .expect("repository status")
+            .status()
+            .is_terminal()
+        {
+            break;
+        }
+        let gate = services.catalog_operation_gate();
+        let (reached, foreground) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        crate::services::maintenance::DISPATCH_RECOVERY_INTERLEAVE.with(|slot| {
+            *slot.borrow_mut() = Some((reached, resumed));
+        });
+        let dispatched = std::thread::scope(|scope| {
+            let foreground = scope.spawn(move || -> Result<(), String> {
+                foreground
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|failure| failure.to_string())?;
+                let operation = match gate.try_lock() {
+                    Ok(operation) => Some(operation),
+                    Err(std::sync::TryLockError::WouldBlock) => None,
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        return Err("catalog gate poisoned".into());
+                    },
+                };
+                resume.send(()).map_err(|failure| failure.to_string())?;
+                released
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|failure| failure.to_string())?;
+                drop(operation);
+                Ok(())
+            });
+            let dispatched =
+                crate::services::maintenance::wake_runtime_maintenance(&services, None);
+            release
+                .send(())
+                .expect("release foreground Catalog operation");
+            foreground
+                .join()
+                .expect("foreground Catalog thread")
+                .expect("foreground Catalog operation");
+            dispatched
+        });
+        match dispatched {
+            Ok(_) | Err(crate::ServiceFailure::CatalogBusy) => {},
+            Err(failure) => return Err(failure.into()),
+        }
+    }
+    assert_eq!(
+        services
+            .repository_operation_status(&administrator, accepted.operation_id())
+            .expect("repository status")
+            .status(),
+        DurableOperationStatus::Succeeded,
+    );
+    Ok(())
+}
+
 #[test]
 fn repository_status_recovers_after_catalog_writer_contention()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -34,11 +127,16 @@ fn repository_status_recovers_after_catalog_writer_contention()
         .ok_or("API endpoint")?;
     let client = RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })?;
     let request = RepositoryRequest::decode(br#"{"action":"status"}"#)?;
-    assert_eq!(
-        client.manage(&ingest, &request),
-        Err(RepositoryServiceClientFailure::AuthenticationRejected),
-    );
     let services = process.services().ok_or("serving services")?;
+    {
+        // Attribution reads an authenticated snapshot without this writer gate.
+        // Keep unrelated maintenance recovery from competing for its grant.
+        let _gate = services.catalog_operation()?;
+        assert_eq!(
+            client.manage(&ingest, &request),
+            Err(RepositoryServiceClientFailure::AuthenticationRejected),
+        );
+    }
     // Retain the actual sole-writer lease, without retaining the API gate.
     // The diagnostic read must expose temporary unavailability, not replace
     // that writer or misclassify the already valid credential.
@@ -302,6 +400,40 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         .find(|endpoint| endpoint.role() == crate::ListenerRole::Api)
         .and_then(|endpoint| endpoint.socket_address())
         .ok_or("API endpoint")?;
+    // Dispatch opens its Catalog before reserving the provider peak. Prove
+    // the canonical authority admits that overlap with native listeners live.
+    let services = process.services().ok_or("native repository services")?;
+    {
+        let _gate = services.catalog_operation()?;
+        let catalog = open_catalog(&services.instance)?;
+        let resources = crate::services::repository_administration::repository_resources(
+            positron_governance::RepositoryProviderKind::LocalFilesystem,
+        );
+        let claim = positron_kernel::WorkClaim::backup_repository_read(resources)?;
+        let governor = services.instance.resource_governor();
+        let admission_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let reservation = loop {
+            match governor.reserve(claim.clone()) {
+                Ok(reservation) => break reservation,
+                Err(failure)
+                    if failure.code() == positron_kernel::AdmissionFailureCode::GovernorContended
+                        && failure.completion_state()
+                            == positron_kernel::AdmissionCompletionState::RejectedBeforeReservation
+                        && std::time::Instant::now() < admission_deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                },
+                Err(failure) => {
+                    return Err(format!(
+                        "canonical native repository dispatch admission: {failure:?}"
+                    )
+                    .into());
+                },
+            }
+        };
+        drop(reservation);
+        drop(catalog);
+    }
     let client = RepositoryServiceClient::new(RepositoryTransport::PlaintextOptOut { endpoint })?;
     let status = RepositoryRequest {
         action: "status".into(),
@@ -315,8 +447,8 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         operation_id: None,
     };
     assert!(client.manage(&ingest, &status).is_err());
-    let current = client
-        .manage(&administrator, &status)
+    let admission_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let current = status_http::inspect(&client, &administrator, &status, admission_deadline)
         .map_err(|failure| format!("repository HTTP stage=initial-status: {failure:?}"))?;
     let mut request = RepositoryRequest {
         action: "init".into(),
@@ -329,16 +461,22 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         repository_id: Some("62626262-6262-4262-8262-626262626262".into()),
         operation_id: None,
     };
-    let admission_deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut accepted = loop {
-        match client.manage(&administrator, &request) {
+        let remaining = admission_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("repository HTTP admission deadline".into());
+        }
+        let result = client.manage_with_timeout(&administrator, &request, remaining);
+        if std::time::Instant::now() >= admission_deadline {
+            return Err("repository HTTP admission deadline".into());
+        }
+        match result {
             Ok(accepted) => break accepted,
             Err(positron_api::repository::RepositoryServiceClientFailure::StaleGeneration)
                 if std::time::Instant::now() < admission_deadline =>
             {
                 request.expected_catalog_generation = Some(
-                    client
-                        .manage(&administrator, &status)
+                    status_http::inspect(&client, &administrator, &status, admission_deadline)
                         .map_err(|failure| {
                             format!("repository HTTP stage=generation-refresh: {failure:?}")
                         })?
@@ -367,11 +505,24 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         .is_some_and(|operation| matches!(operation.status.as_str(), "pending" | "running"))
     {
         if std::time::Instant::now() >= deadline {
-            return Err("Repository HTTP completion deadline".into());
+            let _gate = services.catalog_operation()?;
+            let catalog = open_catalog(&services.instance)?;
+            let claim = positron_kernel::WorkClaim::backup_repository_read(
+                crate::services::repository_administration::repository_resources(
+                    positron_governance::RepositoryProviderKind::LocalFilesystem,
+                ),
+            )?;
+            let governor = services.instance.resource_governor();
+            let admission = governor.reserve(claim);
+            return Err(format!(
+                "Repository HTTP completion deadline; native admission={:?}; tasks={:?}; catalog_generation={}",
+                admission.as_ref().err(),
+                services.instance.maintenance_coordinator().statuses(),
+                catalog.pin()?.number(),
+            ).into());
         }
         std::thread::sleep(Duration::from_millis(25));
-        accepted = client
-            .manage(&administrator, &query)
+        accepted = status_http::inspect(&client, &administrator, &query, deadline)
             .map_err(|failure| format!("repository HTTP stage=operation-status: {failure:?}"))?;
     }
     assert_eq!(
@@ -401,6 +552,7 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
     assert!(!output.contains(path.to_string_lossy().as_ref()));
     assert!(!output.contains(&administrator));
     assert!(!output.contains(&ingest));
+    drop(services);
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         crate::ExitOutcome::Graceful

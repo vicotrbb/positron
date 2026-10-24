@@ -524,19 +524,67 @@ fn run_with_environment<'a>(
     environment: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_positron"));
-    command
-        .args(
-            arguments
-                .into_iter()
-                .map(|argument| argument.as_ref().to_owned()),
-        )
-        .env_clear();
-    for (key, value) in environment {
-        command.env(key, value);
-    }
+    command.args(
+        arguments
+            .into_iter()
+            .map(|argument| argument.as_ref().to_owned()),
+    );
+    configuration_environment(
+        &mut command,
+        std::env::var_os("LLVM_PROFILE_FILE"),
+        environment,
+    );
     command
         .output()
         .expect("Positron configuration command should run")
+}
+
+fn configuration_environment<'a>(
+    command: &mut Command,
+    profile: Option<std::ffi::OsString>,
+    environment: impl IntoIterator<Item = (&'a str, &'a str)>,
+) {
+    command.env_clear();
+    if let Some(profile) = profile {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+}
+
+#[test]
+fn configuration_children_preserve_instrumentation_and_isolate_product_environment()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStringExt;
+    for profile in [
+        None,
+        Some(std::ffi::OsString::from("/fixture/profile-%p")),
+        Some(std::ffi::OsString::from_vec(
+            b"/fixture/non-utf8-\xff-%p".to_vec(),
+        )),
+    ] {
+        for explicit in [false, true] {
+            let mut child = Command::new("/bin/sh");
+            child.args(["-c", "printf '%s\\n%s' \"${LLVM_PROFILE_FILE-absent}\" \"${POSITRON__DIAGNOSTICS__LOG_LEVEL-absent}\""]);
+            child.env("LLVM_PROFILE_FILE", "/inherited/must-be-cleared");
+            child.env("POSITRON__DIAGNOSTICS__LOG_LEVEL", "inherited-canary");
+            configuration_environment(
+                &mut child,
+                profile.clone(),
+                explicit.then_some(("POSITRON__DIAGNOSTICS__LOG_LEVEL", "debug")),
+            );
+            let output = child.output()?;
+            assert!(output.status.success());
+            let mut expected = profile
+                .clone()
+                .map_or_else(|| b"absent".to_vec(), |value| value.into_vec());
+            expected.extend_from_slice(if explicit { b"\ndebug" } else { b"\nabsent" });
+            assert_eq!(output.stdout, expected);
+            assert!(output.stderr.is_empty());
+        }
+    }
+    Ok(())
 }
 
 fn assert_redacted(output: &Output, canary: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -630,3 +678,12 @@ fn path(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
     path.to_str()
         .ok_or_else(|| "test path was not UTF-8".into())
 }
+
+#[path = "configuration_cli/listener_failures.rs"]
+mod listener_failures;
+
+#[path = "configuration_cli/listener_profile_failures.rs"]
+mod listener_profile_failures;
+
+#[path = "configuration_cli/operator_safety_failures.rs"]
+mod operator_safety_failures;

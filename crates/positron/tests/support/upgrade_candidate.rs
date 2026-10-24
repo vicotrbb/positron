@@ -10,7 +10,7 @@ pub(crate) struct Candidate {
     pub source_commit: String,
     pub candidate_commit: String,
 }
-fn checked(command: &mut Command) -> Result<std::process::Output> {
+pub(super) fn checked(command: &mut Command) -> Result<std::process::Output> {
     let output = command.output()?;
     if !output.status.success() {
         return Err(format!(
@@ -25,11 +25,14 @@ pub(crate) fn prepare() -> Result<Candidate> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
+    prepare_in(&workspace)
+}
+pub(super) fn prepare_in(workspace: &Path) -> Result<Candidate> {
     let commit = String::from_utf8(
         checked(
             Command::new("git")
                 .arg("-C")
-                .arg(&workspace)
+                .arg(workspace)
                 .args(["rev-parse", "HEAD"]),
         )?
         .stdout,
@@ -37,7 +40,7 @@ pub(crate) fn prepare() -> Result<Candidate> {
     .trim()
     .to_owned();
     let root = workspace
-        .join("target/native-upgrade-fixture")
+        .join("target/native-upgrade-fixture/native-release-v1")
         .join(&commit);
     let binary = root.join("target/release/positron");
     let marker = root.join("candidate-commit");
@@ -55,7 +58,7 @@ pub(crate) fn prepare() -> Result<Candidate> {
     checked(
         Command::new("git")
             .arg("-C")
-            .arg(&workspace)
+            .arg(workspace)
             .args(["archive", "HEAD", "--output"])
             .arg(&archive),
     )?;
@@ -86,7 +89,7 @@ pub(crate) fn prepare() -> Result<Candidate> {
         "--quiet",
         "--object-format=sha1",
     ]))?;
-    let tracked = checked(Command::new("git").arg("-C").arg(&workspace).args([
+    let tracked = checked(Command::new("git").arg("-C").arg(workspace).args([
         "ls-tree",
         "-rz",
         "--name-only",
@@ -146,6 +149,9 @@ pub(crate) fn prepare() -> Result<Candidate> {
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env_remove("LLVM_PROFILE_FILE")
+        // Cargo's empty values override both inherited wrappers and config files.
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
         .status()?;
     if !status.success() {
         return Err("private candidate fixture build failed".into());

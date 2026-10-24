@@ -1,5 +1,8 @@
 //! Socket-admission outcomes observed through real listener connections.
 
+#[path = "socket_admission/release.rs"]
+mod release;
+
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream as StdTcpStream};
 use std::sync::{Arc, mpsc};
@@ -49,7 +52,7 @@ async fn api_global_accepted_socket_cap_closes_another_peer_then_releases_after_
     assert_closed(rejected).await?;
 
     drop(holder);
-    let accepted = request_from(Ipv4Addr::LOCALHOST, api).await?;
+    let accepted = release::http_after_release(api).await?;
     assert_status(accepted, 405);
     super::shutdown_gracefully(process, &roots)?;
     Ok(())
@@ -537,17 +540,8 @@ async fn otlp_grpc_global_accepted_socket_cap_closes_then_releases_for_a_real_rp
 
     assert_closed(connect_from(Ipv4Addr::LOCALHOST, grpc).await?).await?;
     drop(holder);
-    let mut client = tokio::time::timeout(
-        Duration::from_secs(2),
-        LogsServiceClient::connect(format!("http://{grpc}")),
-    )
-    .await??;
-    let refusal = client
-        .export(Request::new(ExportLogsServiceRequest::default()))
-        .await
-        .expect_err("the released permit must expose the OTLP receiver");
+    let refusal = release::grpc_after_release(grpc).await?;
     assert_eq!(refusal.code(), Code::Unauthenticated);
-    drop(client);
     tokio::time::sleep(Duration::from_millis(25)).await;
     super::shutdown_gracefully(process, &roots)?;
     Ok(())

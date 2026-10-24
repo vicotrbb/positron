@@ -20,6 +20,7 @@ mod snapshot;
 
 /// No service or instance handle escapes this owner, and no listeners are bound.
 pub struct OfflineUpgradeSession {
+    distribution: positron_config::ExecutableDistribution,
     instance: Arc<InitializedInstance>,
     services: ServiceHandle,
     id: OperationId,
@@ -126,7 +127,7 @@ impl OfflineUpgradeSession {
         let parameters = operation
             .upgrade_parameters()
             .ok_or(UpgradeFailure::InvalidRequest)?;
-        let artifact = UpgradeReleasePlan::native_artifact(target)?;
+        let artifact = UpgradeReleasePlan::native_artifact(self.distribution, target)?;
         let version = target.manifest().version;
         if target.digest() != parameters.target().manifest_digest()
             || artifact.sha256 != parameters.target().artifact_digest()
@@ -204,7 +205,7 @@ impl OfflineUpgradeSession {
             .upgrade_parameters()
             .ok_or(UpgradeFailure::InvalidRequest)?;
         let expected = parameters.source();
-        let candidate = UpgradeReleasePlan::native_artifact(source)?;
+        let candidate = UpgradeReleasePlan::native_artifact(self.distribution, source)?;
         let version = source.manifest().version;
         if source.digest() != expected.manifest_digest()
             || candidate.sha256 != expected.artifact_digest()

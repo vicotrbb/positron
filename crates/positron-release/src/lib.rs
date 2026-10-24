@@ -14,6 +14,7 @@ mod native_crates;
 mod native_go;
 mod native_maven;
 mod native_maven_package;
+mod native_nix;
 mod native_nuget;
 mod native_packages;
 mod native_rpm;
@@ -55,3 +56,6 @@ impl std::fmt::Display for ReleaseError {
     }
 }
 impl std::error::Error for ReleaseError {}
+
+#[cfg(test)]
+mod nix_qualification;

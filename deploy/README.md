@@ -17,3 +17,7 @@ user LaunchAgent with retained configuration, data and keys.
 Every surface uses the same Positron artifact and storage format. OCI, packages,
 Compose, Nix, Helm, Kubernetes and other surface implementation tickets must not
 introduce their own database behavior.
+[Nix](nix/README.md) provides a locked source flake, packages and development
+shells for all four native targets, configuration checks, and a NixOS module
+with a VM lifecycle check. Its runbook covers trust, initialization, service,
+upgrade and recovery.

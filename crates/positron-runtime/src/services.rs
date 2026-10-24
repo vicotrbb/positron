@@ -824,7 +824,9 @@ impl ServiceHandle {
         body: &[u8],
     ) -> Result<(Vec<u8>, TransferredResourceReservation), (u16, &'static str)> {
         let started = std::time::Instant::now();
-        let result = query::execute(self, bearer, body).map_err(|failure| match failure {
+        let execution = query::execute(self, bearer, body);
+        let failure = execution.as_ref().err().copied();
+        let result = execution.map_err(|failure| match failure {
             ServiceFailure::Unauthorized => (401, "authentication_rejected"),
             ServiceFailure::InvalidRequest
             | ServiceFailure::InvalidRequestWithLimit(_)
@@ -839,6 +841,7 @@ impl ServiceHandle {
             health.operational_telemetry().record_query(
                 crate::operational::RequestOutcome::from_status(status),
                 started.elapsed(),
+                failure,
             );
         }
         result
@@ -875,6 +878,7 @@ impl ServiceHandle {
             health.operational_telemetry().record_query(
                 crate::operational::RequestOutcome::from_status(status),
                 started.elapsed(),
+                result.as_ref().err().copied(),
             );
         }
         result

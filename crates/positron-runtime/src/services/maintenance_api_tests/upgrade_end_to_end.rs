@@ -125,7 +125,11 @@ fn verify_target(drained: DrainedFixture) -> Result<(), Box<dyn std::error::Erro
     } = drained;
     let listeners = crate::process_lifecycle::ObservingListeners::default();
     let tasks = crate::process_lifecycle::ObservingTasks::default();
-    let mut verification = UpgradeStartupVerification::new(target, Some(query.clone()))?;
+    let mut verification = UpgradeStartupVerification::new(
+        positron_config::ExecutableDistribution::Native,
+        target,
+        Some(query.clone()),
+    )?;
     verification.fixture_version = Some(version);
     let target_process = ApplicationRuntime::start(
         ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly)

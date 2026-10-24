@@ -201,7 +201,11 @@ pub(super) fn complete(
                 .open_maintenance_catalog()
                 .map_err(|_| ServiceFailure::CatalogUnavailable)?;
             #[cfg(test)]
-            let cleanup = if test_stops::armed(test_stops::StopPoint::CaptureCleanupBatch)? {
+            let cleanup = if test_stops::armed(
+                services.instance.instance.to_bytes(),
+                binding.operation_id(),
+                test_stops::StopPoint::CaptureCleanupBatch,
+            )? {
                 positron_kernel::with_catalog_publication_fault_after(
                     positron_kernel::CatalogPublicationFault::RemoveBackupCaptureRegistry,
                     0,
@@ -215,7 +219,11 @@ pub(super) fn complete(
             let cleanup = cleanup.map_err(|_| ServiceFailure::StorageUnavailable);
             if cleanup.is_err() {
                 #[cfg(test)]
-                test_stops::after_cleanup_error(cancellation)?;
+                test_stops::after_cleanup_error(
+                    services.instance.instance.to_bytes(),
+                    binding.operation_id(),
+                    cancellation,
+                )?;
             }
             if !cleanup? {
                 return Ok(false);
@@ -293,7 +301,12 @@ pub(super) fn complete(
                 }
             }
             #[cfg(test)]
-            test_stops::hit(test_stops::StopPoint::CancellationCommitted, cancellation)?;
+            test_stops::hit(
+                services.instance.instance.to_bytes(),
+                binding.operation_id(),
+                test_stops::StopPoint::CancellationCommitted,
+                cancellation,
+            )?;
         },
     }
     Ok(false)

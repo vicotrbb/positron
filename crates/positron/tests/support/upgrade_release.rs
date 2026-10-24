@@ -12,7 +12,8 @@ fn release(
     executable: &Path,
     key: &Ed25519KeyPair,
     source_commit: &str,
-) -> Result<VerifiedReleaseManifest> {
+    distribution: positron_config::ExecutableDistribution,
+) -> Result<(VerifiedReleaseManifest, Vec<u8>)> {
     let bytes = fs::read(executable)?;
     let digest = Sha256::digest(&bytes).into();
     let backup = positron_backup::BackupFormatEpoch::NATIVE_WRITER.value();
@@ -63,7 +64,60 @@ fn release(
             operator: [6; 32],
         },
     };
-    let (manifest, _) = upgrade_metadata::complete_metadata(&manifest)?;
+    let (mut manifest, inventory) = upgrade_metadata::complete_metadata(&manifest)?;
+    let mut inventory = positron_release::ReleaseInventory::from_bytes(&inventory)?;
+    if version.patch == 0 {
+        let prefix = match distribution {
+            positron_config::ExecutableDistribution::Native => "",
+            positron_config::ExecutableDistribution::Nix => "nix-",
+        };
+        let selected = format!(
+            "{prefix}{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        let foreign = positron_release::FileIdentity::of(b"another executable distribution");
+        for artifact in &mut inventory.artifacts {
+            if artifact.surface == positron_release::Surface::NativeExecutable
+                && artifact.target != selected
+            {
+                inventory
+                    .files
+                    .iter_mut()
+                    .find(|file| file.id == artifact.file)
+                    .ok_or("fixture file")?
+                    .identity = foreign.clone();
+                artifact.publication.immutable_identity = format!(
+                    "sha256:{}",
+                    foreign
+                        .sha256
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                );
+                let entry = manifest
+                    .artifacts
+                    .iter_mut()
+                    .find(|entry| {
+                        entry.role == ArtifactRole::NativeExecutable
+                            && entry.platform == artifact.target
+                    })
+                    .ok_or("fixture executable")?;
+                entry.sha256 = foreign.sha256;
+                entry.size = foreign.size;
+            }
+        }
+    }
+    inventory.validate_complete()?;
+    let inventory = inventory.canonical_bytes()?;
+    let identity = positron_release::FileIdentity::of(&inventory);
+    let entry = manifest
+        .artifacts
+        .iter_mut()
+        .find(|entry| entry.role == ArtifactRole::ReleaseInventory)
+        .ok_or("fixture inventory")?;
+    entry.sha256 = identity.sha256;
+    entry.size = identity.size;
     let mut signed = b"positron.release-manifest.v1\0".to_vec();
     signed.extend(manifest.canonical_bytes()?);
     let signature = key
@@ -71,34 +125,37 @@ fn release(
         .as_ref()
         .try_into()
         .map_err(|_| "signature")?;
-    Ok(
+    Ok((
         SignedReleaseManifest::new(manifest, signature)?.verify(&ProjectTrustRoot::new(
             key.public_key()
                 .as_ref()
                 .try_into()
                 .map_err(|_| "trust root")?,
         ))?,
-    )
+        inventory,
+    ))
 }
 pub(crate) fn configuration(
     root: &Path,
+    distribution: positron_config::ExecutableDistribution,
     epoch: u32,
     query: &str,
-    source_executable: &Path,
-    candidate_executable: &Path,
-    source_commit: &str,
-    candidate_commit: &str,
+    executables: (&Path, &Path),
+    commits: (&str, &str),
 ) -> Result<(positron_config::EffectiveConfiguration, [u8; 32])> {
+    let (source_executable, candidate_executable) = executables;
+    let (source_commit, candidate_commit) = commits;
     let key =
         Ed25519KeyPair::from_seed_unchecked(&[0x93; 32]).map_err(|_| "fixture signing key")?;
-    let source = release(
+    let (source, source_inventory) = release(
         epoch,
         ProductVersion::parse_exact(env!("CARGO_PKG_VERSION"))?,
         source_executable,
         &key,
         source_commit,
+        distribution,
     )?;
-    let target = release(
+    let (target, _) = release(
         epoch,
         ProductVersion {
             major: 0,
@@ -108,6 +165,7 @@ pub(crate) fn configuration(
         candidate_executable,
         &key,
         candidate_commit,
+        distribution,
     )?;
     let export = root.join("export");
     let trust = export.join("project.pub");
@@ -115,10 +173,7 @@ pub(crate) fn configuration(
     let candidate = export.join("candidate.manifest");
     let credential = export.join("query.credential");
     let current_inventory = export.join("current.inventory.json");
-    fs::write(
-        &current_inventory,
-        upgrade_metadata::complete_metadata(source.manifest())?.1,
-    )?;
+    fs::write(&current_inventory, source_inventory)?;
     let target_paths =
         upgrade_metadata::artifact_paths(target.manifest(), candidate_executable, &export)?;
     use positron_release::{
@@ -177,9 +232,13 @@ pub(crate) fn configuration(
         .map(|(_, path)| format!("{path:?}"))
         .collect::<Vec<_>>()
         .join(",");
+    let distribution = match distribution {
+        positron_config::ExecutableDistribution::Native => "native",
+        positron_config::ExecutableDistribution::Nix => "nix",
+    };
     let text = format!(
         "schema_version=1\n[storage]\ndata_directory={:?}\nsecrets_directory={:?}\n\
-        [release.installation]\nproject_trust_root_file={trust:?}\ncurrent_manifest_file={current:?}\ncurrent_inventory_file={current_inventory:?}\n\
+        [release.installation]\nexecutable_distribution={distribution:?}\nproject_trust_root_file={trust:?}\ncurrent_manifest_file={current:?}\ncurrent_inventory_file={current_inventory:?}\n\
         candidate_manifest_file={candidate:?}\ncandidate_artifact_files=[{artifacts}]\nquery_credential_file={credential:?}\n",
         root.join("data"),
         root.join("secrets")

@@ -225,12 +225,6 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
             .take()
             .ok_or("source backup credential pipe")?
             .write_all(claim.secret().as_bytes())?;
-        while wait.try_wait()?.is_none() {
-            if Instant::now() >= deadline {
-                return Err("source backup public wait exceeded its original deadline".into());
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
         Ok(())
     })();
     if let Err(primary) = supervision {
@@ -247,7 +241,7 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
         }
         return Err(primary);
     }
-    let published = wait.wait_with_output()?;
+    let published = collect_source_backup(wait, deadline)?;
     if Instant::now() >= deadline {
         return Err(format!("source backup public wait completed after its original deadline: status={:?} phase={:?} terminal_error_code={:?}", field(&published, "status"), field(&published, "phase"), field(&published, "terminal_error_code")).into());
     }
@@ -401,5 +395,38 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
     drop(claim);
     drop(runtime);
     fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[path = "support/bounded_child_output.rs"]
+mod child_output;
+
+fn collect_source_backup(child: std::process::Child, deadline: Instant) -> Result<Output> {
+    Ok(child_output::wait_before(
+        child,
+        deadline,
+        Duration::from_millis(5),
+        "source backup public wait exceeded its original deadline",
+    )?)
+}
+
+#[path = "support/output_pressure.rs"]
+mod output_pressure;
+
+#[test]
+fn source_backup_capture_drains_both_streams_before_waiting_for_exit() -> Result {
+    let output = collect_source_backup(
+        output_pressure::child()?,
+        Instant::now() + Duration::from_secs(5),
+    )?;
+    assert!(output.status.success());
+    assert!(
+        output.stdout == vec![b'x'; 256 * 1024],
+        "stdout capture changed"
+    );
+    assert!(
+        output.stderr == vec![b'x'; 256 * 1024],
+        "stderr capture changed"
+    );
     Ok(())
 }

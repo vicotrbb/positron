@@ -213,6 +213,8 @@ pub(super) fn step(
                             .map_err(failure)?;
                         #[cfg(test)]
                         super::super::backup_administration::hit_stop(
+                            services.instance.instance.to_bytes(),
+                            operation.operation_id().to_bytes(),
                             super::super::backup_administration::StopPoint::BackupOverlayPublished,
                             cancellation,
                         )?;

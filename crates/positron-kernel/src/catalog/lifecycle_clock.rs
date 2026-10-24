@@ -3,6 +3,68 @@ use super::*;
 use crate::RetentionTimeAuthority;
 
 impl Catalog<'_> {
+    /// Retains trusted elapsed time in this same interruptible publication.
+    /// Clock encoding and rollback stay with the Kernel; callers cannot supply
+    /// a replacement clock or accept a discontinuity through this operation.
+    pub fn commit_interruptibly_with_lifecycle_clock(
+        &self,
+        expected: CatalogGenerationId,
+        proposal: CatalogProposal,
+        audit: Option<AuditIntent>,
+        clock: &RetentionTimeAuthority,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<CatalogCommit>, CatalogFailure> {
+        if cancelled() {
+            return Ok(None);
+        }
+        let basis = self.pin()?;
+        if basis.identity() != expected {
+            return Err(CatalogFailure::stale(basis.identity()));
+        }
+        clock
+            .recover_catalog_anchor(&basis)
+            .map_err(clock_failure)?;
+        let mut staged = clock.stage_catalog_anchor().map_err(clock_failure)?;
+        let record = staged
+            .governance_anchor_record(&basis)
+            .map_err(clock_failure)?;
+        let (transaction, epoch, proposed) = proposal.into_parts();
+        let mut objects = Vec::new();
+        objects
+            .try_reserve_exact(
+                proposed
+                    .len()
+                    .checked_add(1)
+                    .ok_or_else(|| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?,
+            )
+            .map_err(|_| CatalogFailure::new(CatalogFailureCode::LimitExceeded))?;
+        let mut seen = false;
+        for object in proposed {
+            if crate::retention_time::validate_catalog_anchor_singleton(
+                &object.plaintext,
+                &mut seen,
+            )
+            .map_err(clock_failure)?
+            {
+                if !basis
+                    .plaintext_objects()
+                    .any(|bytes| bytes == object.plaintext)
+                {
+                    return Err(CatalogFailure::new(CatalogFailureCode::InvalidInput));
+                }
+            } else {
+                objects.push(object);
+            }
+        }
+        objects.push(CatalogObject::new(record)?);
+        let proposal = CatalogProposal::new(transaction, epoch, objects)?;
+        let committed = self.commit_interruptibly(expected, proposal, audit, cancelled)?;
+        if committed.is_some() {
+            staged.commit();
+        }
+        Ok(committed)
+    }
+
     /// Checkpoints only the existing Lifecycle Clock authority. No caller time
     /// or segment scope is accepted, and unpublished intents remain untouched.
     pub fn checkpoint_lifecycle_time(

@@ -41,14 +41,19 @@ fn execute(
             );
         }
         let result = match deadline {
-            Some(deadline) => client.manage_with_timeout(
+            Some(deadline) => client.manage_with_default_listener_timeout(
                 bearer,
                 &request,
                 deadline.saturating_duration_since(Instant::now()),
             ),
-            None => client.manage(bearer, &request),
+            None => client.manage_with_default_listener_timeout(
+                bearer,
+                &request,
+                Duration::from_secs(30),
+            ),
         };
         match result {
+            Ok(_) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {},
             Ok(current) => {
                 if deadline.is_none()
                     || current.operation.as_ref().is_none_or(|operation| {

@@ -395,7 +395,10 @@ pub(super) fn roundtrip(
             .spawn()?,
     );
     ready(operations)?;
-    assert_eq!(archive::query_log(binary, root, endpoint, query)?, expected);
+    assert_eq!(
+        archive::query_log(binary, root, endpoint, query, None)?,
+        expected
+    );
     let mut inspection = online("backup", "status", endpoint);
     inspection.extend(["--operation-id".into(), snapshot]);
     let inherited = execute(binary, &inspection, Some(admin))?;

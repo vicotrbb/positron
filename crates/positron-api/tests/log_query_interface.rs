@@ -1,6 +1,9 @@
 //! Public Query request bounds are enforced before a client performs I/O.
 use positron_api::log_query::{LogQueryBudget, LogQueryRequest};
 
+#[path = "log_query_interface/transport_deadline.rs"]
+mod transport_deadline;
+
 #[test]
 fn bounded_log_query_request_round_trips_the_declared_pipeline_and_budget() {
     let request = LogQueryRequest {
@@ -425,3 +428,6 @@ fn decoder_enforces_declared_cell_type_and_nullability() {
         }
     }
 }
+
+#[path = "log_query_interface/protojson_contract.rs"]
+mod protojson_contract;

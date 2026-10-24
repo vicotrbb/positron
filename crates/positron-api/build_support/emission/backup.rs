@@ -22,8 +22,27 @@ impl BackupServiceClient {{
         let body = request.encode().map_err(|_| Failure::InvalidRequest)?;
         if body.len() > {request_limit} {{ return Err(Failure::InvalidRequest); }}
         let (status, bytes) = self.http.post_with_timeout(bearer, {path:?}, body, {response_limit}, timeout).map_err(|_| Failure::Transport)?;
+        Self::decode_management_response(status, &bytes)
+    }}
+    /// Opts into a bounded request allowance capped at the API listener default of 30 seconds.
+    /// This does not discover or negotiate a custom server deadline.
+    pub fn manage_with_default_listener_timeout(&self, bearer: &str, request: &super::BackupRequest, timeout: std::time::Duration) -> Result<super::BackupResponse, super::BackupServiceClientFailure> {{
+        use super::BackupServiceClientFailure as Failure;
+        let timeout = timeout.min(crate::http_client::DEFAULT_LISTENER_REQUEST_TIMEOUT);
+        let deadline = std::time::Instant::now().checked_add(timeout).ok_or(Failure::Transport)?;
+        if timeout.is_zero() {{ return Err(Failure::Transport); }}
+        let result = (|| {{
+        let body = request.encode().map_err(|_| Failure::InvalidRequest)?;
+        if body.len() > {request_limit} {{ return Err(Failure::InvalidRequest); }}
+        let (status, bytes) = self.http.post_with_default_listener_timeout(bearer, {path:?}, body, {response_limit}, deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| Failure::Transport)?;
+        Self::decode_management_response(status, &bytes)
+        }})();
+        if std::time::Instant::now() >= deadline {{ Err(Failure::Transport) }} else {{ result }}
+    }}
+    fn decode_management_response(status: u16, bytes: &[u8]) -> Result<super::BackupResponse, super::BackupServiceClientFailure> {{
+        use super::BackupServiceClientFailure as Failure;
         if !(200..300).contains(&status) {{
-            let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+            let value = serde_json::from_slice::<serde_json::Value>(bytes).ok();
             let code = value.as_ref().and_then(|value| value.get("code")?.as_str());
             return Err(match (status, code) {{
                 (400, Some("invalid_request")) => Failure::InvalidRequest,
@@ -38,7 +57,7 @@ impl BackupServiceClient {{
                 _ => Failure::Transport,
             }});
         }}
-        super::BackupResponse::decode(&bytes).map_err(|_| Failure::Transport)
+        super::BackupResponse::decode(bytes).map_err(|_| Failure::Transport)
     }}
     pub fn list(&self, bearer: &str, request: &super::BackupListRequest) -> Result<super::BackupListResponse, super::BackupServiceClientFailure> {{
         use super::BackupServiceClientFailure as Failure;

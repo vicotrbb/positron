@@ -18,7 +18,7 @@ impl LogQueryServiceClient {{
     }}
     pub fn execute(&self, bearer: &str, request: &super::LogQueryRequest) -> Result<super::LogQueryResponse, super::LogQueryServiceClientFailure> {{
         let body = request.encode().map_err(|_| super::LogQueryServiceClientFailure::InvalidRequest)?;
-        let (status, bytes) = self.http.post(bearer, HTTP_PATH, body, MAX_RESPONSE_BYTES).map_err(|_| super::LogQueryServiceClientFailure::Transport)?;
+        let (status, bytes) = self.http.post_query(bearer, HTTP_PATH, body, MAX_RESPONSE_BYTES).map_err(|_| super::LogQueryServiceClientFailure::Transport)?;
         if status != 200 {{ return Err(super::client_failure(status, &bytes)); }}
         super::LogQueryResponse::decode(&bytes).map_err(|_| super::LogQueryServiceClientFailure::Transport)
     }}

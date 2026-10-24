@@ -20,6 +20,7 @@ pub(crate) fn upgrade_query_source(
 /// Independently authenticated installed release and optional live Query key.
 /// The key is retained only for the startup verification call and zeroized.
 pub struct UpgradeStartupVerification {
+    pub(crate) distribution: positron_config::ExecutableDistribution,
     pub(crate) release: VerifiedReleaseManifest,
     query_credential: Option<Zeroizing<String>>,
     #[cfg(test)]
@@ -37,6 +38,7 @@ pub struct UpgradeStartupVerification {
 }
 impl UpgradeStartupVerification {
     pub fn new(
+        distribution: positron_config::ExecutableDistribution,
         release: VerifiedReleaseManifest,
         query_credential: Option<String>,
     ) -> Result<Self, UpgradeFailure> {
@@ -45,6 +47,7 @@ impl UpgradeStartupVerification {
                 .map_err(|_| UpgradeFailure::AuthenticationFailed)?;
         }
         Ok(Self {
+            distribution,
             release,
             query_credential: query_credential.map(Zeroizing::new),
             #[cfg(test)]
@@ -252,7 +255,8 @@ impl UpgradeStartupVerification {
     ) -> Result<(), UpgradeFailure> {
         use positron_kernel::release_manifest::ProductVersion;
         let manifest = self.release.manifest();
-        let artifact = super::UpgradeReleasePlan::native_artifact(&self.release)?;
+        let artifact =
+            super::UpgradeReleasePlan::native_artifact(self.distribution, &self.release)?;
         let expected_version = expected.version();
         if self.release.digest() != expected.manifest_digest()
             || artifact.sha256 != expected.artifact_digest()
@@ -410,7 +414,11 @@ mod tests {
             15,
         )?;
         let secret = format!("pos_{}", "a5".repeat(32));
-        let verification = UpgradeStartupVerification::new(release, Some(secret.clone()))?;
+        let verification = UpgradeStartupVerification::new(
+            positron_config::ExecutableDistribution::Native,
+            release,
+            Some(secret.clone()),
+        )?;
         assert!(!format!("{verification:?}").contains(&secret));
         assert!(!format!("{verification:?}").contains("a5a5a5"));
         Ok(())
