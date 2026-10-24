@@ -272,7 +272,7 @@ class BackupOutcomeKnowledge(unittest.TestCase):
 
 
 class RepositoryAdmissionReconciliation(unittest.TestCase):
-    operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    operation_id = bytes(range(16)).hex()
     key = "22222222-2222-4222-8222-222222222222"
     unknown = b"positron: transport outcome unknown; inspect the same operation or idempotency key before retrying\n"
 
@@ -340,7 +340,7 @@ class RepositoryAdmissionReconciliation(unittest.TestCase):
 
     def test_conflicting_replay_or_changed_operation_is_refused(self):
         for replay in [self.response(code=2, error=b"idempotency conflict"),
-                       self.response(identifier="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")]:
+                       self.response(identifier="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]:
             with self.assertRaises(RuntimeError):
                 self.invoke([self.response(code=2, error=self.unknown), self.response(), replay])
             self.assertEqual(len(self.calls), 3)
@@ -374,3 +374,34 @@ class RepositoryAdmissionReconciliation(unittest.TestCase):
                          subprocess.TimeoutExpired(["protected-locator"], 1)])
         self.assertEqual(len(self.calls), 2)
         self.assertNotIn("protected", str(failure.exception))
+
+    def test_noncanonical_operation_ids_never_permit_replay(self):
+        for identifier in ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "A" * 32,
+                           "0" * 32, "f" * 31, "g" * 32, "1" * 33]:
+            with self.subTest(format="noncanonical"):
+                with self.assertRaisesRegex(RuntimeError, "invalid receipt"):
+                    self.invoke([self.response(code=2, error=self.unknown),
+                                 self.response(identifier=identifier)])
+                self.assertEqual(len(self.calls), 2)
+
+    def test_lookup_failures_report_only_exact_closed_canonical_classes(self):
+        failures = [
+            (b"positron: invalid repository request", "invalid_request"),
+            (b"positron: system administration authentication rejected", "authentication_rejected"),
+            (b"positron: repository operation unavailable", "operation_unavailable"),
+            (b"positron: stale resource generation; inspect current state before retrying", "stale_generation"),
+            (b"positron: operation precondition failed; inspect current state before retrying", "precondition_failed"),
+            (b"positron: idempotency key conflicts with an accepted request", "idempotency_conflict"),
+            (b"positron: administration unavailable; inspect or retry the same operation", "administration_unavailable"),
+            (b"positron: capacity unavailable; retry the same idempotent request", "capacity_unavailable"),
+            (self.unknown, "transport_unknown"),
+            (b"protected-canary /protected-locator", "other"),
+        ]
+        for error, category in failures:
+            with self.subTest(category=category):
+                with self.assertRaises(RuntimeError) as failure:
+                    self.invoke([self.response(code=2, error=self.unknown),
+                                 self.response(code=2, error=error)])
+                self.assertEqual(str(failure.exception),
+                                 "repository admission reconciliation refused: code=" + category)
+                self.assertEqual(len(self.calls), 2)

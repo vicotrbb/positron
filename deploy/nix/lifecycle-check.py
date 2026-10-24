@@ -8,7 +8,6 @@ import pathlib
 import subprocess
 import sys
 import time
-import uuid
 
 configuration = "/var/lib/positron-release/positron.toml"
 directory = pathlib.Path("/var/lib/positron-recovery")
@@ -54,13 +53,29 @@ def admit(kind, action, arguments):
             raise RuntimeError("native lifecycle admission deadline exhausted")
         return result
 
+    def repository_failure(result):
+        return {
+            b"positron: invalid repository request": "invalid_request",
+            b"positron: system administration authentication rejected": "authentication_rejected",
+            b"positron: repository operation unavailable": "operation_unavailable",
+            b"positron: stale resource generation; inspect current state before retrying": "stale_generation",
+            b"positron: operation precondition failed; inspect current state before retrying": "precondition_failed",
+            b"positron: idempotency key conflicts with an accepted request": "idempotency_conflict",
+            b"positron: administration unavailable; inspect or retry the same operation": "administration_unavailable",
+            b"positron: capacity unavailable; retry the same idempotent request": "capacity_unavailable",
+            b"positron: transport outcome unknown; inspect the same operation or idempotency key before retrying": "transport_unknown",
+        }.get(result.stderr.strip(), "other")
+
     def operation(result):
         if result.returncode:
-            raise RuntimeError("repository admission reconciliation unavailable")
+            raise RuntimeError("repository admission reconciliation refused: code=" + repository_failure(result))
         try:
             receipt = fields(result.stdout.decode())
             identifier = receipt["operation_id"]
-            if str(uuid.UUID(identifier)) != identifier or receipt["status"] not in ["pending", "running", "succeeded"]:
+            # Match the canonical public operation ID emitted by the repository CLI.
+            if (len(identifier) != 32 or not any(character != "0" for character in identifier)
+                    or any(character not in "0123456789abcdef" for character in identifier)
+                    or receipt["status"] not in ["pending", "running", "succeeded"]):
                 raise ValueError("invalid receipt")
         except (UnicodeDecodeError, KeyError, ValueError):
             raise RuntimeError("repository admission reconciliation invalid receipt") from None
@@ -76,8 +91,7 @@ def admit(kind, action, arguments):
             if time.monotonic() >= deadline:
                 raise RuntimeError("native lifecycle admission deadline exhausted")
             return receipt
-        if (kind == "repository" and action == "init" and result.stderr.strip() ==
-                b"positron: transport outcome unknown; inspect the same operation or idempotency key before retrying"):
+        if kind == "repository" and action == "init" and repository_failure(result) == "transport_unknown":
             # Inspect first; only canonical exact replay can verify the full original binding.
             if arguments.count("--idempotency-key") != 1:
                 raise RuntimeError("repository admission reconciliation requires one key")
