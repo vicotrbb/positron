@@ -49,6 +49,18 @@ impl TraceService for HeldCollector {
     }
 }
 
+fn assert_operational_status(stage: &'static str, response: String, expected: u16) {
+    let actual = response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok());
+    assert!(
+        response.starts_with(&format!("HTTP/1.1 {expected} ")),
+        "operational stage={stage} expected={expected} actual={actual:?}"
+    );
+}
+
 #[test]
 fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -88,8 +100,13 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         &process.bound_endpoints(),
         positron_runtime::ListenerRole::Api,
     )?;
-    assert_status(http(operations, "GET", "/metrics", &[], b"")?, 401);
-    assert_status(
+    assert_operational_status(
+        "initial_metrics_authentication",
+        http(operations, "GET", "/metrics", &[], b"")?,
+        401,
+    );
+    assert_operational_status(
+        "initial_api_probe",
         http(
             api,
             "GET",
@@ -99,7 +116,8 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         )?,
         404,
     );
-    assert_status(
+    assert_operational_status(
+        "initial_ingest_probe",
         http(
             address(
                 &process.bound_endpoints(),
@@ -170,7 +188,7 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         b"",
     )
     .map_err(|error| format!("operational admission metrics scrape: {error}"))?;
-    assert_status(admission_scrape.clone(), 200);
+    assert_operational_status("admission_metrics", admission_scrape.clone(), 200);
     assert!(
         admission_scrape
             .lines()
@@ -234,12 +252,12 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
                     fresh_probes += 1;
                     if completed_requests < 2 {
                         if http_probes % 2 == 0 {
-                            assert_status(operational_probe(
+                            assert_operational_status("export_api_probe", operational_probe(
                                 api, "/telemetry-body-canary", &administrator, b"", deadline,
                             )?, 404);
                             api_requests += 1;
                         } else {
-                            assert_status(operational_probe(
+                            assert_operational_status("export_ingest_probe", operational_probe(
                                 address(&process.bound_endpoints(), positron_runtime::ListenerRole::OtlpHttp)?,
                                 "/v1/logs", &ingest, &otlp_body("stored-telemetry-canary"), deadline,
                             )?, 200);
@@ -312,7 +330,7 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         b"",
     )
     .map_err(|error| format!("operational metrics scrape: {error}"))?;
-    assert_status(scrape.clone(), 200);
+    assert_operational_status("final_metrics", scrape.clone(), 200);
     assert!(scrape.ends_with("# EOF\n"));
     assert!(scrape.contains(&format!(
         "positron_requests_total{{listener=\"api\",outcome=\"request_rejected\"}} {api_requests}\n"
