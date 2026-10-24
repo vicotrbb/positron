@@ -19,18 +19,7 @@ impl OfflineUpgradeSession {
                 .map_err(|_| UpgradeFailure::AuthenticationFailed)?,
         )
         .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-        let operation = Administration::inspect_snapshot(view.snapshot(), id)
-            .map_err(persistence)?
-            .ok_or(UpgradeFailure::InvalidRequest)?;
-        if operation.kind() != DurableOperationKind::Upgrade
-            || operation.target_identity() != Some(instance.instance.to_bytes())
-            || operation.upgrade_parameters().is_none_or(|parameters| {
-                parameters.configuration_digest() != configuration.audit_binding_digest()
-            })
-        {
-            return Err(UpgradeFailure::InvalidRequest);
-        }
-        Ok(operation)
+        inspect_operation(view.snapshot(), instance.instance, configuration, id)
     }
     /// Reads the exact retained verified snapshot for the existing fresh-target
     /// Restore owner. This does not qualify current repository objects or keys.
@@ -86,4 +75,24 @@ impl OfflineUpgradeSession {
         )
         .map_err(persistence)
     }
+}
+
+pub(super) fn inspect_operation(
+    snapshot: &positron_kernel::CatalogSnapshot,
+    instance: positron_kernel::InstanceId,
+    configuration: &EffectiveConfiguration,
+    id: OperationId,
+) -> Result<DurableOperation, UpgradeFailure> {
+    let operation = Administration::inspect_snapshot(snapshot, id)
+        .map_err(persistence)?
+        .ok_or(UpgradeFailure::InvalidRequest)?;
+    if operation.kind() != DurableOperationKind::Upgrade
+        || operation.target_identity() != Some(instance.to_bytes())
+        || operation.upgrade_parameters().is_none_or(|parameters| {
+            parameters.configuration_digest() != configuration.audit_binding_digest()
+        })
+    {
+        return Err(UpgradeFailure::InvalidRequest);
+    }
+    Ok(operation)
 }

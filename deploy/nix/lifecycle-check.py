@@ -48,6 +48,29 @@ def observe_snapshot(status, started, outcome, error="none"):
         record["revision"] = int(revision)
     if status.get("rollback_available") in ["true", "false"]:
         record["rollback_available"] = status["rollback_available"] == "true"
+    for child, kind in [("snapshot", "BackupSnapshot"), ("verification", "BackupVerification")]:
+        if status.get(child) in ["present", "absent"]:
+            record[child] = status[child]
+        if status.get(child + "_kind") == kind:
+            record[child + "_kind"] = kind
+        for field, allowed in [
+                ("phase", ["Accepted", "Preflight", "BackupCapture", "BackupTransfer",
+                           "BackupVerification", "BackupPublication", "BackupCancellation", "Published", "Cancelled"]),
+                ("status", ["Pending", "Running", "Succeeded", "Failed", "Cancelled"])]:
+            key = child + "_" + field
+            if status.get(key) in allowed:
+                record[key] = status[key]
+        for field in ["revision", "progress_percent", "checkpoint_sequence"]:
+            key = child + "_" + field
+            value = status.get(key, "")
+            if value.isascii() and value.isdecimal() and len(value) <= 20:
+                number = int(value)
+                if number <= (100 if field == "progress_percent" else 18446744073709551615):
+                    record[key] = number
+        key = child + "_checkpoint_sha256"
+        value = status.get(key, "")
+        if len(value) == 64 and all(character in "0123456789abcdef" for character in value):
+            record[key] = value
     print(json.dumps(record), flush=True)
 
 

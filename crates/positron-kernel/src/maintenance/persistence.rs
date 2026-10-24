@@ -761,6 +761,26 @@ impl MaintenanceCoordinator {
         Ok(())
     }
 
+    /// Reads one task checkpoint from an authenticated immutable view without
+    /// recovering or changing scheduler state. Unrelated objects are not decoded.
+    pub fn inspect_checkpoint_snapshot(
+        snapshot: &crate::CatalogSnapshot,
+        identity: MaintenanceTaskId,
+    ) -> Result<Option<MaintenanceCheckpoint>, MaintenanceFailure> {
+        let mut checkpoint = None;
+        let mut found = false;
+        for bytes in snapshot.plaintext_objects() {
+            if let Some(candidate) = record::inspect_checkpoint(bytes, identity)? {
+                if found {
+                    return Err(MaintenanceFailure::CatalogUnavailable);
+                }
+                found = true;
+                checkpoint = candidate;
+            }
+        }
+        Ok(checkpoint)
+    }
+
     /// Recovers the complete bounded task registry from authenticated Catalog
     /// objects. Running work never owns durable capacity after a process exit,
     /// so it is returned to its queued checkpoint before any handler resumes.

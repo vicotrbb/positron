@@ -7,6 +7,58 @@ use positron_governance::{
 };
 
 #[test]
+fn offline_progress_refuses_wrong_parent_configuration_and_key_custody()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let configuration = configuration(&fixture)?;
+    let (instance, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&instance))?;
+    let id = accept(&instance, &services, &administrator, &configuration)?;
+    let parent =
+        DurableOperationAdministration::inspect(&open_catalog(&instance)?, id)?.ok_or("parent")?;
+    let generation = open_catalog(&instance)?.pin()?.identity();
+    drop(services);
+    drop(instance);
+    assert_eq!(
+        OfflineUpgradeSession::inspect_progress(&fixture.paths()?, &configuration, id)?.operation,
+        parent
+    );
+    assert_eq!(
+        OfflineUpgradeSession::inspect_progress(
+            &fixture.paths()?,
+            &configuration,
+            positron_governance::OperationId::from_bytes([99; 16])?
+        ),
+        Err(UpgradeFailure::InvalidRequest)
+    );
+    let path = fixture.migration_configuration()?;
+    let changed = fs::read_to_string(&path)? + "\n[diagnostics]\nlog_level = \"debug\"\n";
+    fs::write(&path, changed)?;
+    let changed = positron_config::resolve(
+        positron_config::ConfigurationInputs::try_from_sources(
+            Some(&path),
+            [] as [(&str, &str); 0],
+            [] as [(&str, &str); 0],
+        )
+        .map_err(|failure| format!("configuration: {failure:?}"))?,
+    )?;
+    assert_eq!(
+        OfflineUpgradeSession::inspect_progress(&fixture.paths()?, &changed, id),
+        Err(UpgradeFailure::InvalidRequest)
+    );
+    let instance = crate::InstanceBootstrap::reopen_configured(&fixture.paths()?, &configuration)?;
+    assert_eq!(open_catalog(&instance)?.pin()?.identity(), generation);
+    drop(instance);
+    let key = std::path::Path::new(configuration.secrets_directory()).join("local-root-key.v1");
+    fs::write(key, b"untrusted-key-material")?;
+    assert_eq!(
+        OfflineUpgradeSession::inspect_progress(&fixture.paths()?, &configuration, id),
+        Err(UpgradeFailure::UnsafeState)
+    );
+    Ok(())
+}
+
+#[test]
 fn offline_upgrade_refuses_intent_without_a_completed_drain_marker()
 -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new()?;
@@ -65,7 +117,15 @@ fn offline_upgrade_authenticates_final_marker_and_recovers_without_serving()
     assert_eq!(evidence.transaction(), transaction);
     assert_eq!(session.advance(std::time::Instant::now())?, status);
     assert!(session.rollback_snapshot()?.is_none());
+    let live_progress = session.progress(&configuration)?;
+    assert_eq!(live_progress.operation, status);
+    assert!(live_progress.snapshot.is_none());
+    assert!(live_progress.verification.is_none());
     drop(session);
+    let progress = OfflineUpgradeSession::inspect_progress(&fixture.paths()?, &configuration, id)?;
+    assert_eq!(progress.operation, status);
+    assert!(progress.snapshot.is_none());
+    assert!(progress.verification.is_none());
     let mut instance =
         crate::InstanceBootstrap::reopen_configured(&fixture.paths()?, &configuration)?;
     let (clock, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(
@@ -200,6 +260,11 @@ fn offline_upgrade_refuses_a_preclaimed_child_key_before_provider_work()
         .map_err(|_| "Drain")?;
     drop(services);
     drop(instance);
+    assert_eq!(
+        OfflineUpgradeSession::inspect_progress(&fixture.paths()?, &configuration, id),
+        Err(UpgradeFailure::InvalidRequest),
+        "foreign child binding must never be exposed as upgrade progress"
+    );
     let mut session = OfflineUpgradeSession::begin(&fixture.paths()?, &configuration, id)?;
     assert_eq!(
         session.advance(std::time::Instant::now() + Duration::from_secs(5)),

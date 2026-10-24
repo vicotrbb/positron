@@ -15,7 +15,9 @@ mod admission;
 #[cfg(feature = "test-support")]
 mod diagnostics;
 mod installed;
+mod progress;
 mod reference;
+pub use progress::{OfflineUpgradeProgress, UpgradeCheckpointProgress, UpgradeChildProgress};
 mod snapshot;
 
 /// No service or instance handle escapes this owner, and no listeners are bound.

@@ -71,10 +71,27 @@ class SnapshotObservation(unittest.TestCase):
     def test_untrusted_receipt_fields_are_not_printed(self):
         records = self.invoke("operation_id=protected-secret status=protected-secret "
                               "stage=Some(protected-secret) revision=protected-secret "
-                              "rollback_available=protected-secret extra=protected-secret")
+                              "rollback_available=protected-secret extra=protected-secret "
+                              "snapshot=protected-secret snapshot_kind=protected-secret "
+                              "snapshot_phase=protected-secret snapshot_status=protected-secret "
+                              "snapshot_revision=protected-secret snapshot_checkpoint_sequence=protected-secret "
+                              "snapshot_checkpoint_sha256=protected-secret snapshot_progress_percent=101")
         self.assertEqual(len(records), 4)
         for record in records:
-            self.assertFalse(set(record) & {"operation_id", "status", "stage", "revision", "rollback_available"})
+            self.assertFalse(set(record) & {"operation_id", "status", "stage", "revision", "rollback_available", "snapshot", "snapshot_kind", "snapshot_phase", "snapshot_status", "snapshot_revision", "snapshot_checkpoint_sequence", "snapshot_checkpoint_sha256", "snapshot_progress_percent"})
+        self.assertNotIn("protected", self.output)
+
+    def test_child_progress_keeps_only_closed_fields_and_checkpoint_digest(self):
+        receipt = (f"operation_id={self.operation} status=Running stage=Some(Snapshot) revision=4 "
+                   "snapshot=present snapshot_kind=BackupSnapshot snapshot_phase=BackupTransfer "
+                   "snapshot_status=Running snapshot_revision=7 snapshot_progress_percent=40 "
+                   "snapshot_checkpoint_sequence=3 snapshot_checkpoint_sha256=" + "ab" * 32 +
+                   " verification=absent snapshot_payload=protected-secret")
+        for record in self.invoke(receipt):
+            self.assertEqual(record["snapshot_revision"], 7)
+            self.assertEqual(record["snapshot_checkpoint_sequence"], 3)
+            self.assertEqual(record["snapshot_checkpoint_sha256"], "ab" * 32)
+            self.assertEqual(record["verification"], "absent")
         self.assertNotIn("protected", self.output)
 
     def test_command_timeout_is_closed_and_does_not_retry(self):

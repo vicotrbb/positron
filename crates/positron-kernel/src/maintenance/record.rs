@@ -829,3 +829,23 @@ mod tests {
         );
     }
 }
+
+pub(super) fn inspect_checkpoint(
+    bytes: &[u8],
+    identity: MaintenanceTaskId,
+) -> Result<Option<Option<MaintenanceCheckpoint>>, MaintenanceFailure> {
+    if ![
+        RECORD_MAGIC,
+        PREVIOUS_RECORD_MAGIC,
+        LEGACY_RECORD_MAGIC,
+        OLDEST_RECORD_MAGIC,
+        ANCIENT_RECORD_MAGIC,
+    ]
+    .iter()
+    .any(|magic| bytes.starts_with(*magic))
+        || bytes.get(8..24) != Some(identity.to_bytes().as_slice())
+    {
+        return Ok(None);
+    }
+    decode_record(bytes).map(|state| Some(state.checkpoint))
+}
