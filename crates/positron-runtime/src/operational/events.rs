@@ -156,10 +156,6 @@ impl BackupReadStage {
 /// Closed operational facts; arbitrary text cannot enter the process event ring.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OperationalEvent {
-    BackupRepositoryFailure {
-        stage: u8,
-        failure: positron_domain::repository::RepositoryFailure,
-    },
     BackupReadFailure {
         stage: BackupReadStage,
         failure: crate::services::MaintenanceServiceFailure,
@@ -170,7 +166,6 @@ pub(crate) enum OperationalEvent {
         duration_micros: u64,
     },
     RequestCompleted {
-        status: u16,
         role: crate::ListenerRole,
         outcome: RequestOutcome,
         request_id: u64,
@@ -194,7 +189,6 @@ pub(crate) enum OperationalEvent {
 impl OperationalEvent {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::BackupRepositoryFailure { .. } => "backup_repository_rejected",
             Self::BackupReadFailure { .. } => "backup_read_failure",
             Self::Diagnostic(diagnostic) => diagnostic.name(),
             Self::QueryCompleted { .. } => "query_completed",
@@ -222,10 +216,7 @@ impl OperationalEvent {
                 | OperationalDiagnostic::LocalKeyCustodyWarning
                 | OperationalDiagnostic::IndependentKeyRecoveryRequired,
             ) => "warn",
-            Self::ProcessFenced
-            | Self::BackupReadFailure { .. }
-            | Self::BackupRepositoryFailure { .. }
-            | Self::Diagnostic(_) => "error",
+            Self::ProcessFenced | Self::BackupReadFailure { .. } | Self::Diagnostic(_) => "error",
             Self::RequestCompleted {
                 outcome: RequestOutcome::Unavailable,
                 ..
@@ -245,10 +236,6 @@ impl OperationalEvent {
     }
     pub(crate) fn json(self) -> serde_json::Value {
         let mut value = serde_json::json!({"event": self.name(), "severity": self.severity(), "component": "runtime"});
-        if let Self::BackupRepositoryFailure { stage, failure } = self {
-            value["stage"] = stage.into();
-            value["repository_failure"] = format!("{failure:?}").into();
-        }
         if let Self::BackupReadFailure { stage, failure } = self {
             value["stage"] = stage.token().into();
             value["failure"] = format!("{failure:?}").into();
@@ -320,14 +307,12 @@ impl OperationalEvent {
             }
         }
         if let Self::RequestCompleted {
-            status,
             role,
             outcome,
             request_id,
             duration_micros,
         } = self
         {
-            value["status"] = status.into();
             value["listener"] = listener_label(role).into();
             value["outcome"] = outcome.label().into();
             value["request_id"] = request_id.into();
