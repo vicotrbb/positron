@@ -212,3 +212,6 @@ fn clock_checkpoint_confirms_exact_publication_or_requires_canonical_recovery()
     }
     Ok(())
 }
+
+#[path = "lifecycle_clock/publication.rs"]
+mod publication;
