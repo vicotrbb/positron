@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 import time
+import uuid
 
 configuration = "/var/lib/positron-release/positron.toml"
 directory = pathlib.Path("/var/lib/positron-recovery")
@@ -40,33 +41,58 @@ def generation():
 
 def admit(kind, action, arguments):
     deadline = time.monotonic() + 60
-    attempt = 0
+
+    def execute(command):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("native lifecycle admission deadline exhausted")
+        try:
+            result = subprocess.run(command, input=credential, capture_output=True, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("native lifecycle admission outcome unknown at deadline") from None
+        if time.monotonic() >= deadline:
+            raise RuntimeError("native lifecycle admission deadline exhausted")
+        return result
+
+    def operation(result):
+        if result.returncode:
+            raise RuntimeError("repository admission reconciliation unavailable")
+        try:
+            receipt = fields(result.stdout.decode())
+            identifier = receipt["operation_id"]
+            if str(uuid.UUID(identifier)) != identifier or receipt["status"] not in ["pending", "running", "succeeded"]:
+                raise ValueError("invalid receipt")
+        except (UnicodeDecodeError, KeyError, ValueError):
+            raise RuntimeError("repository admission reconciliation invalid receipt") from None
+        if time.monotonic() >= deadline:
+            raise RuntimeError("native lifecycle admission deadline exhausted")
+        return receipt
+
     while True:
-        attempt += 1
-        result = subprocess.run(["positron", kind, action] + transport + arguments +
-            ["--expected-generation", generation()], input=credential, capture_output=True, timeout=60)
+        command = ["positron", kind, action] + transport + arguments + ["--expected-generation", generation()]
+        result = execute(command)
         if result.returncode == 0:
-            return fields(result.stdout.decode())
+            receipt = fields(result.stdout.decode())
+            if time.monotonic() >= deadline:
+                raise RuntimeError("native lifecycle admission deadline exhausted")
+            return receipt
+        if (kind == "repository" and action == "init" and result.stderr.strip() ==
+                b"positron: transport outcome unknown; inspect the same operation or idempotency key before retrying"):
+            # Inspect first; only canonical exact replay can verify the full original binding.
+            if arguments.count("--idempotency-key") != 1:
+                raise RuntimeError("repository admission reconciliation requires one key")
+            key_index = arguments.index("--idempotency-key") + 1
+            if key_index >= len(arguments):
+                raise RuntimeError("repository admission reconciliation requires one key")
+            inspected = operation(execute(["positron", "repository", "lookup"] + transport +
+                ["--idempotency-key", arguments[key_index]]))
+            replayed = operation(execute(command))
+            if replayed["operation_id"] != inspected["operation_id"]:
+                raise RuntimeError("repository admission reconciliation changed operation")
+            return replayed
         retryable = any(message in result.stderr for message in [b"stale resource generation", b"administration unavailable", b"capacity unavailable"])
         if not retryable or time.monotonic() >= deadline:
-            # Closed failure attribution only; transport refusal stays unknown.
-            failure = {
-                b"positron: invalid repository request": "invalid_request",
-                b"positron: invalid backup request": "invalid_request",
-                b"positron: system administration authentication rejected": "authentication_rejected",
-                b"positron: repository operation unavailable": "operation_unavailable",
-                b"positron: backup operation unavailable": "operation_unavailable",
-                b"positron: stale resource generation; inspect current state before retrying": "stale_generation",
-                b"positron: operation precondition failed; inspect current state before retrying": "precondition_failed",
-                b"positron: idempotency key conflicts with an accepted request": "idempotency_conflict",
-                b"positron: administration unavailable; inspect or retry the same operation": "administration_unavailable",
-                b"positron: capacity unavailable; retry the same idempotent request": "capacity_unavailable",
-                b"positron: transport outcome unknown; inspect the same operation or idempotency key before retrying": "transport_unknown",
-            }.get(result.stderr.strip(), "other")
-            role = {("repository", "init"): "repository_init", ("backup", "create"): "backup_create"}.get((kind, action), "other")
-            elapsed_ms = int((time.monotonic() - (deadline - 60)) * 1000)
-            raise RuntimeError(f"native service refused lifecycle admission: operation={role} "
-                f"code={failure} returncode={result.returncode} attempt={attempt} elapsed_ms={elapsed_ms}")
+            raise RuntimeError("native service refused lifecycle admission")
         time.sleep(0.1)
 
 
@@ -96,6 +122,8 @@ elif sys.argv[1] == "backup":
     completed = fields(run(["positron", "repository", "wait"] + transport +
         ["--operation-id", initialized["operation_id"], "--wait-seconds", "60"], credential))
     assert completed["status"] == "succeeded"
+    assert completed["operation_id"] == initialized["operation_id"]
+    assert completed["repository_id"] == repository_id
     accepted = admit("backup", "create", common +
         ["--retention-seconds", "3600", "--idempotency-key", "33333333-3333-4333-8333-333333333333"])
     while True:

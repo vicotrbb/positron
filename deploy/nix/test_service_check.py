@@ -1,4 +1,5 @@
 """Regressions for the VM's bounded public ingest acknowledgment flow."""
+import ast
 import contextlib
 import io
 import json
@@ -189,7 +190,7 @@ class QueryDeadline(unittest.TestCase):
 
 
 class BackupOutcomeKnowledge(unittest.TestCase):
-    def run_backup(self, responses):
+    def run_backup(self, responses, repository_receipt=None):
         self.commands = []
         self.saved = []
 
@@ -202,7 +203,7 @@ class BackupOutcomeKnowledge(unittest.TestCase):
             elif action == ["repository", "init"]:
                 output = "operation_id=repository"
             elif action == ["repository", "wait"]:
-                output = "operation_id=repository status=succeeded"
+                output = repository_receipt or "operation_id=repository status=succeeded repository_id=11111111-1111-4111-8111-111111111111"
             elif action == ["backup", "create"]:
                 output = "operation_id=snapshot"
             elif action == ["backup", "wait"]:
@@ -259,3 +260,117 @@ class BackupOutcomeKnowledge(unittest.TestCase):
                 self.assertEqual(sum(command[1:3] == ["backup", "wait"]
                                      for command in self.commands), 1)
                 self.assertEqual(self.saved, [])
+
+
+    def test_repository_wait_must_preserve_operation_and_repository_identity(self):
+        for receipt in [
+                "operation_id=other status=succeeded repository_id=11111111-1111-4111-8111-111111111111",
+                "operation_id=repository status=succeeded repository_id=99999999-9999-4999-8999-999999999999"]:
+            with self.assertRaises(AssertionError):
+                self.run_backup([], repository_receipt=receipt)
+            self.assertFalse(any(command[1:3] == ["backup", "create"] for command in self.commands))
+
+
+class RepositoryAdmissionReconciliation(unittest.TestCase):
+    operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    key = "22222222-2222-4222-8222-222222222222"
+    unknown = b"positron: transport outcome unknown; inspect the same operation or idempotency key before retrying\n"
+
+    def response(self, status="running", identifier=None, code=0, error=b""):
+        return types.SimpleNamespace(returncode=code, stderr=error,
+            stdout=f"operation_id={identifier or self.operation_id} status={status}\n".encode())
+
+    def invoke(self, responses, kind="repository", action="init", advances=None, validation_elapsed=0):
+        self.calls = []
+        self.clock = 0
+        self.generations = []
+
+        def execute(command, **options):
+            self.calls.append((command[:], options.copy()))
+            if advances:
+                self.clock += advances[len(self.calls) - 1]
+            response = responses[len(self.calls) - 1]
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        def generation():
+            self.generations.append(True)
+            return str(len(self.generations) + 6)
+
+        path = pathlib.Path(__file__).with_name("lifecycle-check.py")
+        source = ast.parse(path.read_text(), filename=str(path))
+        # Load the actual helper without invoking an unrelated VM lifecycle action.
+        source.body = [node for node in source.body if not isinstance(node, ast.If)]
+        owner = {"__file__": str(path)}
+        with mock.patch.object(pathlib.Path, "read_text", return_value="administrator_secret=protected-canary\n"):
+            exec(compile(source, str(path), "exec"), owner)
+        owner["admit"].__globals__["generation"] = generation
+        original_fields = owner["fields"]
+
+        def validate(text):
+            self.clock += validation_elapsed
+            return original_fields(text)
+
+        owner["admit"].__globals__["fields"] = validate
+        with mock.patch("time.monotonic", side_effect=lambda: self.clock), \
+                mock.patch("subprocess.run", side_effect=execute):
+            return owner["admit"](kind, action, ["--locator", "/protected-locator", "--repository-id",
+                "11111111-1111-4111-8111-111111111111", "--idempotency-key", self.key])
+
+    def test_lost_acknowledgment_inspects_then_replays_exact_original_binding(self):
+        receipt = self.invoke([self.response(code=2, error=self.unknown), self.response(), self.response()])
+        self.assertEqual(receipt["operation_id"], self.operation_id)
+        self.assertEqual(self.calls[0], self.calls[2])
+        self.assertEqual(self.calls[1][0][1:3], ["repository", "lookup"])
+        self.assertEqual(self.calls[1][0][-2:], ["--idempotency-key", self.key])
+        self.assertEqual(len(self.generations), 1)
+
+    def test_nonpositive_or_invalid_lookup_never_replays(self):
+        for lookup in [self.response(code=2, error=self.unknown),
+                       self.response(code=2, error=b"positron: repository operation unavailable"),
+                       self.response(status="failed"),
+                       self.response(status="cancelled"), self.response(identifier="malformed"),
+                       types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")]:
+            with self.subTest(state="unresolved"):
+                with self.assertRaises(RuntimeError) as failure:
+                    self.invoke([self.response(code=2, error=self.unknown), lookup])
+                self.assertEqual(len(self.calls), 2)
+                self.assertNotIn("protected", str(failure.exception))
+
+    def test_conflicting_replay_or_changed_operation_is_refused(self):
+        for replay in [self.response(code=2, error=b"idempotency conflict"),
+                       self.response(identifier="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")]:
+            with self.assertRaises(RuntimeError):
+                self.invoke([self.response(code=2, error=self.unknown), self.response(), replay])
+            self.assertEqual(len(self.calls), 3)
+
+    def test_original_deadline_bounds_lookup_replay_and_late_success(self):
+        for elapsed, expected_calls in [([59, 1], 2), ([50, 5, 5], 3)]:
+            with self.assertRaisesRegex(RuntimeError, "deadline"):
+                self.invoke([self.response(code=2, error=self.unknown), self.response(), self.response()],
+                            advances=elapsed)
+            self.assertEqual(len(self.calls), expected_calls)
+            self.assertEqual(self.calls[1][1]["timeout"], 60 - elapsed[0])
+
+    def test_normal_admission_and_other_unknown_operations_do_not_reconcile(self):
+        self.invoke([self.response()])
+        self.assertEqual(len(self.calls), 1)
+        with self.assertRaises(RuntimeError):
+            self.invoke([self.response(code=2, error=self.unknown)], kind="backup", action="create")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_receipt_validation_cannot_accept_after_original_deadline(self):
+        with self.assertRaisesRegex(RuntimeError, "deadline"):
+            self.invoke([self.response()], validation_elapsed=60)
+        with self.assertRaisesRegex(RuntimeError, "deadline"):
+            self.invoke([self.response(code=2, error=self.unknown), self.response()],
+                        validation_elapsed=60)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_lookup_timeout_stays_unknown_without_replay_or_sensitive_error(self):
+        with self.assertRaisesRegex(RuntimeError, "outcome unknown") as failure:
+            self.invoke([self.response(code=2, error=self.unknown),
+                         subprocess.TimeoutExpired(["protected-locator"], 1)])
+        self.assertEqual(len(self.calls), 2)
+        self.assertNotIn("protected", str(failure.exception))
