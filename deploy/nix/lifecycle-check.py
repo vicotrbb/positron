@@ -40,14 +40,33 @@ def generation():
 
 def admit(kind, action, arguments):
     deadline = time.monotonic() + 60
+    attempt = 0
     while True:
+        attempt += 1
         result = subprocess.run(["positron", kind, action] + transport + arguments +
             ["--expected-generation", generation()], input=credential, capture_output=True, timeout=60)
         if result.returncode == 0:
             return fields(result.stdout.decode())
         retryable = any(message in result.stderr for message in [b"stale resource generation", b"administration unavailable", b"capacity unavailable"])
         if not retryable or time.monotonic() >= deadline:
-            raise RuntimeError("native service refused lifecycle admission")
+            # Closed failure attribution only; transport refusal stays unknown.
+            failure = {
+                b"positron: invalid repository request": "invalid_request",
+                b"positron: invalid backup request": "invalid_request",
+                b"positron: system administration authentication rejected": "authentication_rejected",
+                b"positron: repository operation unavailable": "operation_unavailable",
+                b"positron: backup operation unavailable": "operation_unavailable",
+                b"positron: stale resource generation; inspect current state before retrying": "stale_generation",
+                b"positron: operation precondition failed; inspect current state before retrying": "precondition_failed",
+                b"positron: idempotency key conflicts with an accepted request": "idempotency_conflict",
+                b"positron: administration unavailable; inspect or retry the same operation": "administration_unavailable",
+                b"positron: capacity unavailable; retry the same idempotent request": "capacity_unavailable",
+                b"positron: transport outcome unknown; inspect the same operation or idempotency key before retrying": "transport_unknown",
+            }.get(result.stderr.strip(), "other")
+            role = {("repository", "init"): "repository_init", ("backup", "create"): "backup_create"}.get((kind, action), "other")
+            elapsed_ms = int((time.monotonic() - (deadline - 60)) * 1000)
+            raise RuntimeError(f"native service refused lifecycle admission: operation={role} "
+                f"code={failure} returncode={result.returncode} attempt={attempt} elapsed_ms={elapsed_ms}")
         time.sleep(0.1)
 
 
