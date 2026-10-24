@@ -110,9 +110,6 @@ claim = fields(pathlib.Path("/root/positron-claim").read_text())
 credential = claim["administrator_secret"].encode()
 transport = ["--endpoint", "127.0.0.1:4311", "--credential-stdin", "--allow-plaintext"]
 
-def generation():
-    return fields(run(["positron", "repository", "status"] + transport, credential))["catalog_generation"]
-
 def admit(kind, action, arguments):
     deadline = time.monotonic() + 60
 
@@ -159,14 +156,26 @@ def admit(kind, action, arguments):
         return receipt
 
     while True:
-        command = ["positron", kind, action] + transport + arguments + ["--expected-generation", generation()]
-        result = execute(command)
+        command = None
+        result = execute(["positron", "repository", "status"] + transport)
+        if result.returncode == 0:
+            try:
+                current_generation = fields(result.stdout.decode())["catalog_generation"]
+                if (not current_generation.isascii() or not current_generation.isdecimal()
+                        or len(current_generation) > 20 or int(current_generation) > 18446744073709551615):
+                    raise ValueError("invalid generation")
+            except (UnicodeDecodeError, KeyError, ValueError):
+                raise RuntimeError("repository status invalid receipt") from None
+            command = ["positron", kind, action] + transport + arguments + ["--expected-generation", current_generation]
+            result = execute(command)
+        elif repository_failure(result) not in ["stale_generation", "administration_unavailable", "capacity_unavailable"]:
+            raise RuntimeError("repository status refused: code=" + repository_failure(result))
         if result.returncode == 0:
             receipt = fields(result.stdout.decode())
             if time.monotonic() >= deadline:
                 raise RuntimeError("native lifecycle admission deadline exhausted")
             return receipt
-        if kind == "repository" and action == "init" and repository_failure(result) == "transport_unknown":
+        if command is not None and kind == "repository" and action == "init" and repository_failure(result) == "transport_unknown":
             # Inspect first; only canonical exact replay can verify the full original binding.
             if arguments.count("--idempotency-key") != 1:
                 raise RuntimeError("repository admission reconciliation requires one key")

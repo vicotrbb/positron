@@ -280,12 +280,16 @@ class RepositoryAdmissionReconciliation(unittest.TestCase):
         return types.SimpleNamespace(returncode=code, stderr=error,
             stdout=f"operation_id={identifier or self.operation_id} status={status}\n".encode())
 
-    def invoke(self, responses, kind="repository", action="init", advances=None, validation_elapsed=0):
+    def invoke(self, responses, kind="repository", action="init", advances=None, validation_elapsed=0,
+               real_generation=False):
         self.calls = []
         self.clock = 0
         self.generations = []
 
         def execute(command, **options):
+            if not real_generation and command[1:3] == ["repository", "status"]:
+                return types.SimpleNamespace(returncode=0, stderr=b"",
+                    stdout=("catalog_generation=" + generation()).encode())
             self.calls.append((command[:], options.copy()))
             if advances:
                 self.clock += advances[len(self.calls) - 1]
@@ -305,11 +309,11 @@ class RepositoryAdmissionReconciliation(unittest.TestCase):
         owner = {"__file__": str(path)}
         with mock.patch.object(pathlib.Path, "read_text", return_value="administrator_secret=protected-canary\n"):
             exec(compile(source, str(path), "exec"), owner)
-        owner["admit"].__globals__["generation"] = generation
         original_fields = owner["fields"]
 
         def validate(text):
-            self.clock += validation_elapsed
+            if not text.startswith("catalog_generation="):
+                self.clock += validation_elapsed
             return original_fields(text)
 
         owner["admit"].__globals__["fields"] = validate
@@ -317,6 +321,50 @@ class RepositoryAdmissionReconciliation(unittest.TestCase):
                 mock.patch("subprocess.run", side_effect=execute):
             return owner["admit"](kind, action, ["--locator", "/protected-locator", "--repository-id",
                 "11111111-1111-4111-8111-111111111111", "--idempotency-key", self.key])
+
+    def test_status_capacity_refusal_retries_before_admitting_with_fresh_generation(self):
+        cases = [("repository", "init", b"positron: capacity unavailable; retry the same idempotent request"),
+                 ("backup", "create", b"positron: administration unavailable; inspect or retry the same operation"),
+                 ("upgrade", "start", b"positron: stale resource generation; inspect current state before retrying")]
+        status = types.SimpleNamespace(returncode=0, stdout=b"catalog_generation=7\n", stderr=b"")
+        for kind, action, error in cases:
+            with self.subTest(kind=kind), mock.patch("time.sleep") as sleep:
+                receipt = self.invoke([self.response(code=2, error=error), status, self.response()],
+                                      kind=kind, action=action, real_generation=True)
+            self.assertEqual(receipt["operation_id"], self.operation_id)
+            self.assertEqual([call[0][1:3] for call in self.calls],
+                             [["repository", "status"], ["repository", "status"], [kind, action]])
+            self.assertEqual(self.calls[-1][0][-2:], ["--expected-generation", "7"])
+            self.assertTrue(all(call[1]["timeout"] <= 60 for call in self.calls))
+            sleep.assert_called_once_with(0.1)
+
+    def test_status_retry_and_success_share_the_original_admission_deadline(self):
+        capacity = self.response(code=2, error=b"positron: capacity unavailable; retry the same idempotent request")
+        status = types.SimpleNamespace(returncode=0, stdout=b"catalog_generation=7", stderr=b"")
+        with mock.patch("time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "deadline"):
+                self.invoke([capacity, status], advances=[59, 1], real_generation=True)
+        self.assertEqual([call[0][1:3] for call in self.calls], [["repository", "status"]] * 2)
+        self.assertEqual([call[1]["timeout"] for call in self.calls], [60, 1])
+
+    def test_status_fatal_and_unknown_refusals_never_attempt_admission_or_lookup(self):
+        for error, category in [(self.unknown, "transport_unknown"),
+                (b"positron: system administration authentication rejected", "authentication_rejected"),
+                (b"protected-canary /protected-locator capacity unavailable", "other")]:
+            with self.subTest(category=category), self.assertRaisesRegex(RuntimeError, "code=" + category) as failure:
+                self.invoke([self.response(code=2, error=error)], real_generation=True)
+            self.assertEqual(len(self.calls), 1)
+            self.assertNotIn("protected", str(failure.exception))
+
+    def test_status_timeout_or_invalid_generation_never_attempts_admission(self):
+        for response in [subprocess.TimeoutExpired(["protected-canary"], 60)] + [
+                types.SimpleNamespace(returncode=0, stdout=receipt, stderr=b"")
+                for receipt in [b"", b"catalog_generation=protected-canary", b"catalog_generation=-1",
+                                b"catalog_generation=18446744073709551616", b"catalog_generation=\xff"]]:
+            with self.subTest(receipt="invalid"), self.assertRaises(RuntimeError) as failure:
+                self.invoke([response], real_generation=True)
+            self.assertEqual(len(self.calls), 1)
+            self.assertNotIn("protected", str(failure.exception))
 
     def test_lost_acknowledgment_inspects_then_replays_exact_original_binding(self):
         receipt = self.invoke([self.response(code=2, error=self.unknown), self.response(), self.response()])
