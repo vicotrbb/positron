@@ -14,7 +14,8 @@ from unittest import mock
 class SnapshotObservation(unittest.TestCase):
     operation = "0123456789abcdef0123456789abcdef"
 
-    def invoke(self, receipt=None, failure=None, stderr=None, stop_after_advance=False):
+    def invoke(self, receipt=None, failure=None, stderr=None, stop_after_advance=False,
+               publishing_after=None):
         self.clock = 0
         self.commands = []
         output = io.StringIO()
@@ -26,13 +27,20 @@ class SnapshotObservation(unittest.TestCase):
 
         def execute(command, **options):
             self.commands.append((command, options))
-            if stop_after_advance and len(self.commands) > 1:
+            if stop_after_advance and len(self.commands) > (publishing_after or 1):
                 raise RuntimeError("after publication boundary")
             self.clock += 65
             if failure is not None:
                 raise failure
             text = receipt or (f"operation_id={self.operation} status=Running "
                                "stage=Some(Snapshot) revision=4 rollback_available=false")
+            if publishing_after:
+                text += (f" snapshot=present snapshot_kind=BackupSnapshot snapshot_checkpoint_sequence={len(self.commands) * 50}"
+                         " verification=present verification_kind=BackupVerification"
+                         f" verification_checkpoint_sequence={max(0, len(self.commands) - 2)}")
+            if publishing_after == len(self.commands):
+                text = (f"operation_id={self.operation} status=Running "
+                        "stage=Some(Publishing) revision=5 rollback_available=false")
             return types.SimpleNamespace(returncode=2 if stderr else 0,
                                          stdout=text if isinstance(text, bytes) else text.encode(),
                                          stderr=stderr or b"")
@@ -49,11 +57,24 @@ class SnapshotObservation(unittest.TestCase):
         self.output = output.getvalue()
         return [json.loads(line) for line in self.output.splitlines()]
 
-    def test_each_advance_and_original_deadline_emit_only_closed_public_facts(self):
+    def test_progressive_snapshot_and_verification_can_publish_after_three_minutes(self):
+        records = self.invoke(publishing_after=4, stop_after_advance=True)
+        self.assertEqual([record["outcome"] for record in records], ["advanced"] * 4)
+        self.assertEqual([record["snapshot_checkpoint_sequence"] for record in records[:3]], [50, 100, 150])
+        self.assertEqual(records[2]["verification_checkpoint_sequence"], 1)
+        self.assertEqual(records[-1]["stage"], "Some(Publishing)")
+        self.assertEqual(records[-1]["elapsed_ms"], 260000)
+        self.assertEqual(self.error, "after publication boundary")
+        self.assertEqual(len(self.commands), 5)
+        for command, options in self.commands[:4]:
+            self.assertEqual(command[-2:], ["--seconds", "60"])
+            self.assertEqual(options["timeout"], 180)
+
+    def test_stalled_snapshot_fails_at_the_finite_journey_deadline_with_closed_facts(self):
         records = self.invoke()
         self.assertEqual([item["outcome"] for item in records],
-                         ["advanced", "advanced", "advanced", "deadline"])
-        self.assertEqual([item["elapsed_ms"] for item in records], [65000, 130000, 195000, 195000])
+                         ["advanced"] * 10 + ["deadline"])
+        self.assertEqual([item["elapsed_ms"] for item in records], [65000 * turn for turn in range(1, 11)] + [650000])
         for record in records:
             self.assertEqual(record["operation_id"], self.operation)
             self.assertEqual(record["status"], "Running")
@@ -62,7 +83,7 @@ class SnapshotObservation(unittest.TestCase):
             self.assertIs(record["rollback_available"], False)
             self.assertEqual(record["error"], "none")
         self.assertEqual(self.error, "authenticated upgrade snapshot did not complete")
-        self.assertEqual(len(self.commands), 3)
+        self.assertEqual(len(self.commands), 10)
         for command, options in self.commands:
             self.assertEqual(command[-2:], ["--seconds", "60"])
             self.assertEqual(options["timeout"], 180)
@@ -76,7 +97,7 @@ class SnapshotObservation(unittest.TestCase):
                               "snapshot_phase=protected-secret snapshot_status=protected-secret "
                               "snapshot_revision=protected-secret snapshot_checkpoint_sequence=protected-secret "
                               "snapshot_checkpoint_sha256=protected-secret snapshot_progress_percent=101")
-        self.assertEqual(len(records), 4)
+        self.assertEqual(len(records), 11)
         for record in records:
             self.assertFalse(set(record) & {"operation_id", "status", "stage", "revision", "rollback_available", "snapshot", "snapshot_kind", "snapshot_phase", "snapshot_status", "snapshot_revision", "snapshot_checkpoint_sequence", "snapshot_checkpoint_sha256", "snapshot_progress_percent"})
         self.assertNotIn("protected", self.output)

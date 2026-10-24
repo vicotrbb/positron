@@ -290,7 +290,9 @@ elif sys.argv[1] == "publish-upgrade":
     state = json.loads(state_path.read_text())
     common = ["--config", configuration, "--operation-id", state["upgrade"]]
     started = time.monotonic()
-    deadline = started + 180
+    # Emulated ARM needs about 200 seconds for the snapshot before independent
+    # verification starts. Bound the full fixture journey, retaining 60-second turns.
+    deadline = started + 600
     while True:
         status = advance_snapshot(common, started)
         if status["stage"] == "Some(Publishing)":
