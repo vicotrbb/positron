@@ -170,6 +170,7 @@ pub(crate) enum OperationalEvent {
         duration_micros: u64,
     },
     RequestCompleted {
+        status: u16,
         role: crate::ListenerRole,
         outcome: RequestOutcome,
         request_id: u64,
@@ -319,12 +320,14 @@ impl OperationalEvent {
             }
         }
         if let Self::RequestCompleted {
+            status,
             role,
             outcome,
             request_id,
             duration_micros,
         } = self
         {
+            value["status"] = status.into();
             value["listener"] = listener_label(role).into();
             value["outcome"] = outcome.label().into();
             value["request_id"] = request_id.into();

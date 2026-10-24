@@ -198,6 +198,7 @@ impl OperationalTelemetry {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .saturating_add(1);
         self.record(OperationalEvent::RequestCompleted {
+            status,
             role,
             outcome,
             request_id,
@@ -360,4 +361,41 @@ pub(crate) fn fuzz_state(data: &[u8]) {
         drained += 1;
     }
     assert_eq!(drained, recorded.min(32));
+}
+
+#[cfg(test)]
+#[test]
+fn request_completion_retains_exact_status_in_existing_bounded_ring() {
+    let telemetry = OperationalTelemetry::default();
+    let statuses = [200_u16, 400, 404, 408, 409, 429, 503];
+    for index in 0..40 {
+        telemetry.record_request(
+            crate::ListenerRole::Api,
+            statuses[index % statuses.len()],
+            std::time::Duration::from_micros(1),
+        );
+    }
+    let records = telemetry.snapshot().expect("unpoisoned test owner");
+    assert_eq!(records.len(), 32);
+    for (index, event) in records.into_iter().enumerate() {
+        let status = statuses[(index + 8) % statuses.len()];
+        let json = event.json();
+        assert_eq!(json["status"], status);
+        assert_eq!(json["outcome"], RequestOutcome::from_status(status).label());
+        assert_eq!(json["request_id"], (index + 9) as u64);
+        assert_eq!(event.name(), "request_completed");
+        assert!(serde_json::to_vec(&json).expect("closed record").len() < 512);
+    }
+    let mut metrics = String::new();
+    telemetry.metrics(&mut metrics, false);
+    assert!(
+        metrics.contains(
+            "positron_requests_total{listener=\"api\",outcome=\"request_rejected\"} 24\n"
+        )
+    );
+    assert!(
+        metrics.contains(
+            "positron_requests_total{listener=\"api\",outcome=\"capacity_rejected\"} 5\n"
+        )
+    );
 }
