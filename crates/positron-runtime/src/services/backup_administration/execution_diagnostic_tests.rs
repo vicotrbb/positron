@@ -5,9 +5,16 @@ fn repository_rejection_preserves_result_and_emits_only_bounded_closed_details()
 -> Result<(), Box<dyn std::error::Error>> {
     const CHILD: &str = "POSITRON_BACKUP_REJECTION_DIAGNOSTIC_CHILD";
     if std::env::var_os(CHILD).is_some() {
-        for _ in 0..33 {
+        for index in 0..33 {
+            let stage = [
+                RepositoryFailureStage::Other,
+                RepositoryFailureStage::TransferCheckpointDecode,
+                RepositoryFailureStage::Reservation,
+                RepositoryFailureStage::KeyPreparation,
+                RepositoryFailureStage::ObjectTransfer,
+            ][index % 5];
             assert_eq!(
-                provider_failure(RepositoryFailure::PermissionDenied),
+                provider_failure_at(RepositoryFailure::PermissionDenied, stage),
                 ServiceFailure::BackupRepositoryRejected
             );
         }
@@ -64,7 +71,7 @@ fn repository_rejection_preserves_result_and_emits_only_bounded_closed_details()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(records.len(), 32);
-    for record in records {
+    for (index, record) in records.into_iter().enumerate() {
         assert_eq!(
             record,
             serde_json::json!({
@@ -72,6 +79,7 @@ fn repository_rejection_preserves_result_and_emits_only_bounded_closed_details()
                 "event": "backup_repository_rejected",
                 "severity": "error",
                 "repository_failure": "PermissionDenied",
+                "stage": index % 5,
             })
         );
     }

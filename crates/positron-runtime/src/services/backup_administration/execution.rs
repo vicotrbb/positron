@@ -307,7 +307,9 @@ pub(in crate::services) fn complete(
             } else {
                 BackupTransfer::decode(progress, manifest)
             }
-            .map_err(provider_failure)?,
+            .map_err(|failure| {
+                provider_failure_at(failure, RepositoryFailureStage::TransferCheckpointDecode)
+            })?,
         );
     }
     let external_retained_bytes = work
@@ -392,7 +394,9 @@ pub(in crate::services) fn complete(
             work.owner
                 .runtime
                 .block_on(publisher.reserve(manifest, work.context.keys()))
-                .map_err(provider_failure)?;
+                .map_err(|failure| {
+                    provider_failure_at(failure, RepositoryFailureStage::Reservation)
+                })?;
             work.reservation_established = true;
             #[cfg(test)]
             test_stops::hit(
@@ -436,7 +440,9 @@ pub(in crate::services) fn complete(
                         work.context.keys(),
                         work.next_key,
                     ))
-                    .map_err(provider_failure)?;
+                    .map_err(|failure| {
+                        provider_failure_at(failure, RepositoryFailureStage::KeyPreparation)
+                    })?;
                 #[cfg(test)]
                 if test_stops::armed(
                     services.instance.instance.to_bytes(),
@@ -498,7 +504,9 @@ pub(in crate::services) fn complete(
                     transfer,
                     &mut work.object_verification,
                 ))
-                .map_err(provider_failure)?;
+                .map_err(|failure| {
+                    provider_failure_at(failure, RepositoryFailureStage::ObjectTransfer)
+                })?;
             remaining -= charge;
             if transfer.complete()
                 || work.owner.identity.provider_kind() != "localFilesystem"
@@ -766,7 +774,22 @@ fn fail(
     .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     Err(failure)
 }
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum RepositoryFailureStage {
+    Other = 0,
+    TransferCheckpointDecode = 1,
+    Reservation = 2,
+    KeyPreparation = 3,
+    ObjectTransfer = 4,
+}
 pub(super) fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
+    provider_failure_at(failure, RepositoryFailureStage::Other)
+}
+fn provider_failure_at(
+    failure: RepositoryFailure,
+    stage: RepositoryFailureStage,
+) -> ServiceFailure {
     match failure {
         RepositoryFailure::ControlMemoryRequired { memory_bytes } => {
             ServiceFailure::BackupControlMemoryRequired { memory_bytes }
@@ -791,8 +814,9 @@ pub(super) fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
             {
                 // The closed Repository failure carries no paths, credentials
                 // or provider error strings. Reporting cannot alter rejection.
-                match crate::write_operational_diagnostic(
-                    crate::OperationalDiagnostic::BackupRepositoryRejected(failure),
+                match crate::native_host::operational_worker::write_repository_rejection(
+                    failure,
+                    stage as u8,
                 ) {
                     Ok(()) | Err(_) => {},
                 }

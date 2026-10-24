@@ -187,6 +187,17 @@ pub(crate) fn write_diagnostic(
     )
 }
 
+pub(crate) fn write_repository_rejection(
+    failure: positron_domain::repository::RepositoryFailure,
+    stage: u8,
+) -> std::io::Result<()> {
+    emit(
+        &mut nonblocking_stderr()?,
+        std::io::stderr().is_terminal(),
+        OperationalEvent::BackupRepositoryFailure { stage, failure },
+    )
+}
+
 fn log_enabled(level: positron_config::LogLevel, event: OperationalEvent) -> bool {
     match level {
         positron_config::LogLevel::Error => event.severity() == "error",
