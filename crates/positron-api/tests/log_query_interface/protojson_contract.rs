@@ -58,3 +58,6 @@ where
 mod input_validation;
 #[path = "protojson_contract/roundtrips.rs"]
 mod roundtrips;
+
+#[path = "protojson_contract/compatibility.rs"]
+mod compatibility;
