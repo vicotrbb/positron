@@ -31,6 +31,58 @@ def fields(text):
     return dict(field.split("=", 1) for field in text.split() if "=" in field)
 
 
+def observe_snapshot(status, started, outcome, error="none"):
+    record = {"event": "upgrade_snapshot", "outcome": outcome, "error": error,
+              "elapsed_ms": int((time.monotonic() - started) * 1000)}
+    identifier = status.get("operation_id", "")
+    if (len(identifier) == 32 and any(character != "0" for character in identifier)
+            and all(character in "0123456789abcdef" for character in identifier)):
+        record["operation_id"] = identifier
+    if status.get("status") in ["Pending", "Running", "Succeeded", "Failed", "Cancelled"]:
+        record["status"] = status["status"]
+    if status.get("stage") in ["None"] + ["Some(" + stage + ")" for stage in
+            ["Preflight", "Draining", "Snapshot", "Publishing", "AwaitingRestart", "Verifying", "Succeeded"]]:
+        record["stage"] = status["stage"]
+    revision = status.get("revision", "")
+    if revision.isascii() and revision.isdecimal() and len(revision) <= 20:
+        record["revision"] = int(revision)
+    if status.get("rollback_available") in ["true", "false"]:
+        record["rollback_available"] = status["rollback_available"] == "true"
+    print(json.dumps(record), flush=True)
+
+
+def advance_snapshot(common, started):
+    command = ["runuser", "-u", "positron", "--", "positron", "upgrade", "offline", "advance"]
+    try:
+        result = subprocess.run(command + common + ["--seconds", "60"],
+                                input=None, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        observe_snapshot({}, started, "failed", "command_timeout")
+        raise RuntimeError("offline upgrade advance failed: command_timeout") from None
+    if result.returncode:
+        category = {
+            b"positron: upgrade remains resumable; inspect and retry after trusted time or capacity recovers": "resumable",
+            b"positron: authenticated completed Drain is required; resume the source process control path": "drain_incomplete",
+            b"positron: installed artifact does not match the accepted signed release": "artifact_mismatch",
+            b"positron: installed release or operation authority rejected": "authentication_rejected",
+            b"positron: unsupported release or format transition": "unsupported_transition",
+            b"positron: upgrade precondition changed; inspect the accepted operation": "precondition_changed",
+            b"positron: offline request does not match the accepted upgrade": "invalid_request",
+            b"positron: upgrade recovery state or exclusive volume ownership unavailable": "unsafe_state",
+            b"positron: upgrade outcome unknown; inspect the same operation before retrying": "outcome_unknown",
+            b"positron: upgrade verification failed; use the explicit rollback or fresh-target restore boundary": "verification_failed",
+        }.get(result.stderr.strip(), "other")
+        observe_snapshot({}, started, "failed", category)
+        raise RuntimeError("offline upgrade advance failed: " + category)
+    try:
+        status = fields(result.stdout.decode())
+    except UnicodeDecodeError:
+        observe_snapshot({}, started, "failed", "invalid_receipt")
+        raise RuntimeError("offline upgrade advance failed: invalid_receipt") from None
+    observe_snapshot(status, started, "advanced")
+    return status
+
+
 claim = fields(pathlib.Path("/root/positron-claim").read_text())
 credential = claim["administrator_secret"].encode()
 transport = ["--endpoint", "127.0.0.1:4311", "--credential-stdin", "--allow-plaintext"]
@@ -205,12 +257,14 @@ elif sys.argv[1] == "upgrade":
 elif sys.argv[1] == "publish-upgrade":
     state = json.loads(state_path.read_text())
     common = ["--config", configuration, "--operation-id", state["upgrade"]]
-    deadline = time.monotonic() + 180
+    started = time.monotonic()
+    deadline = started + 180
     while True:
-        status = fields(run(["positron", "upgrade", "offline", "advance"] + common + ["--seconds", "60"], owner=True))
+        status = advance_snapshot(common, started)
         if status["stage"] == "Some(Publishing)":
             break
         if time.monotonic() >= deadline:
+            observe_snapshot(status, started, "deadline")
             raise RuntimeError("authenticated upgrade snapshot did not complete")
     reference = fields(run(["positron", "upgrade", "offline", "restore-reference"] + common, owner=True))
     assert reference["fresh_target_required"] == "true" and reference["manifest_checksum"]
