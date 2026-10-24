@@ -126,6 +126,39 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
             ),
         Err(positron_runtime::ServiceFailure::CapacityUnavailable)
     );
+    use positron_api::log_query as log_api;
+    let query_client =
+        log_api::LogQueryServiceClient::new(log_api::LogQueryTransport::PlaintextOptOut {
+            endpoint: api,
+        })?;
+    let query_request = log_api::LogQueryRequest {
+        pipeline: "logs | range query_time 0 100 | limit 16".into(),
+        budget: Some(log_api::LogQueryBudget {
+            scanned_bytes: 1,
+            decoded_records: 16,
+            output_rows: 16,
+            output_bytes: 16_384,
+            memory_bytes: 1_048_576,
+            cpu_work_units: 15,
+            wall_seconds: 5,
+            maximum_time_range_nanoseconds: 100,
+        }),
+    };
+    // A valid public request that cannot fit the initialized principal's CPU
+    // authority produces a real rejected wire attempt, not a budget event.
+    let mut refused_request = query_request.clone();
+    refused_request
+        .budget
+        .as_mut()
+        .ok_or("missing refusal budget")?
+        .cpu_work_units = 1024;
+    assert!(
+        matches!(
+            query_client.execute(&query, &refused_request),
+            Err(log_api::LogQueryServiceClientFailure::CapacityUnavailable)
+        ),
+        "oversized admission request must be rejected as capacity unavailable"
+    );
     let admission_scrape = http(
         operations,
         "GET",
@@ -149,27 +182,9 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         "an admission-refused query must not be credited with an execution budget dimension"
     );
 
-    use positron_api::log_query as log_api;
-    let budget_response =
-        log_api::LogQueryServiceClient::new(log_api::LogQueryTransport::PlaintextOptOut {
-            endpoint: api,
-        })?
-        .execute(
-            &query,
-            &log_api::LogQueryRequest {
-                pipeline: "logs | range query_time 0 100 | limit 16".into(),
-                budget: Some(log_api::LogQueryBudget {
-                    scanned_bytes: 1,
-                    decoded_records: 16,
-                    output_rows: 16,
-                    output_bytes: 16_384,
-                    memory_bytes: 1_048_576,
-                    cpu_work_units: 15,
-                    wall_seconds: 5,
-                    maximum_time_range_nanoseconds: 100,
-                }),
-            },
-        )?;
+    let (budget_response, capacity_refusals) =
+        super::log_query::execute_admitted_query(&query_client, &query, &query_request)
+            .map_err(|failure| format!("operational scanned-budget query failed: {failure:?}"))?;
     let rendered = format!("{budget_response:?}");
     for secret in [&administrator, &ingest, &query] {
         assert!(
@@ -202,7 +217,7 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
     let mut completed_query = false;
     let mut api_requests = 1;
     let mut ingest_requests = 1;
-    let mut query_requests = 1;
+    let mut query_requests = 2 + capacity_refusals;
     let mut fresh_probes = 0;
     let mut http_probes = 0;
     while completed_requests < 2 || !completed_query {
@@ -304,6 +319,10 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
     )));
     assert!(scrape.contains(&format!(
         "positron_queries_total{{outcome=\"capacity_rejected\"}} {query_requests}\n"
+    )));
+    assert!(scrape.contains(&format!(
+        "positron_requests_total{{listener=\"api\",outcome=\"capacity_rejected\"}} {}\n",
+        1 + capacity_refusals,
     )));
     assert!(scrape.contains("positron_queries_total{outcome=\"success\"} 1\n"));
     assert!(

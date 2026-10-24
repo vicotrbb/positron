@@ -312,7 +312,7 @@ fn response_capture_retains_the_canonical_bound() -> TestResult<()> {
     Ok(())
 }
 
-fn generated_capacity_then_terminal(incomplete: bool) -> TestResult<()> {
+fn generated_capacity_then_terminal(incomplete: bool, expected_refusals: usize) -> TestResult<()> {
     let request = request();
     let mut expected = missing_response()?;
     if incomplete {
@@ -332,39 +332,36 @@ fn generated_capacity_then_terminal(incomplete: bool) -> TestResult<()> {
             .limiting_budget = Some("scanned_bytes".into());
     }
     let bytes = expected.encode()?;
-    let (result, bodies) = scripted(
-        vec![
-            (
-                reply(
-                    429,
-                    &api::query_rejection(429, "capacity_unavailable")?,
-                    true,
-                ),
-                false,
-            ),
-            (reply(200, &bytes, false), false),
-        ],
-        |endpoint| {
-            let client =
-                api::LogQueryServiceClient::new(api::LogQueryTransport::PlaintextOptOut {
-                    endpoint,
-                })?;
-            super::super::execute_admitted_query(&client, "query-canary", &request)
-        },
-    )?;
-    assert_eq!(result?, expected);
-    assert_eq!(bodies, vec![request.encode()?; 2]);
+    let rejection = reply(
+        429,
+        &api::query_rejection(429, "capacity_unavailable")?,
+        true,
+    );
+    let mut replies = vec![(rejection, false); expected_refusals];
+    replies.push((reply(200, &bytes, false), false));
+    let (result, bodies) = scripted(replies, |endpoint| {
+        let client =
+            api::LogQueryServiceClient::new(api::LogQueryTransport::PlaintextOptOut { endpoint })?;
+        super::super::execute_admitted_query(&client, "query-canary", &request)
+    })?;
+    let (response, capacity_refusals) = result?;
+    assert_eq!(response, expected);
+    assert_eq!(
+        capacity_refusals, expected_refusals as u64,
+        "each canonical capacity refusal must be counted exactly"
+    );
+    assert_eq!(bodies, vec![request.encode()?; expected_refusals + 1]);
     Ok(())
 }
 
 #[test]
 fn generated_capacity_then_complete_preserves_the_encoded_query() -> TestResult<()> {
-    generated_capacity_then_terminal(false)
+    generated_capacity_then_terminal(false, 1)
 }
 
 #[test]
 fn generated_capacity_then_incomplete_preserves_the_encoded_query() -> TestResult<()> {
-    generated_capacity_then_terminal(true)
+    generated_capacity_then_terminal(true, 1)
 }
 
 #[test]
@@ -432,4 +429,9 @@ fn generated_repeated_capacity_expires_admission_without_a_late_attempt() -> Tes
     let expected = request.encode()?;
     assert!(bodies.iter().all(|body| *body == expected));
     Ok(())
+}
+
+#[test]
+fn generated_repeated_capacity_counts_every_rejected_attempt() -> TestResult<()> {
+    generated_capacity_then_terminal(false, 2)
 }

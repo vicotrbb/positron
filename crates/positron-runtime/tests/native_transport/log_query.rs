@@ -4,21 +4,22 @@ use positron_api::log_query::{
     log_query_value::Value as Native,
 };
 
-fn execute_admitted_query(
+pub(super) fn execute_admitted_query(
     client: &api::LogQueryServiceClient,
     bearer: &str,
     request: &api::LogQueryRequest,
-) -> Result<api::LogQueryResponse, Box<dyn std::error::Error>> {
+) -> Result<(api::LogQueryResponse, u64), Box<dyn std::error::Error>> {
     // A new fixture admission window, not a total request deadline: an attempt
     // started within five seconds retains the generated client's 30-second cap.
     let admission_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut capacity_refusals = 0;
     loop {
         if std::time::Instant::now() >= admission_deadline {
             return Err("typed query admission window expired".into());
         }
         match client.execute(bearer, request) {
-            Ok(response) => return Ok(response),
-            Err(api::LogQueryServiceClientFailure::CapacityUnavailable) => {},
+            Ok(response) => return Ok((response, capacity_refusals)),
+            Err(api::LogQueryServiceClientFailure::CapacityUnavailable) => capacity_refusals += 1,
             Err(failure) => return Err(failure.into()),
         }
         if admission_deadline.saturating_duration_since(std::time::Instant::now())
@@ -74,7 +75,7 @@ fn acknowledged_logs_have_typed_native_query_headers_rows_and_terminal_truth()
         pipeline: "pipeline:v1 logs | range query_time 0 100 | project body, query_time, event_time, ingest_time, commit_position | limit 2".into(),
         budget: Some(api::LogQueryBudget { scanned_bytes: 1_048_576, decoded_records: 16, output_rows: 16, output_bytes: 16_384, memory_bytes: 1_048_576, cpu_work_units: 15, wall_seconds: 5, maximum_time_range_nanoseconds: 100 }),
     };
-    let response = execute_admitted_query(
+    let (response, _) = execute_admitted_query(
         &client,
         claim.query_secret().ok_or("missing query credential")?,
         &request,
@@ -209,7 +210,7 @@ fn acknowledged_logs_have_typed_native_query_headers_rows_and_terminal_truth()
         .as_mut()
         .ok_or("missing request budget")?
         .scanned_bytes = 1;
-    let incomplete = execute_admitted_query(
+    let (incomplete, _) = execute_admitted_query(
         &client,
         claim.query_secret().ok_or("missing query credential")?,
         &request,
