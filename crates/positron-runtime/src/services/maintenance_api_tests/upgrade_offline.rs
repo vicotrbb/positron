@@ -66,7 +66,25 @@ fn offline_upgrade_authenticates_final_marker_and_recovers_without_serving()
     assert_eq!(session.advance(std::time::Instant::now())?, status);
     assert!(session.rollback_snapshot()?.is_none());
     drop(session);
-    let mut session = OfflineUpgradeSession::begin(&fixture.paths()?, &configuration, id)?;
+    let mut instance =
+        crate::InstanceBootstrap::reopen_configured(&fixture.paths()?, &configuration)?;
+    let (clock, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(
+        instance.retention_time.status().safe_anchor(),
+    );
+    clock.recover_catalog_anchor(&open_catalog(&instance)?.pin()?)?;
+    assert_eq!(
+        clock.status().state(),
+        positron_kernel::LifecycleClockState::Certain
+    );
+    // Cold recovery is conservative. Model genuine monotonic catchup before
+    // asking this authentication/marker fixture to cancel the recorded intent.
+    let recovered = clock.governance_now_seconds()?;
+    let gap = status.updated_at_unix_seconds().saturating_sub(recovered);
+    if gap > 0 {
+        elapsed.advance(gap.checked_mul(1_000_000_000).ok_or("clock gap overflow")?)?;
+    }
+    instance.install_retention_time_for_test(clock)?;
+    let mut session = OfflineUpgradeSession::begin_recovered(instance, &configuration, id)?;
     let status = session.status()?;
     assert_eq!(status.upgrade_stage(), Some(UpgradeStage::Snapshot));
     assert_eq!(status.upgrade_drain_evidence(), Some(evidence));

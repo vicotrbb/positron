@@ -60,10 +60,17 @@ impl OfflineUpgradeSession {
         configuration: &EffectiveConfiguration,
         id: OperationId,
     ) -> Result<Self, UpgradeFailure> {
-        let instance = Arc::new(
-            InstanceBootstrap::reopen_configured(paths, configuration)
-                .map_err(|_| UpgradeFailure::UnsafeState)?,
-        );
+        let instance = InstanceBootstrap::reopen_configured(paths, configuration)
+            .map_err(|_| UpgradeFailure::UnsafeState)?;
+        Self::begin_recovered(instance, configuration, id)
+    }
+
+    pub(crate) fn begin_recovered(
+        instance: InitializedInstance,
+        configuration: &EffectiveConfiguration,
+        id: OperationId,
+    ) -> Result<Self, UpgradeFailure> {
+        let instance = Arc::new(instance);
         let operation = {
             let catalog = open(&instance)?;
             Administration::inspect(&catalog, id)
