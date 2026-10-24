@@ -245,3 +245,70 @@ fn budget_query_capacity_does_not_extend_the_original_five_second_budget() -> Te
     assert!(requests.iter().all(|actual| actual == &expected));
     Ok(())
 }
+
+#[test]
+fn actual_query_cli_accepts_canonical_complete_after_five_seconds() -> TestResult {
+    use positron_api::log_query::*;
+    let root = std::env::temp_dir().join(format!(
+        "positron-query-cli-deadline-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+    ));
+    fs::create_dir(&root)?;
+    let fixture = Fixture { root, child: None };
+    let request = budget_query();
+    let mut response =
+        LogQueryResponse::decode(&serde_json::to_vec(&encoded_budget_incomplete()?)?)?;
+    let terminal = response
+        .events
+        .last_mut()
+        .and_then(|event| event.event.as_mut())
+        .ok_or("canonical terminal")?;
+    let log_query_event::Event::Terminal(terminal) = terminal else {
+        return Err("canonical terminal".into());
+    };
+    terminal.state = "complete".into();
+    terminal.reason.clear();
+    terminal
+        .stats
+        .as_mut()
+        .ok_or("canonical stats")?
+        .limiting_budget = None;
+    let response = response.encode()?;
+    let (result, requests, delivery_error) = scripted_requests_with_writer(
+        &[(200, serde_json::from_slice(&response)?)],
+        |endpoint| {
+            let actual = super::super::super::archive::query_response(
+                std::path::Path::new(env!("CARGO_BIN_EXE_positron")),
+                &fixture.root,
+                endpoint,
+                "query-cli-credential-canary",
+                &request,
+                None,
+            )?;
+            assert_eq!(actual.encode()?, response);
+            Ok("complete".into())
+        },
+        |stream, bytes, _| {
+            std::thread::sleep(Duration::from_secs(6));
+            stream.write_all(bytes)
+        },
+    )?;
+    assert_eq!(
+        requests,
+        vec![serde_json::from_slice::<serde_json::Value>(
+            &request.encode()?
+        )?]
+    );
+    if let Some(error) = delivery_error {
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        ));
+    }
+    assert_eq!(result?, "complete");
+    Ok(())
+}
+
+#[path = "query_cli_admission_tests.rs"]
+mod cli_admission;

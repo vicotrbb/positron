@@ -363,7 +363,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     );
     let api_endpoint = format!("127.0.0.1:{}", ports.get(1).ok_or("missing API port")?).parse()?;
     let before_restart_digest =
-        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?;
+        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret, None)?;
     archive::query_refusals(
         &fixture.root,
         api_endpoint,
@@ -385,7 +385,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     );
     ready(operations)?;
     assert_eq!(
-        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?,
+        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret, None)?,
         before_restart_digest
     );
     binary = recovery::roundtrip(

@@ -30,6 +30,7 @@ pub(super) fn query_log(
     root: &std::path::Path,
     endpoint: std::net::SocketAddr,
     query_secret: &str,
+    parent_deadline: Option<Instant>,
 ) -> TestResult<Vec<u8>> {
     use positron_api::log_query::*;
     let request = LogQueryRequest {
@@ -45,7 +46,14 @@ pub(super) fn query_log(
             maximum_time_range_nanoseconds: 100,
         }),
     };
-    let result = query_response(binary, root, endpoint, query_secret, &request)?;
+    let result = query_response(
+        binary,
+        root,
+        endpoint,
+        query_secret,
+        &request,
+        parent_deadline,
+    )?;
     let bodies = result
         .events
         .iter()
@@ -79,18 +87,32 @@ pub(super) fn query_log(
     Ok(stats.result_digest.clone())
 }
 
-fn query_response(
+pub(super) fn query_response(
     binary: &std::path::Path,
     root: &std::path::Path,
     endpoint: std::net::SocketAddr,
     query_secret: &str,
     request: &positron_api::log_query::LogQueryRequest,
+    parent_deadline: Option<Instant>,
 ) -> TestResult<positron_api::log_query::LogQueryResponse> {
     use positron_api::log_query::LogQueryResponse;
     let path = root.join("query-request.json");
     std::fs::write(&path, request.encode()?)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let output = loop {
+    // These are fixture process bounds, not the query execution budget or a
+    // promise of a fresh 30-second HTTP allowance for every retry. Startup,
+    // credential delivery, backoff, output capture and decoding share one clock.
+    let started = Instant::now();
+    let launch_deadline = started + Duration::from_secs(5);
+    let completion_deadline = started + Duration::from_secs(35);
+    let launch_deadline =
+        parent_deadline.map_or(launch_deadline, |parent| parent.min(launch_deadline));
+    let completion_deadline = parent_deadline.map_or(completion_deadline, |parent| {
+        parent.min(completion_deadline)
+    });
+    loop {
+        if Instant::now() >= launch_deadline {
+            return Err("public query capacity launch window expired".into());
+        }
         let mut child = Command::new(binary)
             .args([
                 "query",
@@ -105,24 +127,55 @@ fn query_response(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
-        child
-            .stdin
-            .take()
-            .ok_or("missing query credential pipe")?
-            .write_all(query_secret.as_bytes())?;
-        let output = collect_query(child, deadline)?;
-        if output.status.success() {
-            break output;
+        let credential = (|| -> std::io::Result<()> {
+            let mut pipe = child
+                .stdin
+                .take()
+                .ok_or_else(|| std::io::Error::other("query credential pipe"))?;
+            pipe.write_all(query_secret.as_bytes())
+        })();
+        if let Err(error) = credential {
+            let killed = child.kill();
+            let reaped = child.wait();
+            killed?;
+            reaped?;
+            return Err(error.into());
         }
-        let error = String::from_utf8_lossy(&output.stderr);
-        if !error.contains("query capacity unavailable; retry after backoff")
-            || Instant::now() + Duration::from_secs(1) >= deadline
+        let output = collect_query(child, completion_deadline)?;
+        if !query_secret.is_empty() {
+            assert!(
+                !output
+                    .stdout
+                    .windows(query_secret.len())
+                    .any(|value| value == query_secret.as_bytes()),
+                "query credential exposed"
+            );
+            assert!(
+                !output
+                    .stderr
+                    .windows(query_secret.len())
+                    .any(|value| value == query_secret.as_bytes()),
+                "query credential exposed"
+            );
+        }
+        if Instant::now() >= completion_deadline {
+            return Err("public query exceeded its fixture completion deadline".into());
+        }
+        if output.status.success() {
+            let response = LogQueryResponse::decode(&output.stdout)?;
+            if Instant::now() >= completion_deadline {
+                return Err("public query exceeded its fixture completion deadline".into());
+            }
+            return Ok(response);
+        }
+        if !output.stdout.is_empty()
+            || output.stderr != b"positron: query capacity unavailable; retry after backoff\n"
+            || Instant::now() + Duration::from_secs(1) >= launch_deadline
         {
-            return Err(format!("public query refused: {error}").into());
+            return Err("public query refused outside its capacity launch policy".into());
         }
         std::thread::sleep(Duration::from_secs(1));
-    };
-    Ok(LogQueryResponse::decode(&output.stdout)?)
+    }
 }
 
 pub(super) fn query_capacity_refusal(
@@ -133,7 +186,7 @@ pub(super) fn query_capacity_refusal(
 ) -> TestResult {
     use positron_api::log_query::*;
     let request = LogQueryRequest::decode(br#"{"pipeline":"logs | range query_time 0 2000 | limit 100","budget":{"scannedBytes":"1048576","decodedRecords":"100","outputRows":"100","outputBytes":"16384","memoryBytes":"1048576","cpuWorkUnits":"16","wallSeconds":"5","maximumTimeRangeNanoseconds":"2000"}}"#)?;
-    let response = query_response(binary, root, endpoint, credential, &request)?;
+    let response = query_response(binary, root, endpoint, credential, &request, None)?;
     let Some(log_query_event::Event::Terminal(terminal)) = response
         .events
         .last()
@@ -338,6 +391,6 @@ pub(super) fn collect_query(child: Child, deadline: Instant) -> TestResult<std::
         child,
         deadline,
         Duration::from_millis(10),
-        "public query exceeded its original wall budget",
+        "public query exceeded its fixture completion deadline",
     )?)
 }

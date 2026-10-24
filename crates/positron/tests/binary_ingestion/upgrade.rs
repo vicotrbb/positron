@@ -56,7 +56,8 @@ pub(super) fn run(
             installed.binary,
             &fixture.root,
             installed.endpoint,
-            installed.query
+            installed.query,
+            None
         )?,
         expected
     );
@@ -138,7 +139,8 @@ pub(super) fn run(
             &executable,
             &fixture.root,
             installed.endpoint,
-            installed.query
+            installed.query,
+            Some(watchdog)
         )?,
         expected
     );
