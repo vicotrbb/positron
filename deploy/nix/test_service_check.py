@@ -113,6 +113,32 @@ class QueryCompletion(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "query did not complete"):
             self.run_query(json.dumps(self.response("incomplete")).encode())
 
+    def test_lifecycle_query_allows_observed_slow_admission_with_finite_budgets(self):
+        requests = []
+        clock = [0]
+        calls = []
+
+        def execute(command, **options):
+            calls.append(options)
+            # ARM qualification observed 15.59s server work and 22.01s CLI time.
+            clock[0] += 22.01
+            complete = int(requests[0]["budget"]["wallSeconds"]) > 15.59
+            response = self.response("complete") if complete else {"events": [
+                {"header": {}}, {"terminal": {"state": "incomplete",
+                    "reason": "budget_exhausted", "stats": {"wallSeconds": "5"}}}]}
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps(response).encode(), stderr=b"")
+
+        with mock.patch.object(pathlib.Path, "read_text", return_value="query_secret=test-only\n"), \
+                mock.patch.object(pathlib.Path, "write_text", side_effect=lambda text: requests.append(json.loads(text))), \
+                mock.patch.object(sys, "argv", ["service-check.py", "query"]), \
+                mock.patch("time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("subprocess.run", side_effect=execute):
+            runpy.run_path(str(pathlib.Path(__file__).with_name("service-check.py")))
+        self.assertEqual(requests[0]["budget"], {"scannedBytes": "1048576", "decodedRecords": "16",
+            "outputRows": "16", "outputBytes": "16384", "memoryBytes": "1048576", "cpuWorkUnits": "15",
+            "wallSeconds": "60", "maximumTimeRangeNanoseconds": "100"})
+        self.assertEqual([call["timeout"] for call in calls], [90])
+
     def test_missing_marker_reports_only_closed_query_facts(self):
         response = {"events": [{"header": {"identity": "protected-canary"}},
             {"terminal": {"state": "incomplete", "reason": "budget_exhausted",
@@ -195,25 +221,25 @@ class QueryDeadline(unittest.TestCase):
     def refused(message=b"positron: query capacity unavailable; retry after backoff"):
         return types.SimpleNamespace(returncode=2, stdout=b"", stderr=message)
 
-    def test_capacity_retry_uses_only_remaining_original_thirty_seconds(self):
+    def test_capacity_retry_uses_only_remaining_original_ninety_seconds(self):
         self.run_query([(20, self.refused()), (1, self.complete())])
-        self.assertEqual([options["timeout"] for _, options in self.commands], [30, 9])
+        self.assertEqual([options["timeout"] for _, options in self.commands], [90, 69])
         self.assertEqual(self.commands[0][0], self.commands[1][0])
         self.assertEqual(self.commands[0][1]["input"], self.commands[1][1]["input"])
 
     def test_complete_response_after_original_deadline_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "query deadline elapsed"):
-            self.run_query([(31, self.complete())])
+            self.run_query([(91, self.complete())])
         self.assertEqual(len(self.commands), 1)
 
     def test_local_validation_crossing_original_deadline_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "query deadline elapsed"):
-            self.run_query([(0, self.complete())], validation_elapsed=31)
+            self.run_query([(0, self.complete())], validation_elapsed=91)
         self.assertEqual(len(self.commands), 1)
 
     def test_capacity_backoff_cannot_begin_an_attempt_after_original_deadline(self):
         with self.assertRaises(RuntimeError):
-            self.run_query([(29.5, self.refused()), (0, self.complete())])
+            self.run_query([(89.5, self.refused()), (0, self.complete())])
         self.assertEqual(len(self.commands), 1)
 
     def test_transport_failure_never_retries(self):

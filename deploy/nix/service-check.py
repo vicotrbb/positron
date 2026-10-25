@@ -96,11 +96,13 @@ elif sys.argv[1] == "ingest":
                 raise RuntimeError("ingest did not acknowledge telemetry") from None
             time.sleep(1)
 else:
+    # Lifecycle qualification allows slow VM snapshot admission; this is not a latency SLA.
+    deadline = time.monotonic() + 90
     query = pathlib.Path("/root/positron-query.json")
     query.write_text(json.dumps({"pipeline": "logs | range query_time 0 100 | limit 16", "budget": {
         "scannedBytes": "1048576", "decodedRecords": "16", "outputRows": "16",
         "outputBytes": "16384", "memoryBytes": "1048576", "cpuWorkUnits": "15",
-        "wallSeconds": "5", "maximumTimeRangeNanoseconds": "100"}}))
+        "wallSeconds": "60", "maximumTimeRangeNanoseconds": "100"}}))
     attempt = 0
     while True:
         remaining = deadline - time.monotonic()
@@ -171,7 +173,7 @@ else:
                 b"positron: query unavailable; inspect instance readiness": "query_unavailable",
                 b"positron: query transport or response unavailable": "transport",
             }.get(result.stderr.strip(), "other")
-            elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
+            elapsed_ms = int((time.monotonic() - (deadline - 90)) * 1000)
             raise RuntimeError(f"public query failed: code={failure} returncode={result.returncode} "
                 f"attempt={attempt} elapsed_ms={elapsed_ms}")
         time.sleep(1)
