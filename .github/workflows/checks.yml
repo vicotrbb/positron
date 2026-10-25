@@ -436,9 +436,94 @@ jobs:
             docker volume rm "$container-temp" "$container-data" "$container-secrets"
             trap - EXIT
           done
+      - name: Build native OCI payloads twice without publication
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          docker buildx create --name positron-oci --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
+          mkdir -p "$RUNNER_TEMP/oci/one" "$RUNNER_TEMP/oci/two"
+          cp "$RUNNER_TEMP/first/native.tar.gz" "$RUNNER_TEMP/oci/one/native.tar.gz"
+          cp "$RUNNER_TEMP/rebuilt-native.tar.gz" "$RUNNER_TEMP/oci/two/native.tar.gz"
+          for build in one two; do
+            docker buildx build --no-cache --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=0 \
+              --output "type=oci,dest=$RUNNER_TEMP/oci/$build/image.tar,compression=uncompressed" \
+              --file deploy/oci/Dockerfile "$RUNNER_TEMP/oci/$build"
+          done
+          POSITRON_TEST_OCI_ARCHIVE="$RUNNER_TEMP/first/native.tar.gz" python3 deploy/oci/test_image.py
+      - name: Run the shared retained-record backup restore upgrade and verification flow in the OCI filesystem
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          executable=$(jq -r 'select(.target.name == "binary_ingestion" and .executable != null and .profile.test == true) | .executable' "$RUNNER_TEMP/public-test-build.json")
+          source_commit=$(git rev-parse HEAD)
+          candidate="$GITHUB_WORKSPACE/target/native-upgrade-fixture/native-release-v1/$source_commit"
+          test -f "$candidate/target/release/positron"
+          docker create --name positron-oci-tools positron-gnu-builder
+          docker cp positron-oci-tools:/bin/kill "$RUNNER_TEMP/oci-kill"
+          docker rm positron-oci-tools
+          docker volume create positron-oci-test-temp
+          docker run --rm -v positron-oci-test-temp:/tmp positron-gnu-builder chmod 1777 /tmp
+          docker run --rm --read-only --user "$(id -u):$(id -g)" \
+            --tmpfs "/run/positron:uid=$(id -u),gid=$(id -g),mode=0700" \
+            -v positron-oci-test-temp:/tmp \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro" -v "$RUNNER_TEMP:$RUNNER_TEMP:ro" \
+            -v "$RUNNER_TEMP/oci-kill:/bin/kill:ro" \
+            -e POSITRON_TEST_NATIVE_BINARY=/usr/bin/positron \
+            -e "POSITRON_TEST_UPGRADE_BINARY=$candidate/target/release/positron" \
+            -e "POSITRON_TEST_SOURCE_COMMIT=$source_commit" \
+            -e "POSITRON_TEST_CANDIDATE_COMMIT=$(cat "$candidate/candidate-commit")" \
+            --entrypoint "$executable" positron-118-test --exact \
+            binary_http_ingestion_recovers_after_sigkill_and_graceful_restart --test-threads=1
+          docker volume rm positron-oci-test-temp
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: runner.os == 'Linux'
+        with:
+          name: oci-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/oci/one/image.tar
+            ${{ runner.temp }}/oci/two/image.tar
+          retention-days: 7
       - name: Remove private GNU lifecycle volume
         if: always() && runner.os == 'Linux'
         run: |
           if docker volume inspect positron-gnu-native-temp >/dev/null 2>&1; then
             docker volume rm positron-gnu-native-temp
           fi
+
+  oci-index:
+    name: Offline multi-architecture OCI index and Release Trust
+    needs: native-archives
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: oci-*
+          path: native
+      - name: Assemble both native layouts offline without executing foreign code
+        shell: bash
+        run: |
+          docker buildx create --name positron-oci --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use
+          for build in one two; do
+            mkdir -p "native/$build/amd64" "native/$build/arm64"
+            tar -xf "native/oci-linux-x86_64/$build/image.tar" -C "native/$build/amd64"
+            tar -xf "native/oci-linux-aarch64/$build/image.tar" -C "native/$build/arm64"
+            docker buildx build --no-cache --platform linux/amd64,linux/arm64 \
+              --build-context "native-amd64=oci-layout://$PWD/native/$build/amd64" \
+              --build-context "native-arm64=oci-layout://$PWD/native/$build/arm64" \
+              --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=0 \
+              --output "type=oci,dest=$PWD/native/index-$build.tar,compression=uncompressed" \
+              --file deploy/oci/Dockerfile.index deploy/oci
+          done
+      - name: Verify actual index images independent bytes and private offline trust bindings
+        env:
+          POSITRON_TEST_OCI_INDEX: ${{ github.workspace }}/native/index-one.tar
+          POSITRON_TEST_OCI_INDEX_REBUILD: ${{ github.workspace }}/native/index-two.tar
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          cargo test --locked -p positron-release --test built_oci -- --ignored
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: oci-multiarchitecture-qualified-payloads
+          path: native/index-*.tar
+          retention-days: 7
