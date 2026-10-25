@@ -3,7 +3,7 @@
 The image contains the unchanged GNU native `positron` executable, its generated
 configuration example, JSON schema and reference, license, GNU runtime libraries,
 and the pinned Mozilla CA bundle converted by curl on 2026-10-20 (MPL-2.0).
-The GNU libraries come from the pinned Rocky runtime input. It contains no shell, package
+The GNU libraries and their upstream license/copyright files come from the pinned Rocky runtime input. The image carries those files and the full Mozilla Public License under `/usr/share/licenses`; the [MPL text](https://www.mozilla.org/en-US/MPL/2.0/) retains the official terms with plain-text formatting. It contains no shell, package
 manager, compiler, interpreter, or diagnostic tools. The same image and complete
 CLI run under Docker, Compose, and Kubernetes. The database requires none of
 those tools when run directly.
@@ -149,7 +149,7 @@ docker buildx build --no-cache --provenance=false --sbom=false --build-arg SOURC
   --file deploy/oci/Dockerfile DIRECTORY_CONTAINING_VERIFIED_NATIVE_ARCHIVE
 ```
 
-That directory contains `native.tar.gz`. Export each independent build separately.
+That directory contains `native.tar.gz` and the unmodified `deploy/oci/MPL-2.0.txt` from the verified source. Export each independent build separately.
 Extract the native layouts, then use `Dockerfile.index` with explicit
 `native-amd64=oci-layout://ABSOLUTE_LAYOUT_DIRECTORY` and
 `native-arm64=oci-layout://ABSOLUTE_LAYOUT_DIRECTORY` build contexts and

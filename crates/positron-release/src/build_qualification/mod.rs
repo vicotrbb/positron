@@ -14,6 +14,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+struct ArtifactBuild<'a> {
+    packages: &'a Value,
+    closure: &'a Value,
+    builder: &'a str,
+    independent_builder: &'a str,
+    notices: &'a [u8],
+}
+
 struct Qualification {
     root: PathBuf,
     rebuild: PathBuf,
@@ -150,13 +158,22 @@ fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualif
     let packages = &metadata["packages"];
     let closure: Value =
         serde_json::from_slice(&fs::read(capture.join("closure.json")).unwrap()).unwrap();
+    let builder = result.inventory.build_identity.clone();
+    let independent_builder = result.independent_builder.clone();
+    let build = || ArtifactBuild {
+        packages,
+        closure: &closure,
+        builder: &builder,
+        independent_builder: &independent_builder,
+        notices: &[],
+    };
     result.artifact(
         "openapi.json",
         Surface::Api,
         "any",
         &api,
         &fs::read(rebuild.join("openapi.json")).unwrap(),
-        (packages, &closure),
+        build(),
     );
     result.artifact(
         "positron",
@@ -164,7 +181,7 @@ fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualif
         &format!("nix-{target}"),
         &fs::read(capture.join("positron")).unwrap(),
         &fs::read(rebuild.join("positron")).unwrap(),
-        (packages, &closure),
+        build(),
     );
     result.artifact(
         "positron.nar",
@@ -172,7 +189,7 @@ fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualif
         target,
         &fs::read(capture.join("positron.nar")).unwrap(),
         &fs::read(rebuild.join("positron.nar")).unwrap(),
-        (packages, &closure),
+        build(),
     );
     result
 }

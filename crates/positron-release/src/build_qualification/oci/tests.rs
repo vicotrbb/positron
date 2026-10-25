@@ -25,8 +25,7 @@ fn descriptor(files: &mut BTreeMap<String, Vec<u8>>, bytes: Vec<u8>, media: &str
     json!({"mediaType":media,"digest":format!("sha256:{digest}"),"size":identity.size})
 }
 
-#[test]
-fn staged_oci_manifest_binds_both_architectures_current_inputs_and_refuses_drift() {
+fn fixture() -> (TestCapture, Qualification) {
     let base = TestCapture::new();
     let source_files: Vec<_> = fs::read_dir(&base.0)
         .unwrap()
@@ -38,10 +37,17 @@ fn staged_oci_manifest_binds_both_architectures_current_inputs_and_refuses_drift
     let mut images = vec![];
     for (target, architecture) in [("linux-x86_64", "amd64"), ("linux-aarch64", "arm64")] {
         let binary = format!("synthetic {target} executable").into_bytes();
-        let payload = tar(&BTreeMap::from([(
-            "usr/bin/positron".into(),
-            binary.clone(),
-        )]));
+        let payload = tar(&BTreeMap::from([
+            ("usr/bin/positron".into(), binary.clone()),
+            (
+                "usr/share/licenses/glibc/COPYING.LIB".into(),
+                b"Glibc runtime terms from unit fixture\n".to_vec(),
+            ),
+            (
+                "usr/share/licenses/ca-certificates/MPL-2.0.txt".into(),
+                b"Mozilla Public License Version 2.0\n".to_vec(),
+            ),
+        ]));
         let layer = descriptor(
             &mut combined,
             payload,
@@ -90,8 +96,19 @@ fn staged_oci_manifest_binds_both_architectures_current_inputs_and_refuses_drift
     combined.insert("index.json".into(), serde_json::to_vec(&json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":images})).unwrap());
     for build in ["one", "two"] {
         fs::write(root.join(format!("index-{build}.tar")), tar(&combined)).unwrap();
+        fs::write(
+            root.join(format!("index-{build}-build-identity.txt")),
+            format!("unit-index-{build}"),
+        )
+        .unwrap();
     }
-    let mut qualification = staged_oci(&root, &root.join("staged"));
+    let qualification = staged_oci(&root, &root.join("staged"));
+    (base, qualification)
+}
+
+#[test]
+fn staged_oci_manifest_binds_both_architectures_current_inputs_and_refuses_drift() {
+    let (_base, mut qualification) = fixture();
     qualification.verify().unwrap();
     let mut signed = qualification.sign();
     signed[0] ^= 1;
@@ -138,4 +155,100 @@ fn staged_oci_manifest_binds_both_architectures_current_inputs_and_refuses_drift
         .unwrap();
     fs::write(qualification.root.join(payload), b"changed filesystem").unwrap();
     assert_eq!(qualification.verify(), Err(ReleaseError::IdentityMismatch));
+}
+
+#[test]
+fn oci_runtime_declared_licenses_and_actual_notices_survive_document_generation() {
+    let (_base, qualification) = fixture();
+    let image = qualification
+        .inventory
+        .artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.surface == Surface::OciImage && artifact.target == "linux-aarch64"
+        })
+        .unwrap();
+    let spdx: Value =
+        serde_json::from_slice(&fs::read(qualification.root.join(&image.spdx)).unwrap()).unwrap();
+    let glibc = spdx["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"] == "rpm:glibc")
+        .unwrap();
+    assert_eq!(glibc["licenseDeclared"], "LicenseRef-RPM-glibc");
+    let extracted = spdx["hasExtractedLicensingInfos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|license| license["licenseId"] == "LicenseRef-RPM-glibc")
+        .unwrap();
+    assert!(extracted["name"].as_str().unwrap().contains("LGPLv2+"));
+    assert!(
+        extracted["extractedText"]
+            .as_str()
+            .unwrap()
+            .contains("Glibc runtime terms from unit fixture")
+    );
+    let cdx: Value =
+        serde_json::from_slice(&fs::read(qualification.root.join(&image.cyclonedx)).unwrap())
+            .unwrap();
+    let glibc = cdx["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|component| component["name"] == "rpm:glibc")
+        .unwrap();
+    assert_eq!(glibc["licenses"][0]["license"]["name"], "LGPLv2+");
+    let notices = fs::read_to_string(qualification.root.join(&image.license_notices)).unwrap();
+    assert!(notices.contains("Glibc runtime terms from unit fixture"));
+    assert!(notices.contains("Mozilla Public License Version 2.0"));
+}
+
+#[test]
+fn each_native_oci_artifact_retains_its_actual_builder_and_independent_builder() {
+    let (_base, qualification) = fixture();
+    let index = qualification
+        .inventory
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.surface == Surface::OciIndex)
+        .unwrap();
+    let provenance: Value =
+        serde_json::from_slice(&fs::read(qualification.root.join(&index.provenance)).unwrap())
+            .unwrap();
+    let evidence: Value =
+        serde_json::from_slice(&fs::read(qualification.root.join(&index.evidence)).unwrap())
+            .unwrap();
+    assert_eq!(
+        provenance["predicate"]["runDetails"]["builder"]["id"],
+        "unit-index-one"
+    );
+    assert_eq!(evidence["independent_builder"], "unit-index-two");
+    for target in ["linux-x86_64", "linux-aarch64"] {
+        for surface in [Surface::NativeExecutable, Surface::OciImage] {
+            let artifact = qualification
+                .inventory
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.surface == surface && artifact.target == target)
+                .unwrap();
+            let provenance: Value = serde_json::from_slice(
+                &fs::read(qualification.root.join(&artifact.provenance)).unwrap(),
+            )
+            .unwrap();
+            let evidence: Value = serde_json::from_slice(
+                &fs::read(qualification.root.join(&artifact.evidence)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                provenance["predicate"]["runDetails"]["builder"]["id"],
+                format!("unit-{target}-one")
+            );
+            assert_eq!(
+                evidence["independent_builder"],
+                format!("unit-{target}-two")
+            );
+        }
+    }
 }

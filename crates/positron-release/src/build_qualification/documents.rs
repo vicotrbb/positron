@@ -10,8 +10,15 @@ impl Qualification {
         target: &str,
         bytes: &[u8],
         rebuilt: &[u8],
-        (packages, closure): (&Value, &Value),
+        build: ArtifactBuild<'_>,
     ) {
+        let ArtifactBuild {
+            packages,
+            closure,
+            builder,
+            independent_builder,
+            notices,
+        } = build;
         let file = self.add(name, bytes);
         fs::write(self.rebuild.join(name), rebuilt).unwrap();
         let digest = hex(&FileIdentity::of(bytes).sha256);
@@ -27,12 +34,16 @@ impl Qualification {
         let mut components = vec![
             json!({"type":"application","name":name,"version":version,"licenses":[{"license":{"id":"MIT"}}],"hashes":[{"alg":"SHA-256","content":digest}]}),
         ];
+        let mut extracted_licenses = vec![];
         for (index, package) in packages.as_array().unwrap().iter().enumerate() {
             let license = package["license"].as_str().unwrap_or("NOASSERTION");
             spdx_packages.push(json!({"SPDXID":format!("SPDXRef-Cargo-{index}"),"name":package["name"],"versionInfo":package["version"],"downloadLocation":package["source"].as_str().unwrap_or("NOASSERTION"),"filesAnalyzed":false,"licenseConcluded":"NOASSERTION","licenseDeclared":license,"copyrightText":"NOASSERTION"}));
             let mut component =
                 json!({"type":"library","name":package["name"],"version":package["version"]});
-            if license != "NOASSERTION" {
+            if let Some(declared) = package["declared_license"].as_str() {
+                component["licenses"] = json!([{"license":{"name":declared}}]);
+                extracted_licenses.push(json!({"licenseId":license,"name":format!("RPM declared licensing: {declared}"),"extractedText":package["license_text"]}));
+            } else if license != "NOASSERTION" {
                 component["licenses"] = json!([{"expression":license}]);
             }
             components.push(component);
@@ -50,7 +61,7 @@ impl Qualification {
                 }
             }
         }
-        let spdx = self.add(&format!("{name}.spdx.json"), &serde_json::to_vec(&json!({"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","dataLicense":"CC0-1.0","name":name,"documentNamespace":format!("https://positron.invalid/qualification/{digest}"),"creationInfo":{"created":fs::read_to_string(self.root.join("created.txt")).unwrap().trim(),"creators":["Tool: positron-build-qualification"]},"packages":spdx_packages,"relationships":[{"spdxElementId":"SPDXRef-DOCUMENT","relationshipType":"DESCRIBES","relatedSpdxElement":"SPDXRef-Artifact"}]})).unwrap());
+        let spdx = self.add(&format!("{name}.spdx.json"), &serde_json::to_vec(&json!({"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","dataLicense":"CC0-1.0","name":name,"documentNamespace":format!("https://positron.invalid/qualification/{digest}"),"creationInfo":{"created":fs::read_to_string(self.root.join("created.txt")).unwrap().trim(),"creators":["Tool: positron-build-qualification"]},"packages":spdx_packages,"hasExtractedLicensingInfos":extracted_licenses,"relationships":[{"spdxElementId":"SPDXRef-DOCUMENT","relationshipType":"DESCRIBES","relatedSpdxElement":"SPDXRef-Artifact"}]})).unwrap());
         let cyclonedx = self.add(&format!("{name}.cdx.json"), &serde_json::to_vec(&json!({"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":components})).unwrap());
         let input_identities: Vec<_> = self
             .inventory
@@ -63,12 +74,11 @@ impl Qualification {
             &serde_json::to_vec(&self.inventory.compatibility).unwrap(),
         )
         .sha256);
-        let provenance = self.add(&format!("{name}.provenance.json"), &serde_json::to_vec(&json!({"_type":"https://in-toto.io/Statement/v1","subject":[{"name":name,"digest":{"sha256":digest}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildDefinition":{"buildType":"https://positron.invalid/build-qualification/v1","externalParameters":{"source_commit":self.inventory.source_commit,"build_identity":self.inventory.build_identity,"api_version":self.inventory.api_version,"product_version":version,"target":target,"inputs_sha256":inputs,"schema_sha256":hex(&self.inventory.compatibility.schema),"compatibility_sha256":compatibility},"resolvedDependencies":self.inventory.inputs},"runDetails":{"builder":{"id":self.inventory.build_identity}}}})).unwrap());
-        let evidence = self.add(&format!("{name}.qualification.json"), &serde_json::to_vec(&json!({"scope":"staged identity and independent functional bytes only; not full release acceptance","artifact_sha256":digest,"builder":self.inventory.build_identity,"independent_builder":self.independent_builder})).unwrap());
-        let license_notices = self.add(
-            &format!("{name}.LICENSE"),
-            include_bytes!("../../../../LICENSE"),
-        );
+        let provenance = self.add(&format!("{name}.provenance.json"), &serde_json::to_vec(&json!({"_type":"https://in-toto.io/Statement/v1","subject":[{"name":name,"digest":{"sha256":digest}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildDefinition":{"buildType":"https://positron.invalid/build-qualification/v1","externalParameters":{"source_commit":self.inventory.source_commit,"build_identity":self.inventory.build_identity,"api_version":self.inventory.api_version,"product_version":version,"target":target,"inputs_sha256":inputs,"schema_sha256":hex(&self.inventory.compatibility.schema),"compatibility_sha256":compatibility},"resolvedDependencies":self.inventory.inputs},"runDetails":{"builder":{"id":builder}}}})).unwrap());
+        let evidence = self.add(&format!("{name}.qualification.json"), &serde_json::to_vec(&json!({"scope":"staged identity and independent functional bytes only; not full release acceptance","artifact_sha256":digest,"builder":builder,"independent_builder":independent_builder})).unwrap());
+        let mut license_bytes = include_bytes!("../../../../LICENSE").to_vec();
+        license_bytes.extend_from_slice(notices);
+        let license_notices = self.add(&format!("{name}.LICENSE"), &license_bytes);
         self.inventory.artifacts.push(Artifact {
             file: file.clone(),
             surface,

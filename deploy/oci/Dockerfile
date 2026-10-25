@@ -2,6 +2,7 @@
 # exact architecture. This recipe does not compile or modify its executable.
 FROM rockylinux/rockylinux:9.6@sha256:91bbb8eb52ca462611c1f9ce5c4cede4172a31bfe64f336e82f29648694a3cfe AS runtime
 ADD native.tar.gz /payload/
+COPY MPL-2.0.txt /ca/MPL-2.0.txt
 # Mozilla roots converted by curl on 2026-10-20; public MPL-2.0 input.
 ADD --checksum=sha256:796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe https://curl.se/ca/cacert-2026-10-20.pem /ca/cacert.pem
 RUN set -eu; \
@@ -10,6 +11,9 @@ RUN set -eu; \
     cp /payload/positron/share/config.schema.json /payload/positron/share/configuration.md /rootfs/usr/share/positron/; \
     cp /payload/positron/etc/positron.toml.example /rootfs/usr/share/positron/; \
     cp /payload/positron/LICENSE /rootfs/usr/share/positron/; \
+    mkdir -p /rootfs/usr/share/licenses/ca-certificates; \
+    cp -R /usr/share/licenses/glibc /usr/share/licenses/libgcc /rootfs/usr/share/licenses/; \
+    cp /ca/MPL-2.0.txt /rootfs/usr/share/licenses/ca-certificates/MPL-2.0.txt; \
     cp /ca/cacert.pem /rootfs/etc/ssl/certs/ca-certificates.crt; \
     chmod 0644 /rootfs/etc/ssl/certs/ca-certificates.crt; \
     for library in libc.so.6 libm.so.6 libgcc_s.so.1 libpthread.so.0 libdl.so.2 librt.so.1; do cp -L "/lib64/$library" /rootfs/lib64/; done; \

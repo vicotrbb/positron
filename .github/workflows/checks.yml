@@ -447,6 +447,7 @@ jobs:
           cp "$RUNNER_TEMP/first/native.tar.gz" "$RUNNER_TEMP/oci/one/native.tar.gz"
           cp "$RUNNER_TEMP/rebuilt-native.tar.gz" "$RUNNER_TEMP/oci/two/native.tar.gz"
           for build in one two; do
+            cp deploy/oci/MPL-2.0.txt "$RUNNER_TEMP/oci/$build/"
             docker buildx build --no-cache --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=0 \
               --output "type=oci,dest=$RUNNER_TEMP/oci/$build/image.tar,compression=uncompressed" \
               --file deploy/oci/Dockerfile "$RUNNER_TEMP/oci/$build"
@@ -532,6 +533,7 @@ jobs:
               --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=0 \
               --output "type=oci,dest=$PWD/native/index-$build.tar,compression=uncompressed" \
               --file deploy/oci/Dockerfile.index deploy/oci
+            echo "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-oci-index-$build" > "native/index-$build-build-identity.txt"
           done
       - name: Verify actual index images independent bytes and private offline trust bindings
         env:

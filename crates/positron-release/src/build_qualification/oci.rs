@@ -42,6 +42,22 @@ impl Layout {
             .unwrap();
         self.blob(image)
     }
+    fn license_files(&self, manifest: &Value) -> BTreeMap<String, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        for entry in tar::Archive::new(self.blob(&manifest["layers"][0]))
+            .entries()
+            .unwrap()
+        {
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap().to_str().unwrap().to_owned();
+            if entry.header().entry_type().is_file() && name.starts_with("usr/share/licenses/") {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                files.insert(name, bytes);
+            }
+        }
+        files
+    }
     fn closure(&self, manifest: &Value) -> Value {
         let mut files = serde_json::Map::new();
         assert_eq!(manifest["layers"].as_array().unwrap().len(), 1);
@@ -119,6 +135,21 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
     let first = root.join("oci-linux-x86_64/one");
     let second = root.join("oci-linux-x86_64/two");
     let mut qualification = captured(&first, &second, output, &inputs);
+    let assembly_builder = fs::read_to_string(root.join("index-one-build-identity.txt"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let assembly_rebuilder = fs::read_to_string(root.join("index-two-build-identity.txt"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_ne!(assembly_builder, assembly_rebuilder);
+    qualification.inventory.build_identity = assembly_builder.clone();
+    qualification.independent_builder = assembly_rebuilder.clone();
+    for build in ["one", "two"] {
+        let name = format!("index-{build}-build-identity.txt");
+        qualification.input(&name, &fs::read(root.join(&name)).unwrap());
+    }
     let index = Layout::read(&root.join("index-one.tar"));
     let independent = Layout::read(&root.join("index-two.tar"));
     assert_eq!(index.0["index.json"], independent.0["index.json"]);
@@ -154,13 +185,22 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
         serde_json::from_slice(&fs::read(first.join("cargo-metadata.json")).unwrap()).unwrap();
     let packages = &metadata["packages"];
     let empty = json!({});
+    let builder = qualification.inventory.build_identity.clone();
+    let independent_builder = qualification.independent_builder.clone();
+    let mut all_notices = vec![];
     qualification.artifact(
         "openapi.json",
         Surface::Api,
         "any",
         &fs::read(first.join("openapi.json")).unwrap(),
         &fs::read(second.join("openapi.json")).unwrap(),
-        (packages, &empty),
+        ArtifactBuild {
+            packages,
+            closure: &empty,
+            builder: &builder,
+            independent_builder: &independent_builder,
+            notices: &[],
+        },
     );
     for (target, architecture) in [("linux-x86_64", "amd64"), ("linux-aarch64", "arm64")] {
         let first = root.join(format!("oci-{target}/one"));
@@ -194,6 +234,12 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
             fs::read(first.join("build-identity.txt")).unwrap(),
             fs::read(second.join("build-identity.txt")).unwrap()
         );
+        let manifest_bytes = index.image(architecture);
+        assert_eq!(manifest_bytes, independent.image(architecture));
+        let manifest: Value = serde_json::from_slice(manifest_bytes).unwrap();
+        let legal = index.license_files(&manifest);
+        let notices = notice_bytes(&legal);
+        all_notices.extend_from_slice(&notices);
         let mut platform_packages = packages.as_array().unwrap().clone();
         for line in fs::read_to_string(first.join("runtime-packages.txt"))
             .unwrap()
@@ -201,12 +247,28 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
         {
             let fields: Vec<_> = line.split('\t').collect();
             assert_eq!(fields.len(), 3);
-            platform_packages.push(json!({"name":format!("rpm:{}",fields[0]),"version":fields[1],"license":null,"source":"NOASSERTION"}));
+            let prefix = format!("usr/share/licenses/{}/", fields[0]);
+            let package_legal = legal
+                .iter()
+                .filter(|(path, _)| path.starts_with(&prefix))
+                .map(|(path, bytes)| (path.clone(), bytes.clone()))
+                .collect();
+            let license_text = String::from_utf8(notice_bytes(&package_legal)).unwrap();
+            assert!(
+                !license_text.is_empty(),
+                "actual runtime license text required"
+            );
+            platform_packages.push(json!({"name":format!("rpm:{}",fields[0]),"version":fields[1],"license":format!("LicenseRef-RPM-{}",fields[0]),"declared_license":fields[2],"license_text":license_text,"source":"NOASSERTION"}));
         }
         let platform_packages = Value::Array(platform_packages);
-        let manifest_bytes = index.image(architecture);
-        assert_eq!(manifest_bytes, independent.image(architecture));
-        let manifest: Value = serde_json::from_slice(manifest_bytes).unwrap();
+        let builder = fs::read_to_string(first.join("build-identity.txt"))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let independent_builder = fs::read_to_string(second.join("build-identity.txt"))
+            .unwrap()
+            .trim()
+            .to_owned();
         let closure = index.closure(&manifest);
         assert_eq!(
             closure["usr/bin/positron"]["sha256"],
@@ -224,7 +286,13 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
             target,
             &fs::read(first.join("positron")).unwrap(),
             &fs::read(second.join("positron")).unwrap(),
-            (&platform_packages, &closure),
+            ArtifactBuild {
+                packages: &platform_packages,
+                closure: &closure,
+                builder: &builder,
+                independent_builder: &independent_builder,
+                notices: &notices,
+            },
         );
         qualification.artifact(
             &format!("{target}-image.json"),
@@ -232,7 +300,13 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
             target,
             manifest_bytes,
             independent.image(architecture),
-            (&platform_packages, &closure),
+            ArtifactBuild {
+                packages: &platform_packages,
+                closure: &closure,
+                builder: &builder,
+                independent_builder: &independent_builder,
+                notices: &notices,
+            },
         );
         let payload = format!("{target}-rootfs.tar");
         qualification.add(&payload, index.blob(&manifest["layers"][0]));
@@ -258,9 +332,24 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
         "any",
         &index.0["index.json"],
         &independent.0["index.json"],
-        (packages, &empty),
+        ArtifactBuild {
+            packages,
+            closure: &empty,
+            builder: &builder,
+            independent_builder: &independent_builder,
+            notices: &all_notices,
+        },
     );
     qualification
+}
+
+fn notice_bytes(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let mut notices = Vec::new();
+    for (path, bytes) in files {
+        notices.extend_from_slice(format!("\n\n===== {path} =====\n").as_bytes());
+        notices.extend_from_slice(bytes);
+    }
+    notices
 }
 
 #[cfg(test)]

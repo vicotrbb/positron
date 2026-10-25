@@ -24,6 +24,7 @@ class ImageContract(unittest.TestCase):
         if archive:
             with tempfile.TemporaryDirectory(prefix="positron-118-") as directory:
                 Path(directory, "native.tar.gz").write_bytes(Path(archive).read_bytes())
+                Path(directory, "MPL-2.0.txt").write_bytes(Path(__file__).with_name("MPL-2.0.txt").read_bytes())
                 docker("buildx", "build", "--load", "--build-arg", "SOURCE_DATE_EPOCH=0", "--file", str(Path(__file__).with_name("Dockerfile")),
                        "--tag", cls.image, directory)
 
@@ -166,6 +167,16 @@ class ImageContract(unittest.TestCase):
                 ("usr/share/positron/positron.toml.example", "positron/etc/positron.toml.example"),
             ]:
                 self.assertEqual(image.extractfile(installed).read(), native.extractfile(original).read())
+            self.assertEqual(image.extractfile("usr/share/licenses/ca-certificates/MPL-2.0.txt").read(),
+                             Path(__file__).with_name("MPL-2.0.txt").read_bytes())
+            runtime_licenses = docker("run", "--rm",
+                "rockylinux/rockylinux:9.6@sha256:91bbb8eb52ca462611c1f9ce5c4cede4172a31bfe64f336e82f29648694a3cfe",
+                "tar", "-C", "/", "-cf", "-", "usr/share/licenses/glibc", "usr/share/licenses/libgcc")
+            with tarfile.open(fileobj=io.BytesIO(runtime_licenses)) as upstream:
+                for license_file in upstream.getmembers():
+                    if license_file.isfile():
+                        self.assertEqual(image.extractfile(license_file.name).read(),
+                                         upstream.extractfile(license_file).read())
             roots = image.extractfile("etc/ssl/certs/ca-certificates.crt").read()
             self.assertEqual(hashlib.sha256(roots).hexdigest(), "796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe")
             names = set(image.getnames())
