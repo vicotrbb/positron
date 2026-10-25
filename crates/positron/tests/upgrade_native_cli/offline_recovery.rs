@@ -370,8 +370,12 @@ fn verified_snapshot(
     let watchdog = Instant::now() + Duration::from_secs(300);
     let initial = session.status()?;
     let mut revision = initial.revision();
+    let mut turns = 0_u64;
+    let mut advance_elapsed = Duration::ZERO;
+    let mut reopen_elapsed = Duration::ZERO;
     loop {
-        let turn = (Instant::now() + Duration::from_secs(30)).min(watchdog);
+        let advance_started = Instant::now();
+        let turn = (advance_started + Duration::from_secs(30)).min(watchdog);
         let operation = match session.advance(turn) {
             Ok(operation) => operation,
             Err(positron_runtime::UpgradeFailure::CapacityUnavailable) => {
@@ -382,6 +386,9 @@ fn verified_snapshot(
             },
             Err(error) => return Err(error.into()),
         };
+        let last_advance_elapsed = advance_started.elapsed();
+        advance_elapsed += last_advance_elapsed;
+        turns += 1;
         assert_eq!(operation.operation_id(), id);
         assert_eq!(operation.request(), initial.request());
         assert_eq!(operation.upgrade_parameters(), initial.upgrade_parameters());
@@ -396,11 +403,40 @@ fn verified_snapshot(
             break;
         }
         assert!(!operation.status().is_terminal(), "{operation:?}");
-        assert!(Instant::now() < watchdog, "snapshot watchdog {operation:?}");
+        assert!(
+            Instant::now() < watchdog,
+            "snapshot watchdog status={:?} stage={:?} revision={} turns={turns} last_advance_ms={} advance_total_ms={} reopen_total_ms={} children={:?}",
+            operation.status(),
+            operation.upgrade_stage(),
+            operation.revision(),
+            last_advance_elapsed.as_millis(),
+            advance_elapsed.as_millis(),
+            reopen_elapsed.as_millis(),
+            session.progress(&case.effective).map(|progress| {
+                let summarize = |child: Option<positron_runtime::UpgradeChildProgress>| {
+                    child.map(|child| {
+                        (
+                            child.kind,
+                            child.phase,
+                            child.status,
+                            child.revision,
+                            child.progress_percent,
+                            child.checkpoint.map(|checkpoint| checkpoint.sequence),
+                        )
+                    })
+                };
+                (
+                    summarize(progress.snapshot),
+                    summarize(progress.verification),
+                )
+            }),
+        );
         // Each real offline CLI command releases its owner before the next
         // invocation resumes the same durable operation.
+        let reopen_started = Instant::now();
         drop(session);
         session = begin_session(case, id)?;
+        reopen_elapsed += reopen_started.elapsed();
         // A stable parent revision makes no claim about either child's progress.
         std::thread::sleep(Duration::from_millis(20));
     }
