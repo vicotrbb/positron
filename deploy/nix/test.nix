@@ -113,7 +113,18 @@ in pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("curl --fail http://127.0.0.1:4310/health/ready")
     machine.succeed("python /etc/positron-service-check.py query")
     machine.succeed("python /etc/positron-lifecycle-check.py upgrade")
-    machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value positron) = inactive")
+    try:
+        machine.wait_until_succeeds("test $(systemctl show -p ActiveState --value positron) = inactive")
+    except Exception:
+        try:
+            code, observation = machine.execute("timeout --kill-after=1s 34s python /etc/positron-lifecycle-check.py source-exit-diagnostics")
+            if code == 0:
+                print(observation, end="")
+            else:
+                print('{"event":"upgrade_source_exit","outcome":"unavailable"}')
+        except Exception:
+            print('{"event":"upgrade_source_exit","outcome":"unavailable"}')
+        raise
     machine.succeed("python /etc/positron-lifecycle-check.py publish-upgrade")
     machine.succeed("/run/booted-system/specialisation/upgraded/bin/switch-to-configuration test")
     machine.wait_for_unit("positron.service")

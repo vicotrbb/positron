@@ -151,3 +151,114 @@ class SnapshotObservation(unittest.TestCase):
         self.assertIs(records[0]["rollback_available"], True)
         self.assertEqual(self.error, "after publication boundary")
         self.assertIn("restore-reference", self.commands[1][0])
+
+
+class SourceExitObservation(unittest.TestCase):
+    operation = "0123456789abcdef0123456789abcdef"
+
+    def invoke(self, receipt=None, returncode=0, failure=None, stop_code=0):
+        self.commands = []
+        output = io.StringIO()
+
+        def read(path, *args, **kwargs):
+            return ("administrator_secret=protected-secret" if path.name == "positron-claim"
+                    else json.dumps({"upgrade": self.operation}))
+
+        def execute(command, **options):
+            self.commands.append((command, options))
+            if len(self.commands) == 1:
+                return types.SimpleNamespace(returncode=stop_code, stdout=b"protected-secret", stderr=b"protected-secret")
+            if failure:
+                raise failure
+            return types.SimpleNamespace(returncode=returncode,
+                stdout=receipt if receipt is not None else (f"operation_id={self.operation} status=Running "
+                    "stage=Some(Draining) revision=3 rollback_available=false").encode(),
+                stderr=b"positron: upgrade recovery state or exclusive volume ownership unavailable")
+
+        path = pathlib.Path(__file__).with_name("lifecycle-check.py")
+        with mock.patch.object(pathlib.Path, "read_text", read), \
+                mock.patch.object(sys, "argv", [str(path), "source-exit-diagnostics"]), \
+                mock.patch("subprocess.run", side_effect=execute), contextlib.redirect_stdout(output):
+            runpy.run_path(str(path))
+        self.output = output.getvalue()
+        self.assertNotIn("protected", self.output)
+        self.assertNotIn(self.operation, self.output)
+        return json.loads(self.output)
+
+    def test_failed_source_exit_observes_existing_offline_status_without_identifiers(self):
+        self.assertEqual(self.invoke(), {"event": "upgrade_source_exit", "outcome": "observed",
+            "status": "Running", "stage": "Some(Draining)", "revision": 3})
+        self.assertEqual(self.commands[0][0], ["systemctl", "stop", "positron"])
+        command, options = self.commands[1]
+        self.assertEqual(command, ["runuser", "-u", "positron", "--", "positron", "upgrade", "offline", "status",
+            "--config", "/var/lib/positron-release/positron.toml", "--operation-id", self.operation])
+        self.assertEqual([options["timeout"] for _, options in self.commands], [10, 20])
+        self.assertEqual(options["input"], None)
+
+    def test_untrusted_refused_and_timed_out_observations_remain_closed(self):
+        cases = [{"receipt": b"protected-secret"}, {"receipt": b"x" * 4097},
+            {"receipt": (f"operation_id={self.operation} status=protected-secret stage=Some(Draining) revision=3").encode()},
+            {"receipt": (f"operation_id={self.operation} status=Running stage=Some(protected-secret) revision=3").encode()},
+            {"receipt": (f"operation_id={self.operation} status=Running stage=Some(Draining) revision=18446744073709551616").encode()},
+            {"receipt": b"operation_id=protected-secret status=Running stage=Some(Draining) revision=3"},
+            {"failure": subprocess.TimeoutExpired("protected-secret", 20)}, {"stop_code": 1}]
+        for case in cases:
+            with self.subTest(kind="unsafe observation"):
+                self.assertEqual(self.invoke(**case), {"event": "upgrade_source_exit", "outcome": "unavailable"})
+        self.assertEqual(self.invoke(returncode=2), {"event": "upgrade_source_exit", "outcome": "refused", "reason": "unsafe_state"})
+
+
+class SourceExitDriverObservation(unittest.TestCase):
+    def invoke(self, failed=True, collector_code=0, collector_error=False):
+        import textwrap
+        calls = []
+        original = RuntimeError("original source exit assertion")
+        script = pathlib.Path(__file__).with_name("test.nix").read_text().split("  testScript = ''\n", 1)[1].rsplit("  '';", 1)[0]
+        output = io.StringIO()
+
+        class Machine:
+            def succeed(self, command):
+                return ""
+
+            def fail(self, command):
+                return ""
+
+            def wait_for_unit(self, unit):
+                pass
+
+            def wait_until_succeeds(self, command, **options):
+                if command == "test $(systemctl show -p ActiveState --value positron) = inactive":
+                    if options:
+                        raise AssertionError("original wait deadline changed")
+                    if failed:
+                        raise original
+
+            def execute(self, command):
+                calls.append(command)
+                if collector_error:
+                    raise OSError("protected-secret")
+                return collector_code, ('{"event":"upgrade_source_exit","outcome":"unavailable"}\n'
+                                        if collector_code == 0 else "protected-secret")
+
+        caught = None
+        with contextlib.redirect_stdout(output):
+            try:
+                exec(compile(textwrap.dedent(script), "test.nix:testScript", "exec"),
+                     {"machine": Machine(), "start_all": lambda: None})
+            except Exception as error:
+                caught = error
+        self.assertIs(caught, original if failed else None)
+        self.assertNotIn("protected", output.getvalue())
+        return calls, output.getvalue()
+
+    def test_original_source_exit_failure_collects_once_and_is_preserved(self):
+        calls, output = self.invoke()
+        self.assertEqual(calls, ["timeout --kill-after=1s 34s python /etc/positron-lifecycle-check.py source-exit-diagnostics"])
+        self.assertEqual(json.loads(output), {"event": "upgrade_source_exit", "outcome": "unavailable"})
+
+    def test_success_and_collector_failures_preserve_the_driver_outcome(self):
+        self.assertEqual(self.invoke(failed=False)[0], [])
+        for options in [{"collector_code": 137}, {"collector_error": True}]:
+            calls, output = self.invoke(**options)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(json.loads(output), {"event": "upgrade_source_exit", "outcome": "unavailable"})

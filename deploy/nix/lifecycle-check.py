@@ -286,6 +286,43 @@ elif sys.argv[1] == "upgrade":
         "--idempotency-key", "55555555-5555-4555-8555-555555555555"])
     state["upgrade"] = accepted["operation_id"]
     state_path.write_text(json.dumps(state))
+elif sys.argv[1] == "source-exit-diagnostics":
+    observation = {"event": "upgrade_source_exit", "outcome": "unavailable"}
+    try:
+        identifier = json.loads(state_path.read_text())["upgrade"]
+        if (not isinstance(identifier, str) or len(identifier) != 32 or identifier == "0" * 32
+                or any(character not in "0123456789abcdef" for character in identifier)):
+            raise ValueError("unsupported operation identity")
+        # Only after the failed wait: stop the restart loop for exclusive offline inspection.
+        stopped = subprocess.run(["systemctl", "stop", "positron"], capture_output=True, timeout=10)
+        if stopped.returncode:
+            raise ValueError("exclusive inspection unavailable")
+        result = subprocess.run(["runuser", "-u", "positron", "--", "positron", "upgrade", "offline", "status",
+            "--config", configuration, "--operation-id", identifier],
+            input=None, capture_output=True, timeout=20)
+        if result.returncode:
+            reason = {
+                b"positron: upgrade recovery state or exclusive volume ownership unavailable": "unsafe_state",
+                b"positron: installed release or operation authority rejected": "authentication_rejected",
+                b"positron: authenticated completed Drain is required; resume the source process control path": "drain_incomplete",
+            }.get(result.stderr.strip(), "other")
+            observation.update(outcome="refused", reason=reason)
+        else:
+            if len(result.stdout) > 4096:
+                raise ValueError("observation exceeds bound")
+            status = fields(result.stdout.decode("ascii"))
+            revision = status["revision"]
+            if (status["operation_id"] != identifier
+                    or status["status"] not in {"Pending", "Running", "Succeeded", "Failed", "Cancelled"}
+                    or status["stage"] not in {"None", "Some(Preflight)", "Some(Draining)", "Some(Snapshot)",
+                        "Some(Publishing)", "Some(AwaitingRestart)", "Some(Verifying)", "Some(Succeeded)"}
+                    or not revision.isascii() or not revision.isdecimal() or len(revision) > 20
+                    or int(revision) > 18446744073709551615):
+                raise ValueError("unsupported observation")
+            observation.update(outcome="observed", status=status["status"], stage=status["stage"], revision=int(revision))
+    except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired):
+        pass
+    print(json.dumps(observation))
 elif sys.argv[1] == "publish-upgrade":
     state = json.loads(state_path.read_text())
     common = ["--config", configuration, "--operation-id", state["upgrade"]]
