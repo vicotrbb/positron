@@ -9,7 +9,6 @@ let
   configuration = pkgs.writeText "positron-service.toml" ''
         schema_version = 1
         [runtime]
-        shutdown_grace_seconds = 5
         [listener]
         operations_bind_address = "127.0.0.1:4310"
         api_bind_address = "127.0.0.1:4311"
