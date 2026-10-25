@@ -455,7 +455,6 @@ jobs:
           POSITRON_TEST_OCI_ARCHIVE="$RUNNER_TEMP/first/native.tar.gz" python3 deploy/oci/test_image.py
           for build in one two; do
             capture="$RUNNER_TEMP/oci/$build"
-            if [ "$build" = one ]; then cp "$RUNNER_TEMP/first/positron" "$capture/positron"; else cp "$RUNNER_TEMP/native-target/release/positron" "$capture/positron"; fi
             cp Cargo.lock rust-toolchain.toml "$capture/"
             date -u +%Y-%m-%dT%H:%M:%SZ > "$capture/created.txt"
             echo "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.target }}-$build" > "$capture/build-identity.txt"

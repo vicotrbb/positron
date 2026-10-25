@@ -252,3 +252,53 @@ fn each_native_oci_artifact_retains_its_actual_builder_and_independent_builder()
         }
     }
 }
+
+#[test]
+fn captured_native_executable_is_the_immutable_archive_payload_after_build_directory_reuse() {
+    let base = TestCapture::new();
+    let capture = base.0.join("capture");
+    fs::create_dir(&capture).unwrap();
+    let binary = b"synthetic immutable native archive payload";
+    let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut archive = tar::Builder::new(gzip);
+    let mut header = tar::Header::new_ustar();
+    header.set_size(binary.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "positron/bin/positron", binary.as_slice())
+        .unwrap();
+    fs::write(
+        capture.join("native.tar.gz"),
+        archive.into_inner().unwrap().finish().unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        capture.join("positron"),
+        b"mutable build directory was reused",
+    )
+    .unwrap();
+    let mut blobs = BTreeMap::new();
+    let layer = descriptor(
+        &mut blobs,
+        tar(&BTreeMap::from([(
+            "usr/bin/positron".into(),
+            binary.to_vec(),
+        )])),
+        "application/vnd.oci.image.layer.v1.tar",
+    );
+    let manifest = descriptor(
+        &mut blobs,
+        serde_json::to_vec(&json!({"layers":[layer]})).unwrap(),
+        "application/vnd.oci.image.manifest.v1+json",
+    );
+    blobs.insert(
+        "index.json".into(),
+        serde_json::to_vec(&json!({"manifests":[manifest]})).unwrap(),
+    );
+    fs::write(capture.join("image.tar"), tar(&blobs)).unwrap();
+    // The capture's source facts are real repository facts; this payload remains
+    // an explicit synthetic unit fixture, not native-build qualification.
+    capture_oci_metadata(&capture);
+    assert_eq!(fs::read(capture.join("positron")).unwrap(), binary);
+}

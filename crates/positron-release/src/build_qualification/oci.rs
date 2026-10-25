@@ -1,6 +1,6 @@
 //! OCI adapter for the shared staged build metadata tests; no publication.
 use super::*;
-use std::{collections::BTreeMap, io::Read};
+use std::{collections::BTreeMap, io::Read, process::Command};
 
 struct Layout(BTreeMap<String, Vec<u8>>);
 impl Layout {
@@ -92,7 +92,23 @@ impl Layout {
 #[ignore = "captures the exact native OCI build inputs"]
 fn capture_oci_build_metadata() {
     let capture = PathBuf::from(std::env::var_os("POSITRON_TEST_OCI_CAPTURE").unwrap());
-    capture_metadata(&capture);
+    capture_oci_metadata(&capture);
+}
+fn capture_oci_metadata(capture: &Path) {
+    // Native Cargo test builds may replace the mutable build-tree executable.
+    // The frozen archive is the exact input used to construct this OCI image.
+    let executable = Command::new("tar")
+        .arg("-xOf")
+        .arg(capture.join("native.tar.gz"))
+        .arg("positron/bin/positron")
+        .output()
+        .unwrap();
+    assert!(
+        executable.status.success(),
+        "native archive extraction failed"
+    );
+    fs::write(capture.join("positron"), executable.stdout).unwrap();
+    capture_metadata(capture);
     let layout = Layout::read(&capture.join("image.tar"));
     let index: Value = serde_json::from_slice(&layout.0["index.json"]).unwrap();
     let manifest: Value = serde_json::from_slice(layout.blob(&index["manifests"][0])).unwrap();
