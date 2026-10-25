@@ -113,6 +113,50 @@ else:
         if result.returncode == 0:
             if time.monotonic() >= deadline:
                 raise RuntimeError("query deadline elapsed")
+            if result.stdout.count(marker.encode()) != 1:
+                observation = {"event": "query_marker_failure",
+                    "marker_count": result.stdout.count(marker.encode()), "outcome": "unavailable"}
+                try:
+                    if len(result.stdout) > 65536:
+                        raise ValueError("query observation exceeds bound")
+                    events = json.loads(result.stdout)["events"]
+                    if not isinstance(events, list) or not 1 <= len(events) <= 32:
+                        raise ValueError("unsupported events")
+                    kinds = []
+                    for event in events:
+                        if not isinstance(event, dict) or len(event) != 1:
+                            raise ValueError("unsupported event")
+                        kind = next(iter(event))
+                        if kind not in {"header", "batch", "terminal"}:
+                            raise ValueError("unsupported event kind")
+                        kinds.append(kind)
+                    terminal = events[-1]["terminal"]
+                    state, reason = terminal["state"], terminal.get("reason", "")
+                    if state not in {"complete", "incomplete"} or reason not in {
+                            "", "unauthorized", "idempotency_conflict", "invalid_budget", "budget_exhausted",
+                            "invalid_cursor", "snapshot_expired", "authorization_changed", "cancelled",
+                            "resource_admission_refused", "resource_exhausted", "unsupported_query",
+                            "store_unavailable", "incomplete_data", "malformed_persistent_data", "internal"}:
+                        raise ValueError("unsupported terminal")
+                    stats = {}
+                    source = terminal.get("stats", {})
+                    if not isinstance(source, dict):
+                        raise ValueError("unsupported statistics")
+                    for field in ("records", "scannedBytes", "decodedRecords", "outputBytes",
+                                  "memoryPeakBytes", "cpuWorkUnits", "wallSeconds", "lastSequence",
+                                  "resumeCount", "repeatedBatchCount"):
+                        if field in source:
+                            value = source[field]
+                            if (not isinstance(value, str) or not value.isascii()
+                                    or not value.isdigit() or len(value) > 20
+                                    or int(value) > 18446744073709551615):
+                                raise ValueError("unsupported statistic")
+                            stats[field] = int(value)
+                    observation.update(outcome="observed", event_kinds=kinds,
+                        terminal_state=state, terminal_reason=reason, stats=stats)
+                except (ValueError, KeyError, TypeError, RecursionError):
+                    pass
+                print(json.dumps(observation))
             assert result.stdout.count(marker.encode()) == 1, "acknowledged record missing or duplicated"
             response = json.loads(result.stdout)
             assert response["events"][-1]["terminal"]["state"] == "complete", "query did not complete"

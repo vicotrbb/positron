@@ -113,6 +113,39 @@ class QueryCompletion(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "query did not complete"):
             self.run_query(json.dumps(self.response("incomplete")).encode())
 
+    def test_missing_marker_reports_only_closed_query_facts(self):
+        response = {"events": [{"header": {"identity": "protected-canary"}},
+            {"terminal": {"state": "incomplete", "reason": "budget_exhausted",
+                "continuationCursor": "protected-canary", "stats": {
+                    "records": "0", "cpuWorkUnits": "15", "resultDigest": "protected-canary"}}}]}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaisesRegex(
+                AssertionError, "acknowledged record missing or duplicated"):
+            self.run_query(json.dumps(response).encode())
+        self.assertEqual(json.loads(output.getvalue()), {
+            "event": "query_marker_failure", "marker_count": 0, "outcome": "observed",
+            "event_kinds": ["header", "terminal"], "terminal_state": "incomplete",
+            "terminal_reason": "budget_exhausted", "stats": {"records": 0, "cpuWorkUnits": 15}})
+
+    def test_marker_diagnostic_rejects_untrusted_or_unbounded_responses(self):
+        responses = [b"protected-canary", b"x" * 65537,
+            b'{"events":[]}', b'{"events":[{"protected-canary":{}}]}']
+        for terminal in [None, {"state": "protected-canary"},
+                {"state": "incomplete", "reason": "protected-canary"},
+                {"state": "complete", "stats": []},
+                {"state": "complete", "stats": {"records": "protected-canary"}},
+                {"state": "complete", "stats": {"records": "18446744073709551616"}},
+                {"state": "complete", "stats": {"records": True}}]:
+            responses.append(json.dumps({"events": [{"terminal": terminal}]}).encode())
+        responses.append(json.dumps({"events": [{"header": {}}] * 33}).encode())
+        for response in responses:
+            output = io.StringIO()
+            with self.subTest(kind="untrusted response"), contextlib.redirect_stdout(output), \
+                    self.assertRaisesRegex(AssertionError, "acknowledged record missing or duplicated"):
+                self.run_query(response)
+            self.assertEqual(json.loads(output.getvalue()), {
+                "event": "query_marker_failure", "marker_count": 0, "outcome": "unavailable"})
+
     def test_missing_unknown_or_malformed_terminal_fails_closed(self):
         missing = self.response("complete")
         del missing["events"][-1]["terminal"]
