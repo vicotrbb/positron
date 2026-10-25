@@ -184,10 +184,36 @@ pub(super) fn fuzz_active_segment_stateful(data: &[u8]) {
             },
             13 => {
                 if lease.is_none() {
-                    if let Ok(grant) = ledger.create_snapshot_lease_for(
-                        fuzz_now(),
-                        NonZeroU64::new(30).expect("positive fuzz lease duration"),
-                    ) {
+                    let current = catalog.pin().expect("current fuzz catalog").identity();
+                    let expected_catalog = (selector & 0x80 != 0).then(|| {
+                        if selector & 0x40 != 0 {
+                            protected_snapshot
+                                .as_ref()
+                                .map_or(current, |(snapshot, _)| snapshot.catalog_identity())
+                        } else {
+                            current
+                        }
+                    });
+                    let ttl = NonZeroU64::new(30).expect("positive fuzz lease duration");
+                    let admission = match expected_catalog {
+                        Some(expected) => {
+                            ledger.create_snapshot_lease_for_at_catalog(fuzz_now(), ttl, expected)
+                        },
+                        None => ledger.create_snapshot_lease_for(fuzz_now(), ttl),
+                    };
+                    if expected_catalog.is_some_and(|expected| expected != current) {
+                        assert_eq!(
+                            admission.expect_err("stale lease admission").code(),
+                            LedgerFailureCode::StaleGeneration,
+                        );
+                        assert_eq!(
+                            catalog.pin().expect("unchanged fuzz catalog").identity(),
+                            current
+                        );
+                    } else if let Ok(grant) = admission {
+                        if let Some(expected) = expected_catalog {
+                            assert_eq!(grant.snapshot().catalog_identity(), expected);
+                        }
                         lease = Some((
                             grant.identity(),
                             grant.expiry(),

@@ -179,7 +179,9 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         if !valid_lease_interval(now, expiry) {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
-        if let Some(expected_catalog) = expected_catalog {
+        if let Some(expected_catalog) = expected_catalog
+            && state.pending_lease_releases.identities().next().is_some()
+        {
             self.catalog.refresh_state()?;
             if self.catalog.pin()?.identity() != expected_catalog {
                 return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration));
