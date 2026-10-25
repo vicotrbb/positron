@@ -169,45 +169,32 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         expected_catalog: Option<CatalogGenerationId>,
         coordinator: Option<&MaintenanceCoordinator>,
     ) -> Result<SnapshotLeaseGrant<'kernel>, LedgerFailure> {
-        // Temporary numeric-only ARM admission measurement; removed after capture.
-        let probe_started = std::time::Instant::now();
-        let mut probe_refresh_us = [0_u128; 3];
         let mut now = window.observed;
         let expiry = window.expiry;
-        let mut state_guard = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ConcurrentWriter))?;
-        let state = &mut *state_guard;
         state.require_healthy()?;
         if !valid_lease_interval(now, expiry) {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
         if let Some(expected_catalog) = expected_catalog {
-            let probe_phase_started = std::time::Instant::now();
             self.catalog.refresh_state()?;
-            probe_refresh_us[0] = probe_phase_started.elapsed().as_micros();
             if self.catalog.pin()?.identity() != expected_catalog {
                 return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration));
             }
         }
-        self.retry_pending_releases(state)?;
-        if let Some(expected_catalog) = expected_catalog {
-            let probe_phase_started = std::time::Instant::now();
-            self.catalog.refresh_state()?;
-            probe_refresh_us[1] = probe_phase_started.elapsed().as_micros();
-            if self.catalog.pin()?.identity() != expected_catalog {
-                return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration));
-            }
+        self.retry_pending_releases(&mut state)?;
+        self.catalog.refresh_state()?;
+        let basis = self.catalog.pin()?;
+        if expected_catalog.is_some_and(|expected| basis.identity() != expected) {
+            return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration));
         }
         now = state.last_snapshot_lease_time.max(now);
         if !valid_lease_interval(now, expiry) {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
-        let probe_phase_started = std::time::Instant::now();
-        self.catalog.refresh_state()?;
-        probe_refresh_us[2] = probe_phase_started.elapsed().as_micros();
-        let basis = self.catalog.pin()?;
         let all_records = records(&basis)?;
         let expired = expired_in_scope(&all_records, self.scope, now);
         for record in all_records
@@ -256,7 +243,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         // Admit every capacity needed by the returned grant before publishing its
         // durable identity. Later failures then drop both reservations without
         // leaving a catalog lease that no caller can release.
-        let snapshot = snapshot_from_record(self, state, &basis, &record)?;
+        let snapshot = snapshot_from_record(self, &state, &basis, &record)?;
         let encoded = encode(&record)?;
         let claim = WorkClaim::tenant(
             self.scope.tenant,
@@ -362,7 +349,6 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             &mut state.pending_lease_releases,
         );
         register_lease_reservation(reservations, pending, identity, retained, &expired)?;
-        let probe_publication_started = std::time::Instant::now();
         let publication = (|| {
             match expiry_submission.as_ref() {
                 Some(submission) => publish_many_with_catalog_objects(
@@ -395,7 +381,6 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             )?;
             Ok::<(), LedgerFailure>(())
         })();
-        let probe_publication_us = probe_publication_started.elapsed().as_micros();
         if let Err(failure) = publication {
             if let Some(submission) = expiry_submission {
                 submission
@@ -432,20 +417,6 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
                 coordinator
                     .install_snapshot_lease_expiry_cancellations(expiry_cancellations, submission)
                     .map_err(|_| LedgerFailure::new(LedgerFailureCode::RecoveryRequired))?;
-            }
-        }
-        drop(state_guard);
-        // Diagnostic output never extends the ledger critical section.
-        // Diagnostic loss must not alter the already-installed lease outcome.
-        static PROBE_OUTPUT_UNAVAILABLE: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        if !PROBE_OUTPUT_UNAVAILABLE.load(std::sync::atomic::Ordering::Relaxed) {
-            use std::io::Write;
-            if writeln!(std::io::stderr().lock(),
-                "TEMP_QUERY_LEASE total_us={} refresh1_us={} refresh2_us={} refresh3_us={} publication_us={}",
-                probe_started.elapsed().as_micros(), probe_refresh_us[0], probe_refresh_us[1],
-                probe_refresh_us[2], probe_publication_us).is_err() {
-                PROBE_OUTPUT_UNAVAILABLE.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
         Ok(SnapshotLeaseGrant {

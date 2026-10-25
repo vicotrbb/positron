@@ -46,6 +46,68 @@ fn expected_catalog_admission_rechecks_after_pending_release_cleanup() -> Result
 }
 
 #[test]
+fn stale_expected_catalog_refuses_before_pending_release_cleanup() -> Result<(), Box<dyn Error>> {
+    let root = TemporaryRoot::new()?;
+    let volume = PrimaryDataVolume::acquire(root.path(), MountQualification::LocalHost)?;
+    let authority = establish_authority(volume)?;
+    let catalog = Catalog::open(
+        &authority,
+        InstanceId::new([0x4a; 16])?,
+        CatalogSecret::from_owned(Box::new([0x4b; 32]), Box::new([0x4c; 32])),
+    )?;
+    let scope = SegmentScope::new(
+        TenantId::from_bytes([0x64; 16])?,
+        SignalKind::Logs,
+        VirtualShardId::new(1)?,
+    );
+    let ledger = ActiveSegmentLedger::open(
+        &authority,
+        &catalog,
+        scope,
+        SegmentProtectionKey::from_owned(Box::new([0x4d; 32])),
+    )?;
+    let initial_catalog = catalog.pin()?.identity();
+    let first = with_ledger_fault(LedgerFileEvent::BeforeLeaseCreationReconciliation, || {
+        ledger.create_snapshot_lease_at_catalog(100, 200, initial_catalog)
+    })
+    .expect_err("post-publication uncertainty leaves its visible lease owned by cleanup");
+    assert_eq!(
+        first.completion_state(),
+        LedgerCompletionState::CommitAmbiguous
+    );
+    let current = catalog.pin()?;
+    let current_identity = current.identity();
+    assert_eq!(
+        super::super::super::snapshot_lease::records(&current)?.len(),
+        1
+    );
+    drop(current);
+    let baseline = authority.governor().inspect()?;
+    let failure = ledger
+        .create_snapshot_lease_at_catalog(101, 201, initial_catalog)
+        .expect_err("a stale caller must not trigger pending release cleanup");
+    assert_eq!(failure.code(), LedgerFailureCode::StaleGeneration);
+    let unchanged = catalog.pin()?;
+    assert_eq!(unchanged.identity(), current_identity);
+    assert_eq!(
+        super::super::super::snapshot_lease::records(&unchanged)?.len(),
+        1
+    );
+    assert_eq!(
+        authority.governor().inspect()?.outstanding_total(),
+        baseline.outstanding_total()
+    );
+    for dimension in crate::ResourceDimension::ALL {
+        assert_eq!(
+            authority.governor().inspect()?.usage(dimension),
+            baseline.usage(dimension),
+            "stale admission changed {dimension:?}",
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn creating_a_lease_terminalizes_the_expired_lease_expiry_task_before_installing_the_new_pair()
 -> Result<(), Box<dyn Error>> {
     let root = TemporaryRoot::new()?;

@@ -49,7 +49,7 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
             governor,
             ledger,
             batch_limit,
-            Arc::new(crate::runtime::SystemQueryClock::default()),
+            Arc::new(crate::runtime::SystemQueryClock),
             Arc::new(crate::runtime::FixedQueryWorkMeter),
         )
     }
