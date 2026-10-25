@@ -230,6 +230,21 @@ fn acknowledged_logs_have_typed_native_query_headers_rows_and_terminal_truth()
             "incomplete query response exposed a credential"
         );
     }
+    assert!(matches!(
+        incomplete
+            .events
+            .first()
+            .and_then(|event| event.event.as_ref()),
+        Some(Event::Header(_))
+    ));
+    assert_eq!(
+        incomplete
+            .events
+            .iter()
+            .filter(|event| matches!(event.event.as_ref(), Some(Event::Terminal(_))))
+            .count(),
+        1
+    );
     let Some(Event::Terminal(terminal)) = incomplete
         .events
         .last()
