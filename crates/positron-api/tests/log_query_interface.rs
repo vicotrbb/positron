@@ -431,3 +431,30 @@ fn decoder_enforces_declared_cell_type_and_nullability() {
 
 #[path = "log_query_interface/protojson_contract.rs"]
 mod protojson_contract;
+
+#[test]
+fn emitted_nix_lifecycle_query_respects_the_public_wire_budget() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/nix");
+    let captured = std::process::Command::new("python3")
+        .arg("-c")
+        .arg("import json, sys; sys.path.insert(0, sys.argv[1]); from test_service_check import QueryCompletion; fixture = QueryCompletion(); print(fixture.run_query(json.dumps(fixture.response('complete')).encode()))")
+        .arg(fixture)
+        .output()
+        .expect("execute the existing Nix fixture capture seam");
+    assert!(captured.status.success(), "Nix fixture capture failed");
+    let request = LogQueryRequest::decode(&captured.stdout)
+        .expect("the actual Nix fixture request must satisfy the public decoder");
+    assert_eq!(
+        request.budget.as_ref().map(|budget| budget.wall_seconds),
+        Some(5)
+    );
+    for wall_seconds in [5, 6, 60] {
+        let mut value: serde_json::Value = serde_json::from_slice(&captured.stdout).unwrap();
+        value["budget"]["wallSeconds"] = wall_seconds.to_string().into();
+        assert_eq!(
+            LogQueryRequest::decode(&serde_json::to_vec(&value).unwrap()).is_ok(),
+            wall_seconds == 5,
+            "public wall budget boundary {wall_seconds}"
+        );
+    }
+}
