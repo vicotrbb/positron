@@ -103,6 +103,7 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
           export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
           if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-reproducible"; fi
+          printf '%s\n' "RUSTFLAGS=$RUSTFLAGS" "CFLAGS=$CFLAGS" > "$RUNNER_TEMP/native-first-flags.txt"
           if [ "$(uname -s)" = Linux ]; then
             docker run --rm --user "$(id -u):$(id -g)" -e RUSTFLAGS -e CFLAGS -e CARGO_HOME=/cargo \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
@@ -136,6 +137,7 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=/positron-source --remap-path-prefix=$RUNNER_TEMP/independent-source=/positron-source --remap-path-prefix=$RUNNER_TEMP/native-target=/positron-target"
           export CFLAGS="-fdebug-prefix-map=$GITHUB_WORKSPACE=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/independent-source=/positron-source -fdebug-prefix-map=$RUNNER_TEMP/native-target=/positron-target"
           if [ "$(uname -s)" = Darwin ]; then export RUSTFLAGS="$RUSTFLAGS -C link-arg=-Wl,-reproducible"; fi
+          printf '%s\n' "RUSTFLAGS=$RUSTFLAGS" "CFLAGS=$CFLAGS" > "$RUNNER_TEMP/native-second-flags.txt"
           if [ "$(uname -s)" = Linux ]; then
             docker run --rm --user "$(id -u):$(id -g)" -e RUSTFLAGS -e CFLAGS -e CARGO_HOME=/cargo \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -v "$RUNNER_TEMP:$RUNNER_TEMP" \
@@ -450,6 +452,24 @@ jobs:
               --file deploy/oci/Dockerfile "$RUNNER_TEMP/oci/$build"
           done
           POSITRON_TEST_OCI_ARCHIVE="$RUNNER_TEMP/first/native.tar.gz" python3 deploy/oci/test_image.py
+          for build in one two; do
+            capture="$RUNNER_TEMP/oci/$build"
+            if [ "$build" = one ]; then cp "$RUNNER_TEMP/first/positron" "$capture/positron"; else cp "$RUNNER_TEMP/native-target/release/positron" "$capture/positron"; fi
+            cp Cargo.lock rust-toolchain.toml "$capture/"
+            date -u +%Y-%m-%dT%H:%M:%SZ > "$capture/created.txt"
+            echo "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.target }}-$build" > "$capture/build-identity.txt"
+            docker run --rm positron-gnu-builder rustc -vV > "$capture/toolchain.txt"
+            docker run --rm positron-gnu-builder rpm -q glibc gcc binutils perl-interpreter git-core >> "$capture/toolchain.txt"
+            if [ "$build" = one ]; then cp "$RUNNER_TEMP/native-first-flags.txt" "$capture/native-build-flags.txt"; else cp "$RUNNER_TEMP/native-second-flags.txt" "$capture/native-build-flags.txt"; fi
+            docker buildx version > "$capture/build-tools.txt"
+            docker buildx inspect --bootstrap >> "$capture/build-tools.txt"
+            docker run --rm rockylinux/rockylinux:9.6@sha256:91bbb8eb52ca462611c1f9ce5c4cede4172a31bfe64f336e82f29648694a3cfe \
+              rpm -q --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{LICENSE}\n' glibc libgcc > "$capture/runtime-packages.txt"
+            cargo metadata --locked --format-version 1 > "$capture/cargo-metadata.json"
+            POSITRON_TEST_OCI_CAPTURE="$capture" cargo test --locked -p positron-release --lib \
+              build_qualification::oci::capture_oci_build_metadata -- --ignored --exact
+            rm "$capture/native.tar.gz"
+          done
       - name: Run the shared retained-record backup restore upgrade and verification flow in the OCI filesystem
         if: runner.os == 'Linux'
         shell: bash
@@ -479,9 +499,7 @@ jobs:
         if: runner.os == 'Linux'
         with:
           name: oci-${{ matrix.target }}
-          path: |
-            ${{ runner.temp }}/oci/one/image.tar
-            ${{ runner.temp }}/oci/two/image.tar
+          path: ${{ runner.temp }}/oci/
           retention-days: 7
       - name: Remove private GNU lifecycle volume
         if: always() && runner.os == 'Linux'
@@ -522,8 +540,14 @@ jobs:
         run: |
           rustup toolchain install 1.96.0 --profile minimal
           cargo test --locked -p positron-release --test built_oci -- --ignored
+          POSITRON_TEST_OCI_CAPTURES="$PWD/native" \
+          POSITRON_TEST_OCI_METADATA_OUT="$PWD/oci-metadata" \
+            cargo test --locked -p positron-release --lib \
+            build_qualification::oci::actual_oci_metadata_is_bound_offline_to_current_build -- --ignored --exact
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: oci-multiarchitecture-qualified-payloads
-          path: native/index-*.tar
+          path: |
+            native/index-*.tar
+            oci-metadata/
           retention-days: 7

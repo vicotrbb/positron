@@ -1,6 +1,7 @@
 """Public OCI image contract. Requires an actual native archive, never a mock binary."""
 import json
 import io
+import hashlib
 import tarfile
 import os
 from pathlib import Path
@@ -26,7 +27,13 @@ class ImageContract(unittest.TestCase):
                 docker("buildx", "build", "--load", "--build-arg", "SOURCE_DATE_EPOCH=0", "--file", str(Path(__file__).with_name("Dockerfile")),
                        "--tag", cls.image, directory)
 
-    def test_nonroot_readonly_initialization_drain_recovery_and_missing_keys(self):
+    def test_default_uid_initialization_drain_recovery_and_missing_keys(self):
+        self.lifecycle(65532)
+
+    def test_arbitrary_uid_initialization_drain_recovery_and_missing_keys(self):
+        self.lifecycle(17293)
+
+    def lifecycle(self, uid):
         suffix = uuid.uuid4().hex[:12]
         name = f"positron-118-{suffix}"
         volumes = {kind: f"{name}-{kind}" for kind in ("data", "secrets", "config", "missing-secrets")}
@@ -39,8 +46,10 @@ class ImageContract(unittest.TestCase):
             destination = {"data": "/var/lib/positron", "secrets": "/var/lib/positron-secrets",
                            "config": "/etc/positron"}[kind]
             mounts += ["--mount", f"type=volume,src={volume},dst={destination},volume-nocopy" + (",readonly" if kind == "config" else "")]
-        common = ["--read-only", "--user", "17293:17293", "--tmpfs",
-                  "/run/positron:rw,nosuid,nodev,noexec,uid=17293,gid=17293,mode=0700", *mounts]
+        common = ["--read-only", "--tmpfs",
+                  f"/run/positron:rw,nosuid,nodev,noexec,uid={uid},gid={uid},mode=0700", *mounts]
+        if uid != 65532:
+            common += ["--user", f"{uid}:{uid}"]
         config = 'schema_version = 1\n[runtime]\nshutdown_grace_seconds = 5\n[listener]\ncontrol_path = "/run/positron/control.sock"\n'
         for index, listener in enumerate(("operations", "api", "otlp_grpc", "otlp_http", "loki_push")):
             address = "127.0.0.1" if listener == "operations" else "0.0.0.0"
@@ -53,7 +62,7 @@ class ImageContract(unittest.TestCase):
                 setup_mounts += ["--mount", f"type=volume,src={volume},dst=/{kind}"]
             docker("run", "--rm", "-i", *setup_mounts,
                    "rockylinux/rockylinux:9.6@sha256:91bbb8eb52ca462611c1f9ce5c4cede4172a31bfe64f336e82f29648694a3cfe",
-                   "sh", "-eu", "-c", 'cat > /config/positron.toml; chown -R 17293:17293 /data /secrets /config /missing-secrets; chmod 700 /data /secrets /config /missing-secrets; chmod 600 /config/positron.toml',
+                   "sh", "-eu", "-c", f'cat > /config/positron.toml; chown -R {uid}:{uid} /data /secrets /config /missing-secrets; chmod 700 /data /secrets /config /missing-secrets; chmod 600 /config/positron.toml',
                    input=config.encode())
             def launch():
                 docker("run", "--detach", "--name", name, *common, 
@@ -157,7 +166,8 @@ class ImageContract(unittest.TestCase):
                 ("usr/share/positron/positron.toml.example", "positron/etc/positron.toml.example"),
             ]:
                 self.assertEqual(image.extractfile(installed).read(), native.extractfile(original).read())
-            self.assertGreater(len(image.extractfile("etc/ssl/certs/ca-certificates.crt").read()), 10_000)
+            roots = image.extractfile("etc/ssl/certs/ca-certificates.crt").read()
+            self.assertEqual(hashlib.sha256(roots).hexdigest(), "796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe")
             names = set(image.getnames())
             for prohibited in ("bin/sh", "bin/bash", "usr/bin/python3", "usr/bin/dnf", "usr/bin/apt"):
                 self.assertNotIn(prohibited, names)

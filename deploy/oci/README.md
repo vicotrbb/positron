@@ -2,7 +2,8 @@
 
 The image contains the unchanged GNU native `positron` executable, its generated
 configuration example, JSON schema and reference, license, GNU runtime libraries,
-and CA roots from the pinned Rocky runtime input. It contains no shell, package
+and the pinned Mozilla CA bundle converted by curl on 2026-10-20 (MPL-2.0).
+The GNU libraries come from the pinned Rocky runtime input. It contains no shell, package
 manager, compiler, interpreter, or diagnostic tools. The same image and complete
 CLI run under Docker, Compose, and Kubernetes. The database requires none of
 those tools when run directly.
@@ -138,7 +139,7 @@ separate explicit destructive operation.
 
 The Linux native archive jobs build the GNU executable twice from independent
 source checkouts on native AMD64 and ARM64 runners. This image consumes those
-exact archives. The runtime base and BuildKit are pinned by digest. Build with
+exact archives. The runtime base and BuildKit are pinned by digest. The [Mozilla CA bundle](https://curl.se/docs/caextract.html) is pinned by its dated URL and SHA-256; the recipe updates that explicit input when the root store changes. Build with
 `SOURCE_DATE_EPOCH=0`, disable BuildKit's separate optional attestation manifests,
 and export one uncompressed OCI filesystem layer for the canonical verifier:
 
