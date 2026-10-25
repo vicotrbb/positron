@@ -645,7 +645,15 @@ fn stalled_collector_has_bounded_deadline_and_drain_starts_no_more_exports()
             request("/deadline-canary")?;
             let canary = received
                 .recv_timeout(Duration::from_secs(2))
-                .map_err(|error| format!("canary export arrival: {error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "canary export arrival: {error}; exported={:?} failed={:?} refused={:?} dropped={:?}",
+                        counter("positron_operational_trace_exported_total").ok(),
+                        counter("positron_operational_trace_failures_total").ok(),
+                        counter("positron_operational_trace_refused_total").ok(),
+                        counter("positron_operational_events_dropped_total").ok(),
+                    )
+                })?;
             assert!(
                 canary
                     .request
