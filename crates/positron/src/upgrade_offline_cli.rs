@@ -16,8 +16,15 @@ struct Options {
     key: Option<AdministrativeIdempotencyKey>,
     revision: Option<u64>,
 }
-pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
-    crate::administrative_cli::exit(execute(arguments, &mut std::io::stdout().lock()))
+pub(super) fn run(
+    arguments: impl Iterator<Item = String>,
+    environment: impl IntoIterator<Item = (String, String)>,
+) -> ExitCode {
+    crate::administrative_cli::exit(execute(
+        arguments,
+        environment,
+        &mut std::io::stdout().lock(),
+    ))
 }
 fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Options, &'static str> {
     let action = arguments.next().ok_or(USAGE)?;
@@ -93,13 +100,14 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Options, &'stati
 }
 fn execute(
     arguments: impl Iterator<Item = String>,
+    environment: impl IntoIterator<Item = (String, String)>,
     output: &mut impl std::io::Write,
 ) -> Result<(), &'static str> {
     let options = parse(arguments)?;
     let configuration = positron_config::resolve(
         positron_config::ConfigurationInputs::try_from_sources(
             Some(&options.config),
-            [] as [(&str, &str); 0],
+            environment,
             [] as [(&str, &str); 0],
         )
         .map_err(|_| "invalid upgrade configuration")?,

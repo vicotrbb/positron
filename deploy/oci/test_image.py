@@ -50,8 +50,11 @@ class ImageContract(unittest.TestCase):
         common = ["--read-only", "--tmpfs",
                   f"/run/positron:rw,nosuid,nodev,noexec,uid={uid},gid={uid},mode=0700", *mounts]
         if uid != 65532:
-            common += ["--user", f"{uid}:{uid}"]
-        config = 'schema_version = 1\n[runtime]\nshutdown_grace_seconds = 5\n[listener]\ncontrol_path = "/run/positron/control.sock"\n'
+            common += ["--user", f"{uid}:{uid}", "--env",
+                       "POSITRON__LISTENER__CONTROL_PATH=/run/positron/custom.sock"]
+        config = 'schema_version = 1\n[runtime]\nshutdown_grace_seconds = 5\n[listener]\n'
+        if uid != 65532:
+            config += 'control_path = "/run/positron/control.sock"\n'
         for index, listener in enumerate(("operations", "api", "otlp_grpc", "otlp_http", "loki_push")):
             address = "127.0.0.1" if listener == "operations" else "0.0.0.0"
             config += f'{listener}_bind_address = "{address}:{4319 + index}"\n{listener}_transport = "plaintext"\n' 

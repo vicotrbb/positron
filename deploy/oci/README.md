@@ -9,9 +9,10 @@ CLI run under Docker, Compose, and Kubernetes. The database requires none of
 those tools when run directly.
 
 The image starts `/usr/bin/positron serve --init-if-empty` as UID/GID 65532 and
-receives SIGTERM directly as PID 1. It sets the canonical control socket to
-`/run/positron/control.sock` through the existing Configuration Contract and sets
-`TMPDIR=/run/positron`. All other configuration uses the same native contract.
+receives SIGTERM directly as PID 1. The native default control socket remains
+`/var/run/positron/control.sock`; `/var/run` links to `/run` in the image. It sets
+`TMPDIR=/run/positron`. Configuration uses the same native contract, including
+operator environment overrides during serving and offline Upgrade continuation.
 The generated files are under `/usr/share/positron`. There is no image-specific
 initialization or storage implementation.
 

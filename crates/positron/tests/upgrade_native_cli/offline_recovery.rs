@@ -21,6 +21,9 @@ struct Source {
 }
 #[inline(never)]
 fn source() -> Result<Source> {
+    source_with_environment(&[])
+}
+fn source_with_environment(environment: &[(&str, &str)]) -> Result<Source> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -67,7 +70,7 @@ fn source() -> Result<Source> {
     let effective = positron_config::resolve(
         positron_config::ConfigurationInputs::try_from_sources(
             Some(&root.join("positron.toml")),
-            [] as [(&str, &str); 0],
+            environment.iter().copied(),
             [] as [(&str, &str); 0],
         )
         .map_err(|_| "offline canonical roots")?,
@@ -175,7 +178,17 @@ fn command(
     id: positron_governance::OperationId,
     revision: Option<u64>,
 ) -> Result<Output> {
+    command_with_environment(case, action, id, revision, &[])
+}
+fn command_with_environment(
+    case: &Case,
+    action: &str,
+    id: positron_governance::OperationId,
+    revision: Option<u64>,
+    environment: &[(&str, &str)],
+) -> Result<Output> {
     let mut command = Command::new(native_binary::executable());
+    command.envs(environment.iter().copied());
     command
         .args(["upgrade", "offline", action, "--config"])
         .arg(case.root.join("positron.toml"))
@@ -532,5 +545,49 @@ fn offline_cancelled_snapshot_replays_cancel_and_reads_status_without_publicatio
             "terminal {action} must not publish"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn offline_upgrade_resolves_the_same_environment_and_refuses_changed_or_invalid_overrides() -> Result
+{
+    let environment = [("POSITRON__RUNTIME__SHUTDOWN_GRACE_SECONDS", "7")];
+    let Source {
+        process,
+        host,
+        accepted,
+        case,
+    } = source_with_environment(&environment)?;
+    let id = process
+        .begin_upgrade(accepted)?
+        .finish(ShutdownTrigger::FirstSignal)?;
+    drop(host);
+    let before = binding(&case)?;
+    for (value, message) in [
+        ("8", "offline request does not match the accepted upgrade"),
+        ("invalid", "invalid upgrade configuration"),
+    ] {
+        let refused = command_with_environment(
+            &case,
+            "advance",
+            id,
+            None,
+            &[("POSITRON__RUNTIME__SHUTDOWN_GRACE_SECONDS", value)],
+        )?;
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert_eq!(binding(&case)?, before);
+    }
+    let accepted = command_with_environment(&case, "advance", id, None, &environment)?;
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&accepted.stdout).contains("operation_id="));
     Ok(())
 }

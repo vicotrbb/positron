@@ -31,7 +31,7 @@ RUN set -eu; \
 FROM scratch
 # One uncompressed filesystem payload, independently compared before signing.
 COPY --from=runtime /rootfs/ /
-ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt TMPDIR=/run/positron POSITRON__LISTENER__CONTROL_PATH=/run/positron/control.sock
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt TMPDIR=/run/positron
 USER 65532:65532
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/bin/positron"]

@@ -114,7 +114,7 @@ pub fn run_native(
         .is_some_and(|argument| argument == "upgrade")
     {
         arguments.next();
-        return upgrade_cli::run(arguments);
+        return upgrade_cli::run(arguments, environment);
     }
     if arguments.peek().is_some_and(|argument| argument == "keys") {
         arguments.next();
