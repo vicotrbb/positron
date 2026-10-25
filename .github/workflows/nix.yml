@@ -1,0 +1,119 @@
+name: Nix distribution
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Nix ${{ matrix.platform.target }} build ${{ matrix.build }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [one, two]
+        platform:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+            target: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+            target: linux-aarch64
+          - runner: macos-15-intel
+            system: x86_64-darwin
+            target: macos-x86_64
+          - runner: macos-15
+            system: aarch64-darwin
+            target: macos-aarch64
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build exact native output in isolated Nix sandbox
+        run: nix build --no-update-lock-file --print-build-logs .#positron
+      - name: Check canonical configuration and native service
+        run: nix flake check --no-update-lock-file --print-build-logs
+      - name: Run public CLI lifecycle against installed output
+        env:
+          POSITRON_TEST_NATIVE_BINARY: ${{ github.workspace }}/result/bin/positron
+          POSITRON_TEST_EXECUTABLE_DISTRIBUTION: nix
+        run: |
+          nix develop --no-update-lock-file --command cargo test --locked --release -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli
+          nix develop --no-update-lock-file --command cargo test --locked --release -p positron --test process_exit offline_doctor_and_verify_inspect_an_initialized_volume_without_changing_its_listing_or_bytes
+      - name: Capture functional output and declared closure
+        run: |
+          mkdir qualification
+          date -u +%Y-%m-%dT%H:%M:%SZ > qualification/created.txt
+          echo "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.platform.target }}-${{ matrix.build }}" > qualification/build-identity.txt
+          cp result/bin/positron qualification/positron
+          nix-store --dump "$(readlink result)" > qualification/positron.nar
+          umask 077
+          nix key generate-secret --key-name positron-qualification-1 > "$RUNNER_TEMP/nix-cache-key"
+          nix key convert-secret-to-public < "$RUNNER_TEMP/nix-cache-key" > qualification/cache-key.pub
+          nix store sign --key-file "$RUNNER_TEMP/nix-cache-key" "$(readlink result)"
+          nix copy --to "file://$RUNNER_TEMP/nix-cache?compression=none" .#positron
+          store_name=$(basename "$(readlink result)")
+          cp "$RUNNER_TEMP/nix-cache/${store_name%%-*}.narinfo" qualification/positron.narinfo
+          nix path-info --recursive --json .#positron > qualification/closure.json
+          nix develop --no-update-lock-file --command rustc -vV > qualification/toolchain.txt
+          cp flake.lock Cargo.lock rust-toolchain.toml qualification/
+          nix develop --no-update-lock-file --command cargo metadata --locked --format-version 1 > qualification/cargo-metadata.json
+          POSITRON_TEST_NIX_CAPTURE="$PWD/qualification" nix develop --no-update-lock-file --command cargo test --locked --release -p positron-release --lib nix_qualification::capture_nix_build_metadata -- --ignored --exact
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nix-${{ matrix.platform.target }}-${{ matrix.build }}
+          path: qualification/
+          retention-days: 7
+
+  reproducibility:
+    name: Nix independent native output comparison
+    needs: native
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: nix-*
+          path: qualification
+      - name: Compare independent payload bytes on every exact target
+        run: |
+          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+            cmp "qualification/nix-$target-one/positron.nar" "qualification/nix-$target-two/positron.nar"
+            cmp "qualification/nix-$target-one/toolchain.txt" "qualification/nix-$target-two/toolchain.txt"
+          done
+      - name: Bind actual outputs to the canonical offline Release Trust verifier
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+            POSITRON_TEST_TARGET="$target" \
+            POSITRON_TEST_NIX="$PWD/qualification/nix-$target-one/positron.nar" \
+            POSITRON_TEST_NIX_REBUILD="$PWD/qualification/nix-$target-two/positron.nar" \
+            POSITRON_TEST_NIX_NARINFO="$PWD/qualification/nix-$target-one/positron.narinfo" \
+            POSITRON_TEST_NIX_CACHE_KEY="$PWD/qualification/nix-$target-one/cache-key.pub" \
+            POSITRON_TEST_NIX_BINARY="$PWD/qualification/nix-$target-one/positron" \
+            POSITRON_TEST_NIX_BINARY_REBUILD="$PWD/qualification/nix-$target-two/positron" \
+              cargo test --locked -p positron-release --test built_nix -- --ignored
+          done
+      - name: Bind actual current-build staged metadata without claiming publication
+        run: |
+          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+            POSITRON_TEST_TARGET="$target" \
+            POSITRON_TEST_NIX_CAPTURE="$PWD/qualification/nix-$target-one" \
+            POSITRON_TEST_NIX_CAPTURE_REBUILD="$PWD/qualification/nix-$target-two" \
+            POSITRON_TEST_NIX_METADATA_OUT="$PWD/metadata/$target" \
+              cargo test --locked -p positron-release --lib nix_qualification::actual_nix_metadata_is_bound_offline_to_current_build -- --ignored --exact
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nix-current-build-staged-metadata
+          path: metadata/
+          retention-days: 7

@@ -27,6 +27,10 @@ candidate_artifact_files = [
   "/var/lib/positron-staging/positron-linux-aarch64",
   "/var/lib/positron-staging/positron-macos-x86_64",
   "/var/lib/positron-staging/positron-macos-aarch64",
+  "/var/lib/positron-staging/positron-nix-linux-x86_64",
+  "/var/lib/positron-staging/positron-nix-linux-aarch64",
+  "/var/lib/positron-staging/positron-nix-macos-x86_64",
+  "/var/lib/positron-staging/positron-nix-macos-aarch64",
   "/var/lib/positron-staging/schema",
   "/var/lib/positron-staging/compatibility",
   "/var/lib/positron-staging/sbom",
@@ -37,7 +41,11 @@ query_credential_file = "/run/positron/query-credential"
 ```
 
 List every candidate artifact file in exact canonical manifest order. Full
-release manifests include four native targets and a Release Inventory member.
+release manifests include four native and four Nix executable targets and a
+Release Inventory member. For Nix installations, also set
+`executable_distribution = "nix"` in `[release.installation]`; omitted or
+`"native"` selects the native archive identity. NAR output identity is separate
+from the executable identity used for Upgrade.
 The example must follow the exact order and identities in its signed manifest.
 A candidate must include the canonical full Release Inventory role and its
 configured artifact file. All required native registry members must be declared

@@ -604,6 +604,14 @@ fn terminal_evidence_bytes(terminal: &ExportTerminal) -> Result<Vec<u8>, QueryFa
     Ok(bytes)
 }
 
+fn durable_terminal_failure(tag: u8, stats: QueryStats) -> Result<QueryFailure, QueryFailure> {
+    let code = query_failure_code_from(tag)?;
+    Ok(match stats.limiting_budget() {
+        Some(dimension) => QueryFailure::for_budget(code, dimension),
+        None => QueryFailure::new(code),
+    })
+}
+
 fn terminal_from_evidence(bytes: &[u8]) -> Result<ExportTerminal, QueryFailure> {
     let mut offset = 0;
     let magic = read_manifest_array::<8>(bytes, &mut offset)?;
@@ -627,7 +635,7 @@ fn terminal_from_evidence(bytes: &[u8]) -> Result<ExportTerminal, QueryFailure> 
         1 if failure_tag == 0 => Ok(ExportTerminal::Complete(stats)),
         2 => Ok(ExportTerminal::Incomplete(
             crate::QueryIncomplete::with_affected_ranges(
-                QueryFailure::new(query_failure_code_from(failure_tag)?),
+                durable_terminal_failure(failure_tag, stats)?,
                 stats,
                 affected_ranges,
             ),
@@ -687,7 +695,7 @@ fn durable_manifest_from_bytes(bytes: &[u8]) -> Result<ExportManifest, QueryFail
     let terminal = match terminal_tag {
         1 if failure_tag == 0 => ExportTerminal::Complete(stats),
         2 => ExportTerminal::Incomplete(crate::QueryIncomplete::with_affected_ranges(
-            QueryFailure::new(query_failure_code_from(failure_tag)?),
+            durable_terminal_failure(failure_tag, stats)?,
             stats,
             affected_ranges,
         )),
@@ -2152,41 +2160,97 @@ mod tests {
     };
     use crate::stream::QueryCounters;
     use crate::{
-        QueryAffectedRange, QueryBudget, QueryFailure, QueryFailureCode, QueryIncomplete,
-        QueryStats, ResultSnapshot, TemporalAxis,
+        QueryAffectedRange, QueryBudget, QueryBudgetDimension, QueryFailure, QueryFailureCode,
+        QueryIncomplete, QueryStats, ResultSnapshot, TemporalAxis,
     };
+
+    fn canonical_terminal_failures() -> impl Iterator<Item = QueryFailure> {
+        [
+            QueryFailureCode::Unauthorized,
+            QueryFailureCode::IdempotencyConflict,
+            QueryFailureCode::InvalidBudget,
+            QueryFailureCode::BudgetExhausted,
+            QueryFailureCode::InvalidCursor,
+            QueryFailureCode::SnapshotExpired,
+            QueryFailureCode::AuthorizationChanged,
+            QueryFailureCode::Cancelled,
+            QueryFailureCode::ResourceAdmissionRefused,
+            QueryFailureCode::ResourceExhausted,
+            QueryFailureCode::UnsupportedQuery,
+            QueryFailureCode::StoreUnavailable,
+            QueryFailureCode::MalformedPersistentData,
+            QueryFailureCode::Internal,
+            QueryFailureCode::IncompleteData,
+        ]
+        .into_iter()
+        .map(QueryFailure::new)
+        .chain(
+            [
+                QueryBudgetDimension::ScannedBytes,
+                QueryBudgetDimension::DecodedRecords,
+                QueryBudgetDimension::OutputRows,
+                QueryBudgetDimension::OutputBytes,
+                QueryBudgetDimension::MemoryBytes,
+                QueryBudgetDimension::CpuWorkUnits,
+                QueryBudgetDimension::WallSeconds,
+                QueryBudgetDimension::MaximumTimeRangeNanoseconds,
+            ]
+            .into_iter()
+            .map(|dimension| {
+                QueryFailure::for_budget(QueryFailureCode::BudgetExhausted, dimension)
+            }),
+        )
+    }
 
     #[test]
     fn terminal_evidence_round_trips_an_incomplete_terminal() {
-        let budget = QueryBudget::new(10, 11, 12, 13, 14, 16)
-            .expect("fixture budget")
-            .with_cpu_work_units(15)
-            .expect("fixture cpu budget");
-        let terminal = ExportTerminal::Incomplete(QueryIncomplete::new(
-            QueryFailure::new(QueryFailureCode::BudgetExhausted),
-            QueryStats::new(
-                QueryCounters {
-                    records: 1,
-                    scanned_bytes: 2,
-                    decoded_records: 3,
-                    output_bytes: 4,
-                    memory_peak_bytes: 5,
-                    cpu_work_units: 6,
-                    wall_seconds: 7,
-                },
-                Some(0),
-                [0x71; 32],
-                budget,
-                0,
-                0,
-            ),
-        ));
+        for failure in canonical_terminal_failures() {
+            let check_unknown_tags = failure.code() == QueryFailureCode::BudgetExhausted
+                && failure.limiting_budget().is_none();
+            let budget = QueryBudget::new(10, 11, 12, 13, 14, 16)
+                .expect("fixture budget")
+                .with_cpu_work_units(15)
+                .expect("fixture cpu budget");
+            let terminal = ExportTerminal::Incomplete(QueryIncomplete::new(
+                failure,
+                QueryStats::new(
+                    QueryCounters {
+                        records: 1,
+                        scanned_bytes: 2,
+                        decoded_records: 3,
+                        output_bytes: 4,
+                        memory_peak_bytes: 5,
+                        cpu_work_units: 6,
+                        wall_seconds: 7,
+                    },
+                    Some(0),
+                    [0x71; 32],
+                    budget,
+                    0,
+                    0,
+                ),
+            ));
 
-        let evidence = terminal_evidence_bytes(&terminal).expect("bounded evidence");
-        assert_eq!(
-            terminal_from_evidence(&evidence).expect("authenticated format"),
-            terminal
-        );
+            let evidence = terminal_evidence_bytes(&terminal).expect("bounded evidence");
+            let decoded = terminal_from_evidence(&evidence).expect("authenticated format");
+            assert_eq!(decoded, terminal);
+            assert_eq!(
+                terminal_evidence_bytes(&decoded).expect("canonical re-encoding"),
+                evidence
+            );
+            if check_unknown_tags {
+                for tag in [0, 16, 255] {
+                    let mut invalid = evidence.clone();
+                    invalid[9] = tag; // Eight-byte magic, terminal tag, then failure tag.
+                    assert_eq!(
+                        terminal_from_evidence(&invalid)
+                            .expect_err("unknown incomplete failure tag")
+                            .code(),
+                        QueryFailureCode::MalformedPersistentData
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2229,64 +2293,84 @@ mod tests {
 
     #[test]
     fn durable_manifest_round_trips_typed_affected_ranges() {
-        let terminal = ExportTerminal::Incomplete(QueryIncomplete::with_affected_ranges(
-            QueryFailure::new(QueryFailureCode::IncompleteData),
-            QueryStats::new(
-                QueryCounters {
-                    records: 0,
-                    scanned_bytes: 0,
-                    decoded_records: 0,
-                    output_bytes: 0,
-                    memory_peak_bytes: 0,
-                    cpu_work_units: 0,
-                    wall_seconds: 0,
-                },
-                None,
-                [0x73; 32],
-                QueryBudget::new(10, 11, 12, 13, 14, 16).expect("fixture budget"),
-                0,
-                0,
-            ),
-            vec![
-                QueryAffectedRange::Known {
-                    axis: TemporalAxis::IngestTime,
-                    earliest_nanoseconds: 30,
-                    latest_nanoseconds: 40,
-                },
-                QueryAffectedRange::Unknown {
-                    axis: TemporalAxis::EventTime,
-                },
-            ],
-        ));
-        let identity = positron_kernel::BootstrapIntegrityIdentity::from_pinned(
-            [0x01; 32],
-            [
-                0x6c, 0xd5, 0xfc, 0x8e, 0x38, 0xa8, 0x4f, 0x85, 0x22, 0xf6, 0xc1, 0x21, 0xa4, 0x95,
-                0xec, 0xf9, 0x52, 0x62, 0x30, 0x43, 0x8a, 0xf3, 0xeb, 0xac, 0xf2, 0x52, 0x4f, 0xfb,
-                0xfe, 0xb1, 0x60, 0x0e,
-            ],
-        )
-        .expect("fixture identity");
-        let manifest = ExportManifest {
-            destination: ExportDestination::configured([0x11; 16]).expect("fixture destination"),
-            output_identity: Some([0x12; 16]),
-            request_digest: [0x13; 32],
-            snapshot: ResultSnapshot::new([0x14; 32], 15, 16),
-            batches: Vec::new(),
-            terminal: terminal.clone(),
-            authentication: positron_kernel::ControlTokenAuthentication::new(1, [0x15; 32])
-                .expect("fixture authentication"),
-            signature: Some(
-                positron_kernel::ExportManifestSignature::new(identity, [0x16; 64])
-                    .expect("fixture signature"),
-            ),
-        };
+        for failure in canonical_terminal_failures() {
+            let check_unknown_tags = failure.code() == QueryFailureCode::BudgetExhausted
+                && failure.limiting_budget().is_none();
+            let terminal = ExportTerminal::Incomplete(QueryIncomplete::with_affected_ranges(
+                failure,
+                QueryStats::new(
+                    QueryCounters {
+                        records: 0,
+                        scanned_bytes: 0,
+                        decoded_records: 0,
+                        output_bytes: 0,
+                        memory_peak_bytes: 0,
+                        cpu_work_units: 0,
+                        wall_seconds: 0,
+                    },
+                    None,
+                    [0x73; 32],
+                    QueryBudget::new(10, 11, 12, 13, 14, 16).expect("fixture budget"),
+                    0,
+                    0,
+                ),
+                vec![
+                    QueryAffectedRange::Known {
+                        axis: TemporalAxis::IngestTime,
+                        earliest_nanoseconds: 30,
+                        latest_nanoseconds: 40,
+                    },
+                    QueryAffectedRange::Unknown {
+                        axis: TemporalAxis::EventTime,
+                    },
+                ],
+            ));
+            let identity = positron_kernel::BootstrapIntegrityIdentity::from_pinned(
+                [0x01; 32],
+                [
+                    0x6c, 0xd5, 0xfc, 0x8e, 0x38, 0xa8, 0x4f, 0x85, 0x22, 0xf6, 0xc1, 0x21, 0xa4,
+                    0x95, 0xec, 0xf9, 0x52, 0x62, 0x30, 0x43, 0x8a, 0xf3, 0xeb, 0xac, 0xf2, 0x52,
+                    0x4f, 0xfb, 0xfe, 0xb1, 0x60, 0x0e,
+                ],
+            )
+            .expect("fixture identity");
+            let manifest = ExportManifest {
+                destination: ExportDestination::configured([0x11; 16])
+                    .expect("fixture destination"),
+                output_identity: Some([0x12; 16]),
+                request_digest: [0x13; 32],
+                snapshot: ResultSnapshot::new([0x14; 32], 15, 16),
+                batches: Vec::new(),
+                terminal: terminal.clone(),
+                authentication: positron_kernel::ControlTokenAuthentication::new(1, [0x15; 32])
+                    .expect("fixture authentication"),
+                signature: Some(
+                    positron_kernel::ExportManifestSignature::new(identity, [0x16; 64])
+                        .expect("fixture signature"),
+                ),
+            };
 
-        let decoded = durable_manifest_from_bytes(
-            &durable_manifest_bytes(&manifest).expect("bounded durable manifest"),
-        )
-        .expect("durable manifest decodes");
-        assert_eq!(decoded.terminal(), &terminal);
+            let bytes = durable_manifest_bytes(&manifest).expect("bounded durable manifest");
+            let decoded = durable_manifest_from_bytes(&bytes).expect("durable manifest decodes");
+            assert_eq!(decoded.terminal(), &terminal);
+            assert_eq!(
+                durable_manifest_bytes(&decoded).expect("canonical re-encoding"),
+                bytes
+            );
+            if check_unknown_tags {
+                for tag in [0, 16, 255] {
+                    let mut invalid = bytes.clone();
+                    // Fixed V2 header with zero batches: failure follows terminal tag at 122.
+                    invalid[123] = tag;
+                    assert_eq!(
+                        durable_manifest_from_bytes(&invalid)
+                            .expect_err("unknown incomplete failure tag")
+                            .code(),
+                        QueryFailureCode::MalformedPersistentData
+                    );
+                }
+            }
+        }
     }
 
     #[test]

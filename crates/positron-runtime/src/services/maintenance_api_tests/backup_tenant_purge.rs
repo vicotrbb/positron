@@ -153,13 +153,20 @@ fn purge_drains_a_backup_stopped_before_its_key_put_before_destroying_keys()
     let bundle = export.join("paused.age");
     instance.create_recovery_bundle(&bundle, &recipients)?;
     instance.verify_recovery_bundle(&bundle, positron_kernel::RecoveryUnlock::Identity(&unlock))?;
-    services
+    let backup = services
         .manage_backup(
             &administrator,
             &create(&services, &path, "f1f1f1f1-f1f1-41f1-81f1-f1f1f1f1f1f1")?.encode()?,
         )
         .map_err(|e| format!("backup: {e:?}"))?;
-    let stop = stop_after(StopPoint::BeforeKeyUpload)?;
+    let backup_id =
+        crate::services::maintenance_verification::decode_fixed_hex(&backup.operation.id)
+            .ok_or("backup stop identity")?;
+    let stop = stop_after(
+        services.instance.instance.to_bytes(),
+        backup_id,
+        StopPoint::BeforeKeyUpload,
+    )?;
     let cancellation = crate::TaskCancellation::new();
     let worker_services = services.clone();
     let worker_cancellation = cancellation.clone();
@@ -186,7 +193,11 @@ fn purge_drains_a_backup_stopped_before_its_key_put_before_destroying_keys()
     let services = ServiceHandle::new(Arc::clone(&instance))?;
     // A resumed capture still owns the pre-purge wrapped key. Purge must let
     // that publisher drain before it can publish its irreversible boundary.
-    let stop = stop_after(StopPoint::BeforeKeyUpload)?;
+    let stop = stop_after(
+        services.instance.instance.to_bytes(),
+        backup_id,
+        StopPoint::BeforeKeyUpload,
+    )?;
     let cancellation = crate::TaskCancellation::new();
     let worker_services = services.clone();
     let worker_cancellation = cancellation.clone();

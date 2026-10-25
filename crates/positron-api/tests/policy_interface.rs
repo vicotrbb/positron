@@ -499,3 +499,6 @@ fn policy_test_contract_artifacts_expose_only_the_redacted_outcome_summary() {
         4
     );
 }
+
+#[path = "policy_interface/rejections.rs"]
+mod rejections;

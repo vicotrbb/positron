@@ -3315,3 +3315,6 @@ fn export_request_digest(
         .control_tokens()
         .digest_query_cursor(b"query-export-request-v2", &payload)?)
 }
+
+#[path = "durable_export/budget_provenance.rs"]
+mod budget_provenance;

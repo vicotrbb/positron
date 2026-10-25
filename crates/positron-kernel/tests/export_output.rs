@@ -1099,3 +1099,6 @@ fn corrupted_or_substituted_export_payload_fails_closed_after_reopen() -> Result
     );
     Ok(())
 }
+
+#[path = "export_output/terminal_replay.rs"]
+mod terminal_replay;

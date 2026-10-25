@@ -11,3 +11,9 @@ publication cannot replace a newer anchor with an older one or clear
 exact transaction and records; unresolved publication requires canonical Catalog
 and clock recovery before further mutation. Operation timestamps and wall time
 never substitute for a trusted observation.
+
+Successful Drain retains genuine trusted elapsed time in the same final
+authenticated Catalog transaction as its Graceful Shutdown Record. Clock
+staging rolls back before visibility on interruption; exact confirmed
+visibility commits the staged anchor. This does not clear `ClockUncertain`,
+add a separate publication, or extend the Drain deadline.

@@ -150,7 +150,12 @@ pub(in crate::services::backup_administration) fn persist(
         .map_err(super::super::super::maintenance::map_failure)?;
     #[cfg(test)]
     if registry != old_registry && !progress.is_empty() {
-        test_stops::hit(test_stops::StopPoint::RegistryCursorPersisted, None)?;
+        test_stops::hit(
+            services.instance.instance.to_bytes(),
+            binding.operation_id(),
+            test_stops::StopPoint::RegistryCursorPersisted,
+            None,
+        )?;
     }
     Ok(())
 }

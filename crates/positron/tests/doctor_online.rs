@@ -325,23 +325,16 @@ fn online_doctor(
         return Err(Box::new(error));
     }
     child.stdin.take();
-    let status = wait_for_child(&mut child)?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or("doctor stdout unavailable after child completion")?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or("doctor stderr unavailable after child completion")?;
-    let mut output = Output {
-        status,
-        stdout: Vec::new(),
-        stderr: Vec::new(),
-    };
-    stdout.read_to_end(&mut output.stdout)?;
-    stderr.read_to_end(&mut output.stderr)?;
-    Ok(output)
+    collect_doctor(child)
+}
+
+fn collect_doctor(child: std::process::Child) -> Result<Output, Box<dyn std::error::Error>> {
+    Ok(child_output::wait_before(
+        child,
+        Instant::now() + CHILD_WAIT,
+        Duration::from_millis(10),
+        "Doctor child exceeded the bounded test deadline",
+    )?)
 }
 
 #[cfg(unix)]
@@ -377,23 +370,6 @@ fn temporary_path(name: &str) -> std::path::PathBuf {
         .expect("time after unix epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("positron-doctor-{name}-{nonce}"))
-}
-
-fn wait_for_child(child: &mut std::process::Child) -> io::Result<std::process::ExitStatus> {
-    let deadline = Instant::now() + CHILD_WAIT;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            terminate_child(child)?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Doctor child exceeded the bounded test deadline",
-            ));
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
 }
 
 fn terminate_child(child: &mut std::process::Child) -> io::Result<()> {
@@ -476,19 +452,14 @@ fn online_control_doctor_bounds_the_whole_response_when_a_peer_trickles_bytes()
     let mut input = child.stdin.take().ok_or("doctor stdin")?;
     input.write_all(b"system-administrator\n")?;
     drop(input);
-    let status = wait_for_child(&mut child);
+    let output = collect_doctor(child);
     let finished = Instant::now();
     done.store(true, Ordering::Release);
     let accepted = join_listener(server, "trickling control listener")?;
-    let status = status?;
-    let mut stdout = String::new();
-    child
-        .stdout
-        .take()
-        .ok_or("doctor stdout")?
-        .read_to_string(&mut stdout)?;
+    let output = output?;
+    let stdout = String::from_utf8(output.stdout)?;
     std::fs::remove_file(path)?;
-    assert_eq!(status.code(), Some(3));
+    assert_eq!(output.status.code(), Some(3));
     assert!(stdout.contains("DOCTOR_ONLINE_INSPECTION_UNAVAILABLE"));
     assert!(
         finished.duration_since(accepted) < REQUEST_BOUND,
@@ -551,3 +522,25 @@ fn healthy_status_peer_consumes_delayed_request_before_responding()
     assert!(response.ends_with(STATUS_BODY));
     Ok(())
 }
+
+#[path = "support/output_pressure.rs"]
+mod output_pressure;
+
+#[test]
+fn doctor_capture_drains_both_streams_before_waiting_for_exit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let output = collect_doctor(output_pressure::child()?)?;
+    assert!(output.status.success());
+    assert!(
+        output.stdout == vec![b'x'; 256 * 1024],
+        "stdout capture changed"
+    );
+    assert!(
+        output.stderr == vec![b'x'; 256 * 1024],
+        "stderr capture changed"
+    );
+    Ok(())
+}
+
+#[path = "support/bounded_child_output.rs"]
+mod child_output;

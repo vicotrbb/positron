@@ -486,7 +486,12 @@ fn restart_at(
             &accepted.operation.id,
         )?;
     } else {
-        let stop = stop_after(point)?;
+        let stop = stop_after(
+            services.instance.instance.to_bytes(),
+            crate::services::maintenance_verification::decode_fixed_hex(&accepted.operation.id)
+                .ok_or("stop operation identity")?,
+            point,
+        )?;
         let cancellation = crate::TaskCancellation::new();
         let worker_services = services.clone();
         let worker_cancel = cancellation.clone();
@@ -701,7 +706,11 @@ fn verify_semantic_admission(
     let status = BackupRequest::decode(&serde_json::to_vec(
         &serde_json::json!({"action":"status", "operation_id":operation}),
     )?)?;
-    let mut stop = Some(stop_after(StopPoint::VerificationMetadataVerified)?);
+    let mut stop = Some(stop_after(
+        services.instance.instance.to_bytes(),
+        task.to_bytes(),
+        StopPoint::VerificationMetadataVerified,
+    )?);
     let mut phase = 0;
     let mut semantic_reservation = None;
     let mut execution = None;
@@ -739,7 +748,11 @@ fn verify_semantic_admission(
                 drop(stop.take());
                 if phase == 0 {
                     semantic_reservation = Some(owner.task().reservations());
-                    stop = Some(stop_after(StopPoint::VerificationSemanticVerified)?);
+                    stop = Some(stop_after(
+                        services.instance.instance.to_bytes(),
+                        task.to_bytes(),
+                        StopPoint::VerificationSemanticVerified,
+                    )?);
                     phase = 1;
                 } else {
                     assert_eq!(
@@ -961,7 +974,11 @@ fn verify_pending_checkpoint_fault(
     )
     .map_err(|failure| format!("task: {failure:?}"))?;
     let coordinator = services.instance.maintenance_coordinator();
-    let stop = stop_after(StopPoint::VerificationRemoteCheckpointDue)?;
+    let stop = stop_after(
+        services.instance.instance.to_bytes(),
+        task.to_bytes(),
+        StopPoint::VerificationRemoteCheckpointDue,
+    )?;
     let mut execution = None;
     let mut work: Option<BackupWork> = None;
     let deadline = std::time::Instant::now() + Duration::from_secs(60);

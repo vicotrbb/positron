@@ -103,6 +103,20 @@ fn catalog_checkpoint_reopen_restores_one_queued_task_with_its_progress()
             MaintenanceCheckpoint::new(1, 1, vec![4, 2]).expect("checkpoint"),
         )
         .expect("checkpoint must publish");
+    let immutable = catalog.pin().map_err(|error| format!("{error:?}"))?;
+    assert_eq!(
+        MaintenanceCoordinator::inspect_checkpoint_snapshot(&immutable, identity)
+            .map_err(|error| format!("{error:?}"))?,
+        Some(MaintenanceCheckpoint::new(1, 1, vec![4, 2]).map_err(|error| format!("{error:?}"))?)
+    );
+    assert_eq!(
+        MaintenanceCoordinator::inspect_checkpoint_snapshot(
+            &immutable,
+            MaintenanceTaskId::new([99; 16]).map_err(|error| format!("{error:?}"))?
+        )
+        .map_err(|error| format!("{error:?}"))?,
+        None
+    );
     let untimed_progress = coordinator
         .status_with_progress_slo(identity, Some(68), false)
         .expect("checkpoint status");

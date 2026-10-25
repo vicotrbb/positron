@@ -1612,10 +1612,11 @@ impl RunningTask for NativeRunningTask {
     }
 
     fn abort(&mut self) -> Result<(), TaskFailure> {
-        if let Some(services) = self.maintenance_wake.as_ref() {
-            services.notify_maintenance_worker();
-        }
-        self.force.cancel();
+        cancel_and_notify(&self.force, || {
+            if let Some(services) = self.maintenance_wake.as_ref() {
+                services.notify_maintenance_worker();
+            }
+        });
         if join_thread_within(&mut self.handle, Duration::from_millis(250))? {
             Ok(())
         } else {
@@ -1631,13 +1632,23 @@ impl NativeRunningTask {
             .as_ref()
             .is_some_and(TaskCancellation::is_cancelled)
         {
-            if let Some(services) = self.maintenance_wake.as_ref() {
-                services.notify_maintenance_worker();
-            }
-            self.force.cancel();
+            cancel_and_notify(&self.force, || {
+                if let Some(services) = self.maintenance_wake.as_ref() {
+                    services.notify_maintenance_worker();
+                }
+            });
         }
     }
 }
+
+fn cancel_and_notify(force: &TaskCancellation, notify: impl FnOnce()) {
+    // A worker consuming this wake must already observe cancellation.
+    force.cancel();
+    notify();
+}
+
+#[cfg(test)]
+mod cancellation_tests;
 
 fn join_thread_within(
     handle: &mut Option<JoinHandle<Result<(), TaskFailure>>>,

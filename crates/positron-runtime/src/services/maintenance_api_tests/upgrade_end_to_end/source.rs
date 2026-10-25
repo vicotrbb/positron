@@ -136,6 +136,7 @@ pub(super) fn drain_source_case(
         })
         .collect();
     let admission = UpgradeRequest::new(
+        positron_config::ExecutableDistribution::Native,
         (source.clone(), qualified),
         artifacts,
         [44; 16],

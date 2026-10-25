@@ -94,3 +94,6 @@ fn upgrade_client_preserves_capacity_refusal() -> Result<(), Box<dyn std::error:
     server.join().map_err(|_| "server")??;
     Ok(())
 }
+
+#[path = "upgrade_contract/transport_deadline.rs"]
+mod transport_deadline;

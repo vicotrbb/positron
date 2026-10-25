@@ -52,3 +52,9 @@ mod tenant_administration;
 mod tls_profiles;
 #[path = "native_transport/transport.rs"]
 mod transport;
+
+#[path = "native_transport/administration_refusals.rs"]
+mod administration_refusals;
+
+#[path = "native_transport/log_query.rs"]
+mod log_query;

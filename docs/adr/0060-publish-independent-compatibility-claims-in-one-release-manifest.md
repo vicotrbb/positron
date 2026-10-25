@@ -113,3 +113,18 @@ keys and requires one signature match using the same Kernel signature primitive.
 Revocation applies to both roles; source-only authority cannot construct a
 verified target or verify a full release. Snapshot expiry, rollback floor and the
 owning Clock still apply. No second trust root or manifest wire format is added.
+
+Nix outputs use the same inventory and manifest. The `Nix` surface identifies
+the output NAR and signed store path. Its native cache profile verifies Nix's
+standard Ed25519 store-path fingerprint, including NAR hash, size and references,
+under a root-authorized Publisher key. Generic workflow provenance cannot
+replace that signature. Functional NAR bytes must match an independent build.
+
+Nix-linked executables differ from GNU archive executables even at the same
+product version. The existing `NativeExecutable` role also carries
+`nix-linux-x86_64`, `nix-linux-aarch64`, `nix-macos-x86_64` and
+`nix-macos-aarch64` platforms. Canonical
+`[release.installation].executable_distribution` selects `native` (the existing
+default) or `nix` for current/candidate executable attestation, durable upgrade
+selection and recovery. This extends the platform namespace without another
+manifest or executable authority, and never guesses from a filesystem path.

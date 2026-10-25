@@ -3,6 +3,7 @@ pub mod keyless;
 mod native_packages;
 mod native_registry;
 mod native_rpm;
+pub mod nix_cache;
 use positron_kernel::release_manifest::{
     FormatCompatibility, ProductVersion, ReleaseCompatibility,
 };
@@ -123,6 +124,14 @@ impl Fixture {
                 required.push((surface, target));
             }
         }
+        for target in [
+            "nix-linux-x86_64",
+            "nix-linux-aarch64",
+            "nix-macos-x86_64",
+            "nix-macos-aarch64",
+        ] {
+            required.push((NativeExecutable, target));
+        }
         for surface in [
             Homebrew,
             OciIndex,
@@ -169,6 +178,8 @@ impl Fixture {
                 }
             } else if surface == Api {
                 b"canonical api definition".to_vec()
+            } else if surface == Nix {
+                include_bytes!("../fixtures/positron.nar").to_vec()
             } else {
                 format!("functional artifact {index}").into_bytes()
             };
@@ -238,7 +249,11 @@ impl Fixture {
                 publication: Publication {
                     registry: format!("https://registry.example/{file}"),
                     immutable_identity: format!("sha256:{digest}"),
-                    native_subject: file.clone(),
+                    native_subject: if surface == Nix {
+                        format!("/nix/store/00000000000000000000000000000000-positron-{target}")
+                    } else {
+                        file.clone()
+                    },
                     native_revision: None,
                     state: PublicationState::Published,
                     proof: format!("receipt-{index}"),
@@ -403,22 +418,28 @@ impl Fixture {
             }) {
                 continue;
             }
-            let policy = self
-                .native_artifacts
-                .iter()
-                .find(|data| data.filename == artifact.file)
-                .map(|data| data.policy.clone())
-                .unwrap_or_else(|| {
-                    NativePublisherPolicy::Keyless(NativeKeylessPublisher {
-                        kind: NativePublicationKind::GithubActions,
-                        trusted_root_sha256: Sha256::digest(serde_json::to_vec(&root).unwrap())
-                            .into(),
-                        identity: keyless::SAN.into(),
-                        issuer: keyless::ISSUER.into(),
-                        repository: keyless::REPOSITORY.into(),
-                        source_ref: keyless::REF.into(),
+            let policy = if artifact.surface == Surface::Nix {
+                NativePublisherPolicy::NixCache {
+                    key_name: nix_cache::NAME.into(),
+                    key_hint: nix_cache::hint(),
+                }
+            } else {
+                self.native_artifacts
+                    .iter()
+                    .find(|data| data.filename == artifact.file)
+                    .map(|data| data.policy.clone())
+                    .unwrap_or_else(|| {
+                        NativePublisherPolicy::Keyless(NativeKeylessPublisher {
+                            kind: NativePublicationKind::GithubActions,
+                            trusted_root_sha256: Sha256::digest(serde_json::to_vec(&root).unwrap())
+                                .into(),
+                            identity: keyless::SAN.into(),
+                            issuer: keyless::ISSUER.into(),
+                            repository: keyless::REPOSITORY.into(),
+                            source_ref: keyless::REF.into(),
+                        })
                     })
-                });
+            };
             publishers.push(NativePublisher {
                 registry: artifact.publication.registry.clone(),
                 policy,
@@ -456,6 +477,12 @@ impl Fixture {
             revoked_manifests: vec![],
             revoked_artifacts: vec![],
         };
+        snapshot.identities.push(SigningIdentity {
+            public_key: nix_cache::key(),
+            purpose: KeyPurpose::Publisher,
+            not_before_unix: 100,
+            expires_unix: keyless::NOW as u64 + 50,
+        });
         mutate(&mut snapshot);
         InstalledProjectTrustRoot {
             public_key: key,
@@ -530,7 +557,11 @@ impl Fixture {
                 let unchanged = native_statement.clone();
                 change_native(artifact, &mut native_statement);
                 let payload = serde_json::to_vec(&native_statement).unwrap();
-                parameters["native"] = if native_statement == unchanged {
+                parameters["native"] = if artifact.surface == Surface::Nix
+                    && native_statement == unchanged
+                {
+                    nix_cache::proof(artifact, &self.inventory)
+                } else if native_statement == unchanged {
                     self.native_artifacts.iter().find(|data|data.filename==artifact.file).map(|data|data.proof.clone()).unwrap_or_else(||json!({"trustedRoot":native.trusted_root(),"bundle":native.bundle(&payload)}))
                 } else {
                     json!({"trustedRoot":native.trusted_root(),"bundle":native.bundle(&payload)})

@@ -5,8 +5,12 @@
 mod archive;
 #[path = "support/archive_binary.rs"]
 mod archive_binary;
+#[path = "support/bounded_child_output.rs"]
+mod child_output;
 #[path = "support/native_binary.rs"]
 mod native_binary;
+#[path = "support/output_pressure.rs"]
+mod output_pressure;
 #[path = "binary_ingestion/recovery.rs"]
 mod recovery;
 #[path = "binary_ingestion/upgrade.rs"]
@@ -58,7 +62,12 @@ fn request_with_capacity_retry(
             head.lines()
                 .any(|line| line.eq_ignore_ascii_case("Retry-After: 1"))
         });
-        if !response.starts_with("HTTP/1.1 429 ") || !retry_after_one_second {
+        let query_capacity = path != positron_api::log_query::HTTP_PATH
+            || response.split_once("\r\n\r\n").is_some_and(|(_, payload)| {
+                positron_api::log_query::decode_query_rejection(429, payload.as_bytes())
+                    == positron_api::log_query::LogQueryServiceClientFailure::CapacityUnavailable
+            });
+        if !response.starts_with("HTTP/1.1 429 ") || !retry_after_one_second || !query_capacity {
             break;
         }
         if Instant::now() + Duration::from_secs(1) >= deadline {
@@ -284,15 +293,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
         let mut input = doctor.stdin.take().ok_or("missing doctor stdin")?;
         writeln!(input, "{}", admin_secret)?;
         drop(input);
-        while doctor.try_wait()?.is_none() {
-            if Instant::now() >= doctor_deadline {
-                doctor.kill()?;
-                doctor.wait()?;
-                return Err("doctor deadline expired".into());
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        let output = doctor.wait_with_output()?;
+        let output = collect_doctor(doctor, doctor_deadline)?;
         if String::from_utf8_lossy(&output.stdout)
             .lines()
             .any(|line| line == "finding_code=DOCTOR_ONLINE_INSPECTION_UNAVAILABLE")
@@ -362,7 +363,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     );
     let api_endpoint = format!("127.0.0.1:{}", ports.get(1).ok_or("missing API port")?).parse()?;
     let before_restart_digest =
-        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?;
+        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret, None)?;
     archive::query_refusals(
         &fixture.root,
         api_endpoint,
@@ -384,7 +385,7 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     );
     ready(operations)?;
     assert_eq!(
-        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret)?,
+        archive::query_log(&binary, &fixture.root, api_endpoint, query_secret, None)?,
         before_restart_digest
     );
     binary = recovery::roundtrip(
@@ -601,4 +602,13 @@ fn binary_http_ingestion_recovers_after_sigkill_and_graceful_restart() -> TestRe
     }
     fixture.child = None;
     Ok(())
+}
+
+fn collect_doctor(doctor: Child, deadline: Instant) -> TestResult<std::process::Output> {
+    Ok(child_output::wait_before(
+        doctor,
+        deadline,
+        Duration::from_millis(25),
+        "doctor deadline expired",
+    )?)
 }

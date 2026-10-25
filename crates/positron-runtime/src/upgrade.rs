@@ -6,7 +6,9 @@ pub(crate) mod fixture_metadata;
 pub(crate) mod startup;
 pub use startup::UpgradeStartupVerification;
 mod offline;
-pub use offline::OfflineUpgradeSession;
+pub use offline::{
+    OfflineUpgradeProgress, OfflineUpgradeSession, UpgradeCheckpointProgress, UpgradeChildProgress,
+};
 mod request;
 #[cfg(test)]
 pub(crate) use request::tests::{installed_trust, qualified_target as qualified_fixture_target};

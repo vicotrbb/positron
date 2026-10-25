@@ -162,7 +162,13 @@ impl InitializedInstance {
         self.key.close_for_shutdown().map_err(|_| unavailable())?;
         self.begin_shutdown()?;
         match catalog
-            .commit_interruptibly(basis.identity(), proposal, None, cancelled)
+            .commit_interruptibly_with_lifecycle_clock(
+                basis.identity(),
+                proposal,
+                None,
+                &self.retention_time,
+                cancelled,
+            )
             .map_err(|_| unavailable())?
         {
             Some(_) => Ok(()),

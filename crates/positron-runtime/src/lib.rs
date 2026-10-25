@@ -31,8 +31,9 @@ mod tail_fuzz_support;
 mod task;
 mod upgrade;
 pub use upgrade::{
-    OfflineUpgradeSession, UpgradeArtifactIdentity, UpgradeArtifactInput, UpgradeFailure,
-    UpgradeReleasePlan, UpgradeRequest, UpgradeStartupVerification,
+    OfflineUpgradeProgress, OfflineUpgradeSession, UpgradeArtifactIdentity, UpgradeArtifactInput,
+    UpgradeCheckpointProgress, UpgradeChildProgress, UpgradeFailure, UpgradeReleasePlan,
+    UpgradeRequest, UpgradeStartupVerification,
 };
 
 pub use configuration::{

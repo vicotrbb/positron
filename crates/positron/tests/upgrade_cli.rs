@@ -87,3 +87,6 @@ fn cli_sends_configured_candidate_and_reports_bound_release_status()
     assert!(!stdout.contains("pos_fixture_secret"));
     Ok(())
 }
+
+#[path = "upgrade_cli/transport_deadline.rs"]
+mod transport_deadline;

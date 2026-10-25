@@ -16,7 +16,46 @@ fn construction_binds_the_full_set_to_the_existing_canonical_manifest() {
         construction.manifest.source_commit,
         support::keyless::SOURCE_COMMIT
     );
-    assert_eq!(construction.manifest.artifacts.len(), 9);
+    use positron_kernel::release_manifest::ArtifactRole;
+    let mut executables: Vec<_> = construction
+        .manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.role == ArtifactRole::NativeExecutable)
+        .map(|artifact| artifact.platform.as_str())
+        .collect();
+    executables.sort_unstable();
+    assert_eq!(
+        executables,
+        [
+            "linux-aarch64",
+            "linux-x86_64",
+            "macos-aarch64",
+            "macos-x86_64",
+            "nix-linux-aarch64",
+            "nix-linux-x86_64",
+            "nix-macos-aarch64",
+            "nix-macos-x86_64"
+        ]
+    );
+    assert_eq!(construction.manifest.artifacts.len(), 13);
+    for role in [
+        ArtifactRole::Schema,
+        ArtifactRole::CompatibilityManifest,
+        ArtifactRole::Sbom,
+        ArtifactRole::Provenance,
+        ArtifactRole::ReleaseInventory,
+    ] {
+        assert_eq!(
+            construction
+                .manifest
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.role == role)
+                .count(),
+            1
+        );
+    }
     assert_ne!(
         construction.signing_message().unwrap(),
         construction.manifest.canonical_bytes().unwrap()
@@ -195,4 +234,52 @@ fn signed_nuget_wrap_binds_the_actual_unsigned_rebuilt_zip() {
         .err(),
         Some(ReleaseError::Unreproducible)
     );
+}
+
+#[test]
+fn full_release_construction_still_requires_every_validation_evidence_result() {
+    for result in [
+        "unit",
+        "integration",
+        "fuzz",
+        "conformance",
+        "fault",
+        "security",
+        "dependency_policy",
+        "secret_scan",
+    ] {
+        for missing in [false, true] {
+            let mut fixture = support::Fixture::new();
+            let id = fixture.inventory.artifacts[0].evidence.clone();
+            let path = fixture.root.join("bundle").join(&id);
+            let mut evidence: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if missing {
+                evidence["results"].as_object_mut().unwrap().remove(result);
+            } else {
+                evidence["results"][result] = serde_json::json!(false);
+            }
+            let bytes = serde_json::to_vec(&evidence).unwrap();
+            std::fs::write(path, &bytes).unwrap();
+            fixture
+                .inventory
+                .files
+                .iter_mut()
+                .find(|file| file.id == id)
+                .unwrap()
+                .identity = FileIdentity::of(&bytes);
+            assert_eq!(
+                construct_release(
+                    &fixture.inventory,
+                    &fixture.root.join("bundle"),
+                    &fixture.rebuild,
+                    &[],
+                    vec![]
+                )
+                .err(),
+                Some(ReleaseError::Unsupported),
+                "{result} missing={missing}"
+            );
+        }
+    }
 }

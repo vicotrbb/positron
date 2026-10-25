@@ -126,8 +126,9 @@ fn execute(
         return Ok(());
     }
     if options.action == "status" {
-        let operation = OfflineUpgradeSession::inspect(&paths, &configuration, options.id)
+        let progress = OfflineUpgradeSession::inspect_progress(&paths, &configuration, options.id)
             .map_err(upgrade_failure)?;
+        let operation = progress.operation;
         writeln!(
             output,
             "operation_id={} status={:?} stage={:?} revision={} rollback_available={}",
@@ -138,6 +139,7 @@ fn execute(
             operation.upgrade_rollback_available()
         )
         .map_err(|_| "upgrade output unavailable")?;
+        write_children(output, progress.snapshot, progress.verification)?;
         return Ok(());
     }
     let mut session = match OfflineUpgradeSession::begin(&paths, &configuration, options.id) {
@@ -194,6 +196,37 @@ fn execute(
         operation.upgrade_rollback_available()
     )
     .map_err(|_| "upgrade output unavailable")?;
+    if options.action == "advance" {
+        let progress = session.progress(&configuration).map_err(upgrade_failure)?;
+        write_children(output, progress.snapshot, progress.verification)?;
+    }
+    Ok(())
+}
+fn write_children(
+    output: &mut impl std::io::Write,
+    snapshot: Option<positron_runtime::UpgradeChildProgress>,
+    verification: Option<positron_runtime::UpgradeChildProgress>,
+) -> Result<(), &'static str> {
+    for (name, child) in [("snapshot", snapshot), ("verification", verification)] {
+        if let Some(child) = child {
+            write!(output,
+                "{name}=present {name}_kind={:?} {name}_phase={:?} {name}_status={:?} {name}_revision={} {name}_progress_percent={}",
+                child.kind, child.phase, child.status, child.revision, child.progress_percent,
+            ).map_err(|_| "upgrade output unavailable")?;
+            if let Some(checkpoint) = child.checkpoint {
+                write!(
+                    output,
+                    " {name}_checkpoint_sequence={} {name}_checkpoint_sha256={}",
+                    checkpoint.sequence,
+                    hex(checkpoint.sha256)
+                )
+                .map_err(|_| "upgrade output unavailable")?;
+            }
+            writeln!(output).map_err(|_| "upgrade output unavailable")?;
+        } else {
+            writeln!(output, "{name}=absent").map_err(|_| "upgrade output unavailable")?;
+        }
+    }
     Ok(())
 }
 fn hex<const N: usize>(bytes: [u8; N]) -> String {
@@ -229,6 +262,34 @@ fn upgrade_failure(failure: positron_runtime::UpgradeFailure) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn child_output_has_closed_fields_and_only_a_checkpoint_digest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut output = Vec::new();
+        super::write_children(
+            &mut output,
+            Some(positron_runtime::UpgradeChildProgress {
+                kind: positron_governance::DurableOperationKind::BackupSnapshot,
+                phase: positron_governance::DurableOperationPhase::BackupTransfer,
+                status: positron_governance::DurableOperationStatus::Running,
+                revision: 7,
+                progress_percent: 40,
+                checkpoint: Some(positron_runtime::UpgradeCheckpointProgress {
+                    sequence: 3,
+                    sha256: [0xab; 32],
+                }),
+            }),
+            None,
+        )?;
+        assert_eq!(
+            String::from_utf8(output)?,
+            concat!(
+                "snapshot=present snapshot_kind=BackupSnapshot snapshot_phase=BackupTransfer snapshot_status=Running snapshot_revision=7 snapshot_progress_percent=40 snapshot_checkpoint_sequence=3 snapshot_checkpoint_sha256=",
+                "abababababababababababababababababababababababababababababababab\nverification=absent\n"
+            )
+        );
+        Ok(())
+    }
     #[test]
     fn offline_upgrade_has_explicit_bounded_actions_and_no_remote_trust_options() {
         assert!(

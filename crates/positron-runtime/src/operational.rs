@@ -15,3 +15,7 @@ pub(crate) use telemetry::OperationalTelemetry;
 
 #[cfg(fuzzing)]
 pub(crate) use telemetry::fuzz_state;
+
+#[cfg(test)]
+#[path = "operational/tests.rs"]
+mod tests;

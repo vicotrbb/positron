@@ -14,6 +14,7 @@ pub struct UpgradeArtifactInput {
 /// Explicit operator intent. Signatures are verified by the one Release Trust owner.
 #[derive(Clone, Debug)]
 pub struct UpgradeRequest {
+    pub(crate) distribution: positron_config::ExecutableDistribution,
     pub(crate) source: VerifiedReleaseManifest,
     pub(crate) target: positron_release::VerifiedReleaseTarget,
     pub(crate) artifacts: Vec<UpgradeArtifactInput>,
@@ -53,6 +54,7 @@ impl UpgradeRequest {
             )
             .map_err(|_| UpgradeFailure::AuthenticationFailed)?;
         let plan = UpgradeReleasePlan::new(
+            self.distribution,
             self.source.clone(),
             self.target.verified_manifest().clone(),
             config_schema,
@@ -68,7 +70,7 @@ impl UpgradeRequest {
             std::env::current_exe().map_err(|_| UpgradeFailure::ArtifactUnavailable)?;
         #[cfg(test)]
         let executable = self.fixture_executable.as_ref().unwrap_or(&executable);
-        let source = UpgradeReleasePlan::native_artifact(&self.source)?;
+        let source = UpgradeReleasePlan::native_artifact(self.distribution, &self.source)?;
         UpgradeArtifactIdentity::measure_until(
             instance,
             executable.as_ref(),
@@ -111,6 +113,7 @@ impl UpgradeRequest {
     }
 
     pub fn new(
+        distribution: positron_config::ExecutableDistribution,
         releases: (
             VerifiedReleaseManifest,
             positron_release::VerifiedReleaseTarget,
@@ -129,6 +132,7 @@ impl UpgradeRequest {
             return Err(UpgradeFailure::InvalidRequest);
         }
         Ok(Self {
+            distribution,
             source: releases.0,
             target: releases.1,
             artifacts,
@@ -324,6 +328,7 @@ pub(crate) mod tests {
             })
             .collect();
         let mut request = UpgradeRequest::new(
+            positron_config::ExecutableDistribution::Native,
             (source, qualified),
             artifacts,
             [0x51; 16],

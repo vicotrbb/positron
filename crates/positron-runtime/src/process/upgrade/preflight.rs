@@ -67,7 +67,8 @@ pub(crate) fn accept_preflight(
         let version = release.manifest().version;
         UpgradeReleaseIdentity::new(
             release.digest(),
-            crate::UpgradeReleasePlan::native_artifact(release)?.sha256,
+            crate::UpgradeReleasePlan::native_artifact(plan.executable_distribution(), release)?
+                .sha256,
             [version.major, version.minor, version.patch],
         )
         .map_err(|_| UpgradeFailure::InvalidRequest)

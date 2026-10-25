@@ -50,11 +50,19 @@ pub(super) fn publish_offline(drained: &DrainedFixture) -> Result<(), Box<dyn st
         target,
         ..
     } = drained;
+    let child_progress = session.progress(configuration)?;
     assert_eq!(
         session.publish(target)?.upgrade_stage(),
         Some(UpgradeStage::AwaitingRestart)
     );
     drop(session);
+    let cold_progress = OfflineUpgradeSession::inspect_progress(
+        &drained.fixture.paths()?,
+        configuration,
+        drained.id,
+    )?;
+    assert_eq!(cold_progress.snapshot, child_progress.snapshot);
+    assert_eq!(cold_progress.verification, child_progress.verification);
     if let Some(installation) = configuration.installed_release() {
         fs::write(
             installation.current_manifest_file().as_path(),
@@ -110,6 +118,22 @@ pub(super) fn snapshot_offline(
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(session.rollback_snapshot()?.is_some());
+    let progress = session.progress(configuration)?;
+    assert_eq!(progress.operation, session.status()?);
+    let snapshot = progress.snapshot.ok_or("snapshot progress")?;
+    let verification = progress.verification.ok_or("verification progress")?;
+    assert_eq!(
+        snapshot.kind,
+        positron_governance::DurableOperationKind::BackupSnapshot
+    );
+    assert_eq!(
+        verification.kind,
+        positron_governance::DurableOperationKind::BackupVerification
+    );
+    assert_eq!(snapshot.status, DurableOperationStatus::Succeeded);
+    assert_eq!(verification.status, DurableOperationStatus::Succeeded);
+    assert_eq!(snapshot.progress_percent, 100);
+    assert_eq!(verification.progress_percent, 100);
     Ok(session)
 }
 
@@ -125,7 +149,11 @@ fn verify_target(drained: DrainedFixture) -> Result<(), Box<dyn std::error::Erro
     } = drained;
     let listeners = crate::process_lifecycle::ObservingListeners::default();
     let tasks = crate::process_lifecycle::ObservingTasks::default();
-    let mut verification = UpgradeStartupVerification::new(target, Some(query.clone()))?;
+    let mut verification = UpgradeStartupVerification::new(
+        positron_config::ExecutableDistribution::Native,
+        target,
+        Some(query.clone()),
+    )?;
     verification.fixture_version = Some(version);
     let target_process = ApplicationRuntime::start(
         ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly)

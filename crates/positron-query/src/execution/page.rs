@@ -49,16 +49,6 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 ));
             },
         };
-        if initially_exhausted || state.physical_elapsed_wall_seconds >= state.budget.wall_seconds()
-        {
-            return self.failed_page(
-                None,
-                QueryFailure::budget_exhausted(crate::QueryBudgetDimension::WallSeconds),
-                &state,
-                delivered_before,
-                resources,
-            );
-        }
         let frontier = match crate::execution_state::commit_position(state.frontier) {
             Ok(frontier) => frontier,
             Err(failure) => {
@@ -109,6 +99,16 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 ));
             },
         };
+        if initially_exhausted || state.physical_elapsed_wall_seconds >= state.budget.wall_seconds()
+        {
+            return self.failed_page(
+                Some(header),
+                QueryFailure::budget_exhausted(crate::QueryBudgetDimension::WallSeconds),
+                &state,
+                delivered_before,
+                resources,
+            );
+        }
         let mut affected_ranges =
             crate::availability::affected_ranges(&state.plan, snapshot.quarantined_holes());
         if let Some(trace_snapshot) = trace_snapshot {

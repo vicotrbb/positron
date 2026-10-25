@@ -28,13 +28,7 @@ impl OfflineUpgradeSession {
                 )?
             },
         };
-        if snapshot.kind() != DurableOperationKind::BackupSnapshot
-            || snapshot.backup_parameters() != Some(parameters.backup())
-            || snapshot.target_identity() != operation.target_identity()
-            || snapshot.request().principal() != operation.request().principal()
-        {
-            return Err(UpgradeFailure::InvalidRequest);
-        }
+        validate_snapshot_child(operation, &snapshot)?;
         self.services
             .drive_upgrade_backup_operation(snapshot.operation_id(), deadline)
     }
@@ -44,9 +38,6 @@ impl OfflineUpgradeSession {
         snapshot: &DurableOperation,
         deadline: Instant,
     ) -> Result<DurableOperation, UpgradeFailure> {
-        let parameters = operation
-            .upgrade_parameters()
-            .ok_or(UpgradeFailure::UnsafeState)?;
         let verification_key =
             Administration::upgrade_snapshot_verification_key(self.id).map_err(persistence)?;
         let verification = match self.child(verification_key)? {
@@ -67,21 +58,7 @@ impl OfflineUpgradeSession {
                 )?
             },
         };
-        let verified = verification
-            .backup_verification_parameters()
-            .ok_or(UpgradeFailure::InvalidRequest)?;
-        let receipt = snapshot
-            .backup_receipt()
-            .ok_or(UpgradeFailure::SnapshotUnavailable)?;
-        if verification.kind() != DurableOperationKind::BackupVerification
-            || verification.target_identity() != operation.target_identity()
-            || verification.request().principal() != operation.request().principal()
-            || verified.snapshot_id() != snapshot.operation_id().to_bytes()
-            || verified.manifest_checksum() != receipt.manifest()
-            || verified.repository() != parameters.backup().repository()
-        {
-            return Err(UpgradeFailure::InvalidRequest);
-        }
+        validate_verification_child(operation, snapshot, &verification)?;
         self.services
             .drive_upgrade_backup_operation(verification.operation_id(), deadline)
     }
@@ -104,4 +81,47 @@ impl OfflineUpgradeSession {
         drop(catalog);
         self.advance_stage(UpgradeStage::Publishing)
     }
+}
+
+pub(super) fn validate_snapshot_child(
+    parent: &DurableOperation,
+    child: &DurableOperation,
+) -> Result<(), UpgradeFailure> {
+    let parameters = parent
+        .upgrade_parameters()
+        .ok_or(UpgradeFailure::UnsafeState)?;
+    if child.kind() != DurableOperationKind::BackupSnapshot
+        || child.backup_parameters() != Some(parameters.backup())
+        || child.target_identity() != parent.target_identity()
+        || child.request().principal() != parent.request().principal()
+    {
+        return Err(UpgradeFailure::InvalidRequest);
+    }
+    Ok(())
+}
+pub(super) fn validate_verification_child(
+    parent: &DurableOperation,
+    snapshot: &DurableOperation,
+    child: &DurableOperation,
+) -> Result<(), UpgradeFailure> {
+    let parameters = parent
+        .upgrade_parameters()
+        .ok_or(UpgradeFailure::UnsafeState)?;
+    let verified = child
+        .backup_verification_parameters()
+        .ok_or(UpgradeFailure::InvalidRequest)?;
+    let receipt = snapshot
+        .backup_receipt()
+        .ok_or(UpgradeFailure::SnapshotUnavailable)?;
+    if child.kind() != DurableOperationKind::BackupVerification
+        || child.target_identity() != parent.target_identity()
+        || child.request().principal() != parent.request().principal()
+        || verified.snapshot_id() != snapshot.operation_id().to_bytes()
+        || verified.manifest_checksum() != receipt.manifest()
+        || verified.repository() != parameters.backup().repository()
+        || verified.registration_identity() != parameters.backup().registration_identity()
+    {
+        return Err(UpgradeFailure::InvalidRequest);
+    }
+    Ok(())
 }

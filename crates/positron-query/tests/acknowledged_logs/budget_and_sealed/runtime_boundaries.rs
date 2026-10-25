@@ -369,7 +369,7 @@ fn runtime_observations_cover_scan_output_and_pre_delivery_boundaries() -> Resul
         let events = service.execute(planned)?.collect::<Vec<_>>();
         assert!(matches!(
             events.as_slice(),
-            [QueryEvent::Terminal(QueryTerminal::Incomplete(incomplete))]
+            [QueryEvent::Header(_), QueryEvent::Terminal(QueryTerminal::Incomplete(incomplete))]
                 if incomplete.code() == QueryFailureCode::BudgetExhausted
                     && incomplete.stats().wall_seconds() == 60
         ));

@@ -281,6 +281,17 @@ pub fn fuzz_maintenance_catalog_stateful(data: &[u8]) {
     };
     let recovered = MaintenanceCoordinator::restore_from_catalog(&reopened)
         .expect("an authenticated Catalog generation must restore maintenance state");
+    let inspected = MaintenanceCoordinator::inspect_checkpoint_snapshot(
+        &reopened.pin().expect("authenticated current snapshot"),
+        identity,
+    )
+    .expect("read-only checkpoint inspection");
+    assert_eq!(
+        inspected
+            .as_ref()
+            .map(|checkpoint| (checkpoint.sequence(), checkpoint.opaque_progress().to_vec())),
+        expected.as_ref().and_then(|shape| shape.1.clone())
+    );
     let actual = recovered.status(identity).ok().map(status_shape);
     assert_eq!(actual, expected.map(recovered_shape));
 }

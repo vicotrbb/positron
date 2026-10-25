@@ -123,6 +123,8 @@ mod upgrade_rejected_shutdown;
 
 #[path = "maintenance_api_tests/upgrade_end_to_end.rs"]
 mod upgrade_end_to_end;
+#[path = "maintenance_api_tests/upgrade_verification_binding.rs"]
+mod upgrade_verification_binding;
 
 #[path = "maintenance_api_tests/upgrade_query_credentials.rs"]
 mod upgrade_query_credentials;
@@ -141,3 +143,6 @@ mod upgrade_crash_resume;
 
 #[path = "maintenance_api_tests/upgrade_rollback.rs"]
 mod upgrade_rollback;
+
+#[path = "maintenance_api_tests/query_observation.rs"]
+mod query_observation;

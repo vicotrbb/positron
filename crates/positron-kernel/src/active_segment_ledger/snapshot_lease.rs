@@ -179,25 +179,24 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         if !valid_lease_interval(now, expiry) {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
-        if let Some(expected_catalog) = expected_catalog {
+        if let Some(expected_catalog) = expected_catalog
+            && state.pending_lease_releases.identities().next().is_some()
+        {
             self.catalog.refresh_state()?;
             if self.catalog.pin()?.identity() != expected_catalog {
                 return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration));
             }
         }
         self.retry_pending_releases(&mut state)?;
-        if let Some(expected_catalog) = expected_catalog {
-            self.catalog.refresh_state()?;
-            if self.catalog.pin()?.identity() != expected_catalog {
-                return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration));
-            }
+        self.catalog.refresh_state()?;
+        let basis = self.catalog.pin()?;
+        if expected_catalog.is_some_and(|expected| basis.identity() != expected) {
+            return Err(LedgerFailure::new(LedgerFailureCode::StaleGeneration));
         }
         now = state.last_snapshot_lease_time.max(now);
         if !valid_lease_interval(now, expiry) {
             return Err(LedgerFailure::new(LedgerFailureCode::InvalidInput));
         }
-        self.catalog.refresh_state()?;
-        let basis = self.catalog.pin()?;
         let all_records = records(&basis)?;
         let expired = expired_in_scope(&all_records, self.scope, now);
         for record in all_records

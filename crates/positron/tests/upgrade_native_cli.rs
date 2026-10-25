@@ -197,6 +197,20 @@ impl RunningTask for IdleMaintenance {
 }
 #[test]
 fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain() -> Result {
+    upgrade_cli_case(positron_config::ExecutableDistribution::Native, false)
+}
+#[test]
+fn real_upgrade_cli_accepts_nix_intent_and_completes_the_same_process_drain() -> Result {
+    upgrade_cli_case(positron_config::ExecutableDistribution::Nix, false)
+}
+#[test]
+fn real_nix_upgrade_refuses_native_executable_identity() -> Result {
+    upgrade_cli_case(positron_config::ExecutableDistribution::Nix, true)
+}
+fn upgrade_cli_case(
+    distribution: positron_config::ExecutableDistribution,
+    mismatch: bool,
+) -> Result {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -226,11 +240,35 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
         .ok_or("Catalog epoch")?
         .value();
     drop(instance);
-    let (effective, candidate) = configuration(
+    let (mut effective, candidate) = configuration(
         &root,
+        distribution,
         epoch,
         claim.query_secret().ok_or("query credential")?,
     )?;
+    assert_eq!(
+        effective
+            .installed_release()
+            .ok_or("installed release")?
+            .executable_distribution(),
+        distribution
+    );
+    if mismatch {
+        let document = fs::read_to_string(root.join("positron.toml"))?.replace(
+            "executable_distribution=\"nix\"",
+            "executable_distribution=\"native\"",
+        );
+        fs::write(root.join("positron.toml"), document)?;
+        effective = positron_config::resolve(
+            positron_config::ConfigurationInputs::try_from_sources(
+                Some(&root.join("positron.toml")),
+                [] as [(&str, &str); 0],
+                [] as [(&str, &str); 0],
+            )
+            .map_err(|_| "fixture configuration inputs")?,
+        )?;
+    }
+
     let host = host("upgrade")?;
     let foreground = ForegroundTasks(&host);
     let process = ApplicationRuntime::start(
@@ -277,6 +315,21 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
         claim.secret()
     )?;
     let mut output = child.wait_with_output()?;
+    if mismatch {
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("upgrade precondition failed"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(process.pending_upgrade_operation()?.is_none());
+        assert_eq!(
+            process.shutdown(ShutdownTrigger::FirstSignal),
+            ExitOutcome::Graceful
+        );
+        fs::remove_dir_all(root)?;
+        return Ok(());
+    }
     if !output.status.success() && String::from_utf8_lossy(&output.stderr).contains(
         "transport outcome unknown; inspect the same operation or idempotency key before retrying"
     ) {
@@ -353,3 +406,53 @@ fn real_upgrade_cli_accepts_native_intent_and_completes_the_same_process_drain()
 
 #[path = "upgrade_native_cli/offline_recovery.rs"]
 mod offline_recovery;
+
+#[test]
+#[ignore = "prepares private signed metadata for the booted NixOS service check"]
+fn prepare_nixos_signed_upgrade_fixture() -> Result {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("POSITRON_TEST_UPGRADE_ROOT").ok_or("fixture root")?,
+    );
+    let source = std::path::PathBuf::from(
+        std::env::var_os("POSITRON_TEST_UPGRADE_SOURCE").ok_or("source executable")?,
+    );
+    let candidate = std::path::PathBuf::from(
+        std::env::var_os("POSITRON_TEST_UPGRADE_CANDIDATE").ok_or("candidate executable")?,
+    );
+    let query = fs::read_to_string(root.join("query.input"))?;
+    let document = root.join("positron.toml");
+    let effective = positron_config::resolve(
+        positron_config::ConfigurationInputs::try_from_sources(
+            Some(&document),
+            [] as [(&str, &str); 0],
+            [] as [(&str, &str); 0],
+        )
+        .map_err(|_| "source configuration")?,
+    )?;
+    let paths = BootstrapPaths::with_local_key(
+        Path::new(effective.data_directory()),
+        Path::new(effective.secrets_directory()),
+        effective.local_key_file().as_path(),
+        MountQualification::LocalHost,
+    )?;
+    let instance = InstanceBootstrap::reopen_configured(&paths, &effective)?;
+    let epoch = instance
+        .catalog_format_epoch()?
+        .ok_or("source epoch")?
+        .value();
+    drop(instance);
+    fs::create_dir_all(root.join("export"))?;
+    fs::set_permissions(root.join("export"), fs::Permissions::from_mode(0o700))?;
+    let commit = std::env::var("POSITRON_TEST_UPGRADE_COMMIT")?;
+    let (_, digest) = release::shared::configuration(
+        &root,
+        positron_config::ExecutableDistribution::Nix,
+        epoch,
+        query.trim(),
+        (&source, &candidate),
+        (&commit, &commit),
+    )?;
+    fs::write(root.join("candidate.digest"), hex(&digest))?;
+    fs::set_permissions(document, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}

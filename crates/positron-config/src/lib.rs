@@ -41,7 +41,7 @@ pub use values::*;
 mod inputs;
 pub use inputs::*;
 mod installed_release;
-pub use installed_release::InstalledReleaseConfiguration;
+pub use installed_release::{ExecutableDistribution, InstalledReleaseConfiguration};
 mod provider_access;
 pub use provider_access::{AzureManagedIdentitySelector, ProviderAccess, ProviderAuthentication};
 mod effective;

@@ -51,17 +51,12 @@ pub(in crate::services) struct SnapshotWork {
 }
 pub(in crate::services) fn recover_accepted_task(
     services: &ServiceHandle,
+    catalog: &positron_kernel::Catalog<'_>,
 ) -> Result<(), ServiceFailure> {
-    let Some(_gate) = services.try_catalog_operation()? else {
-        return Err(ServiceFailure::CatalogBusy);
-    };
-    let catalog = services
-        .open_maintenance_catalog()
-        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     let coordinator = services.instance.maintenance_coordinator();
     let mut after = None;
     while let Some(operation) =
-        DurableOperationAdministration::next_backup_operation(&catalog, after)
+        DurableOperationAdministration::next_backup_operation(catalog, after)
             .map_err(|_| ServiceFailure::CorruptState)?
     {
         require_operation(operation, services.instance.instance.to_bytes())?;
@@ -75,7 +70,7 @@ pub(in crate::services) fn recover_accepted_task(
         }
         submit(
             &services.instance,
-            &catalog,
+            catalog,
             operation,
             services
                 .maintenance_status_now()
@@ -400,7 +395,12 @@ pub(in crate::services) fn complete(
                 .map_err(provider_failure)?;
             work.reservation_established = true;
             #[cfg(test)]
-            test_stops::hit(test_stops::StopPoint::ReservationRegistered, cancellation)?;
+            test_stops::hit(
+                services.instance.instance.to_bytes(),
+                binding.operation_id(),
+                test_stops::StopPoint::ReservationRegistered,
+                cancellation,
+            )?;
             let registry = work.owner.registry_checkpoint()?;
             checkpoint::persist(
                 services,
@@ -422,7 +422,12 @@ pub(in crate::services) fn complete(
                     return Err(ServiceFailure::Cancelled);
                 }
                 #[cfg(test)]
-                test_stops::hit(test_stops::StopPoint::BeforeKeyUpload, cancellation)?;
+                test_stops::hit(
+                    services.instance.instance.to_bytes(),
+                    binding.operation_id(),
+                    test_stops::StopPoint::BeforeKeyUpload,
+                    cancellation,
+                )?;
                 work.next_key = work
                     .owner
                     .runtime
@@ -433,7 +438,11 @@ pub(in crate::services) fn complete(
                     ))
                     .map_err(provider_failure)?;
                 #[cfg(test)]
-                if test_stops::armed(test_stops::StopPoint::KeyPreparationPersisted)? {
+                if test_stops::armed(
+                    services.instance.instance.to_bytes(),
+                    binding.operation_id(),
+                    test_stops::StopPoint::KeyPreparationPersisted,
+                )? {
                     break;
                 }
                 if work.next_key as usize == work.context.keys().len()
@@ -456,7 +465,12 @@ pub(in crate::services) fn complete(
                 )?),
             )?;
             #[cfg(test)]
-            test_stops::hit(test_stops::StopPoint::KeyPreparationPersisted, cancellation)?;
+            test_stops::hit(
+                services.instance.instance.to_bytes(),
+                binding.operation_id(),
+                test_stops::StopPoint::KeyPreparationPersisted,
+                cancellation,
+            )?;
             return Ok(false);
         }
         let mut transfer = work.transfer.ok_or(ServiceFailure::Internal)?;
@@ -628,7 +642,12 @@ pub(in crate::services) fn complete(
         Err(failure) => return Err(provider_failure(failure)),
     };
     #[cfg(test)]
-    test_stops::hit(test_stops::StopPoint::RegistryPublished, cancellation)?;
+    test_stops::hit(
+        services.instance.instance.to_bytes(),
+        binding.operation_id(),
+        test_stops::StopPoint::RegistryPublished,
+        cancellation,
+    )?;
     record_publication(
         services,
         actor,

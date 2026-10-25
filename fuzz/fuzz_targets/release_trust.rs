@@ -48,6 +48,10 @@ fuzz_target!(|data: &[u8]| {
                 return;
             }
             let parameters = &mut statement["predicate"]["buildDefinition"]["externalParameters"];
+            if artifact.surface == Surface::Nix && !package_mutated {
+                parameters["native"]["narinfo"] = String::from_utf8_lossy(data.get(2..).unwrap_or_default()).into_owned().into();
+                return;
+            }
             if package_mutated {
                 if artifact.surface == Surface::SdkRust {
                     parameters["native"]["index"]["cksum"] = support::hex(
@@ -137,6 +141,10 @@ fn mutate_package(fixture: &mut support::Fixture, index: usize, data: &[u8]) -> 
     let mut bytes = std::fs::read(path).unwrap();
     let mut payload = None;
     match artifact.surface {
+        Surface::Nix if data.get(1).is_some_and(|mode| mode & 1 == 1) => {
+            bytes = data.get(2..).unwrap_or_default().to_vec();
+            payload = Some(bytes.clone());
+        },
         Surface::Rpm => {
             let word = |offset: usize| {
                 u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize

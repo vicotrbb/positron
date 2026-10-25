@@ -15,7 +15,7 @@ fn complete_offline_set_is_authenticated_under_installed_authority() {
         &[],
     )
     .unwrap();
-    assert_eq!(report.artifact_count(), 35);
+    assert_eq!(report.artifact_count(), 39);
     assert_eq!(report.trust_sequence(), 2);
     assert_eq!(
         report.manifest().manifest().version,

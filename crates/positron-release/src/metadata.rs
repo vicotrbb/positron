@@ -5,6 +5,14 @@ pub(crate) fn verify_metadata(
     inventory: &ReleaseInventory,
     bundle: &Bundle,
 ) -> Result<(), ReleaseError> {
+    verify_identities(inventory, bundle)?;
+    verify_evidence(inventory, bundle)
+}
+
+pub(crate) fn verify_identities(
+    inventory: &ReleaseInventory,
+    bundle: &Bundle,
+) -> Result<(), ReleaseError> {
     let input_identities = inventory
         .inputs
         .iter()
@@ -108,6 +116,24 @@ pub(crate) fn verify_metadata(
                 return Err(ReleaseError::IdentityMismatch);
             }
         }
+        if bundle
+            .read(&artifact.license_notices, 1_048_576)?
+            .is_empty()
+        {
+            return Err(ReleaseError::Invalid);
+        }
+    }
+    Ok(())
+}
+// Full release construction always requires the complete validation evidence.
+// Staged artifact identity qualification makes no claim that these gates passed.
+pub(crate) fn verify_evidence(
+    inventory: &ReleaseInventory,
+    bundle: &Bundle,
+) -> Result<(), ReleaseError> {
+    for artifact in &inventory.artifacts {
+        let digest = hex(&inventory.file(&artifact.file)?.identity.sha256);
+        let provenance = document(bundle, &artifact.provenance)?;
         let builder = provenance
             .pointer("/predicate/runDetails/builder/id")
             .and_then(Value::as_str)
@@ -142,15 +168,10 @@ pub(crate) fn verify_metadata(
                 return Err(ReleaseError::Unsupported);
             }
         }
-        if bundle
-            .read(&artifact.license_notices, 1_048_576)?
-            .is_empty()
-        {
-            return Err(ReleaseError::Invalid);
-        }
     }
     Ok(())
 }
+
 fn contains_hash(
     value: &Value,
     collection: &str,

@@ -53,6 +53,9 @@ fn remote_object_corruption_fails_backup_without_fencing_and_retains_cleanup()
         crate::services::maintenance_verification::decode_fixed_hex(&accepted.operation.id)
             .ok_or("snapshot")?;
     let stop = crate::services::backup_administration::stop_after(
+        services.instance.instance.to_bytes(),
+        crate::services::maintenance_verification::decode_fixed_hex(&accepted.operation.id)
+            .ok_or("stop operation identity")?,
         crate::services::backup_administration::StopPoint::ReservationRegistered,
     )?;
     let cancellation = crate::TaskCancellation::new();

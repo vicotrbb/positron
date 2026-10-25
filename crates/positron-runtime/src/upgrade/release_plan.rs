@@ -4,6 +4,7 @@ use positron_kernel::release_manifest::{ArtifactRole, ReleaseArtifact, VerifiedR
 
 #[derive(Clone, Debug)]
 pub struct UpgradeReleasePlan {
+    distribution: positron_config::ExecutableDistribution,
     source: VerifiedReleaseManifest,
     target: VerifiedReleaseManifest,
     config_schema: u16,
@@ -11,6 +12,7 @@ pub struct UpgradeReleasePlan {
 }
 impl UpgradeReleasePlan {
     pub fn new(
+        distribution: positron_config::ExecutableDistribution,
         source: VerifiedReleaseManifest,
         target: VerifiedReleaseManifest,
         config_schema: u16,
@@ -44,14 +46,18 @@ impl UpgradeReleasePlan {
         {
             return Err(UpgradeFailure::UnsupportedTransition);
         }
-        Self::native_artifact(&source)?;
-        Self::native_artifact(&target)?;
+        Self::native_artifact(distribution, &source)?;
+        Self::native_artifact(distribution, &target)?;
         Ok(Self {
+            distribution,
             source,
             target,
             config_schema,
             current_epoch,
         })
+    }
+    pub const fn executable_distribution(&self) -> positron_config::ExecutableDistribution {
+        self.distribution
     }
     pub fn source(&self) -> &VerifiedReleaseManifest {
         &self.source
@@ -66,9 +72,18 @@ impl UpgradeReleasePlan {
         self.current_epoch
     }
     pub fn native_artifact(
+        distribution: positron_config::ExecutableDistribution,
         manifest: &VerifiedReleaseManifest,
     ) -> Result<&ReleaseArtifact, UpgradeFailure> {
-        let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let prefix = match distribution {
+            positron_config::ExecutableDistribution::Native => "",
+            positron_config::ExecutableDistribution::Nix => "nix-",
+        };
+        let platform = format!(
+            "{prefix}{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
         let mut artifacts = manifest.manifest().artifacts.iter().filter(|artifact| {
             artifact.role == ArtifactRole::NativeExecutable && artifact.platform == platform
         });
@@ -149,6 +164,50 @@ mod tests {
         .expect("authenticated fixture")
     }
     #[test]
+    fn nix_executable_uses_its_distribution_specific_signed_identity() {
+        let mut source = fixture(0);
+        let mut target = fixture(1);
+        for manifest in [&mut source, &mut target] {
+            for artifact in &mut manifest.artifacts {
+                if artifact.role == ArtifactRole::NativeExecutable {
+                    artifact.platform = format!("nix-{}", artifact.platform);
+                }
+            }
+        }
+        assert!(
+            UpgradeReleasePlan::new(
+                positron_config::ExecutableDistribution::Nix,
+                signed(source.clone()),
+                signed(target.clone()),
+                1,
+                2
+            )
+            .is_ok()
+        );
+        for (source, target) in [(source.clone(), fixture(1)), (fixture(0), target)] {
+            assert!(matches!(
+                UpgradeReleasePlan::new(
+                    positron_config::ExecutableDistribution::Nix,
+                    signed(source),
+                    signed(target),
+                    1,
+                    2
+                ),
+                Err(UpgradeFailure::ArtifactMismatch)
+            ));
+        }
+        assert!(
+            UpgradeReleasePlan::new(
+                positron_config::ExecutableDistribution::Native,
+                signed(source),
+                signed(fixture(1)),
+                1,
+                2
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn signed_backup_claim_must_match_native_verification_capabilities() {
         for unsupported_epoch in [1, 99] {
             let mut source = fixture(0);
@@ -158,7 +217,13 @@ mod tests {
                 manifest.compatibility.backup.readable_epochs = vec![unsupported_epoch];
             }
             assert!(matches!(
-                UpgradeReleasePlan::new(signed(source), signed(target), 1, 2),
+                UpgradeReleasePlan::new(
+                    positron_config::ExecutableDistribution::Native,
+                    signed(source),
+                    signed(target),
+                    1,
+                    2
+                ),
                 Err(UpgradeFailure::UnsupportedTransition)
             ));
         }
@@ -168,13 +233,20 @@ mod tests {
         let source = signed(fixture(0));
         let target = signed(fixture(1));
         let target_digest = target.digest();
-        let plan = UpgradeReleasePlan::new(source, target, 1, 2).expect("compatible signed patch");
+        let plan = UpgradeReleasePlan::new(
+            positron_config::ExecutableDistribution::Native,
+            source,
+            target,
+            1,
+            2,
+        )
+        .expect("compatible signed patch");
         assert_eq!(plan.target().digest(), target_digest);
         assert_eq!(plan.source().manifest().version, version(0));
         assert_eq!(plan.config_schema(), 1);
         assert_eq!(plan.current_epoch(), 2);
         assert_eq!(
-            UpgradeReleasePlan::native_artifact(plan.target())
+            UpgradeReleasePlan::native_artifact(plan.executable_distribution(), plan.target())
                 .expect("native artifact")
                 .size,
             42
@@ -209,9 +281,27 @@ mod tests {
         ] {
             let mut target = fixture(1);
             mutate(&mut target);
-            assert!(UpgradeReleasePlan::new(signed(fixture(0)), signed(target), 1, 2).is_err());
+            assert!(
+                UpgradeReleasePlan::new(
+                    positron_config::ExecutableDistribution::Native,
+                    signed(fixture(0)),
+                    signed(target),
+                    1,
+                    2
+                )
+                .is_err()
+            );
         }
-        assert!(UpgradeReleasePlan::new(signed(fixture(0)), signed(fixture(1)), 1, 3).is_err());
+        assert!(
+            UpgradeReleasePlan::new(
+                positron_config::ExecutableDistribution::Native,
+                signed(fixture(0)),
+                signed(fixture(1)),
+                1,
+                3
+            )
+            .is_err()
+        );
     }
     #[test]
     fn published_additive_claims_and_previous_config_remain_supported() {
@@ -229,17 +319,38 @@ mod tests {
         target.compatibility.previous_config_schema = Some(1);
         target.compatibility.persistent.readable_epochs.push(3);
         target.compatibility.backup.readable_epochs.push(3);
-        assert!(UpgradeReleasePlan::new(signed(fixture(0)), signed(target), 1, 2).is_ok());
+        assert!(
+            UpgradeReleasePlan::new(
+                positron_config::ExecutableDistribution::Native,
+                signed(fixture(0)),
+                signed(target),
+                1,
+                2
+            )
+            .is_ok()
+        );
         let mut downgrade = fixture(1);
         downgrade.upgrade_from = vec![version(2)];
         assert!(matches!(
-            UpgradeReleasePlan::new(signed(fixture(2)), signed(downgrade), 1, 2),
+            UpgradeReleasePlan::new(
+                positron_config::ExecutableDistribution::Native,
+                signed(fixture(2)),
+                signed(downgrade),
+                1,
+                2
+            ),
             Err(UpgradeFailure::UnsupportedTransition)
         ));
         let mut source = fixture(0);
         source.artifacts[0].platform = "foreign-platform".into();
         assert!(matches!(
-            UpgradeReleasePlan::new(signed(source), signed(fixture(1)), 1, 2),
+            UpgradeReleasePlan::new(
+                positron_config::ExecutableDistribution::Native,
+                signed(source),
+                signed(fixture(1)),
+                1,
+                2
+            ),
             Err(UpgradeFailure::ArtifactMismatch)
         ));
     }

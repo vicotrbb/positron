@@ -49,6 +49,18 @@ impl TraceService for HeldCollector {
     }
 }
 
+fn assert_operational_status(stage: &'static str, response: String, expected: u16) {
+    let actual = response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok());
+    assert!(
+        response.starts_with(&format!("HTTP/1.1 {expected} ")),
+        "operational stage={stage} expected={expected} actual={actual:?}"
+    );
+}
+
 #[test]
 fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -88,8 +100,13 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         &process.bound_endpoints(),
         positron_runtime::ListenerRole::Api,
     )?;
-    assert_status(http(operations, "GET", "/metrics", &[], b"")?, 401);
-    assert_status(
+    assert_operational_status(
+        "initial_metrics_authentication",
+        http(operations, "GET", "/metrics", &[], b"")?,
+        401,
+    );
+    assert_operational_status(
+        "initial_api_probe",
         http(
             api,
             "GET",
@@ -99,7 +116,8 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         )?,
         404,
     );
-    assert_status(
+    assert_operational_status(
+        "initial_ingest_probe",
         http(
             address(
                 &process.bound_endpoints(),
@@ -122,16 +140,102 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
             .query_log_bodies(
                 &query,
                 "logs | range query_time 0 100 | limit 16",
-                QueryBudget::new(1, 16, 16, 1_048_576, 1_048_576, 60)?
+                QueryBudget::new(1_048_576, 16, 16, 1_048_576, 20_000_000, 60)?
             ),
         Err(positron_runtime::ServiceFailure::CapacityUnavailable)
+    );
+    use positron_api::log_query as log_api;
+    let query_client =
+        log_api::LogQueryServiceClient::new(log_api::LogQueryTransport::PlaintextOptOut {
+            endpoint: api,
+        })?;
+    let query_request = log_api::LogQueryRequest {
+        pipeline: "logs | range query_time 0 100 | limit 16".into(),
+        budget: Some(log_api::LogQueryBudget {
+            scanned_bytes: 1,
+            decoded_records: 16,
+            output_rows: 16,
+            output_bytes: 16_384,
+            memory_bytes: 1_048_576,
+            cpu_work_units: 15,
+            wall_seconds: 5,
+            maximum_time_range_nanoseconds: 100,
+        }),
+    };
+    // A valid public request that cannot fit the initialized principal's CPU
+    // authority produces a real rejected wire attempt, not a budget event.
+    let mut refused_request = query_request.clone();
+    refused_request
+        .budget
+        .as_mut()
+        .ok_or("missing refusal budget")?
+        .cpu_work_units = 1024;
+    assert!(
+        matches!(
+            query_client.execute(&query, &refused_request),
+            Err(log_api::LogQueryServiceClientFailure::CapacityUnavailable)
+        ),
+        "oversized admission request must be rejected as capacity unavailable"
+    );
+    let admission_scrape = http(
+        operations,
+        "GET",
+        "/metrics",
+        &[
+            ("Authorization", &format!("Bearer {administrator}")),
+            ("Accept", "application/openmetrics-text; version=1.0.0"),
+        ],
+        b"",
+    )
+    .map_err(|error| format!("operational admission metrics scrape: {error}"))?;
+    assert_operational_status("admission_metrics", admission_scrape.clone(), 200);
+    assert!(
+        admission_scrape
+            .lines()
+            .filter(|line| line.starts_with("positron_query_budget_failures_total{"))
+            .all(|line| line
+                .rsplit_once(' ')
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+                == Some(0)),
+        "an admission-refused query must not be credited with an execution budget dimension"
+    );
+
+    let (budget_response, capacity_refusals) =
+        super::log_query::execute_admitted_query(&query_client, &query, &query_request)
+            .map_err(|failure| format!("operational scanned-budget query failed: {failure:?}"))?;
+    let rendered = format!("{budget_response:?}");
+    for secret in [&administrator, &ingest, &query] {
+        assert!(
+            !rendered.contains(secret.as_str()),
+            "query response exposed a credential"
+        );
+    }
+    let Some(log_api::log_query_event::Event::Terminal(terminal)) = budget_response
+        .events
+        .last()
+        .and_then(|event| event.event.as_ref())
+    else {
+        return Err("missing actual query budget terminal".into());
+    };
+    assert_eq!(
+        (terminal.state.as_str(), terminal.reason.as_str()),
+        ("incomplete", "budget_exhausted")
+    );
+    assert_eq!(
+        terminal
+            .stats
+            .as_ref()
+            .ok_or("missing query budget stats")?
+            .limiting_budget
+            .as_deref(),
+        Some("scanned_bytes")
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut completed_requests = 0;
     let mut completed_query = false;
     let mut api_requests = 1;
     let mut ingest_requests = 1;
-    let mut query_requests = 1;
+    let mut query_requests = 2 + capacity_refusals;
     let mut fresh_probes = 0;
     let mut http_probes = 0;
     while completed_requests < 2 || !completed_query {
@@ -148,12 +252,12 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
                     fresh_probes += 1;
                     if completed_requests < 2 {
                         if http_probes % 2 == 0 {
-                            assert_status(operational_probe(
+                            assert_operational_status("export_api_probe", operational_probe(
                                 api, "/telemetry-body-canary", &administrator, b"", deadline,
                             )?, 404);
                             api_requests += 1;
                         } else {
-                            assert_status(operational_probe(
+                            assert_operational_status("export_ingest_probe", operational_probe(
                                 address(&process.bound_endpoints(), positron_runtime::ListenerRole::OtlpHttp)?,
                                 "/v1/logs", &ingest, &otlp_body("stored-telemetry-canary"), deadline,
                             )?, 200);
@@ -164,7 +268,7 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
                         assert_eq!(
                             process.services().ok_or("query services")?.query_log_bodies(
                                 &query, "logs | range query_time 0 100 | limit 16",
-                                QueryBudget::new(1, 16, 16, 1_048_576, 1_048_576, 60)?
+                                QueryBudget::new(1_048_576, 16, 16, 1_048_576, 20_000_000, 60)?
                             ),
                             Err(positron_runtime::ServiceFailure::CapacityUnavailable)
                         );
@@ -224,8 +328,9 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
             ("Accept", "application/openmetrics-text; version=1.0.0"),
         ],
         b"",
-    )?;
-    assert_status(scrape.clone(), 200);
+    )
+    .map_err(|error| format!("operational metrics scrape: {error}"))?;
+    assert_operational_status("final_metrics", scrape.clone(), 200);
     assert!(scrape.ends_with("# EOF\n"));
     assert!(scrape.contains(&format!(
         "positron_requests_total{{listener=\"api\",outcome=\"request_rejected\"}} {api_requests}\n"
@@ -234,8 +339,34 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         "positron_queries_total{{outcome=\"capacity_rejected\"}} {query_requests}\n"
     )));
     assert!(scrape.contains(&format!(
-        "positron_query_budget_failures_total{{dimension=\"scanned_bytes\"}} {query_requests}\n"
+        "positron_requests_total{{listener=\"api\",outcome=\"capacity_rejected\"}} {}\n",
+        1 + capacity_refusals,
     )));
+    assert!(scrape.contains("positron_queries_total{outcome=\"success\"} 1\n"));
+    assert!(
+        scrape
+            .lines()
+            .filter(
+                |line| line.starts_with("positron_query_budget_failures_total{")
+                    && !line.starts_with(
+                        "positron_query_budget_failures_total{dimension=\"scanned_bytes\"}"
+                    )
+            )
+            .all(|line| line
+                .rsplit_once(' ')
+                .and_then(|(_, value)| value.parse::<u64>().ok())
+                == Some(0)),
+        "no other execution budget dimension was exercised"
+    );
+    let scanned_budget_failures = scrape.lines().find_map(|line| {
+        line.strip_prefix("positron_query_budget_failures_total{dimension=\"scanned_bytes\"} ")
+            .and_then(|value| value.parse::<u64>().ok())
+    });
+    assert_eq!(
+        scanned_budget_failures,
+        Some(1),
+        "only the proven scanned-budget execution must increment its dimension counter"
+    );
     assert!(scrape.contains("positron_security_warning{warning=\"otlp_http_plaintext\"} 1\n"));
     assert!(
         scrape
@@ -272,17 +403,26 @@ fn operational_probe(
             .filter(|remaining| !remaining.is_zero())
             .ok_or("operational probe deadline")
     };
-    let mut stream = TcpStream::connect_timeout(&address, remaining()?)?;
+    let mut stream = TcpStream::connect_timeout(&address, remaining()?)
+        .map_err(|error| format!("operational probe connect: {error}"))?;
     let method = if body.is_empty() { "GET" } else { "POST" };
     let mut request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
     request.extend_from_slice(body);
-    stream.set_write_timeout(Some(remaining()?))?;
-    stream.write_all(&request)?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+    stream
+        .set_write_timeout(Some(remaining()?))
+        .map_err(|error| format!("operational probe write timeout: {error}"))?;
+    stream
+        .write_all(&request)
+        .map_err(|error| format!("operational probe write: {error}"))?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|error| format!("operational probe shutdown: {error}"))?;
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {
-        stream.set_read_timeout(Some(remaining()?))?;
+        stream
+            .set_read_timeout(Some(remaining()?))
+            .map_err(|error| format!("operational probe read timeout: {error}"))?;
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
@@ -292,7 +432,7 @@ fn operational_probe(
                 bytes.extend_from_slice(&buffer[..count]);
             },
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(format!("operational probe read: {error}").into()),
         }
     }
     Ok(String::from_utf8(bytes)?)
@@ -505,7 +645,15 @@ fn stalled_collector_has_bounded_deadline_and_drain_starts_no_more_exports()
             request("/deadline-canary")?;
             let canary = received
                 .recv_timeout(Duration::from_secs(2))
-                .map_err(|error| format!("canary export arrival: {error}"))?;
+                .map_err(|error| {
+                    format!(
+                        "canary export arrival: {error}; exported={:?} failed={:?} refused={:?} dropped={:?}",
+                        counter("positron_operational_trace_exported_total").ok(),
+                        counter("positron_operational_trace_failures_total").ok(),
+                        counter("positron_operational_trace_refused_total").ok(),
+                        counter("positron_operational_events_dropped_total").ok(),
+                    )
+                })?;
             assert!(
                 canary
                     .request

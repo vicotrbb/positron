@@ -89,6 +89,7 @@ pub fn installed_upgrade_request(
         })
         .collect();
     UpgradeRequest::new(
+        installation.executable_distribution(),
         (source, qualified),
         artifacts,
         repository,
@@ -126,7 +127,8 @@ pub fn installed_upgrade_startup(
                 .map_err(|_| UpgradeFailure::AuthenticationFailed)
         })
         .transpose()?;
-    UpgradeStartupVerification::new(release, credential).map(Some)
+    UpgradeStartupVerification::new(installation.executable_distribution(), release, credential)
+        .map(Some)
 }
 fn trust_root(path: &Path) -> Result<InstalledReleaseTrust, UpgradeFailure> {
     InstalledReleaseTrust::from_bytes(&read_file(path, MAX_INSTALLED_TRUST_BYTES, false)?)

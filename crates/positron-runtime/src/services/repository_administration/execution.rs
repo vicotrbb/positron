@@ -9,17 +9,12 @@ use std::{
 /// Repairs one acceptance/task-publication gap per bounded worker turn.
 pub(in crate::services) fn recover_accepted_task(
     services: &ServiceHandle,
+    catalog: &positron_kernel::Catalog<'_>,
 ) -> Result<(), ServiceFailure> {
-    let Some(_gate) = services.try_catalog_operation()? else {
-        return Err(ServiceFailure::CatalogBusy);
-    };
-    let catalog = services
-        .open_maintenance_catalog()
-        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
     let coordinator = services.instance.maintenance_coordinator();
     let mut after = None;
     while let Some(operation) =
-        DurableOperationAdministration::next_repository_operation(&catalog, after)
+        DurableOperationAdministration::next_repository_operation(catalog, after)
             .map_err(|_| ServiceFailure::CorruptState)?
     {
         require_operation(operation, services.instance.instance.to_bytes())?;
@@ -41,7 +36,7 @@ pub(in crate::services) fn recover_accepted_task(
         .map_err(|_| ServiceFailure::CorruptState)?;
         coordinator
             .submit_repository_operation_with_resources_and_persist(
-                &catalog,
+                catalog,
                 binding,
                 MaintenancePreconditions::new(
                     operation

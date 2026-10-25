@@ -386,6 +386,16 @@ fn wait_for_signed_reservation(
                             (checkpoint.sequence(), checkpoint.opaque_progress().len())
                         }),
                         status.cancellation_requested(),
+                        {
+                            let governor = services.instance.resource_governor();
+                            let claim = positron_kernel::WorkClaim::backup_repository_read(
+                                status.task().reservations(),
+                            );
+                            match claim {
+                                Ok(claim) => Ok(governor.reserve(claim).err()),
+                                Err(failure) => Err(failure),
+                            }
+                        },
                     )
                 });
             let request = BackupRequest::decode(&serde_json::to_vec(

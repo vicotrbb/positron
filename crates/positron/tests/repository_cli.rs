@@ -246,21 +246,23 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
                 },
                 Err(error) => return Err(error.into()),
             };
-            let output = command(
-                endpoint,
-                claim.secret(),
-                action,
-                &[
-                    "--expected-generation".into(),
-                    current.catalog_generation.to_string(),
-                    "--idempotency-key".into(),
-                    format!("71717171-7171-4171-8171-{:012}", index + 1),
-                    "--repository-id".into(),
-                    "72727272-7272-4272-8272-727272727272".into(),
-                    "--locator".into(),
-                    repository.to_string_lossy().into_owned(),
-                ],
-            )?;
+            let output = after_capacity(admission_deadline, || {
+                command(
+                    endpoint,
+                    claim.secret(),
+                    action,
+                    &[
+                        "--expected-generation".into(),
+                        current.catalog_generation.to_string(),
+                        "--idempotency-key".into(),
+                        format!("71717171-7171-4171-8171-{:012}", index + 1),
+                        "--repository-id".into(),
+                        "72727272-7272-4272-8272-727272727272".into(),
+                        "--locator".into(),
+                        repository.to_string_lossy().into_owned(),
+                    ],
+                )
+            })?;
             if output.status.success() {
                 let text = String::from_utf8(output.stdout)?;
                 assert!(!text.contains(repository.to_string_lossy().as_ref()));
@@ -317,3 +319,6 @@ fn repository_command_uses_the_authenticated_serving_owner() -> TestResult {
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[path = "repository_cli/transport_deadline.rs"]
+mod transport_deadline;

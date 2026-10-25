@@ -3,8 +3,16 @@ use super::{
     ConfigurationFailure, ConfigurationFailureCode, FailureSource, ProtectedFileReference, Setting,
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ExecutableDistribution {
+    #[default]
+    Native,
+    Nix,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct InstalledReleaseConfiguration {
+    executable_distribution: ExecutableDistribution,
     project_trust_root_file: ProtectedFileReference,
     current_manifest_file: ProtectedFileReference,
     current_inventory_file: Option<ProtectedFileReference>,
@@ -13,6 +21,9 @@ pub struct InstalledReleaseConfiguration {
     query_credential_file: Option<ProtectedFileReference>,
 }
 impl InstalledReleaseConfiguration {
+    pub const fn executable_distribution(&self) -> ExecutableDistribution {
+        self.executable_distribution
+    }
     pub fn project_trust_root_file(&self) -> &ProtectedFileReference {
         &self.project_trust_root_file
     }
@@ -44,6 +55,7 @@ impl InstalledReleaseConfiguration {
             !matches!(
                 key.as_str(),
                 "project_trust_root_file"
+                    | "executable_distribution"
                     | "current_manifest_file"
                     | "current_inventory_file"
                     | "candidate_manifest_file"
@@ -64,6 +76,14 @@ impl InstalledReleaseConfiguration {
                 .transpose()
         };
         let project_trust_root_file = path("project_trust_root_file")?.ok_or_else(invalid)?;
+        let executable_distribution = match table.get("executable_distribution") {
+            None => ExecutableDistribution::Native,
+            Some(value) => match value.as_str() {
+                Some("native") => ExecutableDistribution::Native,
+                Some("nix") => ExecutableDistribution::Nix,
+                _ => return Err(invalid()),
+            },
+        };
         let current_manifest_file = path("current_manifest_file")?.ok_or_else(invalid)?;
         let current_inventory_file = path("current_inventory_file")?;
         let candidate_manifest_file = path("candidate_manifest_file")?;
@@ -91,6 +111,7 @@ impl InstalledReleaseConfiguration {
             return Err(invalid());
         }
         Ok(Self {
+            executable_distribution,
             project_trust_root_file,
             current_manifest_file,
             current_inventory_file,
@@ -112,7 +133,7 @@ impl InstalledReleaseConfiguration {
             .map(|value| super::render_toml_basic_string(&value.path))
             .collect::<Vec<_>>()
             .join(",");
-        format!(
+        let mut identity = format!(
             "root={};current={};inventory={};candidate={};query={};files=[{}]",
             path(Some(&self.project_trust_root_file)),
             path(Some(&self.current_manifest_file)),
@@ -120,7 +141,11 @@ impl InstalledReleaseConfiguration {
             path(self.candidate_manifest_file.as_ref()),
             path(self.query_credential_file.as_ref()),
             files
-        )
+        );
+        if self.executable_distribution == ExecutableDistribution::Nix {
+            identity.push_str(";executable_distribution=nix");
+        }
+        identity
     }
 }
 impl std::fmt::Debug for InstalledReleaseConfiguration {
@@ -133,6 +158,6 @@ pub(crate) fn schema(maximum: usize, path: usize) -> String {
         "{{\"type\":\"string\",\"maxLength\":{path},\"pattern\":\"^/\",\"x-positron-protected-file-reference\":true}}"
     );
     format!(
-        "{{\"type\":\"object\",\"additionalProperties\":false,\"writeOnly\":true,\"required\":[\"project_trust_root_file\",\"current_manifest_file\"],\"properties\":{{\"project_trust_root_file\":{file},\"current_manifest_file\":{file},\"current_inventory_file\":{file},\"candidate_manifest_file\":{file},\"query_credential_file\":{file},\"candidate_artifact_files\":{{\"type\":\"array\",\"maxItems\":{maximum},\"items\":{file}}}}}}}"
+        "{{\"type\":\"object\",\"additionalProperties\":false,\"writeOnly\":true,\"required\":[\"project_trust_root_file\",\"current_manifest_file\"],\"properties\":{{\"executable_distribution\":{{\"type\":\"string\",\"enum\":[\"native\",\"nix\"],\"default\":\"native\"}},\"project_trust_root_file\":{file},\"current_manifest_file\":{file},\"current_inventory_file\":{file},\"candidate_manifest_file\":{file},\"query_credential_file\":{file},\"candidate_artifact_files\":{{\"type\":\"array\",\"maxItems\":{maximum},\"items\":{file}}}}}}}"
     )
 }

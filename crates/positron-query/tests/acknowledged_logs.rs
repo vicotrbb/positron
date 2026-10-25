@@ -42,3 +42,6 @@ mod transform_logfmt_edges;
 mod transforms;
 #[path = "acknowledged_logs/typed_pipeline.rs"]
 mod typed_pipeline;
+
+#[path = "acknowledged_logs/pre_stream_deadline.rs"]
+mod pre_stream_deadline;

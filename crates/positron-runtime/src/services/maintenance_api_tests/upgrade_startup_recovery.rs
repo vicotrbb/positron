@@ -118,6 +118,7 @@ fn configuration(
     target_time: u64,
 ) -> Result<crate::ServeConfiguration, Box<dyn std::error::Error>> {
     let mut verification = crate::UpgradeStartupVerification::new(
+        positron_config::ExecutableDistribution::Native,
         prepared.target.clone(),
         Some(prepared.query.clone()),
     )?;

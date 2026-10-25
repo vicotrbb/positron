@@ -15,6 +15,8 @@ use support::*;
 
 #[path = "tests/catalog_persistence.rs"]
 mod catalog_persistence;
+#[path = "tests/checkpoint_inspection.rs"]
+mod checkpoint_inspection;
 #[path = "tests/conflicts.rs"]
 mod conflicts;
 #[path = "tests/core.rs"]

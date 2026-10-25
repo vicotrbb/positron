@@ -167,3 +167,63 @@ fn unresolved_clock_checkpoint_requires_a_new_offline_owner_before_mutation()
     assert_eq!(recovered.advance(std::time::Instant::now())?, operation);
     Ok(())
 }
+
+#[test]
+fn cold_offline_cancellation_waits_for_genuine_clock_catchup()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
+    let configuration = configuration(&fixture)?;
+    let (instance, _, _, administrator) = fixture.initialized_with_admin()?;
+    let services = ServiceHandle::new(Arc::clone(&instance))?;
+    let id = accept(&instance, &services, &administrator, &configuration)?;
+    instance
+        .publish_graceful_shutdown(&mut || false)
+        .map_err(|_| "Drain")?;
+    drop(services);
+    drop(instance);
+
+    let mut instance =
+        crate::InstanceBootstrap::reopen_configured(&fixture.paths()?, &configuration)?;
+    let baseline = instance.retention_time.status().safe_anchor();
+    let (clock, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(baseline);
+    clock.recover_catalog_anchor(&open_catalog(&instance)?.pin()?)?;
+    instance.install_retention_time_for_test(clock)?;
+    elapsed.advance(2_000_000_000)?;
+    let mut session = OfflineUpgradeSession::begin_recovered(instance, &configuration, id)?;
+    let recorded = session.status()?;
+    assert!(recorded.upgrade_drain_evidence().is_some());
+    assert_eq!(session.advance(std::time::Instant::now())?, recorded);
+    drop(session);
+
+    let mut instance =
+        crate::InstanceBootstrap::reopen_configured(&fixture.paths()?, &configuration)?;
+    let (clock, elapsed) = RetentionTimeAuthority::establish_with_manual_elapsed(baseline);
+    clock.recover_catalog_anchor(&open_catalog(&instance)?.pin()?)?;
+    instance.install_retention_time_for_test(clock)?;
+    let recovered_now = instance.retention_time.governance_now_seconds()?;
+    assert_eq!(
+        instance.retention_time.status().state(),
+        positron_kernel::LifecycleClockState::Certain
+    );
+    assert!(recovered_now < recorded.updated_at_unix_seconds());
+    let mut session = OfflineUpgradeSession::begin_recovered(instance, &configuration, id)?;
+    let key = AdministrativeIdempotencyKey::new([87; 16])?;
+    assert_eq!(
+        session.cancel(key, recorded.revision()),
+        Err(UpgradeFailure::SnapshotUnavailable)
+    );
+    assert_eq!(session.status()?, recorded);
+    // Only genuine process-monotonic elapsed time closes the conservative gap.
+    let delta = recorded
+        .updated_at_unix_seconds()
+        .checked_sub(recovered_now)
+        .ok_or("clock gap")?;
+    elapsed.advance(delta.checked_mul(1_000_000_000).ok_or("elapsed overflow")?)?;
+    let cancelled = session.cancel(key, recorded.revision())?;
+    assert_eq!(
+        cancelled.status(),
+        positron_governance::DurableOperationStatus::Cancelled
+    );
+    assert_eq!(cancelled.operation_id(), id);
+    Ok(())
+}
