@@ -282,6 +282,8 @@ class UpgradedStatus(unittest.TestCase):
             self.commands.append((command, options))
             self.clock += (elapsed or [0] * len(responses))[len(self.commands) - 1]
             error = responses[len(self.commands) - 1]
+            if isinstance(error, Exception):
+                raise error
             return types.SimpleNamespace(returncode=2 if error else 0, stderr=error,
                 stdout=b"status=succeeded target_version=candidate target_manifest=manifest source_artifact=source target_artifact=target")
 
@@ -315,3 +317,12 @@ class UpgradedStatus(unittest.TestCase):
                     self.invoke([response])
                 self.assertEqual(len(self.commands), 1)
                 self.assertNotIn("protected-secret", str(failure.exception))
+
+
+    def test_status_timeout_fails_closed_without_retry(self):
+        with self.assertRaisesRegex(RuntimeError, "target startup attestation did not complete") as failure:
+            self.invoke([subprocess.TimeoutExpired(["protected-secret"], 60,
+                         output=b"protected-secret", stderr=b"protected-secret")])
+        self.assertEqual(len(self.commands), 1)
+        self.assertEqual(self.commands[0][1]["timeout"], 60)
+        self.assertNotIn("protected-secret", str(failure.exception))
