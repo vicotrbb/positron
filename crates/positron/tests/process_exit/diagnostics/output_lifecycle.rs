@@ -306,6 +306,26 @@ fn normal_and_saturated_output_reap_before_graceful_marker_and_retain_acknowledg
     Ok(())
 }
 
+fn accept_http_fixture(listener: &std::net::TcpListener) -> std::io::Result<TcpStream> {
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return Ok(stream),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "fixture connection deadline exhausted",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            },
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn read_http_fixture_headers(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut request = Vec::new();
@@ -332,7 +352,7 @@ fn output_lifecycle_retries_only_explicit_ingest_capacity_with_the_same_request(
             "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{\"code\":14,\"message\":\"OTLP Logs ingest capacity is unavailable\"}",
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
         ] {
-            let (mut stream, _) = listener.accept()?;
+            let mut stream = accept_http_fixture(&listener)?;
             let mut request = read_http_fixture_headers(&mut stream)?;
             let mut body = [0; 4];
             stream.read_exact(&mut body)?;
@@ -373,7 +393,7 @@ fn output_lifecycle_does_not_retry_noncanonical_or_query_refusals() -> TestResul
         let port = listener.local_addr()?.port();
         let payload = serde_json::json!({"code": 14, "message": message}).to_string();
         let peer = std::thread::spawn(move || -> std::io::Result<()> {
-            let (mut stream, _) = listener.accept()?;
+            let mut stream = accept_http_fixture(&listener)?;
             read_http_fixture_headers(&mut stream)?;
             write!(
                 stream,
@@ -401,7 +421,7 @@ fn output_lifecycle_trickled_response_cannot_restart_the_original_deadline() -> 
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     let peer = std::thread::spawn(move || -> std::io::Result<()> {
-        let (mut stream, _) = listener.accept()?;
+        let mut stream = accept_http_fixture(&listener)?;
         read_http_fixture_headers(&mut stream)?;
         for _ in 0..60 {
             if stream.write_all(b"H").is_err() {
@@ -431,7 +451,7 @@ fn output_lifecycle_rejects_a_truncated_declared_response() -> TestResult {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     let peer = std::thread::spawn(move || -> std::io::Result<()> {
-        let (mut stream, _) = listener.accept()?;
+        let mut stream = accept_http_fixture(&listener)?;
         read_http_fixture_headers(&mut stream)?;
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{}")?;
         Ok(())
@@ -443,5 +463,21 @@ fn output_lifecycle_rejects_a_truncated_declared_response() -> TestResult {
         result.is_err(),
         "an incomplete declared body cannot succeed"
     );
+    Ok(())
+}
+
+#[test]
+fn output_lifecycle_fixture_fails_without_a_second_connection() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let first = TcpStream::connect(listener.local_addr()?)?;
+    drop(accept_http_fixture(&listener)?);
+    drop(first);
+    let started = Instant::now();
+    let error =
+        accept_http_fixture(&listener).expect_err("missing retry must exhaust peer deadline");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(3));
     Ok(())
 }
