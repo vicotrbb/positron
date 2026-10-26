@@ -767,6 +767,15 @@ fn fail(
     Err(failure)
 }
 pub(super) fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
+    static REMAINING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(32);
+    provider_failure_with(failure, &REMAINING, crate::write_operational_diagnostic)
+}
+
+fn provider_failure_with(
+    failure: RepositoryFailure,
+    remaining: &std::sync::atomic::AtomicU8,
+    report: impl FnOnce(crate::OperationalDiagnostic) -> std::io::Result<()>,
+) -> ServiceFailure {
     match failure {
         RepositoryFailure::ControlMemoryRequired { memory_bytes } => {
             ServiceFailure::BackupControlMemoryRequired { memory_bytes }
@@ -781,9 +790,8 @@ pub(super) fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
         RepositoryFailure::SourceIntegrityCorruption => ServiceFailure::CorruptState,
         RepositoryFailure::InvalidInput => ServiceFailure::Internal,
         _ => {
-            use std::sync::atomic::{AtomicU8, Ordering};
-            static REMAINING: AtomicU8 = AtomicU8::new(32);
-            if REMAINING
+            use std::sync::atomic::Ordering;
+            if remaining
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                     remaining.checked_sub(1)
                 })
@@ -791,9 +799,9 @@ pub(super) fn provider_failure(failure: RepositoryFailure) -> ServiceFailure {
             {
                 // The closed Repository failure carries no paths, credentials
                 // or provider error strings. Reporting cannot alter rejection.
-                match crate::write_operational_diagnostic(
-                    crate::OperationalDiagnostic::BackupRepositoryRejected(failure),
-                ) {
+                match report(crate::OperationalDiagnostic::BackupRepositoryRejected(
+                    failure,
+                )) {
                     Ok(()) | Err(_) => {},
                 }
             }
