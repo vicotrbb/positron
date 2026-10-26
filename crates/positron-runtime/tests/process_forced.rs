@@ -529,6 +529,13 @@ fn drain_diagnostic_child_reports_late_join_failure() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
+    assert!(
+        positron_runtime::write_operational_diagnostic(
+            positron_runtime::OperationalDiagnostic::RuntimeCrashRecordUnavailable,
+        )
+        .is_err(),
+        "library callers have no native output owner"
+    );
     let roots = TestRoots::new("drain-diagnostic-late-child")?;
     let host = Host {
         late_join_failure: true,
@@ -557,6 +564,13 @@ fn drain_diagnostic_child_reports_poll_join_failure() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
+    assert!(
+        positron_runtime::write_operational_diagnostic(
+            positron_runtime::OperationalDiagnostic::RuntimeCrashRecordUnavailable,
+        )
+        .is_err(),
+        "library callers have no native output owner"
+    );
     let roots = TestRoots::new("drain-diagnostic-poll-child")?;
     let host = Host {
         poll_join_failure: true,
@@ -597,47 +611,27 @@ fn child_drain_diagnostic(
 }
 
 #[test]
-fn drain_diagnostic_reports_closed_late_join_context_to_stderr()
--> Result<(), Box<dyn std::error::Error>> {
+fn unavailable_output_preserves_late_join_forced_shutdown() -> Result<(), Box<dyn std::error::Error>>
+{
     let stderr = child_drain_diagnostic(
         "late_join",
         "drain_diagnostic_child_reports_late_join_failure",
     )?;
-    let records: Vec<serde_json::Value> = stderr
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()?;
-    assert_eq!(
-        records,
-        vec![serde_json::json!({
-            "event": "runtime_drain_task_failure", "component": "runtime", "severity": "error",
-            "site": "join_within", "role": "control", "category": "join_unavailable"
-        })]
-    );
+    // A library test has no native output owner or helper argument dispatch.
+    // Closed diagnostic tokens/delivery failures are covered by the owned-sink
+    // process tests; the positron process_exit tests exercise real helper delivery.
+    assert!(stderr.is_empty(), "unowned output must remain unavailable");
     Ok(())
 }
 
 #[test]
-fn drain_diagnostic_reports_closed_poll_join_context_to_stderr()
+fn unavailable_output_preserves_poll_join_failure_and_forced_shutdown()
 -> Result<(), Box<dyn std::error::Error>> {
     let stderr = child_drain_diagnostic(
         "poll_join",
         "drain_diagnostic_child_reports_poll_join_failure",
     )?;
-    let records: Vec<serde_json::Value> = stderr
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<Result<_, _>>()?;
-    let expected: Vec<_> = ["poll_join", "join_within"]
-        .into_iter()
-        .map(|site| {
-            serde_json::json!({
-                "event": "runtime_drain_task_failure", "component": "runtime", "severity": "error",
-                "site": site, "role": "control", "category": "join_unavailable"
-            })
-        })
-        .collect();
-    assert_eq!(records, expected);
+    assert!(stderr.is_empty(), "unowned output must remain unavailable");
     Ok(())
 }
 
