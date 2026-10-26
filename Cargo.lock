@@ -1067,6 +1067,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "close_fds"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bc416f33de9d59e79e57560f450d21ff8393adcf1cdfc3e6d8fb93d5f88a2ed"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "cmac"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3595,6 +3605,7 @@ version = "0.0.0"
 dependencies = [
  "age",
  "base64 0.22.1",
+ "close_fds",
  "cms",
  "flate2",
  "hmac 0.12.1",

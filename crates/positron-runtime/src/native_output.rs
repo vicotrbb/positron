@@ -34,6 +34,9 @@ pub struct NativeOperationalOutput {
     finished: bool,
 }
 impl NativeOperationalOutput {
+    /// The executable launcher must establish close-on-exec discipline before
+    /// starting threads. This owner does not mutate unrelated descriptor flags;
+    /// the helper refuses unexpected inheritance before accepting records.
     pub fn begin() -> io::Result<Self> {
         ACTIVE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

@@ -40,6 +40,26 @@ fn unknown_command_has_the_usage_exit() -> Result<(), Box<dyn std::error::Error>
 
 #[cfg(unix)]
 #[test]
+fn normal_cli_preserves_diagnostics_with_an_unrelated_inherited_descriptor()
+-> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec 3</dev/null; exec \"$1\" unknown",
+            "positron-inherited-descriptor-test",
+        ])
+        .arg(env!("CARGO_BIN_EXE_positron"))
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(diagnostic["event"], "invalid_command_line");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_verify_and_bundle_report_stdout_failure_without_panicking()
 -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]

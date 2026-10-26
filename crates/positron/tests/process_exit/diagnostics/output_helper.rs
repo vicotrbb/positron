@@ -17,6 +17,9 @@ fn spawn_helper(stderr: Stdio) -> TestResult<(Child, UnixStream)> {
     parent.set_write_timeout(Some(Duration::from_secs(2)))?;
     let input: OwnedFd = child.try_clone()?.into();
     let output: OwnedFd = child.into();
+    // Positive fixtures admit only their intended standard streams. The
+    // refusal fixture creates its foreign descriptor inside a separate shell.
+    close_fds::set_fds_cloexec_threadsafe(3, &[]);
     let child = Command::new(env!("CARGO_BIN_EXE_positron"))
         .arg(ARGUMENT)
         .env_clear()
