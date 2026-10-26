@@ -19,6 +19,11 @@ mod instance_bootstrap;
 mod integrity_verification;
 mod listener;
 mod native_host;
+mod native_output;
+#[doc(hidden)]
+pub use native_output::{
+    NativeOperationalOutput, OPERATIONAL_HELPER_ARGUMENT, run_operational_output_helper,
+};
 mod operational;
 mod process;
 #[cfg(fuzzing)]
@@ -151,3 +156,9 @@ pub fn fuzz_key_provider_migration_stateful(data: &[u8]) {
 
 #[cfg(fuzzing)]
 mod key_provider_migration_fuzz;
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_operational_output_frame(bytes: &[u8]) -> Option<usize> {
+    native_output::fuzz_frame(bytes)
+}

@@ -21,7 +21,7 @@ pub(super) fn run(
     health: HealthState,
     admissions: AdmissionRegistry,
 ) -> Result<(), TaskFailure> {
-    let mut sink = nonblocking_stderr();
+    let mut sink = NativeOutputSink;
     let terminal = std::io::stderr().is_terminal();
     let mut sequence = 0_u64;
     while !cancellation.is_cancelled() && !force.is_cancelled() {
@@ -31,12 +31,7 @@ pub(super) fn run(
         };
         let failed = health
             .operational_log_level()
-            .map(|level| {
-                log_enabled(level, event)
-                    && sink
-                        .as_mut()
-                        .map_or(true, |sink| emit(sink, terminal, event).is_err())
-            })
+            .map(|level| log_enabled(level, event) && emit(&mut sink, terminal, event).is_err())
             .unwrap_or(true);
         if failed {
             health
@@ -151,37 +146,22 @@ pub(super) fn destination_allowed(
         }))
 }
 
-#[cfg(unix)]
-struct NonblockingSink<F: std::os::fd::AsFd>(F);
-#[cfg(unix)]
-impl<F: std::os::fd::AsFd> Write for NonblockingSink<F> {
+struct NativeOutputSink;
+impl Write for NativeOutputSink {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        rustix::io::write(&self.0, bytes).map_err(Into::into)
+        crate::native_output::write(bytes)?;
+        Ok(bytes.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
-}
-#[cfg(unix)]
-fn nonblocking_stderr() -> std::io::Result<NonblockingSink<std::io::Stderr>> {
-    let stderr = std::io::stderr();
-    let flags = rustix::fs::fcntl_getfl(&stderr)?;
-    rustix::fs::fcntl_setfl(&stderr, flags | rustix::fs::OFlags::NONBLOCK)?;
-    Ok(NonblockingSink(stderr))
-}
-#[cfg(not(unix))]
-fn nonblocking_stderr() -> std::io::Result<std::io::Sink> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "nonblocking operational output unavailable",
-    ))
 }
 
 pub(crate) fn write_diagnostic(
     diagnostic: crate::operational::OperationalDiagnostic,
 ) -> std::io::Result<()> {
     emit(
-        &mut nonblocking_stderr()?,
+        &mut NativeOutputSink,
         std::io::stderr().is_terminal(),
         OperationalEvent::Diagnostic(diagnostic),
     )
@@ -264,25 +244,6 @@ fn trace(event: OperationalEvent, sequence: u64) -> ExportTraceServiceRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn stalled_output_sink_returns_without_blocking_owned_worker()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let (_reader, writer) = rustix::pipe::pipe()?;
-        rustix::fs::fcntl_setfl(&writer, rustix::fs::OFlags::NONBLOCK)?;
-        let mut sink = NonblockingSink(writer);
-        let bytes = [0_u8; 4096];
-        for _ in 0..4096 {
-            if sink.write(&bytes).is_err() {
-                break;
-            }
-        }
-        let started = std::time::Instant::now();
-        assert!(emit(&mut sink, false, OperationalEvent::ProcessServing).is_err());
-        assert!(started.elapsed() < Duration::from_millis(50));
-        Ok(())
-    }
 
     #[test]
     fn structured_operational_output_is_closed_json_and_sink_failure_is_explicit()

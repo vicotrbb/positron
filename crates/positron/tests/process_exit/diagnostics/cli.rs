@@ -80,3 +80,28 @@ fn command_with_closed_stdout(
         .stderr(Stdio::piped())
         .output()?)
 }
+
+#[cfg(unix)]
+#[test]
+fn native_diagnostic_preserves_the_callers_pipe_flags_and_delivers_json()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (mut reader, writer) = std::io::pipe()?;
+    let before = rustix::fs::fcntl_getfl(&writer)? & rustix::fs::OFlags::NONBLOCK;
+    let status = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["serve", "--set", "storage.data_directory=relative"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(writer.try_clone()?))
+        .status()?;
+    assert_eq!(status.code(), Some(2));
+    assert_eq!(
+        rustix::fs::fcntl_getfl(&writer)? & rustix::fs::OFlags::NONBLOCK,
+        before,
+        "a child diagnostic must not change its caller's shared pipe flags"
+    );
+    drop(writer);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    let diagnostic: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(diagnostic["event"], "configuration_rejected");
+    Ok(())
+}

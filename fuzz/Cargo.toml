@@ -488,3 +488,10 @@ path = "fuzz_targets/log_query_api.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "operational_output_frame"
+path = "fuzz_targets/operational_output_frame.rs"
+test = false
+doc = false
+bench = false

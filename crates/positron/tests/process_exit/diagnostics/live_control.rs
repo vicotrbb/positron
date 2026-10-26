@@ -50,11 +50,17 @@ fn live_control_support_bundle_is_signed_encrypted_and_reports_serving_facts()
     )?;
     let mut status_response = Vec::new();
     status.read_to_end(&mut status_response)?;
-    assert!(
-        status_response.starts_with(b"HTTP/1.1 200 "),
-        "serving status must accept the current system administrator: {}",
-        String::from_utf8_lossy(&status_response),
-    );
+    if !status_response.starts_with(b"HTTP/1.1 200 ") {
+        let _termination = Command::new("/bin/kill")
+            .args(["-TERM", &server.id().to_string()])
+            .status()?;
+        let failed_server = server.wait_with_output()?;
+        panic!(
+            "serving status must accept the current system administrator: {}; server stderr={}",
+            String::from_utf8_lossy(&status_response),
+            String::from_utf8_lossy(&failed_server.stderr),
+        );
+    }
 
     let identity = age::x25519::Identity::generate();
     let output = root.join("live-support.age");

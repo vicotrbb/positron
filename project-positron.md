@@ -15,6 +15,10 @@ around a simple principle:
 > **One binary. One process. One storage kernel. Every observability
 > signal.**
 
+The database has one process and one lifecycle authority. A native invocation
+may additionally own at most one bounded operational-output helper running the
+same binary, with no database or storage authority, as specified by ADR 0076.
+
 Unlike traditional observability stacks that combine multiple
 independent systems (logs, metrics, traces, profiles, search engines,
 object stores, coordinators, queues, etc.), Positron aims to provide a

@@ -35,6 +35,10 @@ mod doctor;
 mod live_control;
 #[path = "diagnostics/offline.rs"]
 mod offline;
+#[path = "diagnostics/output_helper.rs"]
+mod output_helper;
+#[path = "diagnostics/output_lifecycle.rs"]
+mod output_lifecycle;
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]
