@@ -41,17 +41,51 @@ jobs:
         run: |
           directory="$RUNNER_TEMP/process-exit-diagnostics"
           mkdir -p "$directory"
+          export directory
           set +e
-          (
-            ulimit -f 2048
-            command=(cargo test --locked -p positron --test process_exit -- --nocapture)
+          timeout --signal=TERM --kill-after=5s 50s bash <<'DIAGNOSTIC'
+          drain() {
+            dd bs=64K count=32 iflag=fullblock status=none of="$1"
+            cat >/dev/null
+          }
+          mkfifo "$directory/output.pipe"
+          drain "$directory/test-output.txt" < "$directory/output.pipe" &
+          output_reader=$!
+          exec > "$directory/output.pipe" 2>&1
+          printf 'Direct workspace-built executable; Cargo parent context is not reproduced.\n'
+          trace_reader=
+          run_test() {
+            if ! timeout --foreground --signal=TERM --kill-after=5s 10s bash -o pipefail -c '
+              cargo test --locked --workspace --lib --bins --tests --no-run --message-format=json |
+                jq -r "select(.reason == \"compiler-artifact\" and .target.name == \"process_exit\" and .executable != null) | .executable"
+            ' > "$directory/candidates"; then
+              printf 'Workspace artifact lookup failed or exceeded its deadline.\n'
+              return 1
+            fi
+            mapfile -t candidates < "$directory/candidates"
+            if [ "${#candidates[@]}" -ne 1 ] || [ ! -x "${candidates[0]}" ]; then
+              printf 'Workspace artifact lookup did not identify exactly one executable.\n'
+              return 1
+            fi
+            command=("${candidates[0]}" --nocapture)
             if command -v strace >/dev/null 2>&1; then
-              command=(strace -f -o "$directory/descriptors.txt" -e "trace=clone,clone3,fork,vfork,wait4,waitid,exit,exit_group,fcntl,close,dup,dup2,dup3,pipe,pipe2,socketpair,openat,getdents64,prctl,prlimit64" "${command[@]}")
+              mkfifo "$directory/trace.pipe"
+              drain "$directory/descriptors.txt" < "$directory/trace.pipe" &
+              trace_reader=$!
+              command=(strace -f -o "$directory/trace.pipe" -e "trace=clone,clone3,fork,vfork,wait4,waitid,exit,exit_group,fcntl,close,dup,dup2,dup3,pipe,pipe2,socketpair,openat,getdents64,prctl,prlimit64" "${command[@]}")
             else
               printf 'strace unavailable; no installation attempted\n' > "$directory/descriptors.txt"
             fi
-            timeout --signal=TERM --kill-after=5s 45s "${command[@]}" > "$directory/test-output.txt" 2>&1
-          )
+            timeout --foreground --signal=TERM --kill-after=5s 35s "${command[@]}"
+          }
+          run_test
+          printf 'direct_test_exit=%s\n' "$?"
+          exec >/dev/null 2>&1
+          wait "$output_reader"
+          if [ -n "$trace_reader" ]; then
+            wait "$trace_reader"
+          fi
+          DIAGNOSTIC
           result=$?
           printf 'diagnostic_exit=%s\n' "$result"
           head -c 16384 "$directory/test-output.txt"
@@ -63,7 +97,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: process-exit-failure-diagnostics
-          path: ${{ runner.temp }}/process-exit-diagnostics/
+          path: ${{ runner.temp }}/process-exit-diagnostics/*.txt
           retention-days: 1
 
   authenticated-frame-vectors:
