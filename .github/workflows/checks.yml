@@ -72,7 +72,7 @@ jobs:
               mkfifo "$directory/trace.pipe"
               drain "$directory/descriptors.txt" < "$directory/trace.pipe" &
               trace_reader=$!
-              command=(strace -f -o "$directory/trace.pipe" -e "trace=clone,clone3,fork,vfork,wait4,waitid,exit,exit_group,fcntl,close,dup,dup2,dup3,pipe,pipe2,socketpair,openat,getdents64,prctl,prlimit64" "${command[@]}")
+              command=(strace -f -v -o "$directory/trace.pipe" -e "trace=clone,clone3,fork,vfork,wait4,waitid,exit,exit_group,fcntl,close,dup,dup2,dup3,pipe,pipe2,socketpair,open,openat,getdents64,prctl,prlimit64" "${command[@]}")
             else
               printf 'strace unavailable; no installation attempted\n' > "$directory/descriptors.txt"
             fi
