@@ -83,30 +83,106 @@ fn terminate(child: &mut Child) -> TestResult {
     Ok(())
 }
 fn http(port: u16, path: &str, credential: &str, body: &[u8]) -> TestResult<Vec<u8>> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    write!(
-        stream,
-        "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )?;
-    stream.write_all(body)?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
-    assert!(
-        response.starts_with(b"HTTP/1.1 200 "),
-        "public {path} failed with {}",
-        String::from_utf8_lossy(&response)
-    );
-    let boundary = response
-        .windows(4)
-        .position(|bytes| bytes == b"\r\n\r\n")
-        .ok_or("HTTP response boundary")?;
-    Ok(response
-        .get(boundary + 4..)
-        .ok_or("HTTP response body")?
-        .to_vec())
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let remaining = || -> std::io::Result<Duration> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "output lifecycle HTTP deadline exhausted",
+            ))
+        } else {
+            Ok(remaining)
+        }
+    };
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()
+    ).into_bytes();
+    request.extend_from_slice(body);
+    loop {
+        let mut stream = TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            remaining()?,
+        )?;
+        let mut pending = request.as_slice();
+        while !pending.is_empty() {
+            stream.set_write_timeout(Some(remaining()?))?;
+            let written = stream.write(pending)?;
+            if written == 0 {
+                return Err("output lifecycle request write closed".into());
+            }
+            pending = pending.get(written..).ok_or("request write length")?;
+        }
+        let mut response = Vec::new();
+        loop {
+            stream.set_read_timeout(Some(remaining()?))?;
+            let mut buffer = [0; 4096];
+            let count = stream.read(&mut buffer)?;
+            if count == 0 {
+                return Err("output lifecycle HTTP response truncated".into());
+            }
+            response.extend_from_slice(buffer.get(..count).ok_or("response read length")?);
+            if response.len() > 65_536 {
+                return Err("output lifecycle HTTP response exceeded bound".into());
+            }
+            if let Some(boundary) = response.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                let head = std::str::from_utf8(response.get(..boundary).ok_or("HTTP headers")?)?;
+                let lengths = head
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
+                    .map(|(_, value)| value.trim().parse::<usize>())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let [length] = lengths.as_slice() else {
+                    return Err("HTTP response content length".into());
+                };
+                let total = boundary
+                    .checked_add(4)
+                    .and_then(|head| head.checked_add(*length))
+                    .filter(|total| *total <= 65_536)
+                    .ok_or("HTTP response length bound")?;
+                if response.len() == total {
+                    break;
+                }
+                if response.len() > total {
+                    return Err("HTTP response exceeds declared length".into());
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("output lifecycle HTTP deadline exhausted".into());
+        }
+        let boundary = response
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .ok_or("HTTP response boundary")?;
+        let payload = response.get(boundary + 4..).ok_or("HTTP response body")?;
+        let head = std::str::from_utf8(response.get(..boundary).ok_or("HTTP headers")?)?;
+        // This explicit pre-admission refusal accepts no records; identical retry
+        // cannot duplicate the retained record whose recovery this test proves.
+        let retryable = path == "/v1/logs"
+            && response.starts_with(b"HTTP/1.1 429 ")
+            && head
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("Retry-After: 1"))
+            && serde_json::from_slice::<serde_json::Value>(payload).ok()
+                == Some(
+                    serde_json::json!({"code": 14, "message": "OTLP Logs ingest capacity is unavailable"}),
+                );
+        if retryable && deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(1)
+        {
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        if !response.starts_with(b"HTTP/1.1 200 ") {
+            return Err(format!(
+                "public {path} failed with {}",
+                String::from_utf8_lossy(&response)
+            )
+            .into());
+        }
+        return Ok(payload.to_vec());
+    }
 }
 
 #[test]
@@ -227,5 +303,145 @@ fn normal_and_saturated_output_reap_before_graceful_marker_and_retain_acknowledg
         terminate(&mut restarted)?;
         fs::remove_dir_all(root)?;
     }
+    Ok(())
+}
+
+fn read_http_fixture_headers(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let mut request = Vec::new();
+    for _ in 0..4096 {
+        let mut byte = [0];
+        stream.read_exact(&mut byte)?;
+        request.push(byte[0]);
+        if request.ends_with(b"\r\n\r\n") {
+            return Ok(request);
+        }
+    }
+    Err(std::io::Error::other("fixture headers exceed bound"))
+}
+
+#[test]
+fn output_lifecycle_retries_only_explicit_ingest_capacity_with_the_same_request() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let peer = std::thread::spawn(move || -> std::io::Result<Vec<Vec<u8>>> {
+        let mut requests = Vec::new();
+        for response in [
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{\"code\":14,\"message\":\"OTLP Logs ingest capacity is unavailable\"}",
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        ] {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = read_http_fixture_headers(&mut stream)?;
+            let mut body = [0; 4];
+            stream.read_exact(&mut body)?;
+            request.extend_from_slice(&body);
+            requests.push(request);
+            stream.write_all(response.as_bytes())?;
+        }
+        Ok(requests)
+    });
+    let result = http(port, "/v1/logs", "fixture-credential", b"body");
+    let requests = peer.join().map_err(|_| "capacity peer panicked")?;
+    assert_eq!(result?, b"{}");
+    let requests = requests?;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1]);
+    assert!(
+        requests[0]
+            .windows(b"Authorization: Bearer fixture-credential".len())
+            .any(|bytes| bytes == b"Authorization: Bearer fixture-credential")
+    );
+    Ok(())
+}
+
+#[test]
+fn output_lifecycle_does_not_retry_noncanonical_or_query_refusals() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    for (path, retry, message) in [
+        ("/v1/logs", "2", "OTLP Logs ingest capacity is unavailable"),
+        ("/v1/logs", "1", "other refusal"),
+        (
+            positron_api::log_query::HTTP_PATH,
+            "1",
+            "OTLP Logs ingest capacity is unavailable",
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let payload = serde_json::json!({"code": 14, "message": message}).to_string();
+        let peer = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            read_http_fixture_headers(&mut stream)?;
+            write!(
+                stream,
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {retry}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            )?;
+            Ok(())
+        });
+        let result = http(port, path, "fixture-credential", b"");
+        peer.join().map_err(|_| "refusal peer panicked")??;
+        assert!(
+            result
+                .expect_err("noncanonical refusal must fail")
+                .to_string()
+                .contains("429 Too Many Requests")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn output_lifecycle_trickled_response_cannot_restart_the_original_deadline() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let peer = std::thread::spawn(move || -> std::io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        read_http_fixture_headers(&mut stream)?;
+        for _ in 0..60 {
+            if stream.write_all(b"H").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    });
+    let started = Instant::now();
+    let result = http(port, "/v1/logs", "fixture-credential", b"");
+    let elapsed = started.elapsed();
+    peer.join().map_err(|_| "deadline peer panicked")??;
+    assert!(result.is_err());
+    assert!(elapsed >= Duration::from_secs(4));
+    assert!(
+        elapsed < Duration::from_millis(5800),
+        "deadline restarted: {elapsed:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn output_lifecycle_rejects_a_truncated_declared_response() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    let peer = std::thread::spawn(move || -> std::io::Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        read_http_fixture_headers(&mut stream)?;
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{}")?;
+        Ok(())
+    });
+    let result = http(port, "/v1/logs", "fixture-credential", b"");
+    peer.join()
+        .map_err(|_| "truncated response peer panicked")??;
+    assert!(
+        result.is_err(),
+        "an incomplete declared body cannot succeed"
+    );
     Ok(())
 }
