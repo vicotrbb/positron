@@ -262,3 +262,56 @@ class SourceExitDriverObservation(unittest.TestCase):
             calls, output = self.invoke(**options)
             self.assertEqual(len(calls), 1)
             self.assertEqual(json.loads(output), {"event": "upgrade_source_exit", "outcome": "unavailable"})
+
+
+class UpgradedStatus(unittest.TestCase):
+    capacity = b"positron: capacity unavailable; retry the same idempotent request"
+
+    def invoke(self, responses, elapsed=None):
+        self.clock = 0
+        self.commands = []
+        state = {"upgrade": "0123456789abcdef0123456789abcdef", "target_manifest": "manifest",
+                 "source_hash": "source", "target_hash": "target"}
+
+        def read(path, *args, **kwargs):
+            if str(path).endswith("positron-claim"):
+                return "administrator_secret=protected-secret"
+            return json.dumps({"version": "candidate"} if str(path).endswith("inputs.json") else state)
+
+        def execute(command, **options):
+            self.commands.append((command, options))
+            self.clock += (elapsed or [0] * len(responses))[len(self.commands) - 1]
+            error = responses[len(self.commands) - 1]
+            return types.SimpleNamespace(returncode=2 if error else 0, stderr=error,
+                stdout=b"status=succeeded target_version=candidate target_manifest=manifest source_artifact=source target_artifact=target")
+
+        path = pathlib.Path(__file__).with_name("lifecycle-check.py")
+        with mock.patch.object(pathlib.Path, "read_text", read), \
+                mock.patch.object(sys, "argv", [str(path), "upgraded"]), \
+                mock.patch("time.monotonic", side_effect=lambda: self.clock), \
+                mock.patch("time.sleep", side_effect=lambda seconds: setattr(self, "clock", self.clock + seconds)), \
+                mock.patch("subprocess.run", side_effect=execute):
+            runpy.run_path(str(path))
+
+    def test_capacity_refusal_retries_identical_status_with_remaining_deadline(self):
+        self.invoke([self.capacity, b""], [3, 1])
+        self.assertEqual(self.commands[0][0], self.commands[1][0])
+        self.assertEqual(self.commands[0][1]["timeout"], 60)
+        self.assertAlmostEqual(self.commands[1][1]["timeout"], 56.9)
+        self.assertEqual(self.commands[0][1]["input"], b"protected-secret")
+
+    def test_late_success_or_capacity_refusal_exhausts_original_deadline(self):
+        for response in [self.capacity, b""]:
+            with self.subTest(response=response):
+                with self.assertRaisesRegex(RuntimeError, "attestation did not complete"):
+                    self.invoke([response], [60])
+                self.assertEqual(len(self.commands), 1)
+
+    def test_other_and_noncanonical_failures_are_not_retried(self):
+        for response in [b"protected-secret", self.capacity + b" extra",
+                         b"positron: administration unavailable; inspect or retry the same operation"]:
+            with self.subTest(response=response):
+                with self.assertRaises(RuntimeError) as failure:
+                    self.invoke([response])
+                self.assertEqual(len(self.commands), 1)
+                self.assertNotIn("protected-secret", str(failure.exception))
