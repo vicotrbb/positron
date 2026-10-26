@@ -111,6 +111,8 @@ fn http(port: u16, path: &str, credential: &str, body: &[u8]) -> TestResult<Vec<
 
 #[test]
 fn parent_sigkill_ends_its_output_helper_while_stderr_stays_full() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let (_reader, writer) = full_pipe()?;
     let mut parent = OutputChild(
         Command::new(env!("CARGO_BIN_EXE_positron"))

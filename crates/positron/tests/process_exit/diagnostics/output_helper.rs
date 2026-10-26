@@ -6,6 +6,9 @@ use std::process::{Child, ExitStatus};
 use std::time::Instant;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+// macOS std socketpair/pipe setup applies CLOEXEC after creating descriptors.
+// Reuse the process fixture lock across setup/spawn so sibling tests cannot
+// accidentally inherit that transient descriptor and trigger the helper guard.
 const ARGUMENT: &str = positron_runtime::OPERATIONAL_HELPER_ARGUMENT;
 
 fn spawn_helper(stderr: Stdio) -> TestResult<(Child, UnixStream)> {
@@ -57,6 +60,8 @@ pub(super) fn full_pipe() -> TestResult<(std::io::PipeReader, std::io::PipeWrite
 
 #[test]
 fn output_helper_acknowledges_complete_records_and_reaps_after_normal_close() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let (mut reader, writer) = std::io::pipe()?;
     let (mut child, mut socket) = spawn_helper(Stdio::from(writer))?;
     send(&mut socket, b"positron: error configuration_rejected\n")?;
@@ -79,6 +84,8 @@ fn output_helper_acknowledges_complete_records_and_reaps_after_normal_close() ->
 
 #[test]
 fn output_helper_reader_ends_a_blocked_writer_after_abrupt_parent_eof() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let (_reader, writer) = full_pipe()?;
     let flags = rustix::fs::fcntl_getfl(&writer)?;
     let (mut child, mut socket) = spawn_helper(Stdio::from(writer.try_clone()?))?;
@@ -86,13 +93,17 @@ fn output_helper_reader_ends_a_blocked_writer_after_abrupt_parent_eof() -> TestR
     std::thread::sleep(Duration::from_millis(25));
     assert!(child.try_wait()?.is_none());
     drop(socket);
-    assert_eq!(wait(&mut child)?.signal(), Some(9));
+    // A successful self-SIGKILL may still be pending when the non-flushing
+    // abort fallback runs on macOS. ADR 0076 requires prompt fatal termination.
+    assert!(matches!(wait(&mut child)?.signal(), Some(9 | 6)));
     assert_eq!(rustix::fs::fcntl_getfl(&writer)?, flags);
     Ok(())
 }
 
 #[test]
 fn output_helper_close_cannot_retire_the_death_watcher_behind_a_blocked_record() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let (mut reader, writer) = std::io::pipe()?;
     let (mut child, mut socket) = spawn_helper(Stdio::from(writer.try_clone()?))?;
     send(&mut socket, b"ready\n")?;
@@ -118,12 +129,16 @@ fn output_helper_close_cannot_retire_the_death_watcher_behind_a_blocked_record()
     );
     send(&mut socket, &[])?;
     drop(socket);
-    assert_eq!(wait(&mut child)?.signal(), Some(9));
+    // A successful self-SIGKILL may still be pending when the non-flushing
+    // abort fallback runs on macOS. ADR 0076 requires prompt fatal termination.
+    assert!(matches!(wait(&mut child)?.signal(), Some(9 | 6)));
     Ok(())
 }
 
 #[test]
 fn output_helper_refuses_oversized_and_unacknowledged_record_overflow() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     for oversized in [true, false] {
         let (_reader, writer) = full_pipe()?;
         let (mut child, mut socket) = spawn_helper(Stdio::from(writer))?;
@@ -143,6 +158,8 @@ fn output_helper_refuses_oversized_and_unacknowledged_record_overflow() -> TestR
 
 #[test]
 fn output_helper_refuses_an_unrelated_inherited_descriptor_before_records() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     // The shell owns the deliberately inheritable descriptor, so the Rust test
     // harness never exposes it to other concurrently spawned subprocesses.
     let status = Command::new("/bin/sh")
@@ -164,6 +181,8 @@ fn output_helper_refuses_an_unrelated_inherited_descriptor_before_records() -> T
 
 #[test]
 fn native_startup_with_closed_or_full_stderr_is_bounded_and_preserves_its_exit() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     for full in [false, true] {
         let (reader, writer) = if full { full_pipe()? } else { std::io::pipe()? };
         let retained_reader = full.then_some(reader);
@@ -187,6 +206,8 @@ fn native_startup_with_closed_or_full_stderr_is_bounded_and_preserves_its_exit()
 
 #[test]
 fn output_helper_closed_acknowledgment_socket_terminates_without_waiting_for_eof() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let (mut socket, request) = UnixStream::pair()?;
     let (acknowledgment, closed_peer) = UnixStream::pair()?;
     drop(closed_peer);
@@ -200,12 +221,16 @@ fn output_helper_closed_acknowledgment_socket_terminates_without_waiting_for_eof
         .stderr(Stdio::null())
         .spawn()?;
     send(&mut socket, b"closed acknowledgment\n")?;
-    assert_eq!(wait(&mut child)?.signal(), Some(9));
+    // A successful self-SIGKILL may still be pending when the non-flushing
+    // abort fallback runs on macOS. ADR 0076 requires prompt fatal termination.
+    assert!(matches!(wait(&mut child)?.signal(), Some(9 | 6)));
     Ok(())
 }
 
 #[test]
 fn native_terminal_diagnostic_remains_text_and_preserves_caller_nonblock_flags() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
     let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
     rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
