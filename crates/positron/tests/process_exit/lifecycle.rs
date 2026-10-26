@@ -71,7 +71,7 @@ fn first_os_signal_drains_and_exits_successfully() -> Result<(), Box<dyn std::er
         .status()
         .map_err(|error| format!("signal positron: {error}"))?;
     assert!(signal.success());
-    let status = child.wait()?;
+    let status = wait_for_child(&mut child)?;
     let authorization = format!(
         "Bearer {}",
         InstanceBootstrap::claim(&BootstrapPaths::new(
@@ -134,11 +134,8 @@ fn supervised_foreground_process_recovers_forced_exit_then_drains_after_restart(
             if child.try_wait()?.is_none() {
                 child.kill()?;
             }
-            let status = child.wait()?;
-            let mut stderr = String::new();
-            if let Some(pipe) = child.stderr.take() {
-                pipe.take(16_384).read_to_string(&mut stderr)?;
-            }
+            let status = wait_for_child(&mut child)?;
+            let stderr = bounded_child_stderr(&mut child, "Bearer unavailable");
             return Err(format!(
                 "supervised readiness forced={forced} status={status}: {failure}; stderr={stderr}"
             )
@@ -374,11 +371,30 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
             .success()
     );
     let stderr = rejected_child.stderr.take().ok_or("child stderr")?;
+    let flags = rustix::fs::fcntl_getfl(&stderr)?;
+    rustix::fs::fcntl_setfl(&stderr, flags | rustix::fs::OFlags::NONBLOCK)?;
     let mut stderr = BufReader::new(stderr);
+    let diagnostic_deadline = Instant::now() + Duration::from_secs(5);
     let mut records = Vec::new();
     for _ in 0..32 {
         let mut line = String::new();
-        assert!(stderr.read_line(&mut line)? > 0);
+        loop {
+            match stderr.read_line(&mut line) {
+                Ok(0) => return Err("reload diagnostic stderr closed".into()),
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= diagnostic_deadline {
+                        if rejected_child.try_wait()?.is_none() {
+                            rejected_child.kill()?;
+                        }
+                        wait_for_child(&mut rejected_child)?;
+                        return Err("reload diagnostic stderr deadline exhausted".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                },
+                Err(error) => return Err(error.into()),
+            }
+        }
         let record: serde_json::Value = serde_json::from_str(&line)?;
         assert_eq!(record["component"], "runtime");
         let rejected = record["event"] == "configuration_reload_rejected";
@@ -417,9 +433,12 @@ fn sighup_reloads_a_valid_candidate_and_keeps_serving_after_a_rejected_candidate
             .status()?
             .success()
     );
-    assert_eq!(rejected_child.wait()?.code(), Some(0));
-    let mut tail = String::new();
-    stderr.read_to_string(&mut tail)?;
+    assert_eq!(wait_for_child(&mut rejected_child)?.code(), Some(0));
+    let mut buffered_tail = Vec::new();
+    buffered_tail.extend_from_slice(stderr.buffer());
+    rejected_child.stderr = Some(stderr.into_inner());
+    let tail = String::from_utf8(buffered_tail)?
+        + &bounded_child_stderr(&mut rejected_child, &authorization);
     assert!(tail.is_empty(), "unexpected child stderr: {tail}");
     fs::remove_dir_all(root)?;
     Ok(())
@@ -715,32 +734,44 @@ fn configuration_status_response(
 #[cfg(unix)]
 fn bounded_child_stderr(child: &mut std::process::Child, authorization: &str) -> String {
     const MAX_CHILD_STDERR_BYTES: u64 = 4 * 1024;
-
-    child
-        .stderr
-        .take()
-        .map(|mut stderr| {
-            let mut bytes = Vec::with_capacity((MAX_CHILD_STDERR_BYTES + 1) as usize);
-            match stderr
-                .by_ref()
-                .take(MAX_CHILD_STDERR_BYTES + 1)
-                .read_to_end(&mut bytes)
-            {
-                Ok(_) => {
-                    let truncated = bytes.len() > MAX_CHILD_STDERR_BYTES as usize;
-                    bytes.truncate(MAX_CHILD_STDERR_BYTES as usize);
-                    let observation = bounded_redacted_observation(
-                        &String::from_utf8_lossy(&bytes),
-                        authorization,
-                    );
-                    truncated
-                        .then_some(format!("{observation}…<truncated>"))
-                        .unwrap_or(observation)
-                },
-                Err(error) => format!("stderr_read_error={error}"),
-            }
-        })
-        .unwrap_or_else(|| "stderr_unavailable".to_owned())
+    let Some(mut stderr) = child.stderr.take() else {
+        return "stderr_unavailable".to_owned();
+    };
+    let flags = match rustix::fs::fcntl_getfl(&stderr) {
+        Ok(flags) => flags,
+        Err(error) => return format!("stderr_read_error={error}"),
+    };
+    if let Err(error) = rustix::fs::fcntl_setfl(&stderr, flags | rustix::fs::OFlags::NONBLOCK) {
+        return format!("stderr_read_error={error}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut bytes = Vec::with_capacity((MAX_CHILD_STDERR_BYTES + 1) as usize);
+    let suffix = loop {
+        match stderr
+            .by_ref()
+            .take(MAX_CHILD_STDERR_BYTES + 1 - bytes.len() as u64)
+            .read_to_end(&mut bytes)
+        {
+            Ok(_) => break "",
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    break "…<stderr_deadline_exhausted>";
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            },
+            Err(error) => return format!("stderr_read_error={error}"),
+        }
+        if bytes.len() > MAX_CHILD_STDERR_BYTES as usize {
+            break "…<truncated>";
+        }
+    };
+    let truncated = bytes.len() > MAX_CHILD_STDERR_BYTES as usize;
+    bytes.truncate(MAX_CHILD_STDERR_BYTES as usize);
+    let observation = bounded_redacted_observation(&String::from_utf8_lossy(&bytes), authorization);
+    format!(
+        "{observation}{}",
+        if truncated { "…<truncated>" } else { suffix }
+    )
 }
 
 #[cfg(unix)]
@@ -871,7 +902,7 @@ fn native_recovery_survives_the_old_deadline_and_sighup_then_restores_readiness(
             .status()?
             .success()
     );
-    let status = child.wait()?;
+    let status = wait_for_child(&mut child)?;
     if status.code() != Some(0) {
         let authorization = BootstrapPaths::new(&data, &secrets, MountQualification::LocalHost)
             .and_then(|paths| InstanceBootstrap::claim(&paths))
@@ -991,7 +1022,7 @@ fn second_os_signal_escalates_to_forced_exit() -> Result<(), Box<dyn std::error:
             .status()?
             .success()
     );
-    assert_eq!(child.wait()?.code(), Some(4));
+    assert_eq!(wait_for_child(&mut child)?.code(), Some(4));
     fs::remove_dir_all(root)?;
     Ok(())
 }
@@ -1178,5 +1209,25 @@ fn configuration_publication_barrier_rejects_readiness_and_unrelated_pending_sta
     assert_eq!(published.observed_generation, "3");
     assert_eq!(published.effective_digest, "debug");
     assert!(published.is_restored());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn child_stderr_observation_is_bounded_when_a_descendant_retains_the_writer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "sleep 5 & exit 0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    assert!(wait_for_child(&mut child)?.success());
+    let started = Instant::now();
+    let observation = bounded_child_stderr(&mut child, "Bearer fixture-secret");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(observation.contains("stderr_deadline_exhausted"));
     Ok(())
 }

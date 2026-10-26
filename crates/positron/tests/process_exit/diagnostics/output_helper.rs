@@ -232,7 +232,13 @@ fn native_terminal_diagnostic_remains_text_and_preserves_caller_nonblock_flags()
     #[cfg(target_os = "macos")]
     let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
-    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+    let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY;
+    // Linux supports atomic CLOEXEC here; leaving a transient inheritable PTY
+    // lets concurrent helper spawns correctly refuse that unrelated descriptor.
+    #[cfg(target_os = "linux")]
+    let flags = flags | OpenptFlags::CLOEXEC;
+    let master = openpt(flags)?;
+    #[cfg(not(target_os = "linux"))]
     rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
     grantpt(&master)?;
     unlockpt(&master)?;
