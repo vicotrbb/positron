@@ -12,7 +12,9 @@ use std::fs;
 #[cfg(unix)]
 use std::process::Stdio;
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+use super::diagnostics::PROCESS_TEST;
+#[cfg(all(unix, not(target_os = "macos")))]
 static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(unix)]
@@ -1085,6 +1087,8 @@ fn wait_for_published_configuration(
 #[test]
 fn configuration_publication_barrier_rejects_readiness_and_unrelated_pending_state()
 -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     let listener = TcpListener::bind("127.0.0.1:0")?;

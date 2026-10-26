@@ -42,6 +42,8 @@ fn unknown_command_has_the_usage_exit() -> Result<(), Box<dyn std::error::Error>
 #[test]
 fn doctor_verify_and_bundle_report_stdout_failure_without_panicking()
 -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     for arguments in [
         vec!["doctor", "--offline"],
         vec!["verify", "--offline"],
@@ -85,6 +87,8 @@ fn command_with_closed_stdout(
 #[test]
 fn native_diagnostic_preserves_the_callers_pipe_flags_and_delivers_json()
 -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let (mut reader, writer) = std::io::pipe()?;
     let before = rustix::fs::fcntl_getfl(&writer)? & rustix::fs::OFlags::NONBLOCK;
     let status = Command::new(env!("CARGO_BIN_EXE_positron"))

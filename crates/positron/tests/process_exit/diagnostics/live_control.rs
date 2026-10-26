@@ -410,6 +410,8 @@ fn read_control_fixture_request(
 #[test]
 fn control_fixture_consumes_the_declared_body_before_responding()
 -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair()?;
     reader.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -443,6 +445,8 @@ fn control_fixture_consumes_the_declared_body_before_responding()
 #[test]
 fn control_fixture_refuses_incomplete_or_unbounded_requests()
 -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     for request in [
         b"POST / HTTP/1.1\r\n\r\n".as_slice(),
         b"POST / HTTP/1.1\r\nContent-Length: invalid\r\n\r\n",

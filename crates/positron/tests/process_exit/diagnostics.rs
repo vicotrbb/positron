@@ -19,7 +19,7 @@ use std::{io::Read, io::Write, net::TcpStream};
 use std::{os::fd::OwnedFd, os::unix::net::UnixStream};
 
 #[cfg(unix)]
-static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[path = "support.rs"]
 pub(super) mod support;
