@@ -95,6 +95,19 @@ fn capture_oci_build_metadata() {
     capture_oci_metadata(&capture);
 }
 fn capture_oci_metadata(capture: &Path) {
+    capture_oci_executable(capture);
+    capture_metadata(capture);
+    let layout = Layout::read(&capture.join("image.tar"));
+    let index: Value = serde_json::from_slice(&layout.0["index.json"]).unwrap();
+    let manifest: Value = serde_json::from_slice(layout.blob(&index["manifests"][0])).unwrap();
+    fs::write(
+        capture.join("closure.json"),
+        serde_json::to_vec(&layout.closure(&manifest)).unwrap(),
+    )
+    .unwrap();
+}
+
+fn capture_oci_executable(capture: &Path) {
     // Native Cargo test builds may replace the mutable build-tree executable.
     // The frozen archive is the exact input used to construct this OCI image.
     let executable = Command::new("tar")
@@ -108,15 +121,6 @@ fn capture_oci_metadata(capture: &Path) {
         "native archive extraction failed"
     );
     fs::write(capture.join("positron"), executable.stdout).unwrap();
-    capture_metadata(capture);
-    let layout = Layout::read(&capture.join("image.tar"));
-    let index: Value = serde_json::from_slice(&layout.0["index.json"]).unwrap();
-    let manifest: Value = serde_json::from_slice(layout.blob(&index["manifests"][0])).unwrap();
-    fs::write(
-        capture.join("closure.json"),
-        serde_json::to_vec(&layout.closure(&manifest)).unwrap(),
-    )
-    .unwrap();
 }
 
 #[test]

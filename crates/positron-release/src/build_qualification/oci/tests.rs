@@ -278,27 +278,6 @@ fn captured_native_executable_is_the_immutable_archive_payload_after_build_direc
         b"mutable build directory was reused",
     )
     .unwrap();
-    let mut blobs = BTreeMap::new();
-    let layer = descriptor(
-        &mut blobs,
-        tar(&BTreeMap::from([(
-            "usr/bin/positron".into(),
-            binary.to_vec(),
-        )])),
-        "application/vnd.oci.image.layer.v1.tar",
-    );
-    let manifest = descriptor(
-        &mut blobs,
-        serde_json::to_vec(&json!({"layers":[layer]})).unwrap(),
-        "application/vnd.oci.image.manifest.v1+json",
-    );
-    blobs.insert(
-        "index.json".into(),
-        serde_json::to_vec(&json!({"manifests":[manifest]})).unwrap(),
-    );
-    fs::write(capture.join("image.tar"), tar(&blobs)).unwrap();
-    // The capture's source facts are real repository facts; this payload remains
-    // an explicit synthetic unit fixture, not native-build qualification.
-    capture_oci_metadata(&capture);
+    capture_oci_executable(&capture);
     assert_eq!(fs::read(capture.join("positron")).unwrap(), binary);
 }
