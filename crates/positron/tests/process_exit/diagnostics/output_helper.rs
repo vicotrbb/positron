@@ -216,6 +216,7 @@ fn output_helper_closed_acknowledgment_socket_terminates_without_waiting_for_eof
     drop(closed_peer);
     let request: OwnedFd = request.into();
     let acknowledgment: OwnedFd = acknowledgment.into();
+    close_fds::set_fds_cloexec_threadsafe(3, &[]);
     let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
         .arg(ARGUMENT)
         .env_clear()
