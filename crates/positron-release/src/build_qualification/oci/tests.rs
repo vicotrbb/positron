@@ -93,7 +93,12 @@ fn fixture() -> (TestCapture, Qualification) {
             .unwrap();
         }
     }
-    combined.insert("index.json".into(), serde_json::to_vec(&json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":images})).unwrap());
+    let index = descriptor(
+        &mut combined,
+        serde_json::to_vec(&json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":images})).unwrap(),
+        "application/vnd.oci.image.index.v1+json",
+    );
+    combined.insert("index.json".into(), serde_json::to_vec(&json!({"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[index]})).unwrap());
     for build in ["one", "two"] {
         fs::write(root.join(format!("index-{build}.tar")), tar(&combined)).unwrap();
         fs::write(
@@ -104,6 +109,29 @@ fn fixture() -> (TestCapture, Qualification) {
     }
     let qualification = staged_oci(&root, &root.join("staged"));
     (base, qualification)
+}
+
+#[test]
+fn staged_oci_refuses_layout_index_descriptor_type_size_and_digest_drift() {
+    for field in ["mediaType", "size", "digest"] {
+        let (base, _qualification) = fixture();
+        let root = base.0.join("oci");
+        for build in ["one", "two"] {
+            let path = root.join(format!("index-{build}.tar"));
+            let mut layout = Layout::read(&path);
+            let mut index: Value = serde_json::from_slice(&layout.0["index.json"]).unwrap();
+            index["manifests"][0][field] = match field {
+                "size" => json!(0),
+                "digest" => json!(format!("sha256:{}", "0".repeat(64))),
+                _ => json!("application/vnd.oci.image.manifest.v1+json"),
+            };
+            layout
+                .0
+                .insert("index.json".into(), serde_json::to_vec(&index).unwrap());
+            fs::write(path, tar(&layout.0)).unwrap();
+        }
+        assert!(std::panic::catch_unwind(|| staged_oci(&root, &root.join("refused"))).is_err());
+    }
 }
 
 #[test]

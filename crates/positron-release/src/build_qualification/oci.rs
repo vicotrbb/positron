@@ -32,8 +32,23 @@ impl Layout {
         assert_eq!(hex(&FileIdentity::of(bytes).sha256), digest);
         bytes
     }
+    fn index(&self) -> &[u8] {
+        let layout: Value = serde_json::from_slice(&self.0["index.json"]).unwrap();
+        assert_eq!(layout["schemaVersion"], 2);
+        assert_eq!(
+            layout["mediaType"],
+            "application/vnd.oci.image.index.v1+json"
+        );
+        let descriptors = layout["manifests"].as_array().unwrap();
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            descriptors[0]["mediaType"],
+            "application/vnd.oci.image.index.v1+json"
+        );
+        self.blob(&descriptors[0])
+    }
     fn image(&self, architecture: &str) -> &[u8] {
-        let index: Value = serde_json::from_slice(&self.0["index.json"]).unwrap();
+        let index: Value = serde_json::from_slice(self.index()).unwrap();
         let image = index["manifests"]
             .as_array()
             .unwrap()
@@ -172,7 +187,7 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
     }
     let index = Layout::read(&root.join("index-one.tar"));
     let independent = Layout::read(&root.join("index-two.tar"));
-    assert_eq!(index.0["index.json"], independent.0["index.json"]);
+    assert_eq!(index.index(), independent.index());
     for target in ["linux-x86_64", "linux-aarch64"] {
         for build in ["one", "two"] {
             let capture = root.join(format!("oci-{target}/{build}"));
@@ -350,8 +365,8 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
         "oci-index.json",
         Surface::OciIndex,
         "any",
-        &index.0["index.json"],
-        &independent.0["index.json"],
+        index.index(),
+        independent.index(),
         ArtifactBuild {
             packages,
             closure: &empty,

@@ -42,8 +42,22 @@ fn actual_oci_index_and_images_bind_independent_payloads_and_offline_release_tru
     let second = layout(Path::new(
         &std::env::var("POSITRON_TEST_OCI_INDEX_REBUILD").unwrap(),
     ));
-    let index: Value = serde_json::from_slice(&first["index.json"]).unwrap();
+    let layout_index: Value = serde_json::from_slice(&first["index.json"]).unwrap();
     assert_eq!(first["index.json"], second["index.json"]);
+    assert_eq!(layout_index["schemaVersion"], 2);
+    assert_eq!(
+        layout_index["mediaType"],
+        "application/vnd.oci.image.index.v1+json"
+    );
+    let descriptors = layout_index["manifests"].as_array().unwrap();
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(
+        descriptors[0]["mediaType"],
+        "application/vnd.oci.image.index.v1+json"
+    );
+    let index_bytes = blob(&first, &descriptors[0]);
+    assert_eq!(index_bytes, blob(&second, &descriptors[0]));
+    let index: Value = serde_json::from_slice(index_bytes).unwrap();
     let images = index["manifests"].as_array().unwrap();
     assert_eq!(images.len(), 2);
     let mut fixture = support::Fixture::new();
@@ -86,7 +100,7 @@ fn actual_oci_index_and_images_bind_independent_payloads_and_offline_release_tru
         .iter()
         .position(|artifact| artifact.surface == Surface::OciIndex)
         .unwrap();
-    fixture.replace_artifact(position, &first["index.json"], &first["index.json"]);
+    fixture.replace_artifact(position, index_bytes, index_bytes);
     let (signed, prepared) = fixture.published();
     let verify = |signed: &[u8]| {
         verify_release(
