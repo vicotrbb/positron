@@ -77,3 +77,100 @@ fn prepare_compose_lifecycle_inputs() -> Result<(), Box<dyn std::error::Error>> 
     }
     Ok(())
 }
+
+#[test]
+#[ignore = "runs the host Python consumer against canonical Rust ProtoJSON"]
+fn compose_query_consumer_uses_canonical_protojson() -> Result<(), Box<dyn std::error::Error>> {
+    use positron_api::log_query::*;
+    use std::io::Write;
+    let budget = LogQueryBudget {
+        scanned_bytes: 1_048_576,
+        decoded_records: 16,
+        output_rows: 16,
+        output_bytes: 16_384,
+        memory_bytes: 1_048_576,
+        cpu_work_units: 15,
+        wall_seconds: 5,
+        maximum_time_range_nanoseconds: 100,
+    };
+    let response = LogQueryResponse {
+        events: vec![
+            LogQueryEvent {
+                event: Some(log_query_event::Event::Header(LogQueryHeader {
+                    columns: vec![LogQueryColumn {
+                        name: "body".into(),
+                        value_type: "native_value".into(),
+                        nullable: false,
+                    }],
+                    snapshot: Some(LogQuerySnapshot {
+                        identity: vec![1; 32],
+                        generation: 1,
+                        frontier: 0,
+                    }),
+                    ordering: vec![LogQueryOrdering {
+                        column: "query_time".into(),
+                        value_type: "query_time".into(),
+                        direction: "ascending".into(),
+                    }],
+                    effective_budget: Some(budget),
+                    lease: Some(LogQueryLease {
+                        identity: vec![1; 16],
+                        expiry_unix_seconds: 1,
+                    }),
+                    initial_cursor: None,
+                })),
+            },
+            LogQueryEvent {
+                event: Some(log_query_event::Event::Batch(LogQueryBatch {
+                    sequence: 0,
+                    prior_digest: vec![0; 32],
+                    digest: vec![7; 32],
+                    rows: vec![LogQueryRow {
+                        replayed: false,
+                        cells: vec![LogQueryCell {
+                            value: Some(log_query_cell::Value::NativeValue(LogQueryValue {
+                                value: Some(log_query_value::Value::TextValue(
+                                    "compose-retained".into(),
+                                )),
+                            })),
+                        }],
+                    }],
+                })),
+            },
+            LogQueryEvent {
+                event: Some(log_query_event::Event::Terminal(LogQueryTerminal {
+                    state: "complete".into(),
+                    stats: Some(LogQueryStats {
+                        records: 1,
+                        result_digest: vec![7; 32],
+                        last_sequence: Some(0),
+                        cumulative_budget: Some(budget),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            },
+        ],
+    };
+    // The public encoder validates the complete typed response before emission.
+    let bytes = response.encode()?;
+    let mut child = std::process::Command::new("python3")
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../deploy/compose/test_query_wire.py"),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().ok_or("wire consumer input")?;
+    input.write_all(&bytes)?;
+    drop(input);
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "canonical wire consumer refused: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}

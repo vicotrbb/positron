@@ -69,8 +69,9 @@ volumes:
                 self.assertEqual(state["HostConfig"]["Memory"], 2 * 1024 ** 3)
                 self.assertEqual(state["State"]["Health"]["Status"], "healthy")
                 self.assertNotIn(b"administrator_secret=", compose("logs"))
-                invalid_tls = subprocess.run(["docker", *command, "exec", "-T", "positron", "doctor", "--ready", "--endpoint", "127.0.0.1:13133", "--server-name", "wrong.invalid", "--trust-file", "/etc/positron/tls/ca.pem"], capture_output=True)
-                self.assertNotEqual(invalid_tls.returncode, 0)
+                invalid_tls = subprocess.run(["docker", *command, "exec", "-T", "positron", "/usr/bin/positron", "doctor", "--ready", "--endpoint", "127.0.0.1:13133", "--server-name", "wrong.invalid", "--trust-file", "/etc/positron/tls/ca.pem"], capture_output=True)
+                self.assertEqual(invalid_tls.returncode, 3)
+                self.assertIn(b"DOCTOR_ONLINE_INSPECTION_UNAVAILABLE", invalid_tls.stdout)
 
                 compose("stop")
                 self.assertEqual(json.loads(docker("inspect", container))[0]["State"]["ExitCode"], 0)

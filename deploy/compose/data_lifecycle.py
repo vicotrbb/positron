@@ -82,7 +82,7 @@ class DataLifecycle:
 
     def online(self, family, action=None, *args, credential=None, compose=None, timeout=35):
         command = [family] + ([action] if action else [])
-        return (compose or self.compose)("exec", "-T", "positron", *command, "--endpoint", "127.0.0.1:8080", "--server-name", "localhost", "--trust-file", "/etc/positron/tls/ca.pem", "--credential-stdin", *args, input=(credential or self.admin).encode(), timeout=timeout)
+        return (compose or self.compose)("exec", "-T", "positron", "/usr/bin/positron", *command, "--endpoint", "127.0.0.1:8080", "--server-name", "localhost", "--trust-file", "/etc/positron/tls/ca.pem", "--credential-stdin", *args, input=(credential or self.admin).encode(), timeout=timeout)
 
     def query(self, compose=None):
         started = time.monotonic()
@@ -105,8 +105,8 @@ class DataLifecycle:
         self.case.assertEqual(sum(value == "compose-retained" for row in rows for value in row.values() if isinstance(value, str)), 1)
         terminal = [row for row in rows if row.get("state") == "complete"]
         self.case.assertEqual(len(terminal), 1)
-        self.case.assertEqual(terminal[0]["stats"]["records"], 1)
-        return terminal[0]["stats"]["result_digest"]
+        self.case.assertEqual(terminal[0]["stats"]["records"], "1")
+        return terminal[0]["stats"]["resultDigest"]
 
     def ingest(self):
         port = self.compose("port", "positron", "4318").decode().strip().rsplit(":", 1)[1]

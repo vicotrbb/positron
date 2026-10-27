@@ -41,7 +41,10 @@ class ReadinessTLS(unittest.TestCase):
                         self.assertEqual(result.stdout, b"status=ready\n")
                         self.assertEqual(seen, [("/health/ready", None)])
                         args[args.index("localhost")] = "wrong.invalid"
-                        self.assertNotEqual(subprocess.run(args, capture_output=True, timeout=10).returncode, 0)
+                        rejected = subprocess.run(args, capture_output=True, timeout=10)
+                        self.assertEqual(rejected.returncode, 3)
+                        self.assertIn(b"DOCTOR_ONLINE_INSPECTION_UNAVAILABLE", rejected.stdout)
+                        self.assertEqual(seen, [("/health/ready", None)])
                     else:
                         self.assertIn(b"DOCTOR_ONLINE_INSPECTION_UNAVAILABLE", result.stdout)
                         self.assertEqual(seen, [])

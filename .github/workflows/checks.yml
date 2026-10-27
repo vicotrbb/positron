@@ -497,6 +497,7 @@ jobs:
           docker volume rm positron-oci-test-temp
           python3 deploy/compose/test_tls.py
           compose_fixture=$(jq -r 'select(.target.name == "compose_fixture" and .executable != null and .profile.test == true) | .executable' "$RUNNER_TEMP/public-test-build.json")
+          "$compose_fixture" --ignored --exact compose_query_consumer_uses_canonical_protojson
           POSITRON_TEST_COMPOSE_HELPER="$compose_fixture" \
           POSITRON_TEST_OCI_IMAGE=positron-118-test \
           POSITRON_TEST_UPGRADE_BINARY="$candidate/target/release/positron" \
