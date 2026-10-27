@@ -116,7 +116,13 @@ A container export or live volume copy is not a verified Backup Snapshot.
 Create and independently verify a Backup Snapshot before upgrade. Stage the full
 signed candidate and `[release.installation]` references, perform native Upgrade
 preflight and the Quiescent Upgrade Snapshot, then follow its Drain and offline
-publication. Only after native publication succeeds, install the candidate's
+publication. Before starting the native Upgrade operation, suspend automatic
+restart for the planned replacement using
+`docker update --restart=no "$(docker compose ps --quiet positron)"`. This lets the
+source's automatic Upgrade Drain exit without Docker immediately starting the
+old image again. After publication, `docker compose up --detach --force-recreate
+--wait` recreates the service with the candidate image and restores its declared
+restart policy. Only after native publication succeeds, install the candidate's
 verified generated Compose artifact and run `docker compose up --detach --wait`.
 Keep the same volumes and configuration binding, and verify readiness and retained
 queries. Never substitute a mutable image tag or force an older image over a

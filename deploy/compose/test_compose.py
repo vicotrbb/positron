@@ -8,6 +8,7 @@ import tarfile
 import tempfile
 import unittest
 import uuid
+from data_lifecycle import DataLifecycle
 
 
 def docker(*args, **kwargs):
@@ -27,7 +28,7 @@ class ComposeContract(unittest.TestCase):
                 "ghcr.io/vicotrbb/positron@sha256:@INDEX_SHA256@", identity))
             root.joinpath("override.yaml").write_text('''services:
   positron:
-    ports: !reset []
+    ports: !override ["127.0.0.1::4318"]
     volumes: !override
       - data:/var/lib/positron
       - secrets:/var/lib/positron-secrets
@@ -48,6 +49,7 @@ volumes:
                     config = archive.extractfile(archive.getmembers()[0]).read().decode()
                 tls = "".join(f'{name}_tls_certificate_file = "/etc/positron/tls/server.pem"\n{name}_tls_private_key_file = "/etc/positron/tls/server-key.pem"\n' for name in ("operations", "api", "otlp_grpc", "otlp_http", "loki_push"))
                 config = config.replace("[listener]\n", "[listener]\n" + tls)
+                config = config.replace('otlp_http_bind_address = "127.0.0.1:4318"', 'otlp_http_bind_address = "0.0.0.0:4318"')
                 root.joinpath("positron.toml").write_text(config)
                 subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-keyout", str(root / "server-key.pem"), "-out", str(root / "server.pem")], check=True, capture_output=True)
                 payload = io.BytesIO()
@@ -66,6 +68,9 @@ volumes:
                 self.assertEqual(state["HostConfig"]["Memory"], 2 * 1024 ** 3)
                 self.assertEqual(state["State"]["Health"]["Status"], "healthy")
                 self.assertNotIn(b"administrator_secret=", compose("logs"))
+                invalid_tls = subprocess.run(["docker", *command, "exec", "-T", "positron", "doctor", "--ready", "--endpoint", "127.0.0.1:13133", "--server-name", "wrong.invalid", "--trust-file", "/etc/positron/tls/ca.pem"], capture_output=True)
+                self.assertNotEqual(invalid_tls.returncode, 0)
+
                 compose("stop")
                 self.assertEqual(json.loads(docker("inspect", container))[0]["State"]["ExitCode"], 0)
                 claim = compose("run", "--rm", "--no-deps", "positron", "bootstrap", "claim", "--config", "/etc/positron/positron.toml")
@@ -73,19 +78,33 @@ volumes:
                 repeated = subprocess.run(["docker", *command, "run", "--rm", "--no-deps", "positron", "bootstrap", "claim", "--config", "/etc/positron/positron.toml"], capture_output=True)
                 self.assertNotEqual(repeated.returncode, 0)
                 self.assertEqual(repeated.stdout, b"")
+                lifecycle = DataLifecycle(self, root, project, compose, docker, claim)
+                lifecycle.prepare(container, config)
                 compose("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
+                lifecycle.ingest()
+                expected = lifecycle.query()
                 compose("kill", "--signal", "SIGKILL")
                 compose("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
+                self.assertEqual(lifecycle.query(), expected)
+                lifecycle.backup()
+                lifecycle.restore(expected)
+                lifecycle.upgrade(expected)
                 compose("down")
                 for name in ("data", "secrets", "backups"):
                     docker("volume", "inspect", f"{project}_{name}")
                 compose("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
+                self.assertEqual(lifecycle.query(), expected)
+                compose("stop")
+                verified = compose("run", "--rm", "--no-deps", "positron", "verify", "--offline", "--config", "/etc/positron/positron.toml")
+                self.assertIn(b"verified", verified)
             finally:
                 result = subprocess.run(["docker", *command, "logs"], capture_output=True)
                 # Logs contain no claim; reveal useful failure context only.
                 if b"administrator_secret=" not in result.stdout:
                     print(result.stdout.decode(errors="replace"))
                 subprocess.run(["docker", *command, "down", "--volumes"], check=True, capture_output=True)
+                if "lifecycle" in locals() and hasattr(lifecycle, "candidate_tag"):
+                    docker("image", "rm", lifecycle.candidate_tag)
 
 
 if __name__ == "__main__":
