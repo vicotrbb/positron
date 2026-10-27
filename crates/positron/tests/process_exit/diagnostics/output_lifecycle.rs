@@ -75,15 +75,44 @@ fn await_terminated(pid: u32) -> TestResult {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
-fn terminate(child: &mut Child) -> TestResult {
+fn terminate(child: &mut Child, saturated: bool, phase: &str) -> TestResult {
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &child.id().to_string()])
             .status()?
             .success()
     );
-    assert_eq!(wait_for_child(child)?.code(), Some(0));
+    let status = wait_for_child(child)?;
+    if status.code() != Some(0) {
+        return Err(format!("saturated={saturated} phase={phase} status={status}").into());
+    }
     Ok(())
+}
+fn output_failure_context(reader: &mut std::io::PipeReader, child: &mut Child) -> String {
+    let status = child.try_wait();
+    let mut bytes = Vec::new();
+    let observed = rustix::fs::fcntl_getfl(&*reader)
+        .and_then(|flags| rustix::fs::fcntl_setfl(&*reader, flags | rustix::fs::OFlags::NONBLOCK));
+    if observed.is_ok() {
+        let _bounded_read = reader.take(65536).read_to_end(&mut bytes);
+    }
+    let events: Vec<String> = bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+            let event = value.get("event")?.as_str()?;
+            (event.len() <= 80
+                && event
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
+            .then(|| event.to_owned())
+        })
+        .take(32)
+        .collect();
+    format!(
+        "child_status={status:?} bytes={} events={events:?}",
+        bytes.len()
+    )
 }
 fn http(port: u16, path: &str, credential: &str, body: &[u8]) -> TestResult<Vec<u8>> {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -292,10 +321,20 @@ fn normal_and_saturated_output_reap_before_graceful_marker_and_retain_acknowledg
                 .stderr(Stdio::from(writer.try_clone()?))
                 .spawn()?,
         );
-        wait_for_ready(ports[0])?;
+        wait_for_ready(ports[0]).map_err(|error| {
+            format!(
+                "saturated={saturated} phase=initial_readiness error={error} {}",
+                output_failure_context(&mut reader, &mut child)
+            )
+        })?;
         let helper = children(child.id())?.first().copied();
         http(ports[3], "/v1/logs", claim.ingest_secret().ok_or("ingest credential")?, br#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"42","body":{"stringValue":"output-helper-retained"}}]}]}]}"#)?;
-        terminate(&mut child)?;
+        terminate(&mut child, saturated, "after_ingest").map_err(|error| {
+            format!(
+                "{error} {}",
+                output_failure_context(&mut reader, &mut child)
+            )
+        })?;
         if let Some(helper) = helper {
             await_terminated(helper)?;
         }
@@ -338,7 +377,7 @@ fn normal_and_saturated_output_reap_before_graceful_marker_and_retain_acknowledg
                 .count(),
             1
         );
-        terminate(&mut restarted)?;
+        terminate(&mut restarted, saturated, "after_query")?;
         fs::remove_dir_all(root)?;
     }
     Ok(())
