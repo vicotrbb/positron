@@ -29,13 +29,20 @@ async fn structural_amplification_is_rejected_before_handler_and_releases_admiss
     assert_eq!(failure.code(), Code::InvalidArgument);
 
     let follow_up = harness.authorize(tonic::Request::new(otlp_request("after-preflight")))?;
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), client.export(follow_up))
-            .await??
-            .into_inner()
-            .partial_success
-            .is_none()
-    );
+    let (metadata, _, body) = follow_up.into_parts();
+    // Only this single-record positive probe may replay explicit precommit
+    // capacity. A persistent admission leak still exhausts the same deadline.
+    let response = super::authentication::single_record_export(
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        || {
+            let mut client = client.clone();
+            let mut request = tonic::Request::new(body.clone());
+            *request.metadata_mut() = metadata.clone();
+            async move { client.export(request).await }
+        },
+    )
+    .await?;
+    assert!(response.into_inner().partial_success.is_none());
     assert_eq!(
         harness.query_log_bodies("logs | range query_time 0 100 | limit 16")?,
         vec!["after-preflight"]

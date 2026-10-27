@@ -7,7 +7,7 @@ use tonic::{Code, Request};
 
 use super::support::{LiveGrpcHarness, otlp_request};
 
-async fn single_record_export<T, F, Fut>(
+pub(super) async fn single_record_export<T, F, Fut>(
     deadline: tokio::time::Instant,
     mut attempt: F,
 ) -> Result<T, tonic::Status>
