@@ -200,7 +200,8 @@ fn online_backup_requires_verified_recovery_and_publishes_reusable_ciphertext()
         "11111111-1111-4111-8111-111111111111",
     )?;
     assert_eq!(accepted.operation.status, "pending");
-    let first = finish(&client, &services, &administrator, &accepted.operation.id)?;
+    let first = finish(&client, &services, &administrator, &accepted.operation.id)
+        .map_err(|failure| format!("first backup completion: {failure}"))?;
     assert_eq!(first.operation.status, "succeeded");
     assert_eq!(
         first.operation.irreversible_boundary,
@@ -222,7 +223,8 @@ fn online_backup_requires_verified_recovery_and_publishes_reusable_ciphertext()
         &repository_path,
         "22222222-2222-4222-8222-222222222222",
     )?;
-    let second = finish(&client, &services, &administrator, &second.operation.id)?;
+    let second = finish(&client, &services, &administrator, &second.operation.id)
+        .map_err(|failure| format!("second backup completion: {failure}"))?;
     assert_eq!(second.operation.status, "succeeded");
     assert!(second.receipt.ok_or("second receipt")?.reused_bytes > 0);
     let listing = positron_api::backup::BackupListRequest {
@@ -266,45 +268,133 @@ fn online_backup_requires_verified_recovery_and_publishes_reusable_ciphertext()
         &administrator,
         &cancelling.operation.id,
         "44444444-4444-4444-8444-444444444444",
-    )?;
+    )
+    .map_err(|failure| format!("initial backup cancellation: {failure}"))?;
     assert_eq!(cancellation.operation.phase, "backup_cancellation");
     assert!(cancellation.cleanup_pending);
-    let cancelled = finish(&client, &services, &administrator, &cancelling.operation.id)?;
+    let cancelled = finish(&client, &services, &administrator, &cancelling.operation.id)
+        .map_err(|failure| format!("initial backup cleanup: {failure}"))?;
     assert_eq!(cancelled.operation.status, "cancelled");
     assert!(!cancelled.cleanup_pending);
-    let (_, reserved) = create_current(
-        &client,
-        &services,
-        &administrator,
-        &repository_path,
-        "55555555-5555-4555-8555-555555555555",
-    )?;
-    wait_for_signed_reservation(
-        &services,
-        &repository_path,
-        &identity,
-        &reserved.operation.id,
-        &administrator,
-    )?;
+    let cursor = client
+        .list(&administrator, &listing)
+        .map_err(|failure| format!("fresh cursor after initial cancellation: {failure:?}"))?
+        .next_cursor
+        .ok_or("fresh cursor")?;
+    drop(services);
     assert_eq!(
-        client.list(
-            &administrator,
-            &positron_api::backup::BackupListRequest {
-                cursor: Some(old_cursor),
-                ..listing
-            }
-        ),
-        Err(BackupServiceClientFailure::PreconditionFailed)
+        process.shutdown(ShutdownTrigger::FirstSignal),
+        crate::ExitOutcome::Graceful
     );
-    let cancellation = cancel_current(
-        &client,
-        &services,
-        &administrator,
-        &reserved.operation.id,
-        "66666666-6666-4666-8666-666666666666",
-    )?;
+    let initialized = fixture
+        .reopen()
+        .map_err(|failure| format!("reopen before reservation: {failure}"))?;
+    let services = ServiceHandle::new(Arc::clone(&initialized))
+        .map_err(|failure| format!("services before reservation: {failure:?}"))?;
+    let reserved = services
+        .manage_backup(
+            &administrator,
+            &create(
+                &services,
+                &repository_path,
+                "55555555-5555-4555-8555-555555555555",
+            )?
+            .encode()?,
+        )
+        .map_err(|failure| format!("accept reserved backup: {failure:?}"))?;
+    let cursor_request = positron_api::backup::BackupListRequest {
+        cursor: Some(cursor),
+        ..listing
+    };
+    assert_eq!(
+        services
+            .list_backups(&administrator, &cursor_request.encode()?)
+            .map_err(|failure| format!("cursor before reservation: {failure:?}"))?
+            .entries
+            .len(),
+        1
+    );
+    let snapshot =
+        crate::services::maintenance_verification::decode_fixed_hex(&reserved.operation.id)
+            .ok_or("reserved operation")?;
+    let stop = crate::services::backup_administration::stop_after(
+        initialized.instance.to_bytes(),
+        snapshot,
+        crate::services::backup_administration::StopPoint::ReservationRegistered,
+    )
+    .map_err(|failure| format!("arm reservation stop: {failure:?}"))?;
+    let cancellation = crate::TaskCancellation::new();
+    let worker_services = services.clone();
+    let worker_cancellation = cancellation.clone();
+    let worker =
+        std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancellation));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !stop.observed() && !worker.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            cancellation.cancel();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let worker_result = worker.join().map_err(|_| "reservation worker panic")?;
+    assert!(
+        stop.observed(),
+        "reservation stop not reached: {worker_result:?}"
+    );
+    assert_eq!(worker_result, Ok(()));
+    assert_signed_reservation(&services, &repository_path, &identity, snapshot)
+        .map_err(|failure| format!("inspect stopped signed reservation: {failure}"))?;
+    assert_eq!(
+        services.list_backups(&administrator, &cursor_request.encode()?),
+        Err(MaintenanceServiceFailure::PreconditionFailed)
+    );
+    let status = BackupRequest::decode(&serde_json::to_vec(
+        &serde_json::json!({"action":"status", "operation_id":reserved.operation.id}),
+    )?)?;
+    let revision = services
+        .manage_backup(&administrator, &status.encode()?)
+        .map_err(|failure| format!("stopped backup status: {failure:?}"))?
+        .operation_revision;
+    let cancellation = BackupRequest::decode(&serde_json::to_vec(
+        &serde_json::json!({"action":"cancel", "operation_id":reserved.operation.id, "idempotency_key":"66666666-6666-4666-8666-666666666666", "expected_operation_revision":revision}),
+    )?)?;
+    // The stopped worker and this request share the established clock. Reopening
+    // first would introduce conservative clock recovery and a publication race.
+    let cancellation = services
+        .manage_backup(&administrator, &cancellation.encode()?)
+        .map_err(|failure| format!("stopped backup cancellation: {failure:?}"))?;
     assert_eq!(cancellation.operation.status, "running");
-    let cancelled = finish(&client, &services, &administrator, &reserved.operation.id)?;
+    assert_eq!(cancellation.operation.phase, "backup_cancellation");
+    assert!(cancellation.cleanup_pending);
+    drop(stop);
+    drop(services);
+    drop(initialized);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(fixture.paths()?, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )
+    .map_err(|failure| format!("restart after signed reservation: {failure:?}"))?;
+    let services = process.services().ok_or("reopened services")?;
+    let endpoint = process
+        .bound_endpoints()
+        .into_iter()
+        .find(|endpoint| endpoint.role() == crate::ListenerRole::Api)
+        .and_then(|endpoint| endpoint.socket_address())
+        .ok_or("reopened API endpoint")?;
+    let client = BackupServiceClient::new(BackupTransport::PlaintextOptOut { endpoint })?;
+    let recovered = client
+        .manage(&administrator, &status)
+        .map_err(|failure| format!("cancelled intent after restart: {failure:?}"))?;
+    assert!(matches!(
+        recovered.operation.status.as_str(),
+        "running" | "cancelled"
+    ));
+    assert!(matches!(
+        recovered.operation.phase.as_str(),
+        "backup_cancellation" | "cancelled"
+    ));
+    let cancelled = finish(&client, &services, &administrator, &reserved.operation.id)
+        .map_err(|failure| format!("reserved backup cleanup after restart: {failure}"))?;
     assert_eq!(cancelled.operation.status, "cancelled");
     assert!(!cancelled.cleanup_pending);
     {
@@ -324,6 +414,40 @@ fn online_backup_requires_verified_recovery_and_publishes_reusable_ciphertext()
         crate::ExitOutcome::Graceful
     );
     fs::remove_dir_all(repository_path)?;
+    Ok(())
+}
+fn assert_signed_reservation(
+    services: &ServiceHandle,
+    path: &std::path::Path,
+    identity: &RepositoryIdentity,
+    snapshot: [u8; 16],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let signer = {
+        let _gate = services.catalog_operation()?;
+        let catalog = open_catalog(&services.instance)?;
+        let basis = catalog.pin()?;
+        let (_, governance) = basis.governance_object()?;
+        services.instance.key.backup_control_signer(
+            services.instance.instance,
+            governance.protected_integrity_key(),
+        )?
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let repository = runtime.block_on(LocalRepository::attach(path, identity))?;
+    let resources = backup_read_resources(services)?;
+    let publisher = positron_backup::BackupPublisher::new(&repository, identity, &signer)
+        .with_control_resources(&resources, 0)?;
+    let proof = backup_inspection_proof(&runtime, &publisher, snapshot)?;
+    let verified = publisher.with_registry_verification(&proof)?;
+    assert_eq!(
+        runtime
+            .block_on(verified.cancellation_candidate(snapshot))?
+            .ok_or("signed reservation")?
+            .snapshot_id(),
+        snapshot
+    );
     Ok(())
 }
 fn wait_for_signed_reservation(
@@ -432,7 +556,10 @@ fn cancel_current(
         &serde_json::json!({"action":"status", "operation_id":operation}),
     )?)?;
     loop {
-        let revision = client.manage(bearer, &status)?.operation_revision;
+        let revision = client
+            .manage(bearer, &status)
+            .map_err(|failure| format!("cancellation status read: {failure:?}"))?
+            .operation_revision;
         let request = BackupRequest::decode(&serde_json::to_vec(
             &serde_json::json!({"action":"cancel", "operation_id":operation, "idempotency_key":cancellation_key, "expected_operation_revision":revision}),
         )?)?;
@@ -445,7 +572,7 @@ fn cancel_current(
                     return Err("cancellation refused without stale operation revision".into());
                 }
             },
-            Err(failure) => return Err(failure.into()),
+            Err(failure) => return Err(format!("cancellation write: {failure:?}").into()),
         }
     }
 }
