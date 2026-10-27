@@ -98,19 +98,33 @@ fn http(port: u16, path: &str, credential: &str, body: &[u8]) -> TestResult<Vec<
             Ok(remaining)
         }
     };
+    let context = |operation: &'static str, budget: Duration, error: std::io::Error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "output lifecycle HTTP operation={operation} remaining_nanos={} error={error}",
+                budget.as_nanos()
+            ),
+        )
+    };
     let mut request = format!(
         "POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()
     ).into_bytes();
     request.extend_from_slice(body);
     loop {
-        let mut stream = TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            remaining()?,
-        )?;
+        let budget = remaining()?;
+        let mut stream =
+            TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), budget)
+                .map_err(|error| context("connect", budget, error))?;
         let mut pending = request.as_slice();
         while !pending.is_empty() {
-            stream.set_write_timeout(Some(remaining()?))?;
-            let written = stream.write(pending)?;
+            let budget = remaining()?;
+            stream
+                .set_write_timeout(Some(budget))
+                .map_err(|error| context("set_write_timeout", budget, error))?;
+            let written = stream
+                .write(pending)
+                .map_err(|error| context("write_request", budget, error))?;
             if written == 0 {
                 return Err("output lifecycle request write closed".into());
             }
@@ -118,9 +132,14 @@ fn http(port: u16, path: &str, credential: &str, body: &[u8]) -> TestResult<Vec<
         }
         let mut response = Vec::new();
         loop {
-            stream.set_read_timeout(Some(remaining()?))?;
+            let budget = remaining()?;
+            stream
+                .set_read_timeout(Some(budget))
+                .map_err(|error| context("set_read_timeout", budget, error))?;
             let mut buffer = [0; 4096];
-            let count = stream.read(&mut buffer)?;
+            let count = stream
+                .read(&mut buffer)
+                .map_err(|error| context("read_response", budget, error))?;
             if count == 0 {
                 return Err("output lifecycle HTTP response truncated".into());
             }
@@ -330,7 +349,12 @@ fn accept_http_fixture(listener: &std::net::TcpListener) -> std::io::Result<TcpS
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return Ok(stream),
+            Ok((stream, _)) => {
+                // Darwin inherits the listener's O_NONBLOCK on accepted sockets.
+                // The scripted peer uses bounded blocking reads after acceptance.
+                stream.set_nonblocking(false)?;
+                return Ok(stream);
+            },
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
                     return Err(std::io::Error::new(
@@ -357,6 +381,49 @@ fn read_http_fixture_headers(stream: &mut TcpStream) -> std::io::Result<Vec<u8>>
         }
     }
     Err(std::io::Error::other("fixture headers exceed bound"))
+}
+
+#[test]
+fn output_lifecycle_fixture_waits_for_delayed_headers_and_retains_its_read_timeout() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    for send_headers in [true, false] {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let peer = std::thread::spawn(move || -> std::io::Result<()> {
+            let mut stream = accept_http_fixture(&listener)?;
+            accepted_tx.send(()).map_err(std::io::Error::other)?;
+            result_tx
+                .send(read_http_fixture_headers(&mut stream))
+                .map_err(std::io::Error::other)?;
+            Ok(())
+        });
+        let mut client = TcpStream::connect(address)?;
+        accepted_rx.recv_timeout(Duration::from_secs(2))?;
+        // No request exists yet: accepted I/O must wait rather than report EAGAIN.
+        let early = result_rx.recv_timeout(Duration::from_millis(50));
+        assert!(
+            matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "fixture returned before request data or its original read timeout: {early:?}"
+        );
+        if send_headers {
+            let request = b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\n\r\n";
+            client.write_all(request)?;
+            assert_eq!(result_rx.recv_timeout(Duration::from_secs(2))??, request);
+        } else {
+            let failure = result_rx
+                .recv_timeout(Duration::from_secs(3))?
+                .expect_err("missing request must exhaust the existing read timeout");
+            assert!(matches!(
+                failure.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ));
+        }
+        peer.join().map_err(|_| "delayed-header peer panicked")??;
+    }
+    Ok(())
 }
 
 #[test]
