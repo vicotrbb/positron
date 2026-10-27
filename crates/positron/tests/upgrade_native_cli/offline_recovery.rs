@@ -53,12 +53,18 @@ fn source_with_environment(environment: &[(&str, &str)]) -> Result<Source> {
         .ok_or("Catalog epoch")?
         .value();
     drop(instance);
+    let diagnostic_configuration_started = Instant::now();
     let (_, candidate) = configuration(
         &root,
         positron_config::ExecutableDistribution::Nix,
         epoch,
         claim.query_secret().ok_or("Query credential")?,
     )?;
+    let diagnostic_configuration_elapsed = diagnostic_configuration_started.elapsed();
+    let diagnostic_executable_bytes = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.metadata().ok())
+        .map(|metadata| metadata.len());
     // Unlike the serving fixture's explicit BootstrapPaths, the real offline
     // command derives every root from this canonical document.
     let mut text = fs::read_to_string(root.join("positron.toml"))?;
@@ -107,6 +113,7 @@ fn source_with_environment(environment: &[(&str, &str)]) -> Result<Source> {
             .ok_or("API profile")?
             .connection_protection()
             .request_deadline();
+    let diagnostic_start = Instant::now();
     let response = match client.manage(claim.secret(), &input) {
         Ok(response) => response,
         Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport) => {
@@ -121,10 +128,14 @@ fn source_with_environment(environment: &[(&str, &str)]) -> Result<Source> {
                 idempotency_key: input.idempotency_key.clone(),
                 operation_id: None,
             };
+            let diagnostic_start_elapsed = diagnostic_start.elapsed();
+            let mut diagnostic_lookup_attempts = 0u32;
             loop {
                 if Instant::now() >= admission_deadline {
                     return Err("ambiguous offline preparation exceeded original API budget".into());
                 }
+                diagnostic_lookup_attempts += 1;
+                let diagnostic_lookup_started = Instant::now();
                 match client.manage(claim.secret(), &lookup) {
                     Ok(response) => break response,
                     Err(
@@ -135,6 +146,32 @@ fn source_with_environment(environment: &[(&str, &str)]) -> Result<Source> {
                         std::thread::sleep(Duration::from_millis(100));
                     },
                     Err(error) => {
+                        let health = process.health();
+                        eprintln!(
+                            "offline_preparation_lookup_failure start_ms={} total_ms={} lookup_attempts={diagnostic_lookup_attempts} last_lookup_ms={} budget_ms={} remaining_ms={} phase={:?} source_candidate_bytes={diagnostic_executable_bytes:?} configuration_ms={}",
+                            diagnostic_start_elapsed.as_millis(),
+                            diagnostic_start.elapsed().as_millis(),
+                            diagnostic_lookup_started.elapsed().as_millis(),
+                            admission_deadline
+                                .saturating_duration_since(diagnostic_start)
+                                .as_millis(),
+                            admission_deadline
+                                .saturating_duration_since(Instant::now())
+                                .as_millis(),
+                            health.phase(),
+                            diagnostic_configuration_elapsed.as_millis()
+                        );
+                        if let Ok(events) = health.operational_logs_json()
+                            && let Ok(events) =
+                                serde_json::from_str::<Vec<serde_json::Value>>(&events)
+                        {
+                            for event in events.iter().rev().take(8) {
+                                eprintln!(
+                                    "offline_preparation_event {}",
+                                    serde_json::json!({"event":event.get("event"), "stage":event.get("stage"), "failure":event.get("failure"), "outcome":event.get("outcome")})
+                                );
+                            }
+                        }
                         return Err(format!("offline preparation lookup: {error:?}").into());
                     },
                 }
