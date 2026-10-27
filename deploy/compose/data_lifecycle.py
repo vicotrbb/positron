@@ -111,7 +111,7 @@ class DataLifecycle:
     def ingest(self):
         port = self.compose("port", "positron", "4318").decode().strip().rsplit(":", 1)[1]
         body = json.dumps({"resourceLogs": [{"scopeLogs": [{"logRecords": [{"timeUnixNano": "42", "body": {"stringValue": "compose-retained"}}]}]}]}).encode()
-        context = ssl.create_default_context(cafile=str(self.root / "server.pem"))
+        context = ssl.create_default_context(cafile=str(self.root / "ca.pem"))
         denied = urllib.request.Request(f"https://localhost:{port}/v1/logs", data=body, headers={"Authorization": "Bearer invalid", "Content-Type": "application/json"})
         with self.case.assertRaises(urllib.error.HTTPError) as failure:
             urllib.request.urlopen(denied, context=context, timeout=5)

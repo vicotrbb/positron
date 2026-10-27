@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import uuid
 from data_lifecycle import DataLifecycle
+from tls_fixture import material
 
 
 def docker(*args, **kwargs):
@@ -51,10 +52,10 @@ volumes:
                 config = config.replace("[listener]\n", "[listener]\n" + tls)
                 config = config.replace('otlp_http_bind_address = "127.0.0.1:4318"', 'otlp_http_bind_address = "0.0.0.0:4318"')
                 root.joinpath("positron.toml").write_text(config)
-                subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-keyout", str(root / "server-key.pem"), "-out", str(root / "server.pem")], check=True, capture_output=True)
+                material(root)
                 payload = io.BytesIO()
                 with tarfile.open(fileobj=payload, mode="w") as archive:
-                    for source, name, mode in [("positron.toml", "positron.toml", 0o600), ("server-key.pem", "tls/server-key.pem", 0o600), ("server.pem", "tls/server.pem", 0o644), ("server.pem", "tls/ca.pem", 0o644)]:
+                    for source, name, mode in [("positron.toml", "positron.toml", 0o600), ("server-key.pem", "tls/server-key.pem", 0o600), ("server.pem", "tls/server.pem", 0o644), ("ca.pem", "tls/ca.pem", 0o644)]:
                         data = root.joinpath(source).read_bytes()
                         member = tarfile.TarInfo(name)
                         member.size, member.mode, member.uid, member.gid = len(data), mode, 65532, 65532
@@ -98,6 +99,15 @@ volumes:
                 verified = compose("run", "--rm", "--no-deps", "positron", "verify", "--offline", "--config", "/etc/positron/positron.toml")
                 self.assertIn(b"verified", verified)
             finally:
+                inspected = subprocess.run(["docker", "inspect", container], capture_output=True)
+                if inspected.returncode == 0:
+                    health = json.loads(inspected.stdout)[0].get("State", {}).get("Health", {})
+                    if health.get("Status") == "unhealthy":
+                        # The native probe emits closed non-secret Doctor facts.
+                        # Never print arbitrary process output or request headers.
+                        prefixes = ("report_version=", "mode=", "status=", "finding_code=", "severity=", "evidence_scope=", "safe_command=")
+                        probes = [{"exit_code": entry.get("ExitCode"), "output": "\n".join(line for line in entry.get("Output", "").splitlines() if line.startswith(prefixes))[:2048]} for entry in health.get("Log", [])[-3:]]
+                        print(json.dumps({"health_status": health.get("Status"), "last_probes": probes}))
                 result = subprocess.run(["docker", *command, "logs"], capture_output=True)
                 # Logs contain no claim; reveal useful failure context only.
                 if b"administrator_secret=" not in result.stdout:
