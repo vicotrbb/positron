@@ -16,7 +16,7 @@ fn compose_pins_the_inventory_index_and_explicit_runtime_boundaries() {
     let digest = support::hex(&fixture.inventory.file(&index.file).unwrap().identity.sha256);
     assert!(compose.contains(&format!("ghcr.io/vicotrbb/positron@sha256:{digest}")));
     assert!(compose.contains("read_only: true"));
-    assert!(compose.contains("stop_grace_period: 65s"));
+    assert!(compose.contains("stop_grace_period: 3605s"));
     assert!(compose.contains("/var/lib/positron-secrets"));
     assert!(!compose.contains("latest"));
     assert_eq!(compose, compose_deployment(&fixture.inventory).unwrap());
@@ -147,5 +147,60 @@ fn compose_cannot_omit_independent_payload_or_hide_secrets() {
         )
         .err(),
         Some(ReleaseError::SecretDetected)
+    );
+}
+
+#[test]
+fn generated_stop_allowance_covers_every_accepted_native_deadline_and_rejects_shortening() {
+    let mut fixture = support::Fixture::new();
+    let compose = compose_deployment(&fixture.inventory).unwrap();
+    let grace: u32 = compose
+        .lines()
+        .find_map(|line| line.strip_prefix("    stop_grace_period: "))
+        .unwrap()
+        .trim_end_matches('s')
+        .parse()
+        .unwrap();
+    for seconds in ["120", "3600"] {
+        let inputs = positron_config::ConfigurationInputs::try_from_sources(
+            None,
+            [] as [(&str, &str); 0],
+            [("runtime.shutdown_grace_seconds", seconds)],
+        )
+        .unwrap();
+        let accepted = positron_config::resolve(inputs).unwrap();
+        assert!(
+            grace >= u32::from(accepted.shutdown_grace_seconds()) + 5,
+            "generated Compose must cover accepted {seconds}s deadline plus safety margin"
+        );
+    }
+    let inputs = positron_config::ConfigurationInputs::try_from_sources(
+        None,
+        [] as [(&str, &str); 0],
+        [("runtime.shutdown_grace_seconds", "3601")],
+    )
+    .unwrap();
+    assert!(positron_config::resolve(inputs).is_err());
+    let position = fixture
+        .inventory
+        .artifacts
+        .iter()
+        .position(|a| a.surface == Surface::Compose)
+        .unwrap();
+    let shortened = compose.replace(
+        &format!("stop_grace_period: {grace}s"),
+        "stop_grace_period: 65s",
+    );
+    fixture.replace_artifact(position, shortened.as_bytes(), shortened.as_bytes());
+    assert_eq!(
+        construct_release(
+            &fixture.inventory,
+            &fixture.root.join("bundle"),
+            &fixture.rebuild,
+            &[],
+            vec![]
+        )
+        .err(),
+        Some(ReleaseError::IdentityMismatch)
     );
 }

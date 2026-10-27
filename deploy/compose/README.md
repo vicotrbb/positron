@@ -62,8 +62,14 @@ container-local at `127.0.0.1:13133`. Its native TLS readiness probe needs no
 administrator credential. Do not enable Operations mTLS without also replacing
 the health probe with an approved client-identity-aware probe.
 
-Keep `runtime.shutdown_grace_seconds` below the Compose 65-second stop allowance
-(the canonical default is 30 seconds). The service has a 2 GiB memory limit,
+The generated stop allowance covers the canonical native configuration's maximum
+Drain deadline plus a five-second safety margin: currently 3600 + 5 = 3605 seconds
+(the default native deadline is 30 seconds). Normal Drain exits as soon as it
+finishes; this allowance does not delay a successful stop. Generation reads the
+bound from the Rust Configuration Contract and fails if that contract no longer
+provides a bounded integer range. Native configuration rejects out-of-range
+Drain deadlines, and release construction rejects a shortened generated artifact.
+The service has a 2 GiB memory limit,
 two CPU limit, 256 PID limit and 64 MiB disposable runtime tmpfs. Configure native
 resource reservations and disk headroom for your workload within those ceilings;
 change both deployment limits and native budgets when sizing a larger instance.
@@ -120,10 +126,10 @@ publication. Before starting the native Upgrade operation, suspend automatic
 restart for the planned replacement using
 `docker update --restart=no "$(docker compose ps --quiet positron)"`. This lets the
 source's automatic Upgrade Drain exit without Docker immediately starting the
-old image again. After publication, `docker compose up --detach --force-recreate
---wait` recreates the service with the candidate image and restores its declared
-restart policy. Only after native publication succeeds, install the candidate's
-verified generated Compose artifact and run `docker compose up --detach --wait`.
+old image again. Only after native publication succeeds, install the candidate's
+verified generated Compose artifact and its accepted configuration and installed
+manifest references. Then run `docker compose up --detach --force-recreate --wait`
+to start the candidate image and restore the declared restart policy.
 Keep the same volumes and configuration binding, and verify readiness and retained
 queries. Never substitute a mutable image tag or force an older image over a
 newer writable format. On failure, follow the native reported recovery plan.

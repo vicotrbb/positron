@@ -24,7 +24,7 @@ class ComposeContract(unittest.TestCase):
             root = Path(directory)
             # A local immutable image ID exercises unpublished bytes without a registry.
             template = Path(__file__).with_name("compose.yaml.in").read_text()
-            root.joinpath("compose.yaml").write_text(template.replace("@SOURCE@", "local-test").replace(
+            root.joinpath("compose.yaml").write_text(template.replace("@SOURCE@", "local-test").replace("@STOP_GRACE_SECONDS@", "3605").replace(
                 "ghcr.io/vicotrbb/positron@sha256:@INDEX_SHA256@", identity))
             root.joinpath("override.yaml").write_text('''services:
   positron:

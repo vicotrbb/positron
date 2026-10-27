@@ -10,7 +10,7 @@ services:
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
     stop_signal: SIGTERM
-    stop_grace_period: 65s
+    stop_grace_period: @STOP_GRACE_SECONDS@s
     cpus: 2.0
     mem_limit: 2g
     pids_limit: 256
