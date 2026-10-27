@@ -130,12 +130,15 @@ fn repeated_capacity_refusal_exhausts_the_original_launch_window() -> TestResult
     let responses = vec![(429, rejection(429, "capacity_unavailable")?); 8];
     let (result, requests) =
         scripted_requests(&responses, |endpoint| query(&fixture, endpoint, None))?;
-    assert_eq!(
-        result
-            .expect_err("capacity cannot create a fresh launch window")
-            .to_string(),
+    let error = result
+        .expect_err("capacity cannot create a fresh launch window")
+        .to_string();
+    // Scheduling can exhaust the same window during the permitted backoff.
+    assert!(matches!(
+        error.as_str(),
         "public query refused outside its capacity launch policy"
-    );
+            | "public query capacity launch window expired"
+    ));
     assert!(!requests.is_empty());
     assert!(requests.len() < responses.len());
     let expected = serde_json::from_slice::<serde_json::Value>(&budget_query().encode()?)?;
