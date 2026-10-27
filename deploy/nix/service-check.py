@@ -102,6 +102,7 @@ else:
         "outputBytes": "16384", "memoryBytes": "1048576", "cpuWorkUnits": "15",
         "wallSeconds": "5", "maximumTimeRangeNanoseconds": "100"}}))
     attempt = 0
+    executions = 0
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -111,8 +112,43 @@ else:
             "--credential-stdin", "--allow-plaintext", "--request", str(query)],
             input=claim["query_secret"].encode(), capture_output=True, timeout=remaining)
         if result.returncode == 0:
+            executions += 1
             if time.monotonic() >= deadline:
                 raise RuntimeError("query deadline elapsed")
+            wall_exhausted = False
+            try:
+                if len(result.stdout) > 65536:
+                    raise ValueError("query observation exceeds bound")
+                events = json.loads(result.stdout)["events"]
+                if (not isinstance(events, list) or not 1 <= len(events) <= 32
+                        or any(not isinstance(event, dict) or len(event) != 1
+                            or next(iter(event)) not in {"header", "batch", "terminal"}
+                            or not isinstance(next(iter(event.values())), dict) for event in events)
+                        or sum("terminal" in event for event in events) != 1):
+                    raise ValueError("unsupported events")
+                terminal = events[-1]["terminal"]
+                stats = terminal["stats"]
+                wall_exhausted = (terminal["state"] == "incomplete"
+                    and terminal.get("reason") == "budget_exhausted"
+                    and isinstance(stats, dict) and stats.get("limitingBudget") == "wall_seconds"
+                    and stats.get("wallSeconds") == "5"
+                    and all(isinstance(value, str) and value.isascii() and value.isdigit()
+                        and len(value) <= 20 and int(value) <= 18446744073709551615
+                        for field, value in stats.items() if field in {
+                            "records", "scannedBytes", "decodedRecords", "outputRows", "outputBytes",
+                            "memoryPeakBytes", "cpuWorkUnits", "wallSeconds", "lastSequence",
+                            "resumeCount", "repeatedBatchCount"}))
+            except (ValueError, KeyError, TypeError, RecursionError):
+                pass
+            if wall_exhausted:
+                if executions >= 3:
+                    raise RuntimeError("query wall allowance exhausted")
+                if time.monotonic() + 1 >= deadline:
+                    raise RuntimeError("query deadline elapsed")
+                # A fresh read has no mutation or cumulative-cursor authority.
+                # Discard this incomplete result; require one complete answer.
+                time.sleep(1)
+                continue
             if result.stdout.count(marker.encode()) != 1:
                 observation = {"event": "query_marker_failure",
                     "marker_count": result.stdout.count(marker.encode()), "outcome": "unavailable"}
@@ -152,6 +188,13 @@ else:
                                     or int(value) > 18446744073709551615):
                                 raise ValueError("unsupported statistic")
                             stats[field] = int(value)
+                    if "limitingBudget" in source:
+                        limiter = source["limitingBudget"]
+                        if limiter not in {"scanned_bytes", "decoded_records", "output_rows",
+                                "output_bytes", "memory_bytes", "cpu_work_units", "wall_seconds",
+                                "maximum_time_range_nanoseconds"}:
+                            raise ValueError("unsupported limiting budget")
+                        stats["limitingBudget"] = limiter
                     observation.update(outcome="observed", event_kinds=kinds,
                         terminal_state=state, terminal_reason=reason, stats=stats)
                 except (ValueError, KeyError, TypeError, RecursionError):

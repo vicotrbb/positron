@@ -196,6 +196,51 @@ class QueryDeadline(unittest.TestCase):
     def refused(message=b"positron: query capacity unavailable; retry after backoff"):
         return types.SimpleNamespace(returncode=2, stdout=b"", stderr=message)
 
+    @staticmethod
+    def wall_exhausted(limiter="wall_seconds"):
+        return types.SimpleNamespace(returncode=0, stderr=b"", stdout=json.dumps({"events": [
+            {"header": {}}, {"terminal": {"state": "incomplete", "reason": "budget_exhausted",
+                "stats": {"wallSeconds": "5", "limitingBudget": limiter}}}]}).encode())
+
+    def test_wall_exhaustion_discards_partial_output_and_repeats_identical_query(self):
+        self.run_query([(17.75, self.wall_exhausted()), (1, self.complete())])
+        self.assertEqual([options["timeout"] for _, options in self.commands], [30, 11.25])
+        self.assertEqual(self.commands[0][0], self.commands[1][0])
+        self.assertEqual(self.commands[0][1]["input"], self.commands[1][1]["input"])
+
+    def test_wall_exhaustion_is_bounded_to_three_executions(self):
+        with self.assertRaisesRegex(RuntimeError, "query wall allowance exhausted"):
+            self.run_query([(1, self.wall_exhausted())] * 3 + [(0, self.complete())])
+        self.assertEqual(len(self.commands), 3)
+
+    def test_capacity_refusals_do_not_consume_query_execution_attempts(self):
+        self.run_query([(0, self.refused())] * 4 + [(0, self.wall_exhausted()),
+            (0, self.wall_exhausted()), (0, self.complete())])
+        self.assertEqual(len(self.commands), 7)
+
+    def test_wall_retry_cannot_begin_after_original_deadline(self):
+        with self.assertRaisesRegex(RuntimeError, "query deadline elapsed"):
+            self.run_query([(29.5, self.wall_exhausted()), (0, self.complete())])
+        self.assertEqual(len(self.commands), 1)
+
+    def test_missing_unknown_or_other_limiting_budget_never_retries(self):
+        for limiter in [None, "cpu_work_units", "protected-canary", 5]:
+            with self.subTest(limiter=limiter), contextlib.redirect_stdout(io.StringIO()), \
+                    self.assertRaises(AssertionError):
+                self.run_query([(0, self.wall_exhausted(limiter)), (0, self.complete())])
+            self.assertEqual(len(self.commands), 1)
+
+    def test_complete_empty_or_duplicate_is_never_retried(self):
+        empty = {"events": [{"header": {}}, {"terminal": {"state": "complete"}}]}
+        duplicate = QueryCompletion.response("complete")
+        duplicate["events"].insert(0, duplicate["events"][0])
+        for response in [empty, duplicate]:
+            result = types.SimpleNamespace(returncode=0, stdout=json.dumps(response).encode(), stderr=b"")
+            with self.subTest(response=response), contextlib.redirect_stdout(io.StringIO()), \
+                    self.assertRaisesRegex(AssertionError, "acknowledged record missing or duplicated"):
+                self.run_query([(0, result), (0, self.complete())])
+            self.assertEqual(len(self.commands), 1)
+
     def test_capacity_retry_uses_only_remaining_original_thirty_seconds(self):
         self.run_query([(20, self.refused()), (1, self.complete())])
         self.assertEqual([options["timeout"] for _, options in self.commands], [30, 9])
