@@ -1,9 +1,9 @@
 //! Unit fixture and identity refusal regressions; these are not native build claims.
 use super::*;
 
-struct TestCapture(PathBuf);
+pub(super) struct TestCapture(pub(super) PathBuf);
 impl TestCapture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "positron-nix-metadata-{}-{}",

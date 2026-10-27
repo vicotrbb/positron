@@ -1,0 +1,4 @@
+# Native, independently qualified OCI layouts are explicit offline contexts.
+# BuildKit only combines descriptors; it executes no foreign architecture code.
+ARG TARGETARCH
+FROM native-${TARGETARCH}

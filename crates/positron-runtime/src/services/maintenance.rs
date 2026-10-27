@@ -72,16 +72,25 @@ impl MaintenanceWorkerFailureContext {
     }
 
     fn report(self, failure: ServiceFailure) -> ServiceFailure {
+        self.report_with(failure, None, crate::write_operational_diagnostic)
+    }
+
+    fn report_with(
+        self,
+        failure: ServiceFailure,
+        stage: Option<IntegrityScrubFailureStage>,
+        report: impl FnOnce(OperationalDiagnostic) -> std::io::Result<()>,
+    ) -> ServiceFailure {
         if maintenance_failure_category(failure).is_none() {
             return failure;
         }
         let diagnostic = OperationalDiagnostic::MaintenanceOperationFailure {
             operation: self.operation,
             task: self.task_class,
-            stage: None,
+            stage,
             failure,
         };
-        let delivery = match crate::write_operational_diagnostic(diagnostic) {
+        let delivery = match report(diagnostic) {
             Ok(()) => DiagnosticDelivery::Delivered,
             Err(_) => DiagnosticDelivery::Unavailable,
         };
@@ -93,20 +102,9 @@ fn report_integrity_scrub_failure_stage(
     stage: IntegrityScrubFailureStage,
     failure: ServiceFailure,
 ) -> ServiceFailure {
-    if maintenance_failure_category(failure).is_none() {
-        return failure;
-    }
-    let diagnostic = OperationalDiagnostic::MaintenanceOperationFailure {
-        operation: MaintenanceWorkerOperation::CompleteInFlight,
-        task: Some(MaintenanceTaskClass::IntegrityScrub),
-        stage: Some(stage),
-        failure,
-    };
-    let delivery = match crate::write_operational_diagnostic(diagnostic) {
-        Ok(()) => DiagnosticDelivery::Delivered,
-        Err(_) => DiagnosticDelivery::Unavailable,
-    };
-    preserve_primary_failure(delivery, failure)
+    MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::CompleteInFlight)
+        .with_task_class(MaintenanceTaskClass::IntegrityScrub)
+        .report_with(failure, Some(stage), crate::write_operational_diagnostic)
 }
 
 #[derive(Clone)]
@@ -1704,41 +1702,38 @@ mod diagnostic_tests {
         Ok(())
     }
 
-    const DIAGNOSTIC_CHILD: &str = "POSITRON_MAINTENANCE_DIAGNOSTIC_CHILD";
-
     #[test]
     fn worker_failure_diagnostic_emits_closed_operation_and_task_class()
     -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var_os(DIAGNOSTIC_CHILD).is_some() {
+        let context =
+            MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::CompleteInFlight)
+                .with_task_class(MaintenanceTaskClass::IntegrityScrub);
+        let mut contents = Vec::new();
+        for stage in [
+            None,
+            Some(IntegrityScrubFailureStage::VerificationOutcomeFenced),
+        ] {
             assert_eq!(
-                MaintenanceWorkerFailureContext::new(MaintenanceWorkerOperation::CompleteInFlight)
-                    .with_task_class(MaintenanceTaskClass::IntegrityScrub)
-                    .report(ServiceFailure::CorruptState),
+                context.report_with(ServiceFailure::CorruptState, stage, |diagnostic| {
+                    crate::render_operational_diagnostic(&mut contents, false, diagnostic)
+                }),
                 ServiceFailure::CorruptState
             );
-            assert_eq!(
-                report_integrity_scrub_failure_stage(
-                    IntegrityScrubFailureStage::VerificationOutcomeFenced,
-                    ServiceFailure::CorruptState,
-                ),
-                ServiceFailure::CorruptState
-            );
-            return Ok(());
         }
-
-        let executable = std::env::current_exe()?;
-        let output = std::process::Command::new(executable)
-            .env(DIAGNOSTIC_CHILD, "1")
-            .arg("--exact")
-            .arg("services::maintenance::diagnostic_tests::worker_failure_diagnostic_emits_closed_operation_and_task_class")
-            .arg("--nocapture")
-            .output()?;
-        assert!(
-            output.status.success(),
-            "diagnostic child exited with {:?}",
-            output.status.code()
+        assert_eq!(
+            report_integrity_scrub_failure_stage(
+                IntegrityScrubFailureStage::VerificationOutcomeFenced,
+                ServiceFailure::CorruptState,
+            ),
+            ServiceFailure::CorruptState
         );
-        let records = String::from_utf8(output.stderr)?
+        assert_eq!(
+            context.report_with(ServiceFailure::CorruptState, None, |_| {
+                Err(std::io::Error::other("closed output"))
+            }),
+            ServiceFailure::CorruptState
+        );
+        let records = String::from_utf8(contents)?
             .lines()
             .map(serde_json::from_str::<serde_json::Value>)
             .collect::<Result<Vec<_>, _>>()?;

@@ -61,6 +61,181 @@ fn assert_operational_status(stage: &'static str, response: String, expected: u1
     );
 }
 
+fn observe_metrics(
+    deadline: std::time::Instant,
+    mut probe: impl FnMut(std::time::Instant) -> Result<String, Box<dyn std::error::Error>>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err("metrics observation deadline".into());
+        }
+        let response = probe(deadline)?;
+        let (head, body) = response
+            .split_once("\r\n\r\n")
+            .ok_or("malformed metrics response")?;
+        let mut lines = head.lines();
+        let status = lines.next().ok_or("missing metrics status")?;
+        let mut length = None;
+        for line in lines {
+            let (name, value) = line.split_once(':').ok_or("malformed metrics header")?;
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                return Err("unsupported metrics framing".into());
+            }
+            if name.eq_ignore_ascii_case("content-length") {
+                if length.is_some() {
+                    return Err("duplicate metrics length".into());
+                }
+                length = Some(value.trim().parse::<usize>()?);
+            }
+        }
+        if length != Some(body.len()) {
+            return Err("incomplete metrics response".into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("metrics observation deadline".into());
+        }
+        if status.starts_with("HTTP/1.1 200 ") {
+            return Ok(response);
+        }
+        if !status.starts_with("HTTP/1.1 503 ") || !body.is_empty() {
+            return Err("metrics observation unavailable".into());
+        }
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(Duration::from_millis(10)),
+        );
+    }
+}
+
+#[test]
+fn metrics_observation_retries_only_complete_empty_unavailable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    let mut responses = [
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+    ]
+    .into_iter();
+    let mut calls = 0;
+    let response = observe_metrics(deadline, |received| {
+        assert_eq!(received, deadline);
+        calls += 1;
+        Ok(responses.next().ok_or("unexpected probe")?.into())
+    })?;
+    assert!(response.starts_with("HTTP/1.1 200 "));
+    assert_eq!(calls, 2);
+    Ok(())
+}
+
+#[test]
+fn metrics_observation_stops_at_original_deadline() {
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_millis(20);
+    let mut calls = 0;
+    let result = observe_metrics(deadline, |received| {
+        assert_eq!(received, deadline);
+        calls += 1;
+        Ok("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".into())
+    });
+    assert!(result.is_err());
+    assert!(calls >= 1);
+    assert!(started.elapsed() >= Duration::from_millis(20));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn metrics_observation_never_retries_other_or_malformed_responses() {
+    for response in [
+        "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 1\r\n\r\nx",
+        "HTTP/1.1 503 Service Unavailable\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nx",
+        "malformed",
+    ] {
+        let mut calls = 0;
+        let result = observe_metrics(
+            std::time::Instant::now() + Duration::from_millis(100),
+            |_| {
+                calls += 1;
+                Ok(response.into())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+    let mut calls = 0;
+    assert!(
+        observe_metrics(
+            std::time::Instant::now() + Duration::from_millis(100),
+            |_| {
+                calls += 1;
+                Err("transport failure".into())
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn metrics_observation_rejects_a_response_after_its_original_deadline() {
+    let deadline = std::time::Instant::now() + Duration::from_millis(10);
+    let mut calls = 0;
+    assert!(
+        observe_metrics(deadline, |_| {
+            calls += 1;
+            std::thread::sleep(Duration::from_millis(20));
+            Ok("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".into())
+        })
+        .is_err()
+    );
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn operational_probe_bounds_a_held_response_by_the_original_deadline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    listener.set_nonblocking(true)?;
+    let (release, held) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || -> std::io::Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(1))
+                },
+                Err(error) => return Err(error),
+            }
+        };
+        stream.set_write_timeout(Some(Duration::from_millis(100)))?;
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")?;
+        let _ = held.recv_timeout(Duration::from_secs(1));
+        Ok(())
+    });
+    let started = std::time::Instant::now();
+    let response = operational_probe(
+        address,
+        "/metrics",
+        "test-only",
+        b"",
+        started + Duration::from_millis(20),
+    );
+    let _ = release.send(());
+    peer.join().map_err(|_| "probe peer panic")??;
+    assert!(response.is_err());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    Ok(())
+}
+
 #[test]
 fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -177,16 +352,10 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
         ),
         "oversized admission request must be rejected as capacity unavailable"
     );
-    let admission_scrape = http(
-        operations,
-        "GET",
-        "/metrics",
-        &[
-            ("Authorization", &format!("Bearer {administrator}")),
-            ("Accept", "application/openmetrics-text; version=1.0.0"),
-        ],
-        b"",
-    )
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let admission_scrape = observe_metrics(deadline, |deadline| {
+        operational_probe(operations, "/metrics", &administrator, b"", deadline)
+    })
     .map_err(|error| format!("operational admission metrics scrape: {error}"))?;
     assert_operational_status("admission_metrics", admission_scrape.clone(), 200);
     assert!(
@@ -230,7 +399,6 @@ fn real_operational_scrape_and_external_otlp_export_are_bounded_and_secret_safe(
             .as_deref(),
         Some("scanned_bytes")
     );
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut completed_requests = 0;
     let mut completed_query = false;
     let mut api_requests = 1;
@@ -406,14 +574,24 @@ fn operational_probe(
     let mut stream = TcpStream::connect_timeout(&address, remaining()?)
         .map_err(|error| format!("operational probe connect: {error}"))?;
     let method = if body.is_empty() { "GET" } else { "POST" };
-    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    let accept = if path == "/metrics" {
+        "Accept: application/openmetrics-text; version=1.0.0\r\n"
+    } else {
+        ""
+    };
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {credential}\r\n{accept}Content-Type: application/x-protobuf\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
     request.extend_from_slice(body);
-    stream
-        .set_write_timeout(Some(remaining()?))
-        .map_err(|error| format!("operational probe write timeout: {error}"))?;
-    stream
-        .write_all(&request)
-        .map_err(|error| format!("operational probe write: {error}"))?;
+    let mut pending = request.as_slice();
+    while !pending.is_empty() {
+        stream.set_write_timeout(Some(remaining()?))?;
+        let count = stream.write(pending)?;
+        if count == 0 {
+            return Err("operational probe write closed".into());
+        }
+        pending = pending
+            .get(count..)
+            .ok_or("operational probe write count")?;
+    }
     stream
         .shutdown(std::net::Shutdown::Write)
         .map_err(|error| format!("operational probe shutdown: {error}"))?;

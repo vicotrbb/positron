@@ -21,6 +21,9 @@ struct Source {
 }
 #[inline(never)]
 fn source() -> Result<Source> {
+    source_with_environment(&[])
+}
+fn source_with_environment(environment: &[(&str, &str)]) -> Result<Source> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -50,12 +53,18 @@ fn source() -> Result<Source> {
         .ok_or("Catalog epoch")?
         .value();
     drop(instance);
+    let diagnostic_configuration_started = Instant::now();
     let (_, candidate) = configuration(
         &root,
         positron_config::ExecutableDistribution::Nix,
         epoch,
         claim.query_secret().ok_or("Query credential")?,
     )?;
+    let diagnostic_configuration_elapsed = diagnostic_configuration_started.elapsed();
+    let diagnostic_executable_bytes = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.metadata().ok())
+        .map(|metadata| metadata.len());
     // Unlike the serving fixture's explicit BootstrapPaths, the real offline
     // command derives every root from this canonical document.
     let mut text = fs::read_to_string(root.join("positron.toml"))?;
@@ -67,7 +76,7 @@ fn source() -> Result<Source> {
     let effective = positron_config::resolve(
         positron_config::ConfigurationInputs::try_from_sources(
             Some(&root.join("positron.toml")),
-            [] as [(&str, &str); 0],
+            environment.iter().copied(),
             [] as [(&str, &str); 0],
         )
         .map_err(|_| "offline canonical roots")?,
@@ -104,6 +113,7 @@ fn source() -> Result<Source> {
             .ok_or("API profile")?
             .connection_protection()
             .request_deadline();
+    let diagnostic_start = Instant::now();
     let response = match client.manage(claim.secret(), &input) {
         Ok(response) => response,
         Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport) => {
@@ -118,10 +128,14 @@ fn source() -> Result<Source> {
                 idempotency_key: input.idempotency_key.clone(),
                 operation_id: None,
             };
+            let diagnostic_start_elapsed = diagnostic_start.elapsed();
+            let mut diagnostic_lookup_attempts = 0u32;
             loop {
                 if Instant::now() >= admission_deadline {
                     return Err("ambiguous offline preparation exceeded original API budget".into());
                 }
+                diagnostic_lookup_attempts += 1;
+                let diagnostic_lookup_started = Instant::now();
                 match client.manage(claim.secret(), &lookup) {
                     Ok(response) => break response,
                     Err(
@@ -132,6 +146,32 @@ fn source() -> Result<Source> {
                         std::thread::sleep(Duration::from_millis(100));
                     },
                     Err(error) => {
+                        let health = process.health();
+                        eprintln!(
+                            "offline_preparation_lookup_failure start_ms={} total_ms={} lookup_attempts={diagnostic_lookup_attempts} last_lookup_ms={} budget_ms={} remaining_ms={} phase={:?} source_candidate_bytes={diagnostic_executable_bytes:?} configuration_ms={}",
+                            diagnostic_start_elapsed.as_millis(),
+                            diagnostic_start.elapsed().as_millis(),
+                            diagnostic_lookup_started.elapsed().as_millis(),
+                            admission_deadline
+                                .saturating_duration_since(diagnostic_start)
+                                .as_millis(),
+                            admission_deadline
+                                .saturating_duration_since(Instant::now())
+                                .as_millis(),
+                            health.phase(),
+                            diagnostic_configuration_elapsed.as_millis()
+                        );
+                        if let Ok(events) = health.operational_logs_json()
+                            && let Ok(events) =
+                                serde_json::from_str::<Vec<serde_json::Value>>(&events)
+                        {
+                            for event in events.iter().rev().take(8) {
+                                eprintln!(
+                                    "offline_preparation_event {}",
+                                    serde_json::json!({"event":event.get("event"), "stage":event.get("stage"), "failure":event.get("failure"), "outcome":event.get("outcome")})
+                                );
+                            }
+                        }
                         return Err(format!("offline preparation lookup: {error:?}").into());
                     },
                 }
@@ -175,7 +215,17 @@ fn command(
     id: positron_governance::OperationId,
     revision: Option<u64>,
 ) -> Result<Output> {
+    command_with_environment(case, action, id, revision, &[])
+}
+fn command_with_environment(
+    case: &Case,
+    action: &str,
+    id: positron_governance::OperationId,
+    revision: Option<u64>,
+    environment: &[(&str, &str)],
+) -> Result<Output> {
     let mut command = Command::new(native_binary::executable());
+    command.envs(environment.iter().copied());
     command
         .args(["upgrade", "offline", action, "--config"])
         .arg(case.root.join("positron.toml"))
@@ -532,5 +582,49 @@ fn offline_cancelled_snapshot_replays_cancel_and_reads_status_without_publicatio
             "terminal {action} must not publish"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn offline_upgrade_resolves_the_same_environment_and_refuses_changed_or_invalid_overrides() -> Result
+{
+    let environment = [("POSITRON__RUNTIME__SHUTDOWN_GRACE_SECONDS", "7")];
+    let Source {
+        process,
+        host,
+        accepted,
+        case,
+    } = source_with_environment(&environment)?;
+    let id = process
+        .begin_upgrade(accepted)?
+        .finish(ShutdownTrigger::FirstSignal)?;
+    drop(host);
+    let before = binding(&case)?;
+    for (value, message) in [
+        ("8", "offline request does not match the accepted upgrade"),
+        ("invalid", "invalid upgrade configuration"),
+    ] {
+        let refused = command_with_environment(
+            &case,
+            "advance",
+            id,
+            None,
+            &[("POSITRON__RUNTIME__SHUTDOWN_GRACE_SECONDS", value)],
+        )?;
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert_eq!(binding(&case)?, before);
+    }
+    let accepted = command_with_environment(&case, "advance", id, None, &environment)?;
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&accepted.stdout).contains("operation_id="));
     Ok(())
 }

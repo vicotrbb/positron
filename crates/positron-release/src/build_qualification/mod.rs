@@ -1,5 +1,6 @@
 //! Test-signed, staged current-build metadata. This is deliberately not a published release.
 mod documents;
+mod oci;
 mod tests;
 
 use crate::{files::Bundle, inventory::hex, *};
@@ -12,6 +13,14 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+struct ArtifactBuild<'a> {
+    packages: &'a Value,
+    closure: &'a Value,
+    builder: &'a str,
+    independent_builder: &'a str,
+    notices: &'a [u8],
+}
 
 struct Qualification {
     root: PathBuf,
@@ -62,11 +71,12 @@ impl Qualification {
             }
             scan_release_contents(&self.rebuild, payload, &[])?;
         }
-        crate::metadata::verify_identities(&inventory, &bundle)
+        crate::metadata::verify_identities(&inventory, &bundle)?;
+        crate::oci::verify_oci(&inventory, &bundle)
     }
 }
 
-fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualification {
+fn captured(capture: &Path, rebuild: &Path, output: &Path, inputs: &[&str]) -> Qualification {
     fs::create_dir_all(output).unwrap();
     let independent = output.join("independent");
     fs::create_dir_all(&independent).unwrap();
@@ -110,21 +120,7 @@ fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualif
             },
         },
     };
-    for name in [
-        "source.tar",
-        "build-identity.txt",
-        "created.txt",
-        "Cargo.lock",
-        "flake.lock",
-        "rust-toolchain.toml",
-        "toolchain.txt",
-        "closure.json",
-        "cargo-metadata.json",
-        "compatibility.json",
-        "compatibility-sources.json",
-        "source-commit.txt",
-        "version.txt",
-    ] {
+    for name in inputs {
         result.input(name, &fs::read(capture.join(name)).unwrap());
     }
     let source_scan = inspect_file(capture, "source.tar", &[]);
@@ -132,16 +128,52 @@ fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualif
         "input":"source.tar", "result":match source_scan { Ok(_) => "no recognized credential forms".into(), Err(error) => error.to_string() },
         "scope":"exact captured build input only; never an accepted Source release artifact or full release secret-scan claim"
     })).unwrap());
+    result
+}
+
+fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualification {
+    let mut result = captured(
+        capture,
+        rebuild,
+        output,
+        &[
+            "source.tar",
+            "build-identity.txt",
+            "created.txt",
+            "Cargo.lock",
+            "flake.lock",
+            "rust-toolchain.toml",
+            "toolchain.txt",
+            "closure.json",
+            "cargo-metadata.json",
+            "compatibility.json",
+            "compatibility-sources.json",
+            "source-commit.txt",
+            "version.txt",
+        ],
+    );
+    let api = fs::read(capture.join("openapi.json")).unwrap();
     let metadata: Value =
         serde_json::from_slice(&fs::read(capture.join("cargo-metadata.json")).unwrap()).unwrap();
     let packages = &metadata["packages"];
+    let closure: Value =
+        serde_json::from_slice(&fs::read(capture.join("closure.json")).unwrap()).unwrap();
+    let builder = result.inventory.build_identity.clone();
+    let independent_builder = result.independent_builder.clone();
+    let build = || ArtifactBuild {
+        packages,
+        closure: &closure,
+        builder: &builder,
+        independent_builder: &independent_builder,
+        notices: &[],
+    };
     result.artifact(
         "openapi.json",
         Surface::Api,
         "any",
         &api,
         &fs::read(rebuild.join("openapi.json")).unwrap(),
-        packages,
+        build(),
     );
     result.artifact(
         "positron",
@@ -149,7 +181,7 @@ fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualif
         &format!("nix-{target}"),
         &fs::read(capture.join("positron")).unwrap(),
         &fs::read(rebuild.join("positron")).unwrap(),
-        packages,
+        build(),
     );
     result.artifact(
         "positron.nar",
@@ -157,7 +189,7 @@ fn staged(capture: &Path, rebuild: &Path, output: &Path, target: &str) -> Qualif
         target,
         &fs::read(capture.join("positron.nar")).unwrap(),
         &fs::read(rebuild.join("positron.nar")).unwrap(),
-        packages,
+        build(),
     );
     result
 }
@@ -265,6 +297,10 @@ fn compatibility_sources(repo: &Path) -> (ReleaseCompatibility, Vec<u8>) {
 #[ignore = "captures metadata for the native Nix build in POSITRON_TEST_NIX_CAPTURE"]
 fn capture_nix_build_metadata() {
     let capture = PathBuf::from(std::env::var_os("POSITRON_TEST_NIX_CAPTURE").unwrap());
+    capture_metadata(&capture);
+}
+
+fn capture_metadata(capture: &Path) {
     let repo = repository();
     let (compatibility, definitions) = compatibility_sources(&repo);
     fs::write(

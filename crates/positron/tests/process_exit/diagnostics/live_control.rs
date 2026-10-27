@@ -50,11 +50,17 @@ fn live_control_support_bundle_is_signed_encrypted_and_reports_serving_facts()
     )?;
     let mut status_response = Vec::new();
     status.read_to_end(&mut status_response)?;
-    assert!(
-        status_response.starts_with(b"HTTP/1.1 200 "),
-        "serving status must accept the current system administrator: {}",
-        String::from_utf8_lossy(&status_response),
-    );
+    if !status_response.starts_with(b"HTTP/1.1 200 ") {
+        let _termination = Command::new("/bin/kill")
+            .args(["-TERM", &server.id().to_string()])
+            .status()?;
+        let failed_server = server.wait_with_output()?;
+        panic!(
+            "serving status must accept the current system administrator: {}; server stderr={}",
+            String::from_utf8_lossy(&status_response),
+            String::from_utf8_lossy(&failed_server.stderr),
+        );
+    }
 
     let identity = age::x25519::Identity::generate();
     let output = root.join("live-support.age");
@@ -404,6 +410,8 @@ fn read_control_fixture_request(
 #[test]
 fn control_fixture_consumes_the_declared_body_before_responding()
 -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair()?;
     reader.set_read_timeout(Some(Duration::from_secs(5)))?;
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -437,6 +445,8 @@ fn control_fixture_consumes_the_declared_body_before_responding()
 #[test]
 fn control_fixture_refuses_incomplete_or_unbounded_requests()
 -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     for request in [
         b"POST / HTTP/1.1\r\n\r\n".as_slice(),
         b"POST / HTTP/1.1\r\nContent-Length: invalid\r\n\r\n",

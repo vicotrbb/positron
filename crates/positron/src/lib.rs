@@ -76,6 +76,21 @@ pub fn run_native(
     arguments: impl IntoIterator<Item = String>,
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
+    let Ok(output) = positron_runtime::NativeOperationalOutput::begin() else {
+        return ExitCode::from(EXIT_FORCED);
+    };
+    let outcome = run_native_inner(arguments, environment);
+    if output.finish().is_err() && outcome == ExitCode::SUCCESS {
+        ExitCode::from(EXIT_FORCED)
+    } else {
+        outcome
+    }
+}
+
+fn run_native_inner(
+    arguments: impl IntoIterator<Item = String>,
+    environment: impl IntoIterator<Item = (String, String)>,
+) -> ExitCode {
     let mut arguments = arguments.into_iter().peekable();
     if arguments.peek().is_some_and(|argument| argument == "query") {
         arguments.next();
@@ -114,7 +129,7 @@ pub fn run_native(
         .is_some_and(|argument| argument == "upgrade")
     {
         arguments.next();
-        return upgrade_cli::run(arguments);
+        return upgrade_cli::run(arguments, environment);
     }
     if arguments.peek().is_some_and(|argument| argument == "keys") {
         arguments.next();

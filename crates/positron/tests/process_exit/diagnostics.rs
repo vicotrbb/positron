@@ -19,7 +19,7 @@ use std::{io::Read, io::Write, net::TcpStream};
 use std::{os::fd::OwnedFd, os::unix::net::UnixStream};
 
 #[cfg(unix)]
-static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[path = "support.rs"]
 pub(super) mod support;
@@ -35,6 +35,10 @@ mod doctor;
 mod live_control;
 #[path = "diagnostics/offline.rs"]
 mod offline;
+#[path = "diagnostics/output_helper.rs"]
+mod output_helper;
+#[path = "diagnostics/output_lifecycle.rs"]
+mod output_lifecycle;
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]

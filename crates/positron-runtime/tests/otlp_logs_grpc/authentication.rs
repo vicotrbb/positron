@@ -7,6 +7,132 @@ use tonic::{Code, Request};
 
 use super::support::{LiveGrpcHarness, otlp_request};
 
+async fn single_record_export<T, F, Fut>(
+    deadline: tokio::time::Instant,
+    mut attempt: F,
+) -> Result<T, tonic::Status>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(tonic::Status::deadline_exceeded(
+                "single-record export deadline expired",
+            ));
+        }
+        let result = tokio::time::timeout_at(deadline, attempt())
+            .await
+            .map_err(|_| {
+                tonic::Status::deadline_exceeded("single-record export deadline expired")
+            })?;
+        match result {
+            Err(status)
+                if status.code() == Code::Unavailable
+                    && status.message() == "OTLP Logs ingest capacity is unavailable"
+                    && status.details().is_empty() =>
+            {
+                tokio::time::sleep_until(
+                    deadline.min(tokio::time::Instant::now() + Duration::from_millis(25)),
+                )
+                .await;
+            },
+            other => return other,
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn single_record_capacity_refusal_retries_within_one_deadline() {
+    let mut attempts = 0;
+    let result = single_record_export(tokio::time::Instant::now() + Duration::from_secs(2), || {
+        attempts += 1;
+        std::future::ready(if attempts == 1 {
+            Err(tonic::Status::unavailable(
+                "OTLP Logs ingest capacity is unavailable",
+            ))
+        } else {
+            Ok(())
+        })
+    })
+    .await;
+    assert!(result.is_ok());
+    assert_eq!(attempts, 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn single_record_export_does_not_retry_other_failures() {
+    for status in [
+        tonic::Status::unauthenticated("OTLP Logs ingest capacity is unavailable"),
+        tonic::Status::unavailable("OTLP Logs ingest is temporarily unavailable"),
+        tonic::Status::with_details(
+            Code::Unavailable,
+            "OTLP Logs ingest capacity is unavailable",
+            vec![1].into(),
+        ),
+        tonic::Status::unknown("transport failed"),
+    ] {
+        let mut attempts = 0;
+        let result =
+            single_record_export(tokio::time::Instant::now() + Duration::from_secs(2), || {
+                attempts += 1;
+                std::future::ready(Err::<(), _>(status.clone()))
+            })
+            .await;
+        assert_eq!(
+            result
+                .expect_err("noncanonical failure must remain closed")
+                .code(),
+            status.code()
+        );
+        assert_eq!(attempts, 1);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn single_record_export_keeps_one_deadline_for_backoff_and_io() {
+    let mut attempts = 0;
+    let result = single_record_export(
+        tokio::time::Instant::now() + Duration::from_millis(10),
+        || {
+            attempts += 1;
+            std::future::ready(Err::<(), _>(tonic::Status::unavailable(
+                "OTLP Logs ingest capacity is unavailable",
+            )))
+        },
+    )
+    .await;
+    assert_eq!(
+        result
+            .expect_err("backoff cannot extend the deadline")
+            .code(),
+        Code::DeadlineExceeded
+    );
+    assert_eq!(attempts, 1);
+    let mut attempts = 0;
+    let result = single_record_export(tokio::time::Instant::now(), || {
+        attempts += 1;
+        std::future::ready(Ok(()))
+    })
+    .await;
+    assert_eq!(
+        result.expect_err("expired allowance cannot launch").code(),
+        Code::DeadlineExceeded
+    );
+    assert_eq!(attempts, 0);
+    let result = single_record_export(
+        tokio::time::Instant::now() + Duration::from_millis(10),
+        std::future::pending::<Result<(), tonic::Status>>,
+    )
+    .await;
+    assert_eq!(
+        result
+            .expect_err("inflight call shares the deadline")
+            .code(),
+        Code::DeadlineExceeded
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn authentication_rejection_precedes_message_decompression_and_decoding()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -116,7 +242,7 @@ async fn configured_proxy_metadata_keeps_the_grpc_bearer_authoritative()
 async fn unconfigured_grpc_forwarded_metadata_cannot_supply_authority()
 -> Result<(), Box<dyn std::error::Error>> {
     let harness = LiveGrpcHarness::start("unconfigured-forwarded-metadata")?;
-    let mut client = tokio::time::timeout(
+    let client = tokio::time::timeout(
         Duration::from_secs(2),
         LogsServiceClient::connect(format!("http://{}", harness.endpoint())),
     )
@@ -126,7 +252,15 @@ async fn unconfigured_grpc_forwarded_metadata_cannot_supply_authority()
     metadata.insert("x-forwarded-for", "198.51.100.24".parse()?);
     metadata.insert("x-forwarded-user", "forged-user".parse()?);
     metadata.insert("x-forwarded-authorization", "Bearer pos_forged".parse()?);
-    tokio::time::timeout(Duration::from_secs(2), client.export(request)).await??;
+    let (metadata, _, body) = request.into_parts();
+    // Only this one-record fixture may replay an explicit precommit refusal.
+    single_record_export(tokio::time::Instant::now() + Duration::from_secs(2), || {
+        let mut client = client.clone();
+        let mut request = Request::new(body.clone());
+        *request.metadata_mut() = metadata.clone();
+        async move { client.export(request).await }
+    })
+    .await?;
     assert_eq!(
         harness.query_log_bodies("logs | range query_time 0 100 | limit 16")?,
         ["own-bearer-only"]

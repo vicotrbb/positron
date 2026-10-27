@@ -351,12 +351,28 @@ elif sys.argv[1] == "upgraded":
     inputs = json.loads(pathlib.Path("/etc/positron-upgrade-inputs.json").read_text())
     deadline = time.monotonic() + 60
     while True:
-        status = fields(run(["positron", "upgrade", "status"] + transport + ["--operation-id", state["upgrade"]], credential))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("target startup attestation did not complete")
+        try:
+            result = subprocess.run(["positron", "upgrade", "status"] + transport +
+                ["--operation-id", state["upgrade"]], input=credential,
+                capture_output=True, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("target startup attestation did not complete") from None
+        if time.monotonic() >= deadline:
+            raise RuntimeError("target startup attestation did not complete")
+        if result.returncode:
+            if result.stderr.strip() != b"positron: capacity unavailable; retry the same idempotent request":
+                raise RuntimeError("target startup attestation status refused")
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+            continue
+        status = fields(result.stdout.decode())
         if status["status"] == "succeeded":
             break
         if status["status"] == "failed" or time.monotonic() >= deadline:
             raise RuntimeError("target startup attestation did not complete")
-        time.sleep(0.1)
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
     assert status["target_version"] == inputs["version"]
     assert status["target_manifest"] == state["target_manifest"]
     assert status["source_artifact"] == state["source_hash"]

@@ -31,7 +31,11 @@ serde_json = "=1.0.150"
 rustix = { version = "=1.1.4", default-features = false, features = ["fs", "std", "termios"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["net", "rt", "time"] }
 
+[target.'cfg(unix)'.dependencies]
+close_fds = "=0.3.2"
+
 [dev-dependencies]
+rustix = { version = "=1.1.4", default-features = false, features = ["pty"] }
 pgp = { version = "=0.21.0", default-features = false }
 signed_note = "=0.2.0"
 sigstore-merkle = { version = "=0.15.0", default-features = false }

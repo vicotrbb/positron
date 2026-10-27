@@ -1076,6 +1076,7 @@ impl RunningProcess {
     #[must_use]
     pub fn begin_shutdown(mut self) -> DrainingProcess {
         let deadline = std::time::Instant::now() + self.drain_deadline;
+        crate::native_output::set_deadline(deadline);
         self.absorb_retired_tasks();
         self.state.transition(ProcessPhase::Draining);
         let failed_roles = {
@@ -1676,6 +1677,16 @@ impl DrainingProcess {
             } else {
                 false
             };
+        // Native output owns no storage, but its child must be confirmed absent
+        // before the irreversible graceful Catalog marker can be published.
+        if crate::native_output::close().is_err() {
+            self.0
+                .state
+                .health()
+                .operational_telemetry()
+                .log_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         if !preserve_upgrade_drain
             && let Some(instance) = owned_instance.as_ref()
             && let Err(failure) = instance.publish_graceful_shutdown(&mut cancelled)

@@ -3,62 +3,27 @@ use super::*;
 #[test]
 fn repository_rejection_preserves_result_and_emits_only_bounded_closed_details()
 -> Result<(), Box<dyn std::error::Error>> {
-    const CHILD: &str = "POSITRON_BACKUP_REJECTION_DIAGNOSTIC_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        for _ in 0..33 {
-            assert_eq!(
-                provider_failure(RepositoryFailure::PermissionDenied),
-                ServiceFailure::BackupRepositoryRejected
-            );
-        }
+    let remaining = std::sync::atomic::AtomicU8::new(32);
+    let mut contents = Vec::new();
+    for _ in 0..33 {
         assert_eq!(
-            provider_failure(RepositoryFailure::Busy),
-            ServiceFailure::CapacityUnavailable
+            provider_failure_with(
+                RepositoryFailure::PermissionDenied,
+                &remaining,
+                |diagnostic| {
+                    crate::render_operational_diagnostic(&mut contents, false, diagnostic)
+                }
+            ),
+            ServiceFailure::BackupRepositoryRejected
         );
-        return Ok(());
     }
-    let executable = std::env::current_exe()?;
-    let path = std::env::temp_dir().join(format!(
-        "positron-backup-diagnostic-{}-{}.log",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let sink = options.open(&path)?;
-    let output = std::process::Command::new(executable)
-        .env(CHILD, "1")
-        .args([
-            "--exact",
-            "services::backup_administration::execution::diagnostic_tests::repository_rejection_preserves_result_and_emits_only_bounded_closed_details",
-            "--nocapture",
-        ])
-        .stderr(sink)
-        .output();
-    let contents = (|| -> std::io::Result<Vec<u8>> {
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        std::fs::File::open(&path)?
-            .take(16_385)
-            .read_to_end(&mut bytes)?;
-        Ok(bytes)
-    })();
-    let cleanup = std::fs::remove_file(&path);
-    let output = output?;
-    let contents = contents?;
-    cleanup?;
-    assert!(output.status.success());
-    assert!(
-        contents.len() <= 16_384,
-        "diagnostic capture exceeded its fixture bound"
+    assert_eq!(
+        provider_failure_with(RepositoryFailure::Busy, &remaining, |_| {
+            panic!("capacity rejection must not emit a repository diagnostic")
+        }),
+        ServiceFailure::CapacityUnavailable
     );
+    assert!(contents.len() <= 16_384);
     let records = String::from_utf8(contents)?
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
@@ -76,4 +41,18 @@ fn repository_rejection_preserves_result_and_emits_only_bounded_closed_details()
         );
     }
     Ok(())
+}
+
+#[test]
+fn repository_rejection_retains_primary_failure_when_output_is_unavailable() {
+    let remaining = std::sync::atomic::AtomicU8::new(1);
+    let mut attempted = false;
+    assert_eq!(
+        provider_failure_with(RepositoryFailure::PermissionDenied, &remaining, |_| {
+            attempted = true;
+            Err(std::io::Error::other("closed output"))
+        }),
+        ServiceFailure::BackupRepositoryRejected
+    );
+    assert!(attempted);
 }

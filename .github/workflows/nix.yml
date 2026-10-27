@@ -67,7 +67,7 @@ jobs:
           nix develop --no-update-lock-file --command rustc -vV > qualification/toolchain.txt
           cp flake.lock Cargo.lock rust-toolchain.toml qualification/
           nix develop --no-update-lock-file --command cargo metadata --locked --format-version 1 > qualification/cargo-metadata.json
-          POSITRON_TEST_NIX_CAPTURE="$PWD/qualification" nix develop --no-update-lock-file --command cargo test --locked --release -p positron-release --lib nix_qualification::capture_nix_build_metadata -- --ignored --exact
+          POSITRON_TEST_NIX_CAPTURE="$PWD/qualification" nix develop --no-update-lock-file --command cargo test --locked --release -p positron-release --lib build_qualification::capture_nix_build_metadata -- --ignored --exact
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nix-${{ matrix.platform.target }}-${{ matrix.build }}
@@ -110,7 +110,7 @@ jobs:
             POSITRON_TEST_NIX_CAPTURE="$PWD/qualification/nix-$target-one" \
             POSITRON_TEST_NIX_CAPTURE_REBUILD="$PWD/qualification/nix-$target-two" \
             POSITRON_TEST_NIX_METADATA_OUT="$PWD/metadata/$target" \
-              cargo test --locked -p positron-release --lib nix_qualification::actual_nix_metadata_is_bound_offline_to_current_build -- --ignored --exact
+              cargo test --locked -p positron-release --lib build_qualification::actual_nix_metadata_is_bound_offline_to_current_build -- --ignored --exact
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

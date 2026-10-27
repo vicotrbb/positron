@@ -58,4 +58,4 @@ impl std::fmt::Display for ReleaseError {
 impl std::error::Error for ReleaseError {}
 
 #[cfg(test)]
-mod nix_qualification;
+mod build_qualification;

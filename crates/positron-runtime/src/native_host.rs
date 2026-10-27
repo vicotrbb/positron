@@ -2379,7 +2379,6 @@ mod tests {
     use std::fs;
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::path::PathBuf;
-    use std::process::Command;
     use std::time::Duration;
 
     use super::{
@@ -2526,20 +2525,12 @@ mod tests {
     #[test]
     fn maintenance_failure_diagnostic_reports_a_closed_category()
     -> Result<(), Box<dyn std::error::Error>> {
-        let output = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "native_host::tests::failed_native_maintenance_task_requests_process_owned_fence_before_join_error",
-                "--nocapture",
-            ])
-            .output()?;
-        assert!(
-            output.status.success(),
-            "maintenance failure child failed with status {:?}; stderr: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+        let mut output = Vec::new();
+        assert_eq!(
+            report_maintenance_failure_to(&mut output, crate::ServiceFailure::CorruptState),
+            MaintenanceDiagnosticDelivery::Delivered
         );
-        let stderr = String::from_utf8(output.stderr)?;
+        let stderr = String::from_utf8(output)?;
         assert!(
             stderr.contains("\"event\":\"maintenance_worker_failure\"")
                 && stderr.contains("\"category\":\"corrupt_state\""),

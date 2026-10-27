@@ -11,14 +11,17 @@ use std::{
 };
 const USAGE: &str = "usage: positron upgrade start|status|lookup|wait|cancel --endpoint ADDRESS --credential-stdin [--server-name NAME --trust-file PATH | --allow-plaintext] [--candidate-manifest DIGEST --repository-id UUID --retention-seconds N --expected-generation N --idempotency-key UUID --operation-id ID]";
 
-pub(super) fn run(arguments: impl Iterator<Item = String>) -> ExitCode {
+pub(super) fn run(
+    arguments: impl Iterator<Item = String>,
+    environment: impl IntoIterator<Item = (String, String)>,
+) -> ExitCode {
     let mut arguments = arguments.peekable();
     if arguments
         .peek()
         .is_some_and(|argument| argument == "offline")
     {
         arguments.next();
-        return crate::upgrade_offline_cli::run(arguments);
+        return crate::upgrade_offline_cli::run(arguments, environment);
     }
     crate::administrative_cli::exit(execute(arguments, &mut std::io::stdout().lock()))
 }

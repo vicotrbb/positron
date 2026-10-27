@@ -40,8 +40,30 @@ fn unknown_command_has_the_usage_exit() -> Result<(), Box<dyn std::error::Error>
 
 #[cfg(unix)]
 #[test]
+fn normal_cli_preserves_diagnostics_with_an_unrelated_inherited_descriptor()
+-> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    let output = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec 3</dev/null; exec \"$1\" unknown",
+            "positron-inherited-descriptor-test",
+        ])
+        .arg(env!("CARGO_BIN_EXE_positron"))
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(diagnostic["event"], "invalid_command_line");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_verify_and_bundle_report_stdout_failure_without_panicking()
 -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     for arguments in [
         vec!["doctor", "--offline"],
         vec!["verify", "--offline"],
@@ -79,4 +101,31 @@ fn command_with_closed_stdout(
         .stdout(stdout)
         .stderr(Stdio::piped())
         .output()?)
+}
+
+#[cfg(unix)]
+#[test]
+fn native_diagnostic_preserves_the_callers_pipe_flags_and_delivers_json()
+-> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    let (mut reader, writer) = std::io::pipe()?;
+    let before = rustix::fs::fcntl_getfl(&writer)? & rustix::fs::OFlags::NONBLOCK;
+    let status = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["serve", "--set", "storage.data_directory=relative"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(writer.try_clone()?))
+        .status()?;
+    assert_eq!(status.code(), Some(2));
+    assert_eq!(
+        rustix::fs::fcntl_getfl(&writer)? & rustix::fs::OFlags::NONBLOCK,
+        before,
+        "a child diagnostic must not change its caller's shared pipe flags"
+    );
+    drop(writer);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    let diagnostic: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(diagnostic["event"], "configuration_rejected");
+    Ok(())
 }

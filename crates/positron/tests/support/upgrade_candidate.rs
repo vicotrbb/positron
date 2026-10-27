@@ -22,6 +22,30 @@ pub(super) fn checked(command: &mut Command) -> Result<std::process::Output> {
     Ok(output)
 }
 pub(crate) fn prepare() -> Result<Candidate> {
+    // Minimal-image tests stage the independently compiled fixture outside the
+    // runtime image. Compilers and Git remain build-time test dependencies.
+    if let Some(binary) = std::env::var_os("POSITRON_TEST_UPGRADE_BINARY") {
+        let binary = PathBuf::from(binary);
+        let source_commit = std::env::var("POSITRON_TEST_SOURCE_COMMIT")?;
+        let candidate_commit = std::env::var("POSITRON_TEST_CANDIDATE_COMMIT")?;
+        for commit in [&source_commit, &candidate_commit] {
+            if !matches!(commit.len(), 40 | 64)
+                || !commit
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err("invalid staged fixture source identity".into());
+            }
+        }
+        if !binary.is_file() || source_commit == candidate_commit {
+            return Err("missing or unversioned staged fixture".into());
+        }
+        return Ok(Candidate {
+            binary,
+            source_commit,
+            candidate_commit,
+        });
+    }
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()?;
