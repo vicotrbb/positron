@@ -265,6 +265,7 @@ impl Fixture {
         native.extend(native_rpm::fixtures());
         fixture.install_native(native);
         fixture.refresh_homebrew();
+        fixture.refresh_compose();
         fixture
     }
     fn install_native(&mut self, native: Vec<native_registry::NativeArtifactFixture>) {
@@ -346,6 +347,16 @@ impl Fixture {
         });
         id
     }
+    fn refresh_compose(&mut self) {
+        let index = self
+            .inventory
+            .artifacts
+            .iter()
+            .position(|a| a.surface == Surface::Compose)
+            .unwrap();
+        let compose = compose_deployment(&self.inventory).unwrap();
+        self.replace_artifact(index, compose.as_bytes(), compose.as_bytes());
+    }
     fn refresh_homebrew(&mut self) {
         let index = self
             .inventory
@@ -402,6 +413,9 @@ impl Fixture {
         self.inventory.artifacts[index]
             .publication
             .immutable_identity = format!("sha256:{new}");
+        if artifact.surface == Surface::OciIndex {
+            self.refresh_compose();
+        }
         if artifact.surface == Surface::NativeArchive {
             self.refresh_homebrew();
         }

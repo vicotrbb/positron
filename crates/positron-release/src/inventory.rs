@@ -321,7 +321,7 @@ impl ReleaseInventory {
         }
         for artifact in &self.artifacts {
             use Surface::*;
-            if (matches!(artifact.surface, Api | OciImage | Homebrew | Nix)
+            if (matches!(artifact.surface, Api | OciImage | Homebrew | Nix | Compose)
                 || (artifact.surface == NativeExecutable
                     && (artifact.target.starts_with("linux-")
                         || artifact.target.starts_with("nix-"))))

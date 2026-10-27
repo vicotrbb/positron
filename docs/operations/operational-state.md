@@ -218,3 +218,11 @@ declared omissions. Neither collection path repairs storage or changes process s
 Crash candidates are ordered by canonical record sequence before source-file or byte
 truncation. If the directory inventory itself exceeds its bound, collection emits an
 empty declared summary instead of selecting an unpredictable subset of directory entries.
+
+For a credential-free readiness probe in a minimal OCI image, use
+`positron doctor --ready --endpoint 127.0.0.1:13133 --server-name localhost --trust-file /etc/positron/tls/ca.pem`.
+It checks the authoritative `/health/ready` endpoint, accepts only HTTP 200,
+refuses redirects, bypasses ambient proxies and has a five-second deadline.
+It never reads a bearer or the response body. Use a certificate with the selected
+DNS name. `--allow-plaintext` is an explicit alternative for a reviewed local
+plaintext Operations Listener. This does not replace authenticated Doctor detail.

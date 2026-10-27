@@ -375,6 +375,36 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
             notices: &all_notices,
         },
     );
+    let compose = compose_deployment(&qualification.inventory).unwrap();
+    let mut independent_inventory = qualification.inventory.clone();
+    let index_file = independent_inventory
+        .artifacts
+        .iter()
+        .find(|a| a.surface == Surface::OciIndex)
+        .unwrap()
+        .file
+        .clone();
+    independent_inventory
+        .files
+        .iter_mut()
+        .find(|f| f.id == index_file)
+        .unwrap()
+        .identity = FileIdentity::of(independent.index());
+    let rebuilt_compose = compose_deployment(&independent_inventory).unwrap();
+    qualification.artifact(
+        "compose.yaml",
+        Surface::Compose,
+        "any",
+        compose.as_bytes(),
+        rebuilt_compose.as_bytes(),
+        ArtifactBuild {
+            packages: &json!([]),
+            closure: &empty,
+            builder: &assembly_builder,
+            independent_builder: &assembly_rebuilder,
+            notices: &[],
+        },
+    );
     qualification
 }
 

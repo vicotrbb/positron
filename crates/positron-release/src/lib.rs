@@ -1,6 +1,8 @@
 //! Offline release construction and verification, using the canonical kernel manifest.
 #![forbid(unsafe_code)]
 
+mod compose;
+pub use compose::compose_deployment;
 mod homebrew;
 pub use homebrew::homebrew_formula;
 mod native_archive;

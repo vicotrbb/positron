@@ -453,6 +453,7 @@ jobs:
               --file deploy/oci/Dockerfile "$RUNNER_TEMP/oci/$build"
           done
           POSITRON_TEST_OCI_ARCHIVE="$RUNNER_TEMP/first/native.tar.gz" python3 deploy/oci/test_image.py
+          POSITRON_TEST_OCI_IMAGE=positron-118-test python3 deploy/compose/test_compose.py
           for build in one two; do
             capture="$RUNNER_TEMP/oci/$build"
             cp Cargo.lock rust-toolchain.toml "$capture/"
@@ -494,6 +495,32 @@ jobs:
             -e "POSITRON_TEST_CANDIDATE_COMMIT=$(cat "$candidate/candidate-commit")" \
             --entrypoint "$executable" positron-118-test --exact \
             binary_http_ingestion_recovers_after_sigkill_and_graceful_restart --test-threads=1
+          cat > "$RUNNER_TEMP/compose-public-test.yaml" <<YAML
+          services:
+            positron:
+              image: positron-118-test
+              user: "$(id -u):$(id -g)"
+              volumes: !override
+                - positron-oci-test-temp:/tmp
+                - $GITHUB_WORKSPACE:$GITHUB_WORKSPACE:ro
+                - $RUNNER_TEMP:$RUNNER_TEMP:ro
+                - $RUNNER_TEMP/oci-kill:/bin/kill:ro
+              tmpfs: !override
+                - /run/positron:uid=$(id -u),gid=$(id -g),mode=0700
+          volumes:
+            positron-oci-test-temp:
+              external: true
+          YAML
+          docker compose --project-name positron-public-test \
+            -f deploy/compose/compose.yaml.in -f "$RUNNER_TEMP/compose-public-test.yaml" \
+            run --rm --no-deps --entrypoint "$executable" \
+            -e POSITRON_TEST_NATIVE_BINARY=/usr/bin/positron \
+            -e "POSITRON_TEST_UPGRADE_BINARY=$candidate/target/release/positron" \
+            -e "POSITRON_TEST_SOURCE_COMMIT=$source_commit" \
+            -e "POSITRON_TEST_CANDIDATE_COMMIT=$(cat "$candidate/candidate-commit")" \
+            positron --exact binary_http_ingestion_recovers_after_sigkill_and_graceful_restart --test-threads=1
+          docker compose --project-name positron-public-test \
+            -f deploy/compose/compose.yaml.in -f "$RUNNER_TEMP/compose-public-test.yaml" down
           docker volume rm positron-oci-test-temp
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: runner.os == 'Linux'

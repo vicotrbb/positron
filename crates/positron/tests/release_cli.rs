@@ -396,3 +396,47 @@ fn native_cli_extracts_the_known_rpm_functional_identity_without_overwriting_fil
     );
     assert!(!refused.exists());
 }
+
+#[test]
+fn compose_cli_generates_the_canonical_unsigned_deployment_and_refuses_overwrite() {
+    let fixture = support::Fixture::new();
+    let input = fixture.root.join("compose-inventory.json");
+    let output = fixture.root.join("compose.yaml");
+    std::fs::write(&input, fixture.inventory.canonical_bytes().unwrap()).unwrap();
+    let arguments = [
+        "compose",
+        "--inventory",
+        path(&input),
+        "--out",
+        path(&output),
+    ];
+    let generated = run(&arguments);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&output).unwrap(),
+        compose_deployment(&fixture.inventory).unwrap()
+    );
+    assert!(
+        String::from_utf8(generated.stdout)
+            .unwrap()
+            .contains("unsigned-compose-deployment")
+    );
+    assert!(!run(&arguments).status.success());
+    assert!(
+        !run(&[
+            "compose",
+            "--inventory",
+            path(&input),
+            "--out",
+            path(&output),
+            "--target",
+            "linux-x86_64"
+        ])
+        .status
+        .success()
+    );
+}

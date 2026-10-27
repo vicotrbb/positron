@@ -1,0 +1,92 @@
+"""Actual Compose lifecycle integration; uses the same native OCI build as CI."""
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+import unittest
+import uuid
+
+
+def docker(*args, **kwargs):
+    return subprocess.run(["docker", *args], check=True, capture_output=True, **kwargs).stdout
+
+
+class ComposeContract(unittest.TestCase):
+    def test_tls_initialization_claim_health_restart_drain_and_retained_volumes(self):
+        image = os.environ["POSITRON_TEST_OCI_IMAGE"]
+        identity = json.loads(docker("image", "inspect", image))[0]["Id"]
+        project = "positron119" + uuid.uuid4().hex[:10]
+        with tempfile.TemporaryDirectory(prefix="positron-compose-") as directory:
+            root = Path(directory)
+            # A local immutable image ID exercises unpublished bytes without a registry.
+            template = Path(__file__).with_name("compose.yaml.in").read_text()
+            root.joinpath("compose.yaml").write_text(template.replace("@SOURCE@", "local-test").replace(
+                "ghcr.io/vicotrbb/positron@sha256:@INDEX_SHA256@", identity))
+            root.joinpath("override.yaml").write_text('''services:
+  positron:
+    ports: !reset []
+    volumes: !override
+      - data:/var/lib/positron
+      - secrets:/var/lib/positron-secrets
+      - configuration:/etc/positron:ro
+      - backups:/var/lib/positron-backups
+volumes:
+  configuration:
+''')
+            command = ["compose", "--project-name", project, "--file", str(root / "compose.yaml"), "--file", str(root / "override.yaml")]
+            def compose(*args, **kwargs):
+                return docker(*command, *args, **kwargs)
+            compose("create", "--pull", "never")
+            container = compose("ps", "--all", "--quiet", "positron").decode().strip()
+            try:
+                # Extract the actual generated contract, rather than a second config model.
+                archived = docker("cp", f"{container}:/usr/share/positron/positron.toml.example", "-")
+                with tarfile.open(fileobj=io.BytesIO(archived)) as archive:
+                    config = archive.extractfile(archive.getmembers()[0]).read().decode()
+                tls = "".join(f'{name}_tls_certificate_file = "/etc/positron/tls/server.pem"\n{name}_tls_private_key_file = "/etc/positron/tls/server-key.pem"\n' for name in ("operations", "api", "otlp_grpc", "otlp_http", "loki_push"))
+                config = config.replace("[listener]\n", "[listener]\n" + tls)
+                root.joinpath("positron.toml").write_text(config)
+                subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost", "-keyout", str(root / "server-key.pem"), "-out", str(root / "server.pem")], check=True, capture_output=True)
+                payload = io.BytesIO()
+                with tarfile.open(fileobj=payload, mode="w") as archive:
+                    for source, name, mode in [("positron.toml", "positron.toml", 0o600), ("server-key.pem", "tls/server-key.pem", 0o600), ("server.pem", "tls/server.pem", 0o644), ("server.pem", "tls/ca.pem", 0o644)]:
+                        data = root.joinpath(source).read_bytes()
+                        member = tarfile.TarInfo(name)
+                        member.size, member.mode, member.uid, member.gid = len(data), mode, 65532, 65532
+                        archive.addfile(member, io.BytesIO(data))
+                # Provisioning helper is not part of the application or running stack.
+                docker("run", "--rm", "-i", "-v", f"{project}_configuration:/config", "rockylinux/rockylinux:9.6@sha256:91bbb8eb52ca462611c1f9ce5c4cede4172a31bfe64f336e82f29648694a3cfe", "tar", "-xf", "-", "-C", "/config", input=payload.getvalue())
+                compose("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
+                state = json.loads(docker("inspect", container))[0]
+                self.assertTrue(state["HostConfig"]["ReadonlyRootfs"])
+                self.assertEqual(state["Config"]["User"], "65532:65532")
+                self.assertEqual(state["HostConfig"]["Memory"], 2 * 1024 ** 3)
+                self.assertEqual(state["State"]["Health"]["Status"], "healthy")
+                self.assertNotIn(b"administrator_secret=", compose("logs"))
+                compose("stop")
+                self.assertEqual(json.loads(docker("inspect", container))[0]["State"]["ExitCode"], 0)
+                claim = compose("run", "--rm", "--no-deps", "positron", "bootstrap", "claim", "--config", "/etc/positron/positron.toml")
+                self.assertIn(b"administrator_secret=", claim)
+                repeated = subprocess.run(["docker", *command, "run", "--rm", "--no-deps", "positron", "bootstrap", "claim", "--config", "/etc/positron/positron.toml"], capture_output=True)
+                self.assertNotEqual(repeated.returncode, 0)
+                self.assertEqual(repeated.stdout, b"")
+                compose("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
+                compose("kill", "--signal", "SIGKILL")
+                compose("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
+                compose("down")
+                for name in ("data", "secrets", "backups"):
+                    docker("volume", "inspect", f"{project}_{name}")
+                compose("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
+            finally:
+                result = subprocess.run(["docker", *command, "logs"], capture_output=True)
+                # Logs contain no claim; reveal useful failure context only.
+                if b"administrator_secret=" not in result.stdout:
+                    print(result.stdout.decode(errors="replace"))
+                subprocess.run(["docker", *command, "down", "--volumes"], check=True, capture_output=True)
+
+
+if __name__ == "__main__":
+    unittest.main()
