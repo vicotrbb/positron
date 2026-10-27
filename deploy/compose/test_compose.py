@@ -8,7 +8,7 @@ import tarfile
 import tempfile
 import unittest
 import uuid
-from data_lifecycle import DataLifecycle
+from data_lifecycle import ADMIN_IMAGE, DataLifecycle
 from tls_fixture import material
 
 
@@ -17,6 +17,19 @@ def docker(*args, **kwargs):
 
 
 class ComposeContract(unittest.TestCase):
+    def test_installed_recovery_identity_has_protected_parent_and_file(self):
+        project = "positron119permissions" + uuid.uuid4().hex[:10]
+        volume = project + "_configuration"
+        lifecycle = DataLifecycle.__new__(DataLifecycle)
+        lifecycle.project, lifecycle.docker = project, docker
+        try:
+            lifecycle.install({"fixtures/export/recovery.identity": b"private-fixture"})
+            metadata = docker("run", "--rm", "-v", f"{volume}:/config:ro", ADMIN_IMAGE,
+                              "stat", "-c", "%u:%g:%a", "/config/fixtures", "/config/fixtures/export", "/config/fixtures/export/recovery.identity")
+            self.assertEqual(metadata.decode().splitlines(), ["65532:65532:700", "65532:65532:700", "65532:65532:600"])
+        finally:
+            docker("volume", "rm", volume)
+
     def test_tls_initialization_claim_health_restart_drain_and_retained_volumes(self):
         image = os.environ["POSITRON_TEST_OCI_IMAGE"]
         identity = json.loads(docker("image", "inspect", image))[0]["Id"]

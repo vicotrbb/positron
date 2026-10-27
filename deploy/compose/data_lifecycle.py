@@ -71,6 +71,11 @@ class DataLifecycle:
     def install(self, files):
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode="w") as archive:
+            directories = sorted({str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}, key=lambda name: (len(Path(name).parts), name))
+            for name in directories:
+                member = tarfile.TarInfo(name)
+                member.type, member.mode, member.uid, member.gid = tarfile.DIRTYPE, 0o700, 65532, 65532
+                archive.addfile(member)
             for name, data in files.items():
                 member = tarfile.TarInfo(name)
                 member.size, member.mode, member.uid, member.gid = len(data), 0o600, 65532, 65532
