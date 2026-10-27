@@ -38,10 +38,13 @@ fn children(parent: u32) -> TestResult<Vec<u32>> {
         })
         .collect())
 }
-fn await_helper(parent: u32) -> TestResult<u32> {
-    let deadline = Instant::now() + Duration::from_secs(1);
+fn await_helper(parent: &mut Child) -> TestResult<u32> {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(1);
+    let mut samples = 0;
     loop {
-        let children = children(parent)?;
+        let children = children(parent.id())?;
+        samples += 1;
         assert!(
             children.len() <= 1,
             "one invocation must own at most one output helper"
@@ -50,7 +53,7 @@ fn await_helper(parent: u32) -> TestResult<u32> {
             return Ok(*pid);
         }
         if Instant::now() >= deadline {
-            return Err("native output child was not observed".into());
+            return Err(format!("native output child was not observed: parent_status={:?} elapsed_ms={} ps_samples={samples}", parent.try_wait()?, started.elapsed().as_millis()).into());
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -158,10 +161,9 @@ fn http(port: u16, path: &str, credential: &str, body: &[u8]) -> TestResult<Vec<
             .ok_or("HTTP response boundary")?;
         let payload = response.get(boundary + 4..).ok_or("HTTP response body")?;
         let head = std::str::from_utf8(response.get(..boundary).ok_or("HTTP headers")?)?;
-        // This explicit pre-admission refusal accepts no records; identical retry
-        // cannot duplicate the retained record whose recovery this test proves.
-        let retryable = path == "/v1/logs"
-            && response.starts_with(b"HTTP/1.1 429 ")
+        // Ingest admits no records on this refusal. Query is a fresh read whose
+        // complete canonical rejection carries no accepted execution outcome.
+        let ingest_capacity = path == "/v1/logs"
             && head
                 .lines()
                 .any(|line| line.eq_ignore_ascii_case("Retry-After: 1"))
@@ -169,6 +171,23 @@ fn http(port: u16, path: &str, credential: &str, body: &[u8]) -> TestResult<Vec<
                 == Some(
                     serde_json::json!({"code": 14, "message": "OTLP Logs ingest capacity is unavailable"}),
                 );
+        let query_capacity = path == positron_api::log_query::HTTP_PATH
+            && head
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .filter(|(name, _)| name.eq_ignore_ascii_case("Retry-After"))
+                .map(|(_, value)| value.trim())
+                .eq(["1"])
+            && positron_api::log_query::decode_query_rejection(429, payload)
+                == positron_api::log_query::LogQueryServiceClientFailure::CapacityUnavailable
+            && positron_api::log_query::query_rejection(429, "capacity_unavailable")
+                .ok()
+                .and_then(|expected| serde_json::from_slice::<serde_json::Value>(&expected).ok())
+                .is_some_and(|expected| {
+                    serde_json::from_slice::<serde_json::Value>(payload).ok() == Some(expected)
+                });
+        let retryable =
+            response.starts_with(b"HTTP/1.1 429 ") && (ingest_capacity || query_capacity);
         if retryable && deadline.saturating_duration_since(Instant::now()) > Duration::from_secs(1)
         {
             std::thread::sleep(Duration::from_secs(1));
@@ -197,7 +216,7 @@ fn parent_sigkill_ends_its_output_helper_while_stderr_stays_full() -> TestResult
             .stderr(Stdio::from(writer))
             .spawn()?,
     );
-    let helper = await_helper(parent.id())?;
+    let helper = await_helper(&mut parent)?;
     std::thread::sleep(Duration::from_millis(50));
     assert!(parent.try_wait()?.is_none());
     parent.kill()?;
@@ -342,14 +361,33 @@ fn read_http_fixture_headers(stream: &mut TcpStream) -> std::io::Result<Vec<u8>>
 
 #[test]
 fn output_lifecycle_retries_only_explicit_ingest_capacity_with_the_same_request() -> TestResult {
+    retry_capacity_case(
+        "/v1/logs",
+        br#"{"code":14,"message":"OTLP Logs ingest capacity is unavailable"}"#,
+    )
+}
+
+#[test]
+fn output_lifecycle_retries_only_explicit_query_capacity_with_the_same_request() -> TestResult {
+    let payload = positron_api::log_query::query_rejection(429, "capacity_unavailable")
+        .map_err(|_| "query refusal fixture")?;
+    retry_capacity_case(positron_api::log_query::HTTP_PATH, &payload)
+}
+
+fn retry_capacity_case(path: &str, payload: &[u8]) -> TestResult {
     #[cfg(target_os = "macos")]
     let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
+    let refusal = format!(
+        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        payload.len(),
+        std::str::from_utf8(payload)?
+    );
     let peer = std::thread::spawn(move || -> std::io::Result<Vec<Vec<u8>>> {
         let mut requests = Vec::new();
         for response in [
-            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{\"code\":14,\"message\":\"OTLP Logs ingest capacity is unavailable\"}",
+            refusal.as_str(),
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
         ] {
             let mut stream = accept_http_fixture(&listener)?;
@@ -362,7 +400,7 @@ fn output_lifecycle_retries_only_explicit_ingest_capacity_with_the_same_request(
         }
         Ok(requests)
     });
-    let result = http(port, "/v1/logs", "fixture-credential", b"body");
+    let result = http(port, path, "fixture-credential", b"body");
     let requests = peer.join().map_err(|_| "capacity peer panicked")?;
     assert_eq!(result?, b"{}");
     let requests = requests?;
@@ -377,7 +415,7 @@ fn output_lifecycle_retries_only_explicit_ingest_capacity_with_the_same_request(
 }
 
 #[test]
-fn output_lifecycle_does_not_retry_noncanonical_or_query_refusals() -> TestResult {
+fn output_lifecycle_does_not_retry_noncanonical_or_cross_protocol_refusals() -> TestResult {
     #[cfg(target_os = "macos")]
     let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
     for (path, retry, message) in [
@@ -407,6 +445,77 @@ fn output_lifecycle_does_not_retry_noncanonical_or_query_refusals() -> TestResul
         assert!(
             result
                 .expect_err("noncanonical refusal must fail")
+                .to_string()
+                .contains("429 Too Many Requests")
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn output_lifecycle_query_capacity_metadata_and_retry_header_fail_closed() -> TestResult {
+    #[cfg(target_os = "macos")]
+    let _guard = PROCESS_TEST.lock().map_err(|_| "process test lock")?;
+    let canonical = positron_api::log_query::query_rejection(429, "capacity_unavailable")
+        .map_err(|_| "query refusal fixture")?;
+    let value: serde_json::Value = serde_json::from_slice(&canonical)?;
+    let mut cases = Vec::new();
+    for field in [
+        "code",
+        "retryClass",
+        "completionState",
+        "source",
+        "safeDetail",
+    ] {
+        let mut changed = value.clone();
+        changed[field] = serde_json::json!("unknown");
+        cases.push((changed.to_string(), "Retry-After: 1\r\n"));
+        let mut missing = value.clone();
+        assert!(
+            missing
+                .as_object_mut()
+                .ok_or("refusal object")?
+                .remove(field)
+                .is_some()
+        );
+        cases.push((missing.to_string(), "Retry-After: 1\r\n"));
+    }
+    let mut extra = value.clone();
+    extra["extra"] = serde_json::json!(true);
+    cases.push((extra.to_string(), "Retry-After: 1\r\n"));
+    let canonical = std::str::from_utf8(&canonical)?;
+    cases.push((
+        format!(
+            "{{\"code\":\"PUBLIC_ERROR_CODE_CAPACITY_UNAVAILABLE\",{}",
+            canonical.strip_prefix('{').ok_or("refusal object")?
+        ),
+        "Retry-After: 1\r\n",
+    ));
+    cases.push((canonical.into(), "Retry-After: 1\r\nRetry-After: 1\r\n"));
+    cases.push((canonical.into(), "Retry-After: 2\r\n"));
+    for (payload, retry) in cases {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let peer = std::thread::spawn(move || -> std::io::Result<()> {
+            let mut stream = accept_http_fixture(&listener)?;
+            read_http_fixture_headers(&mut stream)?;
+            write!(
+                stream,
+                "HTTP/1.1 429 Too Many Requests\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            )?;
+            Ok(())
+        });
+        let result = http(
+            port,
+            positron_api::log_query::HTTP_PATH,
+            "fixture-credential",
+            b"",
+        );
+        peer.join().map_err(|_| "query refusal peer panicked")??;
+        assert!(
+            result
+                .expect_err("noncanonical query refusal must fail")
                 .to_string()
                 .contains("429 Too Many Requests")
         );
