@@ -423,6 +423,8 @@ fn verified_snapshot(
     let mut turns = 0_u64;
     let mut advance_elapsed = Duration::ZERO;
     let mut reopen_elapsed = Duration::ZERO;
+    let mut last_reopen_elapsed = Duration::ZERO;
+    let mut recent_turns = std::collections::VecDeque::with_capacity(4);
     loop {
         let advance_started = Instant::now();
         let turn = (advance_started + Duration::from_secs(30)).min(watchdog);
@@ -453,40 +455,51 @@ fn verified_snapshot(
             break;
         }
         assert!(!operation.status().is_terminal(), "{operation:?}");
+        let children = session.progress(&case.effective).map(|progress| {
+            let summarize = |child: Option<positron_runtime::UpgradeChildProgress>| {
+                child.map(|child| {
+                    (
+                        child.kind,
+                        child.phase,
+                        child.status,
+                        child.revision,
+                        child.progress_percent,
+                        child.checkpoint.map(|checkpoint| checkpoint.sequence),
+                    )
+                })
+            };
+            (
+                summarize(progress.snapshot),
+                summarize(progress.verification),
+            )
+        });
+        if recent_turns.len() == 4 {
+            recent_turns.pop_front();
+        }
+        recent_turns.push_back((
+            turns,
+            last_advance_elapsed.as_millis(),
+            last_reopen_elapsed.as_millis(),
+            children,
+        ));
         assert!(
             Instant::now() < watchdog,
-            "snapshot watchdog status={:?} stage={:?} revision={} turns={turns} last_advance_ms={} advance_total_ms={} reopen_total_ms={} children={:?}",
+            "snapshot watchdog status={:?} stage={:?} revision={} turns={turns} last_advance_ms={} advance_total_ms={} reopen_total_ms={} recent_turns(turn,advance_ms,preceding_reopen_ms,children)={:?}",
             operation.status(),
             operation.upgrade_stage(),
             operation.revision(),
             last_advance_elapsed.as_millis(),
             advance_elapsed.as_millis(),
             reopen_elapsed.as_millis(),
-            session.progress(&case.effective).map(|progress| {
-                let summarize = |child: Option<positron_runtime::UpgradeChildProgress>| {
-                    child.map(|child| {
-                        (
-                            child.kind,
-                            child.phase,
-                            child.status,
-                            child.revision,
-                            child.progress_percent,
-                            child.checkpoint.map(|checkpoint| checkpoint.sequence),
-                        )
-                    })
-                };
-                (
-                    summarize(progress.snapshot),
-                    summarize(progress.verification),
-                )
-            }),
+            recent_turns,
         );
         // Each real offline CLI command releases its owner before the next
         // invocation resumes the same durable operation.
         let reopen_started = Instant::now();
         drop(session);
         session = begin_session(case, id)?;
-        reopen_elapsed += reopen_started.elapsed();
+        last_reopen_elapsed = reopen_started.elapsed();
+        reopen_elapsed += last_reopen_elapsed;
         // A stable parent revision makes no claim about either child's progress.
         std::thread::sleep(Duration::from_millis(20));
     }

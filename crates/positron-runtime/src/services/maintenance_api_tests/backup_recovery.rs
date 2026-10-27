@@ -192,8 +192,30 @@ fn cancelled_backup_keeps_its_cold_claim_acknowledgement_owner()
         crate::services::backup_administration::StopPoint::CancellationCommitted,
     )
 }
+#[test]
+fn cancelled_worker_cannot_leave_reservation_polling_without_its_joined_outcome()
+-> Result<(), Box<dyn std::error::Error>> {
+    let result = cancellation_restart_at_with_cancelled_worker(
+        crate::services::backup_administration::StopPoint::CancellationCommitted,
+        true,
+    );
+    let error = result.expect_err("cancelled worker cannot publish a signed reservation");
+    assert!(
+        error
+            .to_string()
+            .contains("backup worker exited before signed reservation; worker=Ok(Ok(()))"),
+        "{error}"
+    );
+    Ok(())
+}
 fn cancellation_restart_at(
     point: crate::services::backup_administration::StopPoint,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cancellation_restart_at_with_cancelled_worker(point, false)
+}
+fn cancellation_restart_at_with_cancelled_worker(
+    point: crate::services::backup_administration::StopPoint,
+    cancel_before_reservation: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
     let fixture = Fixture::new()?;
@@ -270,49 +292,65 @@ fn cancellation_restart_at(
         point,
     )?;
     let cancellation = crate::TaskCancellation::new();
+    if cancel_before_reservation {
+        cancellation.cancel();
+    }
     let worker_services = services.clone();
     let worker_cancellation = cancellation.clone();
     let worker =
         std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancellation));
-    wait_for_signed_reservation(
-        &services,
-        &repository_path,
-        &identity,
-        &accepted.operation.id,
-        &administrator,
-    )?;
-    let status_request = BackupRequest::decode(&serde_json::to_vec(
-        &serde_json::json!({"action":"status","operation_id":accepted.operation.id}),
-    )?)?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let status = services
-            .manage_backup(&administrator, &status_request.encode()?)
-            .map_err(|failure| format!("inspect active backup: {failure:?}"))?;
-        let request = BackupRequest::decode(&serde_json::to_vec(
-            &serde_json::json!({"action":"cancel","operation_id":accepted.operation.id,"idempotency_key":"99999999-9999-4999-8999-999999999999","expected_operation_revision":status.operation_revision}),
+    let reservation_and_cancel = (|| -> Result<(), Box<dyn std::error::Error>> {
+        wait_for_signed_reservation(
+            &services,
+            &repository_path,
+            &identity,
+            &accepted.operation.id,
+            &administrator,
+            &worker,
+        )?;
+        let status_request = BackupRequest::decode(&serde_json::to_vec(
+            &serde_json::json!({"action":"status","operation_id":accepted.operation.id}),
         )?)?;
-        match services.manage_backup(&administrator, &request.encode()?) {
-            Ok(response) => {
-                assert!(response.cleanup_pending);
-                break;
-            },
-            Err(MaintenanceServiceFailure::StaleGeneration)
-                if std::time::Instant::now() < deadline => {},
-            Err(failure) => {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = services
+                .manage_backup(&administrator, &status_request.encode()?)
+                .map_err(|failure| format!("inspect active backup: {failure:?}"))?;
+            let request = BackupRequest::decode(&serde_json::to_vec(
+                &serde_json::json!({"action":"cancel","operation_id":accepted.operation.id,"idempotency_key":"99999999-9999-4999-8999-999999999999","expected_operation_revision":status.operation_revision}),
+            )?)?;
+            match services.manage_backup(&administrator, &request.encode()?) {
+                Ok(response) => {
+                    if !response.cleanup_pending {
+                        return Err("cancelled backup did not retain cleanup".into());
+                    }
+                    break;
+                },
+                Err(MaintenanceServiceFailure::StaleGeneration)
+                    if std::time::Instant::now() < deadline => {},
+                Err(failure) => {
+                    cancellation.cancel();
+                    return Err(format!("cancel backup: {failure:?}").into());
+                },
+            }
+        }
+        while !stop.observed() && !worker.is_finished() {
+            if std::time::Instant::now() >= deadline {
                 cancellation.cancel();
-                return Err(format!("cancel backup: {failure:?}").into());
-            },
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
+        Ok(())
+    })();
+    if reservation_and_cancel.is_err() {
+        cancellation.cancel();
     }
-    while !stop.observed() && !worker.is_finished() {
-        if std::time::Instant::now() >= deadline {
-            cancellation.cancel();
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    let joined = worker.join();
+    if let Err(error) = reservation_and_cancel {
+        return Err(format!("{error}; worker={joined:?}").into());
     }
-    assert_eq!(worker.join().map_err(|_| "cleanup worker panic")?, Ok(()));
+    assert_eq!(joined.map_err(|_| "cleanup worker panic")?, Ok(()));
     assert!(
         stop.observed(),
         "cleanup worker did not stop at the requested durable boundary: {:?}",
