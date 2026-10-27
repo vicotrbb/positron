@@ -386,23 +386,43 @@ fn retry_capacity_case(path: &str, payload: &[u8]) -> TestResult {
     );
     let peer = std::thread::spawn(move || -> std::io::Result<Vec<Vec<u8>>> {
         let mut requests = Vec::new();
-        for response in [
+        for (index, response) in [
             refusal.as_str(),
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-        ] {
-            let mut stream = accept_http_fixture(&listener)?;
-            let mut request = read_http_fixture_headers(&mut stream)?;
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let context = |stage, error| {
+                std::io::Error::other(format!(
+                    "capacity peer request={index} stage={stage}: {error}"
+                ))
+            };
+            let mut stream =
+                accept_http_fixture(&listener).map_err(|error| context("accept", error))?;
+            let mut request = read_http_fixture_headers(&mut stream)
+                .map_err(|error| context("headers", error))?;
             let mut body = [0; 4];
-            stream.read_exact(&mut body)?;
+            stream
+                .read_exact(&mut body)
+                .map_err(|error| context("body", error))?;
             request.extend_from_slice(&body);
             requests.push(request);
-            stream.write_all(response.as_bytes())?;
+            stream
+                .write_all(response.as_bytes())
+                .map_err(|error| context("response", error))?;
         }
         Ok(requests)
     });
     let result = http(port, path, "fixture-credential", b"body");
     let requests = peer.join().map_err(|_| "capacity peer panicked")?;
-    assert_eq!(result?, b"{}");
+    let result = result.map_err(|error| {
+        format!(
+            "capacity client: {error}; peer_failure={:?}",
+            requests.as_ref().err()
+        )
+    })?;
+    assert_eq!(result, b"{}");
     let requests = requests?;
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
