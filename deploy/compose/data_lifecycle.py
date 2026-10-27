@@ -46,7 +46,7 @@ class DataLifecycle:
         self.install(files)
         # Backups are an explicit writable production mount, not a /tmp fixture.
         self.docker("run", "--rm", "-v", f"{self.project}_backups:{BACKUPS}", ADMIN_IMAGE,
-                    "sh", "-eu", "-c", f"chown 65532:65532 {BACKUPS}; chmod 700 {BACKUPS}")
+                    "install", "-d", "-o", "65532", "-g", "65532", "-m", "0700", BACKUPS, f"{BACKUPS}/repository")
         self.recipient = (fixture / "export/recipient").read_text()
         self.candidate_digest = (fixture / "export/candidate-digest").read_text()
         candidate_context = self.root / "candidate-image"
