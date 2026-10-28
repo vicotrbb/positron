@@ -498,7 +498,13 @@ pub(in crate::services) fn complete(
                     transfer,
                     &mut work.object_verification,
                 ))
-                .map_err(provider_failure)?;
+                .map_err(|failure| {
+                    #[cfg(feature = "test-support")]
+                    if failure == RepositoryFailure::CorruptState {
+                        eprintln!("backup_runtime_corrupt phase=transfer_call");
+                    }
+                    provider_failure(failure)
+                })?;
             remaining -= charge;
             if transfer.complete()
                 || work.owner.identity.provider_kind() != "localFilesystem"

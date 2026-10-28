@@ -147,7 +147,13 @@ impl BackupOwner {
             .map(|registry| {
                 self.base_publisher(0)
                     .and_then(|publisher| publisher.registry_verification_checkpoint(registry))
-                    .map_err(provider_failure)
+                    .map_err(|failure| {
+                        #[cfg(feature = "test-support")]
+                        if failure == RepositoryFailure::CorruptState {
+                            eprintln!("backup_runtime_corrupt phase=registry_checkpoint");
+                        }
+                        provider_failure(failure)
+                    })
             })
             .transpose()
     }

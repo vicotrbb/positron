@@ -121,98 +121,156 @@ impl super::BackupPublisher<'_> {
         mut checkpoint: BackupTransfer,
         verification: &mut Option<BackupObjectVerification>,
     ) -> Result<BackupTransfer, RepositoryFailure> {
-        self.require_identity().await?;
-        self.require_reserved(manifest).await?;
-        BackupTransfer::decode(&checkpoint.encode(), manifest)?;
-        if checkpoint.complete() {
-            return Ok(checkpoint);
-        }
-        let object = manifest
-            .objects
-            .get(checkpoint.next as usize)
-            .ok_or(RepositoryFailure::CorruptState)?;
-        match self.repository.object_size_hint(object.object()).await {
-            Ok(size) => {
-                if size != object.length {
-                    return Err(RepositoryFailure::ChecksumMismatch);
-                }
-                let state = verification.get_or_insert_with(|| BackupObjectVerification {
-                    object: object.object(),
-                    offset: 0,
-                    digest: Sha256::new(),
-                    uploaded: false,
-                });
-                if state.object != object.object() || state.offset >= object.length {
-                    return Err(RepositoryFailure::CorruptState);
-                }
-                let length = (object.length - state.offset).min(crate::MAX_RANGE_BYTES);
-                let bytes = self
-                    .repository
-                    .read_range(
-                        ObjectRange::new(object.object(), state.offset, length)?
-                            .with_expected_size(object.length)?,
-                    )
-                    .await?;
-                if bytes.bytes().len() as u64 != length {
-                    return Err(RepositoryFailure::CorruptState);
-                }
-                state.digest.update(bytes.bytes());
-                state.offset += length;
-                if state.offset == object.length {
-                    if <[u8; 32]>::from(state.digest.clone().finalize()) != object.checksum {
+        #[cfg(feature = "test-support")]
+        let mut phase = "identity";
+        let result = async {
+            self.require_identity().await?;
+            #[cfg(feature = "test-support")]
+            {
+                phase = "reservation";
+            }
+            self.require_reserved(manifest).await?;
+            #[cfg(feature = "test-support")]
+            {
+                phase = "checkpoint";
+            }
+            BackupTransfer::decode(&checkpoint.encode(), manifest)?;
+            if checkpoint.complete() {
+                return Ok(checkpoint);
+            }
+            #[cfg(feature = "test-support")]
+            {
+                phase = "object";
+            }
+            let object = manifest
+                .objects
+                .get(checkpoint.next as usize)
+                .ok_or(RepositoryFailure::CorruptState)?;
+            #[cfg(feature = "test-support")]
+            {
+                phase = "object_hint";
+            }
+            match self.repository.object_size_hint(object.object()).await {
+                Ok(size) => {
+                    if size != object.length {
                         return Err(RepositoryFailure::ChecksumMismatch);
                     }
-                    if state.uploaded {
-                        checkpoint.uploaded = checkpoint
-                            .uploaded
-                            .checked_add(object.length)
-                            .ok_or(RepositoryFailure::LimitExceeded)?;
-                    } else {
-                        checkpoint.reused = checkpoint
-                            .reused
-                            .checked_add(object.length)
-                            .ok_or(RepositoryFailure::LimitExceeded)?;
+                    #[cfg(feature = "test-support")]
+                    {
+                        phase = "verification_cursor";
                     }
-                    checkpoint.next += 1;
-                    *verification = None;
-                }
-                return Ok(checkpoint);
-            },
-            Err(RepositoryFailure::NotFound) => {},
-            Err(failure) => return Err(failure),
+                    let state = verification.get_or_insert_with(|| BackupObjectVerification {
+                        object: object.object(),
+                        offset: 0,
+                        digest: Sha256::new(),
+                        uploaded: false,
+                    });
+                    if state.object != object.object() || state.offset >= object.length {
+                        return Err(RepositoryFailure::CorruptState);
+                    }
+                    let length = (object.length - state.offset).min(crate::MAX_RANGE_BYTES);
+                    #[cfg(feature = "test-support")]
+                    {
+                        phase = "range";
+                    }
+                    let bytes = self
+                        .repository
+                        .read_range(
+                            ObjectRange::new(object.object(), state.offset, length)?
+                                .with_expected_size(object.length)?,
+                        )
+                        .await?;
+                    if bytes.bytes().len() as u64 != length {
+                        return Err(RepositoryFailure::CorruptState);
+                    }
+                    state.digest.update(bytes.bytes());
+                    state.offset += length;
+                    if state.offset == object.length {
+                        if <[u8; 32]>::from(state.digest.clone().finalize()) != object.checksum {
+                            return Err(RepositoryFailure::ChecksumMismatch);
+                        }
+                        if state.uploaded {
+                            checkpoint.uploaded = checkpoint
+                                .uploaded
+                                .checked_add(object.length)
+                                .ok_or(RepositoryFailure::LimitExceeded)?;
+                        } else {
+                            checkpoint.reused = checkpoint
+                                .reused
+                                .checked_add(object.length)
+                                .ok_or(RepositoryFailure::LimitExceeded)?;
+                        }
+                        checkpoint.next += 1;
+                        *verification = None;
+                    }
+                    return Ok(checkpoint);
+                },
+                Err(RepositoryFailure::NotFound) => {},
+                Err(failure) => return Err(failure),
+            }
+            let plan = UploadPlan::new(object.object(), object.length)?;
+            #[cfg(feature = "test-support")]
+            {
+                phase = "upload_state";
+            }
+            let state = match self.repository.inspect_upload(plan.id()).await? {
+                Some(state) => state,
+                None => self.repository.begin_upload(plan).await?,
+            };
+            if state.object() != object.object() || state.total_size() != object.length {
+                return Err(RepositoryFailure::CorruptState);
+            }
+            let length = (object.length - state.uploaded_bytes()).min(crate::MAX_RANGE_BYTES);
+            if length == 0 {
+                return Err(RepositoryFailure::CorruptState);
+            }
+            #[cfg(feature = "test-support")]
+            {
+                phase = "source";
+            }
+            let bytes = source.read(object.file, object.offset + state.uploaded_bytes(), length)?;
+            if bytes.len() as u64 != length {
+                return Err(RepositoryFailure::CorruptState);
+            }
+            #[cfg(feature = "test-support")]
+            {
+                phase = "upload";
+            }
+            match self
+                .repository
+                .resume_upload(UploadPart::new(state, bytes)?)
+                .await?
+            {
+                UploadOutcome::Pending(_) => {},
+                UploadOutcome::Complete(_) => {
+                    *verification = Some(BackupObjectVerification {
+                        object: object.object(),
+                        offset: 0,
+                        digest: Sha256::new(),
+                        uploaded: true,
+                    });
+                },
+            }
+            Ok(checkpoint)
         }
-        let plan = UploadPlan::new(object.object(), object.length)?;
-        let state = match self.repository.inspect_upload(plan.id()).await? {
-            Some(state) => state,
-            None => self.repository.begin_upload(plan).await?,
-        };
-        if state.object() != object.object() || state.total_size() != object.length {
-            return Err(RepositoryFailure::CorruptState);
+        .await;
+        #[cfg(feature = "test-support")]
+        if result == Err(RepositoryFailure::CorruptState) {
+            let object = manifest.objects.get(checkpoint.next as usize);
+            eprintln!(
+                "backup_transfer_corrupt phase={phase} next={} count={} verification_present={} verification_offset={} expected_length={} object_equal={} failure=CorruptState",
+                checkpoint.next,
+                checkpoint.count,
+                verification.is_some(),
+                verification.as_ref().map_or(0, |state| state.offset),
+                object.map_or(0, |object| object.length),
+                verification
+                    .as_ref()
+                    .zip(object)
+                    .is_some_and(|(state, object)| state.object == object.object())
+            );
         }
-        let length = (object.length - state.uploaded_bytes()).min(crate::MAX_RANGE_BYTES);
-        if length == 0 {
-            return Err(RepositoryFailure::CorruptState);
-        }
-        let bytes = source.read(object.file, object.offset + state.uploaded_bytes(), length)?;
-        if bytes.len() as u64 != length {
-            return Err(RepositoryFailure::CorruptState);
-        }
-        match self
-            .repository
-            .resume_upload(UploadPart::new(state, bytes)?)
-            .await?
-        {
-            UploadOutcome::Pending(_) => {},
-            UploadOutcome::Complete(_) => {
-                *verification = Some(BackupObjectVerification {
-                    object: object.object(),
-                    offset: 0,
-                    digest: Sha256::new(),
-                    uploaded: true,
-                });
-            },
-        }
-        Ok(checkpoint)
+        result
     }
 }
 pub(super) async fn verify_object(
