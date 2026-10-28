@@ -152,25 +152,69 @@ fn compose_query_consumer_uses_canonical_protojson() -> Result<(), Box<dyn std::
             },
         ],
     };
-    // The public encoder validates the complete typed response before emission.
-    let bytes = response.encode()?;
-    let mut child = std::process::Command::new("python3")
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../deploy/compose/test_query_wire.py"),
-        )
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let mut input = child.stdin.take().ok_or("wire consumer input")?;
-    input.write_all(&bytes)?;
-    drop(input);
-    let output = child.wait_with_output()?;
-    assert!(
-        output.status.success(),
-        "canonical wire consumer refused: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let mut responses = vec![("complete-one", response.clone())];
+    for state in ["incomplete", "complete"] {
+        let mut empty = response.clone();
+        empty.events.remove(1);
+        let Some(log_query_event::Event::Header(header)) = empty
+            .events
+            .first_mut()
+            .and_then(|event| event.event.as_mut())
+        else {
+            return Err("header absent".into());
+        };
+        header.columns.first_mut().ok_or("column absent")?.name = "wire-secret-canary".into();
+        let Some(log_query_event::Event::Terminal(terminal)) = empty
+            .events
+            .last_mut()
+            .and_then(|event| event.event.as_mut())
+        else {
+            return Err("terminal absent".into());
+        };
+        terminal.state = state.into();
+        terminal.reason = if state == "incomplete" {
+            "budget_exhausted".into()
+        } else {
+            String::new()
+        };
+        terminal.stats = Some(LogQueryStats {
+            result_digest: vec![0; 32],
+            cumulative_budget: Some(budget),
+            limiting_budget: (state == "incomplete").then(|| "wall_seconds".into()),
+            wall_seconds: if state == "incomplete" { 5 } else { 0 },
+            ..Default::default()
+        });
+        responses.push((
+            if state == "incomplete" {
+                "incomplete-zero"
+            } else {
+                "complete-zero"
+            },
+            empty,
+        ));
+    }
+    for (case, response) in responses {
+        // The public encoder validates the complete typed response before emission.
+        let bytes = response.encode()?;
+        let mut child = std::process::Command::new("python3")
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../deploy/compose/test_query_wire.py"),
+            )
+            .arg(case)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let mut input = child.stdin.take().ok_or("wire consumer input")?;
+        input.write_all(&bytes)?;
+        drop(input);
+        let output = child.wait_with_output()?;
+        assert!(
+            output.status.success(),
+            "canonical wire consumer refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }

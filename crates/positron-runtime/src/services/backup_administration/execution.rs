@@ -474,6 +474,14 @@ pub(in crate::services) fn complete(
             return Ok(false);
         }
         let mut transfer = work.transfer.ok_or(ServiceFailure::Internal)?;
+        #[cfg(test)]
+        let starting_next = transfer.next_object();
+        #[cfg(test)]
+        let fault_checkpoint = test_stops::armed(
+            services.instance.instance.to_bytes(),
+            binding.operation_id(),
+            test_stops::StopPoint::TransferCheckpointPublication,
+        )?;
         let started = std::time::Instant::now();
         let mut remaining = 4 * 1024 * 1024u64;
         for _ in 0..MAX_BACKUP_STEP_ADVANCES {
@@ -506,6 +514,13 @@ pub(in crate::services) fn complete(
                     provider_failure(failure)
                 })?;
             remaining -= charge;
+            #[cfg(test)]
+            if fault_checkpoint
+                && transfer.next_object() > starting_next
+                && work.object_verification.is_some()
+            {
+                break;
+            }
             if transfer.complete()
                 || work.owner.identity.provider_kind() != "localFilesystem"
                 || started.elapsed() >= std::time::Duration::from_millis(10)
@@ -513,15 +528,41 @@ pub(in crate::services) fn complete(
                 break;
             }
         }
-        let registry = work.owner.registry_checkpoint()?;
-        checkpoint::persist(
-            services,
-            execution,
-            binding,
-            registry.as_deref(),
-            Some(&checkpoint::encode(transfer, work.next_key, &[])?),
-        )?;
+        // The verifier advances in place. Retain its matching volatile cursor
+        // even when the following durable checkpoint must be retried.
         work.transfer = Some(transfer);
+        let registry = work.owner.registry_checkpoint()?;
+        let persist = || {
+            checkpoint::persist(
+                services,
+                execution,
+                binding,
+                registry.as_deref(),
+                Some(&checkpoint::encode(transfer, work.next_key, &[])?),
+            )
+        };
+        #[cfg(test)]
+        let persisted = if fault_checkpoint
+            && transfer.next_object() > starting_next
+            && work.object_verification.is_some()
+        {
+            test_stops::hit(
+                services.instance.instance.to_bytes(),
+                binding.operation_id(),
+                test_stops::StopPoint::TransferCheckpointPublication,
+                None,
+            )?;
+            positron_kernel::with_catalog_publication_fault_after(
+                positron_kernel::CatalogPublicationFault::RenameMarker,
+                0,
+                persist,
+            )
+        } else {
+            persist()
+        };
+        #[cfg(not(test))]
+        let persisted = persist();
+        persisted?;
         return Ok(false);
     }
     if !matches!(

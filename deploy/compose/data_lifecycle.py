@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import ssl
 import subprocess
+import sys
 import tarfile
 import time
 import urllib.error
@@ -89,7 +90,7 @@ class DataLifecycle:
         command = [family] + ([action] if action else [])
         return (compose or self.compose)("exec", "-T", "positron", "/usr/bin/positron", *command, "--endpoint", "127.0.0.1:8080", "--server-name", "localhost", "--trust-file", "/etc/positron/tls/ca.pem", "--credential-stdin", *args, input=(credential or self.admin).encode(), timeout=timeout)
 
-    def query(self, compose=None):
+    def query(self, compose=None, *, stage):
         started = time.monotonic()
         while True:
             try:
@@ -107,11 +108,31 @@ class DataLifecycle:
             elif isinstance(value, list):
                 for child in value: yield from objects(child)
         rows = list(objects(response))
-        self.case.assertEqual(sum(value == "compose-retained" for row in rows for value in row.values() if isinstance(value, str)), 1)
+        matching_rows = sum(value == "compose-retained" for row in rows for value in row.values() if isinstance(value, str))
         terminal = [row for row in rows if row.get("state") == "complete"]
-        self.case.assertEqual(len(terminal), 1)
-        self.case.assertEqual(terminal[0]["stats"]["records"], "1")
-        return terminal[0]["stats"]["resultDigest"]
+        try:
+            self.case.assertEqual(matching_rows, 1)
+            self.case.assertEqual(len(terminal), 1)
+            self.case.assertEqual(terminal[0]["stats"]["records"], "1")
+            return terminal[0]["stats"]["resultDigest"]
+        except (AssertionError, KeyError, TypeError):
+            terminals = [event["terminal"] for event in response.get("events", [])
+                         if isinstance(event, dict) and isinstance(event.get("terminal"), dict)]
+            item = terminals[0] if len(terminals) == 1 else {}
+            stats = item.get("stats", {})
+            stats = stats if isinstance(stats, dict) else {}
+            records = stats.get("records", "0")
+            records = int(records) if isinstance(records, str) and records.isascii() and records.isdecimal() and len(records) <= 20 and int(records) <= 18446744073709551615 else None
+            state = item.get("state", "none")
+            reason = item.get("reason", "none")
+            limiting = stats.get("limitingBudget", "none")
+            print(json.dumps({"event": "compose_query_failed",
+                "stage": stage if stage in ("initial", "restart", "restore", "post_restore", "upgrade", "reinstall", "wire") else "other",
+                "terminal_count": len(terminals), "state": state if state in ("complete", "incomplete", "continued", "none") else "other",
+                "records": records, "digest_present": bool(stats.get("resultDigest")), "matching_rows": matching_rows,
+                "reason": reason if reason in ("none", "unauthorized", "idempotency_conflict", "invalid_budget", "budget_exhausted", "invalid_cursor", "snapshot_expired", "authorization_changed", "cancelled", "resource_admission_refused", "resource_exhausted", "unsupported_query", "store_unavailable", "incomplete_data", "malformed_persistent_data", "internal") else "other",
+                "limiting_budget": limiting if limiting in ("none", "scanned_bytes", "decoded_records", "output_rows", "output_bytes", "memory_bytes", "cpu_work_units", "wall_seconds", "maximum_time_range_nanoseconds") else "other"}), file=sys.stderr, flush=True)
+            raise
 
     def ingest(self):
         port = self.compose("port", "positron", "4318").decode().strip().rsplit(":", 1)[1]
@@ -199,11 +220,11 @@ class DataLifecycle:
                 self.case.assertIn(result["operation"]["status"], ["pending", "running"])
                 if time.monotonic() >= deadline: raise AssertionError("native Restore did not complete")
             restored("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
-            self.case.assertEqual(self.query(restored), expected)
+            self.case.assertEqual(self.query(restored, stage="restore"), expected)
         finally:
             restored("down", "--volumes")
         self.compose("up", "--detach", "--wait", "--wait-timeout", "90", "--pull", "never")
-        self.case.assertEqual(self.query(), expected)
+        self.case.assertEqual(self.query(stage="post_restore"), expected)
 
     def upgrade(self, expected):
         container = self.compose("ps", "--quiet", "positron").decode().strip()
@@ -237,4 +258,4 @@ class DataLifecycle:
         self.case.assertEqual(after["Image"], self.candidate_image)
         retained = lambda state: {m["Destination"]: m["Name"] for m in state["Mounts"] if m["Type"] == "volume"}
         self.case.assertEqual(retained(before), retained(after))
-        self.case.assertEqual(self.query(), expected)
+        self.case.assertEqual(self.query(stage="upgrade"), expected)

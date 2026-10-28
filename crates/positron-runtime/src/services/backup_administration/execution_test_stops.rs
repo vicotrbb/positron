@@ -18,6 +18,7 @@ pub(in crate::services) enum StopPoint {
     CaptureCleanupBatch,
     CancellationCommitted,
     ResourcesRequeued,
+    TransferCheckpointPublication,
     ReservationRegistered,
     BeforeKeyUpload,
     KeyPreparationPersisted,
@@ -107,6 +108,9 @@ pub(in crate::services) fn hit(
     }) {
         let stop = stop.take().ok_or(ServiceFailure::Internal)?;
         stop.observed.store(true, Ordering::Release);
+        if point == StopPoint::TransferCheckpointPublication {
+            return Ok(());
+        }
         if let Some(cancellation) = cancellation {
             cancellation.cancel();
         }

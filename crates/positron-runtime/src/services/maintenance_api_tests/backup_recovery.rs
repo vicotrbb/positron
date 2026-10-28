@@ -490,3 +490,120 @@ fn cancellation_restart_at_with_cancelled_worker(
     fs::remove_dir_all(repository_path)?;
     Ok(())
 }
+
+#[test]
+fn transfer_checkpoint_publication_failure_retries_the_same_worker_without_rejecting_snapshot()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let fixture = Fixture::new()?;
+    let (initialized, ingest, _, administrator) = fixture.initialized_with_admin()?;
+    let export = fixture.recovery_export_directory()?;
+    let repository_path = export.join("checkpoint-repository");
+    fs::create_dir(&repository_path)?;
+    fs::set_permissions(&repository_path, fs::Permissions::from_mode(0o700))?;
+    let identity = RepositoryIdentity::local(
+        [91; 16],
+        initialized.instance.to_bytes(),
+        initialized.integrity_key_fingerprint(),
+        &repository_path,
+    )?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    drop(runtime.block_on(LocalRepository::initialize(
+        &repository_path,
+        identity.clone(),
+    ))?);
+    let services = ServiceHandle::new(Arc::clone(&initialized))?;
+    services.ingest_otlp_logs(
+        &ingest,
+        request("cold publication telemetry").encode_to_vec(),
+    )?;
+    let unlock = age::x25519::Identity::generate();
+    let recipients = positron_kernel::RecoveryRecipients::parse(&[unlock.to_public().to_string()])?;
+    let bundle = export.join("publication.age");
+    initialized.create_recovery_bundle(&bundle, &recipients)?;
+    initialized
+        .verify_recovery_bundle(&bundle, positron_kernel::RecoveryUnlock::Identity(&unlock))?;
+    let accepted = services
+        .manage_backup(
+            &administrator,
+            &create(
+                &services,
+                &repository_path,
+                "77777777-7777-4777-8777-777777777777",
+            )?
+            .encode()?,
+        )
+        .map_err(|failure| format!("accept backup: {failure:?}"))?;
+    let snapshot =
+        crate::services::maintenance_verification::decode_fixed_hex(&accepted.operation.id)
+            .ok_or("snapshot identity")?;
+    let fault = crate::services::backup_administration::stop_after(
+        initialized.instance.to_bytes(),
+        snapshot,
+        crate::services::backup_administration::StopPoint::TransferCheckpointPublication,
+    )?;
+    let cancellation = crate::TaskCancellation::new();
+    let worker_services = services.clone();
+    let worker_cancellation = cancellation.clone();
+    let worker =
+        std::thread::spawn(move || worker_services.run_maintenance_worker(&worker_cancellation));
+    let result = (|| -> Result<BackupResponse, Box<dyn std::error::Error>> {
+        let request = BackupRequest::decode(&serde_json::to_vec(&serde_json::json!({
+            "action":"status", "operation_id":accepted.operation.id,
+        }))?)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            let response = services
+                .manage_backup(&administrator, &request.encode()?)
+                .map_err(|failure| format!("backup status: {failure:?}"))?;
+            if matches!(
+                response.operation.status.as_str(),
+                "succeeded" | "failed" | "cancelled"
+            ) {
+                return Ok(response);
+            }
+            if worker.is_finished() || std::time::Instant::now() >= deadline {
+                return Err(
+                    "backup worker did not complete after checkpoint publication failure".into(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    cancellation.cancel();
+    let worker_result = worker.join().map_err(|_| "worker panic")?;
+    assert_eq!(worker_result, Ok(()));
+    assert!(
+        fault.observed(),
+        "the exact advanced-object checkpoint must encounter the real publication fault"
+    );
+    let completed = result?;
+    assert_eq!(
+        completed.operation.status, "succeeded",
+        "checkpoint retry must not reject the accepted snapshot: {:?}",
+        completed.operation
+    );
+    assert!(completed.receipt.is_some());
+    let signer = {
+        let _gate = services.catalog_operation()?;
+        let catalog = open_catalog(&initialized)?;
+        let basis = catalog.pin()?;
+        let (_, governance) = basis.governance_object()?;
+        initialized
+            .key
+            .backup_control_signer(initialized.instance, governance.protected_integrity_key())?
+    };
+    let repository = runtime.block_on(LocalRepository::attach(&repository_path, &identity))?;
+    let resources = backup_read_resources(&services)?;
+    let publisher = positron_backup::BackupPublisher::new(&repository, &identity, &signer)
+        .with_control_resources(&resources, 0)?;
+    let proof = backup_inspection_proof(&runtime, &publisher, snapshot)?;
+    let publisher = publisher.with_registry_verification(&proof)?;
+    assert_eq!(
+        runtime.block_on(publisher.verify(snapshot))?.snapshot_id(),
+        snapshot
+    );
+    Ok(())
+}
