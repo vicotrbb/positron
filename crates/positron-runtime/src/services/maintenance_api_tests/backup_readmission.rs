@@ -15,8 +15,22 @@ fn partially_prepared_backup_keys_resume_after_cold_stop() -> Result<(), Box<dyn
 {
     restart_at(crate::services::backup_administration::StopPoint::KeyPreparationPersisted)
 }
+#[test]
+fn offline_readmission_uses_the_remaining_original_turn() -> Result<(), Box<dyn std::error::Error>>
+{
+    restart_with_driver(
+        crate::services::backup_administration::StopPoint::ResourcesRequeued,
+        true,
+    )
+}
 fn restart_at(
     point: crate::services::backup_administration::StopPoint,
+) -> Result<(), Box<dyn std::error::Error>> {
+    restart_with_driver(point, false)
+}
+fn restart_with_driver(
+    point: crate::services::backup_administration::StopPoint,
+    offline: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
     let fixture = Fixture::new()?;
@@ -89,6 +103,46 @@ fn restart_at(
         .status(task)
         .map_err(|failure| format!("task status: {failure:?}"))?;
     let before = initialized.resource_governor().inspect()?;
+    if offline {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let result = services.drive_upgrade_backup_operation(
+            positron_governance::OperationId::from_bytes(task.to_bytes())?,
+            deadline,
+        );
+        let status = initialized
+            .maintenance_coordinator()
+            .status(task)
+            .map_err(|error| format!("offline task status: {error:?}"))?;
+        assert!(
+            status
+                .task()
+                .reservations()
+                .get(positron_kernel::ResourceDimension::MemoryBytes)
+                > original
+                    .task()
+                    .reservations()
+                    .get(positron_kernel::ResourceDimension::MemoryBytes),
+            "fixture must traverse real authenticated readmission"
+        );
+        assert!(
+            result.as_ref().is_ok_and(|operation| operation.status()
+                == positron_governance::DurableOperationStatus::Succeeded),
+            "offline turn must continue after readmission: result={result:?} phase={:?} remaining_ms={}",
+            status.phase(),
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+        );
+        assert_eq!(
+            initialized
+                .resource_governor()
+                .inspect()?
+                .outstanding_reservations(),
+            before.outstanding_reservations()
+        );
+        fs::remove_dir_all(repository_path)?;
+        return Ok(());
+    }
     let stop = crate::services::backup_administration::stop_after(
         services.instance.instance.to_bytes(),
         task.to_bytes(),
