@@ -74,11 +74,14 @@ def observe_snapshot(status, started, outcome, error="none"):
     print(json.dumps(record), flush=True)
 
 
-def advance_snapshot(common, started):
+def advance_snapshot(common, started, deadline):
     command = ["runuser", "-u", "positron", "--", "positron", "upgrade", "offline", "advance"]
+    command_timeout = 180
+    command_deadline = time.monotonic() + command_timeout
+    resumed = False
     try:
         result = subprocess.run(command + common + ["--seconds", "60"],
-                                input=None, capture_output=True, timeout=180)
+                                input=None, capture_output=True, timeout=command_timeout)
     except subprocess.TimeoutExpired:
         observe_snapshot({}, started, "failed", "command_timeout")
         raise RuntimeError("offline upgrade advance failed: command_timeout") from None
@@ -95,14 +98,38 @@ def advance_snapshot(common, started):
             b"positron: upgrade outcome unknown; inspect the same operation before retrying": "outcome_unknown",
             b"positron: upgrade verification failed; use the explicit rollback or fresh-target restore boundary": "verification_failed",
         }.get(result.stderr.strip(), "other")
-        observe_snapshot({}, started, "failed", category)
-        raise RuntimeError("offline upgrade advance failed: " + category)
+        if result.returncode == 2 and not result.stdout and category == "resumable":
+            remaining = min(command_deadline, deadline) - time.monotonic()
+            if remaining <= 0:
+                observe_snapshot({}, started, "deadline")
+                raise RuntimeError("authenticated upgrade snapshot did not complete")
+            try:
+                result = subprocess.run(command[:-1] + ["status"] + common,
+                                        input=None, capture_output=True, timeout=remaining)
+            except subprocess.TimeoutExpired:
+                observe_snapshot({}, started, "failed", "command_timeout")
+                raise RuntimeError("offline upgrade advance failed: command_timeout") from None
+            resumed = result.returncode == 0
+            if not resumed:
+                category = "status_refused"
+        if not resumed:
+            observe_snapshot({}, started, "failed", category)
+            raise RuntimeError("offline upgrade advance failed: " + category)
     try:
         status = fields(result.stdout.decode())
     except UnicodeDecodeError:
         observe_snapshot({}, started, "failed", "invalid_receipt")
         raise RuntimeError("offline upgrade advance failed: invalid_receipt") from None
-    observe_snapshot(status, started, "advanced")
+    if resumed:
+        if time.monotonic() >= deadline:
+            observe_snapshot({}, started, "deadline")
+            raise RuntimeError("authenticated upgrade snapshot did not complete")
+        if (status.get("operation_id") != common[-1] or status.get("status") != "Running"
+                or status.get("stage") not in ["Some(Snapshot)", "Some(Publishing)"]):
+            observe_snapshot({}, started, "failed", "invalid_receipt")
+            raise RuntimeError("offline upgrade advance failed: invalid_receipt")
+    observe_snapshot(status, started, "resumable" if resumed else "advanced",
+                     "resumable" if resumed else "none")
     return status
 
 
@@ -331,7 +358,7 @@ elif sys.argv[1] == "publish-upgrade":
     # verification starts. Bound the full fixture journey, retaining 60-second turns.
     deadline = started + 600
     while True:
-        status = advance_snapshot(common, started)
+        status = advance_snapshot(common, started, deadline)
         if status["stage"] == "Some(Publishing)":
             break
         if time.monotonic() >= deadline:
