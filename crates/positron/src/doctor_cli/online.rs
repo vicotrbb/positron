@@ -102,18 +102,23 @@ fn operations_client(
     Ok((builder, target))
 }
 
-pub(super) fn ready(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {
+pub(super) fn health(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {
+    let state = if matches!(options.mode, Mode::Live) {
+        "live"
+    } else {
+        "ready"
+    };
     let (builder, target) = operations_client(options)?;
     let response = builder
         .build()
         .map_err(|_| DoctorFailure::EndpointUnavailable)?
-        .get(format!("{target}/health/ready"))
+        .get(format!("{target}/health/{state}"))
         .send()
         .map_err(|_| DoctorFailure::EndpointUnavailable)?;
     if response.status() != reqwest::StatusCode::OK {
         return Err(DoctorFailure::EndpointUnavailable);
     }
-    Ok((ExitCode::SUCCESS, "status=ready\n".to_owned()))
+    Ok((ExitCode::SUCCESS, format!("status={state}\n")))
 }
 
 fn read_trust_file(path: &std::path::Path) -> Result<Vec<u8>, DoctorFailure> {

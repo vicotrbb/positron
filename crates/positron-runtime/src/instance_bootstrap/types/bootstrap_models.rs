@@ -232,6 +232,28 @@ pub struct BootstrapPaths {
 }
 
 impl BootstrapPaths {
+    /// Explicit mount preparation creates only private data/secrets leaf directories.
+    pub fn prepare_storage(
+        configuration: &positron_config::EffectiveConfiguration,
+        qualification: MountQualification,
+    ) -> Result<Self, BootstrapFailure> {
+        let data = Path::new(configuration.data_directory());
+        let secrets = Path::new(configuration.secrets_directory());
+        if configuration.local_key_file().as_path() != secrets.join("local-root-key.v1") {
+            return Err(BootstrapFailure::new(BootstrapFailureCode::InvalidRoots));
+        }
+        let storage = InstanceBootstrapStorage::prepare(data, secrets, qualification)
+            .map_err(super::super::storage::storage_failure)?;
+        Ok(Self {
+            key_cache_lease: positron_kernel::key_provider::KeyCacheLease::default(),
+            storage,
+            #[cfg(test)]
+            data: data.to_owned(),
+            #[cfg(test)]
+            secrets: secrets.to_owned(),
+        })
+    }
+
     pub fn new(
         data: &Path,
         secrets: &Path,
@@ -378,7 +400,8 @@ pub struct InitializedInstance {
     pub(in crate::instance_bootstrap) integrity_key_fingerprint: [u8; 32],
     pub(in crate::instance_bootstrap) catalog_generation: std::sync::atomic::AtomicU64,
     pub(in crate::instance_bootstrap) governance_audit_frontier: u64,
-    pub(in crate::instance_bootstrap) claim_available: bool,
+    pub(in crate::instance_bootstrap) claim_available: std::sync::atomic::AtomicBool,
+    pub(in crate::instance_bootstrap) bootstrap_claim_gate: Mutex<()>,
 }
 
 impl std::fmt::Debug for InitializedInstance {

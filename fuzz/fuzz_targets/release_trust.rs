@@ -16,6 +16,7 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(inventory) = serde_json::from_slice::<ReleaseInventory>(data) {
         let _formula = homebrew_formula(&inventory);
         let _compose = compose_deployment(&inventory);
+        let _chart = helm_chart(&inventory);
         let _eligibility = inventory.validate_complete();
     }
     let mut formula_input = fixture.inventory.clone();

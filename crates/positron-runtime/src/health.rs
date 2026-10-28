@@ -329,6 +329,20 @@ impl std::fmt::Debug for HealthState {
 }
 
 impl HealthState {
+    /// The owner-local Control listener can outlive startup's service installation.
+    /// Delegate to the current retained instance without opening another volume.
+    pub(crate) fn claim_bootstrap(&self) -> Result<crate::BootstrapClaim, ()> {
+        if self.phase() != ProcessPhase::Serving {
+            return Err(());
+        }
+        let instance = self
+            .inspection_authority
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(())?;
+        instance.claim_bootstrap().map_err(|_| ())
+    }
+
     /// Returns the bounded, allowlisted operational event snapshot owned by
     /// the process lifecycle. Event values are closed vocabulary only.
     pub fn operational_log_snapshot(&self) -> Result<String, OperationalLogFailure> {

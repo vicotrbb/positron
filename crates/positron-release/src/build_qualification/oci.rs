@@ -405,6 +405,22 @@ fn staged_oci(root: &Path, output: &Path) -> Qualification {
             notices: &[],
         },
     );
+    let chart = helm_chart(&qualification.inventory).unwrap();
+    let rebuilt_chart = helm_chart(&independent_inventory).unwrap();
+    qualification.artifact(
+        "positron.tgz",
+        Surface::Helm,
+        "any",
+        &chart,
+        &rebuilt_chart,
+        ArtifactBuild {
+            packages: &json!([]),
+            closure: &empty,
+            builder: &assembly_builder,
+            independent_builder: &assembly_rebuilder,
+            notices: &[],
+        },
+    );
     qualification
 }
 

@@ -269,3 +269,25 @@ impl<S: Write + TimeoutStream> Write for DeadlineStream<'_, S> {
         self.stream.flush()
     }
 }
+
+#[cfg(fuzzing)]
+pub(super) fn fuzz_bootstrap_control_request(bytes: &[u8]) {
+    if bytes.len() > 8192 {
+        return;
+    }
+    let mut input = Cursor::new(bytes.to_vec());
+    let Ok(head) = io::read_head(&mut input) else {
+        return;
+    };
+    let state = crate::health::ProcessState::starting();
+    state.transition(crate::ProcessPhase::Serving);
+    let _response = dispatch::route(
+        &mut input,
+        ListenerRole::Control,
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 1)),
+        None,
+        head,
+        &state.health(),
+        RouteDependencies::new(None, None),
+    );
+}

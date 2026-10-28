@@ -56,7 +56,7 @@ fn execute(
     match options.mode {
         Mode::Offline => execute_offline(&options, environment),
         Mode::Online => online::execute(&options),
-        Mode::Ready => online::ready(&options),
+        Mode::Ready | Mode::Live => online::health(&options),
     }
 }
 

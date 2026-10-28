@@ -285,7 +285,8 @@ pub(super) fn outcome(
         integrity_key_fingerprint: record.integrity_fingerprint,
         catalog_generation: std::sync::atomic::AtomicU64::new(generation),
         governance_audit_frontier: audit_frontier,
-        claim_available,
+        claim_available: std::sync::atomic::AtomicBool::new(claim_available),
+        bootstrap_claim_gate: std::sync::Mutex::new(()),
     })
 }
 

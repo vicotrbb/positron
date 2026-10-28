@@ -67,6 +67,13 @@ pub fn fuzz_doctor_status(bytes: &[u8]) -> Option<String> {
     doctor_cli::fuzz_status(bytes)
 }
 
+/// Exercise the bounded owner-local claim response codec without storage or output.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_bootstrap_control_response(bytes: &[u8]) {
+    let _parsed = bootstrap_cli::control::response_body(bytes);
+}
+
 const EXIT_OK: u8 = 0;
 const EXIT_CONFIGURATION: u8 = 2;
 const EXIT_STARTUP: u8 = 3;

@@ -511,6 +511,75 @@ jobs:
           name: oci-${{ matrix.target }}
           path: ${{ runner.temp }}/oci/
           retention-days: 7
+      - name: Run exact isolated standalone Helm native lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case '${{ matrix.target }}' in
+            linux-x86_64) architecture=amd64; helm_sha=9adafecab4d406853bba163a70e9f104f47dbbf65ce24b7653bae7e36150bcb6; kind_sha=eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa;;
+            linux-aarch64) architecture=arm64; helm_sha=78803142087a0069fa4b50d3f32a84d3ef25c14d1ee8a40fbccf86a6216d2f36; kind_sha=8e1014e87c34901cc422a1445866835d1e666f2a61301c27e722bdeab5a1f7e4;;
+            *) exit 2;;
+          esac
+          mkdir -p "$RUNNER_TEMP/helm-tools" "$RUNNER_TEMP/helm-candidate"
+          curl --fail --location --silent --show-error "https://get.helm.sh/helm-v4.2.2-linux-$architecture.tar.gz" --output "$RUNNER_TEMP/helm-tools/helm.tar.gz"
+          echo "$helm_sha  $RUNNER_TEMP/helm-tools/helm.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/helm-tools/helm.tar.gz" -C "$RUNNER_TEMP/helm-tools"
+          curl --fail --location --silent --show-error "https://github.com/kubernetes-sigs/kind/releases/download/v0.31.0/kind-linux-$architecture" --output "$RUNNER_TEMP/helm-tools/kind"
+          echo "$kind_sha  $RUNNER_TEMP/helm-tools/kind" | sha256sum --check
+          chmod 0755 "$RUNNER_TEMP/helm-tools/kind"
+          export PATH="$RUNNER_TEMP/helm-tools:$RUNNER_TEMP/helm-tools/linux-$architecture:$PATH"
+          cluster="positron-120-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "$cluster" > "$RUNNER_TEMP/helm-cluster-name"
+          export POSITRON_TEST_KUBECONFIG="$RUNNER_TEMP/helm-kubeconfig"
+          kind create cluster --name "$cluster" --kubeconfig "$POSITRON_TEST_KUBECONFIG" --image kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f --wait 180s
+          export POSITRON_TEST_SOURCE_COMMIT="$(git rev-parse HEAD)"
+          candidate="$GITHUB_WORKSPACE/target/native-upgrade-fixture/native-release-v1/$POSITRON_TEST_SOURCE_COMMIT"
+          export POSITRON_TEST_UPGRADE_BINARY="$candidate/target/release/positron"
+          export POSITRON_TEST_CANDIDATE_COMMIT="$(cat "$candidate/candidate-commit")"
+          export POSITRON_TEST_HELM_CURRENT_BINARY="$RUNNER_TEMP/first/positron"
+          export POSITRON_TEST_HELM_FIXTURE_HELPER="$(jq -r 'select(.target.name == "compose_fixture" and .executable != null and .profile.test == true) | .executable' "$RUNNER_TEMP/public-test-build.json")"
+          export POSITRON_TEST_HELM_FIXTURE_BUILDER=positron-gnu-builder
+          test -x "$POSITRON_TEST_HELM_CURRENT_BINARY"
+          test -x "$POSITRON_TEST_UPGRADE_BINARY"
+          test -x "$POSITRON_TEST_HELM_FIXTURE_HELPER"
+          "$POSITRON_TEST_HELM_CURRENT_BINARY" release archive --target '${{ matrix.target }}' --binary "$POSITRON_TEST_UPGRADE_BINARY" --out "$RUNNER_TEMP/helm-candidate/native.tar.gz"
+          cp deploy/oci/MPL-2.0.txt "$RUNNER_TEMP/helm-candidate/"
+          docker buildx build --load --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=0 --file deploy/oci/Dockerfile --tag positron-120-candidate "$RUNNER_TEMP/helm-candidate"
+          kind load docker-image positron-118-test positron-120-candidate --name "$cluster"
+          node="$(kind get nodes --name "$cluster")"
+          current_digest="$(docker exec "$node" ctr --namespace k8s.io images list | awk '$1 == "docker.io/library/positron-118-test:latest" { print $3 }')"
+          candidate_digest="$(docker exec "$node" ctr --namespace k8s.io images list | awk '$1 == "docker.io/library/positron-120-candidate:latest" { print $3 }')"
+          [[ "$current_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          [[ "$candidate_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          export POSITRON_TEST_HELM_IMAGE="ghcr.io/vicotrbb/positron@$current_digest"
+          export POSITRON_TEST_HELM_CANDIDATE_IMAGE="ghcr.io/vicotrbb/positron@$candidate_digest"
+          docker exec "$node" ctr --namespace k8s.io images tag --force docker.io/library/positron-118-test:latest "$POSITRON_TEST_HELM_IMAGE"
+          docker exec "$node" ctr --namespace k8s.io images tag --force docker.io/library/positron-120-candidate:latest "$POSITRON_TEST_HELM_CANDIDATE_IMAGE"
+          export POSITRON_TEST_HELM_INDEX_FILE="$RUNNER_TEMP/runtime-image-index.json"
+          docker exec "$node" ctr --namespace k8s.io content get "$current_digest" > "$POSITRON_TEST_HELM_INDEX_FILE"
+          export POSITRON_TEST_HELM_CHART_OUT="$RUNNER_TEMP/positron-runtime.tgz"
+          cargo test --locked -p positron-release --test helm prepare_runtime_helm_fixture -- --ignored --exact
+          export POSITRON_TEST_HELM_CHART="$POSITRON_TEST_HELM_CHART_OUT"
+          python3 -m pip install --break-system-packages 'PyYAML==6.0.3'
+          helm version --short
+          kind version
+          kubectl --kubeconfig "$POSITRON_TEST_KUBECONFIG" version --output=json
+          kubectl --kubeconfig "$POSITRON_TEST_KUBECONFIG" get nodes --output=json
+          kubectl --kubeconfig "$POSITRON_TEST_KUBECONFIG" get storageclass standard --output=json
+          kubectl --kubeconfig "$POSITRON_TEST_KUBECONFIG" -n local-path-storage get deployment local-path-provisioner --output=jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+          sha256sum "$POSITRON_TEST_HELM_CURRENT_BINARY" "$POSITRON_TEST_UPGRADE_BINARY"
+          printf 'source=%s candidate=%s current_image=%s candidate_image=%s\n' "$POSITRON_TEST_SOURCE_COMMIT" "$POSITRON_TEST_CANDIDATE_COMMIT" "$current_digest" "$candidate_digest"
+          python3 deploy/helm/test_native_adapter.py
+          python3 deploy/helm/test_chart.py
+          python3 deploy/helm/test_kubernetes.py KubernetesLifecycle.test_native_upgrade_preserves_verified_data_and_drain
+      - name: Remove owned isolated Helm cluster
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/helm-cluster-name" ]; then
+            "$RUNNER_TEMP/helm-tools/kind" delete cluster --name "$(cat "$RUNNER_TEMP/helm-cluster-name")" --kubeconfig "$RUNNER_TEMP/helm-kubeconfig"
+          fi
       - name: Remove private GNU lifecycle volume
         if: always() && runner.os == 'Linux'
         run: |

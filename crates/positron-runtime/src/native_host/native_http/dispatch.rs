@@ -1,3 +1,4 @@
+use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 
 use zeroize::Zeroizing;
@@ -742,6 +743,29 @@ fn route_inner<S: Read + Write>(
                 positron_api::policy::MAX_ACTIVATE_REQUEST_BYTES,
             )?;
             policy_activate_response(services, &bearer, &body)
+        },
+        (ListenerRole::Control, "POST", "/control/bootstrap/claim") => {
+            if health.phase() != ProcessPhase::Serving {
+                return Ok(Response::empty(503));
+            }
+            if head.content_length != 0 || head.bearer.is_some() {
+                return Ok(Response::empty(400));
+            }
+            let claim = health.claim_bootstrap().map_err(|_| Response::empty(503))?;
+            let mut body = format!("administrator_secret={}\n", claim.secret());
+            if let Some(secret) = claim.ingest_secret() {
+                writeln!(&mut body, "ingest_secret={secret}").map_err(|_| Response::empty(503))?;
+            }
+            if let Some(secret) = claim.query_secret() {
+                writeln!(&mut body, "query_secret={secret}").map_err(|_| Response::empty(503))?;
+            }
+            Ok(Response {
+                status: 200,
+                content_type: "text/plain; charset=utf-8",
+                body: body.into_bytes(),
+                retry_after_seconds: None,
+                response_reservation: None,
+            })
         },
         (ListenerRole::Control, "GET", "/control/fenced/inspection" | "/control/doctor")
             if health.phase() == ProcessPhase::Fenced =>

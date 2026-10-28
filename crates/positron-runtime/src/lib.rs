@@ -162,3 +162,10 @@ mod key_provider_migration_fuzz;
 pub fn fuzz_operational_output_frame(bytes: &[u8]) -> Option<usize> {
     native_output::fuzz_frame(bytes)
 }
+
+/// Exercise native Control framing and claim routing without an instance owner.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_bootstrap_control_request(bytes: &[u8]) {
+    native_host::fuzz_bootstrap_control_request(bytes);
+}

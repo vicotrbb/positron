@@ -1812,3 +1812,42 @@ fn audit_retention_exact_replay_keeps_history_verifiable_after_cold_reopen()
     );
     Ok(())
 }
+
+#[test]
+fn live_bootstrap_claim_returns_once_under_the_existing_volume_owner() -> Result<(), Box<dyn Error>>
+{
+    let roots = Roots::new()?;
+    let paths = roots.paths().map_err(|code| format!("paths: {code:?}"))?;
+    let instance = Arc::new(InstanceBootstrap::initialize(
+        &paths,
+        InitializationPlan::non_interactive(),
+    )?);
+    assert!(
+        InstanceBootstrap::claim(&paths).is_err(),
+        "offline claim must not steal live ownership"
+    );
+    let barrier = Arc::new(Barrier::new(2));
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let instance = Arc::clone(&instance);
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            barrier.wait();
+            instance.claim_bootstrap()
+        }));
+    }
+    let mut successes = 0;
+    for thread in threads {
+        if let Ok(claim) = thread.join().map_err(|_| "claim thread failed")? {
+            assert!(claim.secret().starts_with("pos_"));
+            successes += 1;
+        }
+    }
+    assert_eq!(successes, 1);
+    assert!(!instance.claim_available());
+    assert!(!roots.secrets.join("bootstrap-claim.v1").exists());
+    assert!(instance.claim_bootstrap().is_err());
+    drop(instance);
+    assert!(InstanceBootstrap::claim(&paths).is_err());
+    Ok(())
+}

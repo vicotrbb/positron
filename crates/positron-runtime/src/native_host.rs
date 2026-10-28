@@ -2569,3 +2569,8 @@ mod tests {
         assert_eq!(super::fuzz_h2_observer(&seed), seed.len());
     }
 }
+
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_bootstrap_control_request(bytes: &[u8]) {
+    native_http::fuzz_bootstrap_control_request(bytes);
+}

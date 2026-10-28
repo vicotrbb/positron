@@ -1,0 +1,6 @@
+apiVersion: v2
+name: positron
+description: Standalone Positron database; one instance, no Operator
+version: @VERSION@
+appVersion: "@VERSION@"
+type: application

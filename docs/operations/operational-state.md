@@ -226,3 +226,9 @@ refuses redirects, bypasses ambient proxies and has a five-second deadline.
 It never reads a bearer or the response body. Use a certificate with the selected
 DNS name. `--allow-plaintext` is an explicit alternative for a reviewed local
 plaintext Operations Listener. This does not replace authenticated Doctor detail.
+
+Use `doctor --live` with the same endpoint and TLS options for Kubernetes
+liveness. It checks the authoritative `/health/live` endpoint with the identical
+strict client policy, independently of traffic readiness. Only HTTP 200 succeeds;
+redirects and unavailable endpoints fail. Neither health command accepts a bearer,
+configuration file, control socket or response-body authority.

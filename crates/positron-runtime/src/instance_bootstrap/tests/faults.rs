@@ -295,3 +295,20 @@ fn claim_rejects_a_valid_envelope_for_another_principal() -> Result<(), Box<dyn 
     );
     Ok(())
 }
+
+#[test]
+fn live_claim_removal_failure_returns_no_secret_and_preserves_retry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let roots = Roots::new()?;
+    let paths = roots.paths();
+    let instance = InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    let failure = with_fault(BootstrapFileEvent::RemoveClaim, || {
+        instance.claim_bootstrap()
+    })
+    .expect_err("claim must not release before durable destruction");
+    assert_eq!(failure.code(), BootstrapFailureCode::ClaimDestructionFailed);
+    assert!(instance.claim_available());
+    assert!(!instance.claim_bootstrap()?.secret().is_empty());
+    assert!(!instance.claim_available());
+    Ok(())
+}

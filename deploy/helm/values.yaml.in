@@ -1,0 +1,39 @@
+# Generated from Release Inventory source @SOURCE@ and the native Configuration Contract.
+image: ghcr.io/vicotrbb/positron@sha256:@INDEX_SHA256@
+# Exactly one writer, or zero while explicitly running offline maintenance.
+replicas: 1
+terminationGracePeriodSeconds: @STOP_GRACE_SECONDS@
+# Filesystem-mode, ReadWriteOnce storage. Supply an independently qualified class.
+storageClass: ""
+storage:
+  data: 10Gi
+  secrets: 1Gi
+  backups: 10Gi
+# Existing Secret containing server.pem, server-key.pem and ca.pem. Never secret values.
+tlsSecret: ""
+# Optional existing private native operation inputs (release trust/recovery files).
+operationInputsClaim: ""
+# Optional existing local Backup Repository PVC, e.g. for a fresh-target restore.
+backupClaim: ""
+# Numeric identity must remain stable across replacement and volume reattachment.
+identity:
+  uid: 65532
+  gid: 65532
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+# Native TOML, generated from Rust. Configure TLS paths for every network role.
+# Data/secret roots use owner-only subdirectories of their separate PVCs.
+configuration: |
+@CONFIGURATION@
+# Explicit offline Job; never automatic install/upgrade hooks. Results belong to
+# native durable operations. Bootstrap claim must use an attached pod, not Job logs.
+maintenance:
+  enabled: false
+  name: operation
+  args: []
+  activeDeadlineSeconds: 3600
