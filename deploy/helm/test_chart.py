@@ -155,13 +155,24 @@ class HelmChart(unittest.TestCase):
                     if sys.platform == "linux":
                         observed = subprocess.run(["stat", "-f", "-c", "%t:%T", str(root)], capture_output=True, timeout=3)
                         value = observed.stdout.decode().strip()
-                        report["filesystem"] = value if re.fullmatch(r"[A-Za-z0-9_:.-]{1,80}", value) else "unavailable"
+                        report["filesystem"] = value if re.fullmatch(r"[A-Za-z0-9_:/.-]{1,80}", value) else "unavailable"
                     for name in ["data", "secrets"]:
                         if (root / name).exists():
                             metadata = (root / name).stat()
                             report[name] = {"uid": metadata.st_uid, "gid": metadata.st_gid, "mode": oct(metadata.st_mode & 0o7777)}
                     with error_path.open("rb") as errors: log = errors.read(16384).decode(errors="replace")
                     report["events_observed"] = [event for event in ["process_starting", "process_recovering", "process_serving", "dependency_storage_unavailable", "dependency_key_unavailable", "dependency_resources_unavailable", "dependency_catalog_unavailable", "dependency_recovery_unavailable"] if event in log]
+                    resource_fields = {
+                        "resource_stage": {"observation", "governor", "catalog", "ledger"},
+                        "resource_reason": {"unsupported_platform", "observation_unavailable", "malformed_limit", "ambiguous_hierarchy", "arithmetic", "allocation_unavailable", "zero_capacity", "invalid_configuration", "policy_cardinality_exceeded", "bootstrap_inventory_unavailable", "insufficient_outstanding_progress", "tenant_progress_unavailable", "system_recovery_progress_unavailable", "invalid_recovery_scope", "governor_contended", "primary_volume_observation_unavailable", "observed_volume_mismatch", "internal_fenced", "resource_admission_refused", "limit_exceeded", "storage_exhausted", "cancelled"},
+                        "resource_source": {"registered_bounds", "host_cpu", "host_memory", "cgroup_membership", "cgroup_mounts", "cgroup_cpu", "cgroup_memory", "process_file_descriptors", "primary_volume_filesystem"},
+                        "resource_dimension": {"memory_bytes", "queue_slots", "task_slots", "buffer_cache_bytes", "batch_items", "lease_slots", "retry_slots", "io_permits", "cpu_work_units", "file_descriptors", "disk_headroom_bytes"},
+                    }
+                    for line in log.splitlines():
+                        try: event = json.loads(line)
+                        except ValueError: continue
+                        if isinstance(event, dict) and event.get("event") == "dependency_resources_unavailable":
+                            report["resource_failure"] = {key: event[key] for key, values in resource_fields.items() if isinstance(event.get(key), str) and event[key] in values}
                     for state in ["live", "ready"]:
                         connection = http.client.HTTPSConnection("localhost", endpoints[0], context=trust, timeout=3)
                         try:

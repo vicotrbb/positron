@@ -119,5 +119,23 @@ pub(super) fn catalog_failure(failure: CatalogFailure) -> BootstrapFailure {
         | CatalogFailureCode::IdempotencyConflict
         | CatalogFailureCode::ConcurrentWriter => BootstrapFailureCode::CatalogUnavailable,
     };
-    BootstrapFailure::new(code)
+    let failure_code = failure.code();
+    let result = BootstrapFailure::new(code);
+    match failure_code {
+        CatalogFailureCode::ResourceAdmissionRefused => {
+            result.with_resource_context(super::super::BootstrapResourceContext::new(
+                super::super::BootstrapResourceStage::Catalog,
+                super::super::BootstrapResourceReason::ResourceAdmissionRefused,
+                None,
+            ))
+        },
+        CatalogFailureCode::LimitExceeded => {
+            result.with_resource_context(super::super::BootstrapResourceContext::new(
+                super::super::BootstrapResourceStage::Catalog,
+                super::super::BootstrapResourceReason::LimitExceeded,
+                None,
+            ))
+        },
+        _ => result,
+    }
 }

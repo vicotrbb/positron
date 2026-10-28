@@ -583,7 +583,9 @@ impl RunningProcess {
                     },
                     Err(_) => self
                         .state
-                        .record_dependency_status(Some(BootstrapFailureCode::ResourceUnavailable)),
+                        .record_dependency_status(Some(BootstrapFailure::new(
+                            BootstrapFailureCode::ResourceUnavailable,
+                        ))),
                 }
             }
         }

@@ -69,6 +69,157 @@ pub enum BootstrapFailureCode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapResourceStage {
+    Observation,
+    Governor,
+    Catalog,
+    Ledger,
+}
+impl BootstrapResourceStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Observation => "observation",
+            Self::Governor => "governor",
+            Self::Catalog => "catalog",
+            Self::Ledger => "ledger",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapResourceReason {
+    UnsupportedPlatform,
+    ObservationUnavailable,
+    MalformedLimit,
+    AmbiguousHierarchy,
+    Arithmetic,
+    AllocationUnavailable,
+    ZeroCapacity,
+    InvalidConfiguration,
+    PolicyCardinalityExceeded,
+    BootstrapInventoryUnavailable,
+    InsufficientOutstandingProgress,
+    TenantProgressUnavailable,
+    SystemRecoveryProgressUnavailable,
+    InvalidRecoveryScope,
+    GovernorContended,
+    PrimaryVolumeObservationUnavailable,
+    ObservedVolumeMismatch,
+    InternalFenced,
+    ResourceAdmissionRefused,
+    LimitExceeded,
+    StorageExhausted,
+    Cancelled,
+}
+impl BootstrapResourceReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UnsupportedPlatform => "unsupported_platform",
+            Self::ObservationUnavailable => "observation_unavailable",
+            Self::MalformedLimit => "malformed_limit",
+            Self::AmbiguousHierarchy => "ambiguous_hierarchy",
+            Self::Arithmetic => "arithmetic",
+            Self::AllocationUnavailable => "allocation_unavailable",
+            Self::ZeroCapacity => "zero_capacity",
+            Self::InvalidConfiguration => "invalid_configuration",
+            Self::PolicyCardinalityExceeded => "policy_cardinality_exceeded",
+            Self::BootstrapInventoryUnavailable => "bootstrap_inventory_unavailable",
+            Self::InsufficientOutstandingProgress => "insufficient_outstanding_progress",
+            Self::TenantProgressUnavailable => "tenant_progress_unavailable",
+            Self::SystemRecoveryProgressUnavailable => "system_recovery_progress_unavailable",
+            Self::InvalidRecoveryScope => "invalid_recovery_scope",
+            Self::GovernorContended => "governor_contended",
+            Self::PrimaryVolumeObservationUnavailable => "primary_volume_observation_unavailable",
+            Self::ObservedVolumeMismatch => "observed_volume_mismatch",
+            Self::InternalFenced => "internal_fenced",
+            Self::ResourceAdmissionRefused => "resource_admission_refused",
+            Self::LimitExceeded => "limit_exceeded",
+            Self::StorageExhausted => "storage_exhausted",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapResourceSource {
+    RegisteredBounds,
+    HostCpu,
+    HostMemory,
+    CgroupMembership,
+    CgroupMounts,
+    CgroupCpu,
+    CgroupMemory,
+    ProcessFileDescriptors,
+    PrimaryVolumeFilesystem,
+}
+impl BootstrapResourceSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::RegisteredBounds => "registered_bounds",
+            Self::HostCpu => "host_cpu",
+            Self::HostMemory => "host_memory",
+            Self::CgroupMembership => "cgroup_membership",
+            Self::CgroupMounts => "cgroup_mounts",
+            Self::CgroupCpu => "cgroup_cpu",
+            Self::CgroupMemory => "cgroup_memory",
+            Self::ProcessFileDescriptors => "process_file_descriptors",
+            Self::PrimaryVolumeFilesystem => "primary_volume_filesystem",
+        }
+    }
+}
+/// Closed bootstrap diagnostics; external error text and resource identities never enter here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BootstrapResourceContext {
+    stage: BootstrapResourceStage,
+    reason: BootstrapResourceReason,
+    source: Option<BootstrapResourceSource>,
+    dimension: Option<positron_kernel::ResourceDimension>,
+}
+impl BootstrapResourceContext {
+    pub(in crate::instance_bootstrap) const fn new(
+        stage: BootstrapResourceStage,
+        reason: BootstrapResourceReason,
+        source: Option<BootstrapResourceSource>,
+    ) -> Self {
+        Self {
+            stage,
+            reason,
+            source,
+            dimension: None,
+        }
+    }
+    pub(in crate::instance_bootstrap) const fn with_dimension(
+        mut self,
+        dimension: Option<positron_kernel::ResourceDimension>,
+    ) -> Self {
+        self.dimension = dimension;
+        self
+    }
+    pub(crate) fn append_json(self, value: &mut serde_json::Value) {
+        value["resource_stage"] = self.stage.label().into();
+        value["resource_reason"] = self.reason.label().into();
+        if let Some(source) = self.source {
+            value["resource_source"] = source.label().into();
+        }
+        if let Some(dimension) = self.dimension {
+            use positron_kernel::ResourceDimension::*;
+            value["resource_dimension"] = match dimension {
+                MemoryBytes => "memory_bytes",
+                QueueSlots => "queue_slots",
+                TaskSlots => "task_slots",
+                BufferCacheBytes => "buffer_cache_bytes",
+                BatchItems => "batch_items",
+                LeaseSlots => "lease_slots",
+                RetrySlots => "retry_slots",
+                IoPermits => "io_permits",
+                CpuWorkUnits => "cpu_work_units",
+                FileDescriptors => "file_descriptors",
+                DiskHeadroomBytes => "disk_headroom_bytes",
+            }
+            .into();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootstrapFailure {
     code: BootstrapFailureCode,
     lifecycle_generation_conflict: Option<positron_governance::TenantLifecycleGenerationConflict>,
@@ -76,9 +227,20 @@ pub struct BootstrapFailure {
     display_generation_conflict: Option<TenantDisplayGenerationConflict>,
     retention_generation_conflict: Option<positron_governance::TenantRetentionGenerationConflict>,
     maintenance_task: Option<MaintenanceTaskId>,
+    resource_context: Option<BootstrapResourceContext>,
 }
 
 impl BootstrapFailure {
+    pub(in crate::instance_bootstrap) const fn with_resource_context(
+        mut self,
+        context: BootstrapResourceContext,
+    ) -> Self {
+        self.resource_context = Some(context);
+        self
+    }
+    pub(crate) const fn resource_context(self) -> Option<BootstrapResourceContext> {
+        self.resource_context
+    }
     pub(crate) const fn new(code: BootstrapFailureCode) -> Self {
         Self {
             code,
@@ -87,6 +249,7 @@ impl BootstrapFailure {
             display_generation_conflict: None,
             retention_generation_conflict: None,
             maintenance_task: None,
+            resource_context: None,
         }
     }
 
@@ -100,6 +263,7 @@ impl BootstrapFailure {
             display_generation_conflict: None,
             retention_generation_conflict: None,
             maintenance_task: None,
+            resource_context: None,
         }
     }
 
@@ -113,6 +277,7 @@ impl BootstrapFailure {
             display_generation_conflict: None,
             retention_generation_conflict: None,
             maintenance_task: None,
+            resource_context: None,
         }
     }
 
@@ -126,6 +291,7 @@ impl BootstrapFailure {
             display_generation_conflict: Some(conflict),
             retention_generation_conflict: None,
             maintenance_task: None,
+            resource_context: None,
         }
     }
 
@@ -139,6 +305,7 @@ impl BootstrapFailure {
             display_generation_conflict: None,
             retention_generation_conflict: Some(conflict),
             maintenance_task: None,
+            resource_context: None,
         }
     }
 
@@ -152,6 +319,7 @@ impl BootstrapFailure {
             display_generation_conflict: None,
             retention_generation_conflict: None,
             maintenance_task: Some(maintenance_task),
+            resource_context: None,
         }
     }
 

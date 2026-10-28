@@ -167,7 +167,23 @@ const fn ledger_open_failure(code: LedgerFailureCode) -> BootstrapFailure {
         | LedgerFailureCode::SnapshotExpired
         | LedgerFailureCode::ClockUncertain => BootstrapFailureCode::CatalogUnavailable,
     };
-    BootstrapFailure::new(bootstrap)
+    let failure = BootstrapFailure::new(bootstrap);
+    let reason = match code {
+        LedgerFailureCode::ResourceAdmissionRefused => {
+            super::super::BootstrapResourceReason::ResourceAdmissionRefused
+        },
+        LedgerFailureCode::LimitExceeded => super::super::BootstrapResourceReason::LimitExceeded,
+        LedgerFailureCode::StorageExhausted => {
+            super::super::BootstrapResourceReason::StorageExhausted
+        },
+        LedgerFailureCode::Cancelled => super::super::BootstrapResourceReason::Cancelled,
+        _ => return failure,
+    };
+    failure.with_resource_context(super::super::BootstrapResourceContext::new(
+        super::super::BootstrapResourceStage::Ledger,
+        reason,
+        None,
+    ))
 }
 
 pub(super) fn ensure_claim(

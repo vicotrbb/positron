@@ -1127,7 +1127,7 @@ impl ProcessState {
             .record_operational_event(OperationalEvent::ResourceObservationDeferred);
     }
 
-    pub(crate) fn record_dependency_status(&self, failure: Option<crate::BootstrapFailureCode>) {
+    pub(crate) fn record_dependency_status(&self, failure: Option<crate::BootstrapFailure>) {
         let previously_unavailable = self
             .health
             .dependency_unavailable
@@ -1135,22 +1135,24 @@ impl ProcessState {
         if failure.is_none() && !previously_unavailable {
             return;
         }
-        self.health.record_operational_event(match failure {
-            Some(crate::BootstrapFailureCode::StorageUnavailable) => {
-                OperationalEvent::DependencyStorageUnavailable
-            },
-            Some(crate::BootstrapFailureCode::KeyCustodyUnavailable) => {
-                OperationalEvent::DependencyKeyUnavailable
-            },
-            Some(crate::BootstrapFailureCode::ResourceUnavailable) => {
-                OperationalEvent::DependencyResourcesUnavailable
-            },
-            Some(crate::BootstrapFailureCode::CatalogUnavailable) => {
-                OperationalEvent::DependencyCatalogUnavailable
-            },
-            Some(_) => OperationalEvent::DependencyRecoveryUnavailable,
-            None => OperationalEvent::DependencyRestored,
-        });
+        let context = failure.and_then(crate::BootstrapFailure::resource_context);
+        self.health
+            .record_operational_event(match failure.map(crate::BootstrapFailure::code) {
+                Some(crate::BootstrapFailureCode::StorageUnavailable) => {
+                    OperationalEvent::DependencyStorageUnavailable
+                },
+                Some(crate::BootstrapFailureCode::KeyCustodyUnavailable) => {
+                    OperationalEvent::DependencyKeyUnavailable
+                },
+                Some(crate::BootstrapFailureCode::ResourceUnavailable) => {
+                    OperationalEvent::DependencyResourcesUnavailable(context)
+                },
+                Some(crate::BootstrapFailureCode::CatalogUnavailable) => {
+                    OperationalEvent::DependencyCatalogUnavailable
+                },
+                Some(_) => OperationalEvent::DependencyRecoveryUnavailable,
+                None => OperationalEvent::DependencyRestored,
+            });
     }
 
     pub(crate) fn fail_critical_worker(&self) {
@@ -1337,7 +1339,9 @@ mod tests {
         assert_eq!(state.health().diagnostic_status(), "unavailable");
         state.transition(ProcessPhase::Serving);
         assert_eq!(state.health().diagnostic_status(), "healthy");
-        state.record_dependency_status(Some(crate::BootstrapFailureCode::ResourceUnavailable));
+        state.record_dependency_status(Some(crate::BootstrapFailure::new(
+            crate::BootstrapFailureCode::ResourceUnavailable,
+        )));
         assert_eq!(state.health().readiness(), super::Readiness::NotReady);
         assert_eq!(state.health().diagnostic_status(), "degraded");
         state.record_dependency_status(None);

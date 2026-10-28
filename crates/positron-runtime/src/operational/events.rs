@@ -182,7 +182,7 @@ pub(crate) enum OperationalEvent {
     ResourceObservationDeferred,
     DependencyStorageUnavailable,
     DependencyKeyUnavailable,
-    DependencyResourcesUnavailable,
+    DependencyResourcesUnavailable(Option<crate::instance_bootstrap::BootstrapResourceContext>),
     DependencyCatalogUnavailable,
     DependencyRecoveryUnavailable,
     DependencyRestored,
@@ -204,7 +204,7 @@ impl OperationalEvent {
             Self::ResourceObservationDeferred => "resource_observation_deferred",
             Self::DependencyStorageUnavailable => "dependency_storage_unavailable",
             Self::DependencyKeyUnavailable => "dependency_key_unavailable",
-            Self::DependencyResourcesUnavailable => "dependency_resources_unavailable",
+            Self::DependencyResourcesUnavailable(_) => "dependency_resources_unavailable",
             Self::DependencyCatalogUnavailable => "dependency_catalog_unavailable",
             Self::DependencyRecoveryUnavailable => "dependency_recovery_unavailable",
             Self::DependencyRestored => "dependency_restored",
@@ -229,7 +229,7 @@ impl OperationalEvent {
             Self::ResourceObservationDeferred
             | Self::DependencyStorageUnavailable
             | Self::DependencyKeyUnavailable
-            | Self::DependencyResourcesUnavailable
+            | Self::DependencyResourcesUnavailable(_)
             | Self::DependencyCatalogUnavailable
             | Self::DependencyRecoveryUnavailable => "warn",
             _ => "info",
@@ -237,6 +237,9 @@ impl OperationalEvent {
     }
     pub(crate) fn json(self) -> serde_json::Value {
         let mut value = serde_json::json!({"event": self.name(), "severity": self.severity(), "component": "runtime"});
+        if let Self::DependencyResourcesUnavailable(Some(context)) = self {
+            context.append_json(&mut value);
+        }
         if let Self::BackupReadFailure { stage, failure } = self {
             value["stage"] = stage.token().into();
             value["failure"] = format!("{failure:?}").into();

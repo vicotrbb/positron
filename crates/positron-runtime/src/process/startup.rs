@@ -260,7 +260,7 @@ impl ApplicationRuntime {
                     &mut tasks,
                 ));
             }
-            state.record_dependency_status(Some(failure.failure.code()));
+            state.record_dependency_status(Some(failure.failure));
             attempt = attempt.saturating_add(1);
             let retained_volume = match configuration.paths.retain_volume() {
                 Ok(volume) => Some(volume),

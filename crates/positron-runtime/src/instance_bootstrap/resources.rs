@@ -44,10 +44,10 @@ pub(super) fn establish(
     let sizing = resource_sizing(max_registered_tenants)?;
     let observed =
         ObservedResourceEnvironment::observe(&volume, registered_resource_bounds(sizing.raw)?)
-            .map_err(resource_failure)?;
+            .map_err(observation_failure)?;
     let configuration = resource_configuration(tenant, sizing, observed)?;
     StorageKernelResourceAuthority::establish(volume, configuration)
-        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
+        .map_err(|failure| governor_failure(failure.failure()))
 }
 
 /// Establishes the canonical storage-bound governor for an exclusively owned
@@ -60,10 +60,10 @@ pub(super) fn establish_system_diagnostics(
     let sizing = resource_sizing(max_registered_tenants)?;
     let observed =
         ObservedResourceEnvironment::observe(&volume, registered_resource_bounds(sizing.raw)?)
-            .map_err(resource_failure)?;
+            .map_err(observation_failure)?;
     let configuration = system_diagnostics_resource_configuration(sizing, observed)?;
     StorageKernelResourceAuthority::establish(volume, configuration)
-        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))
+        .map_err(|failure| governor_failure(failure.failure()))
 }
 
 fn resource_sizing(max_registered_tenants: u16) -> Result<ResourceSizing, BootstrapFailure> {
@@ -169,8 +169,8 @@ fn resource_configuration(
         .get(ResourceDimension::DiskHeadroomBytes);
     let inventory = ResourceInventory::new_observed(
         observed,
-        OperatorLimits::new(sizing.raw).map_err(resource_failure)?,
-        RecoveryReserve::new(sizing.recovery_capacity).map_err(resource_failure)?,
+        OperatorLimits::new(sizing.raw).map_err(governor_failure)?,
+        RecoveryReserve::new(sizing.recovery_capacity).map_err(governor_failure)?,
         sizing.cardinality,
         DiskPressureThresholds::new(
             recovery_disk,
@@ -178,26 +178,26 @@ fn resource_configuration(
             recovery_disk.saturating_add(2),
             disk,
         )
-        .map_err(resource_failure)?,
+        .map_err(governor_failure)?,
     )
-    .map_err(resource_failure)?;
+    .map_err(governor_failure)?;
     let policy = GovernorPolicy::new(
         [
             TenantQuota::new(tenant, 1, sizing.per_tenant_ordinary_capacity)
-                .map_err(resource_failure)?,
+                .map_err(governor_failure)?,
         ],
-        ordinary_pool_policy().map_err(resource_failure)?,
+        ordinary_pool_policy().map_err(governor_failure)?,
     )
-    .map_err(resource_failure)?
+    .map_err(governor_failure)?
     .with_principal_quota(
         PrincipalQuota::new(
             DEFAULT_PRINCIPAL_MAXIMUM_OPERATIONS,
             ResourceAmounts::new(DEFAULT_PRINCIPAL_OPERATION_QUOTA),
             ResourceAmounts::new(DEFAULT_PRINCIPAL_AGGREGATE_QUOTA),
         )
-        .map_err(resource_failure)?,
+        .map_err(governor_failure)?,
     );
-    ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(resource_failure)
+    ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(governor_failure)
 }
 
 fn system_diagnostics_resource_configuration(
@@ -210,8 +210,8 @@ fn system_diagnostics_resource_configuration(
         .get(ResourceDimension::DiskHeadroomBytes);
     let inventory = ResourceInventory::new_observed(
         observed,
-        OperatorLimits::new(sizing.raw).map_err(resource_failure)?,
-        RecoveryReserve::new(sizing.recovery_capacity).map_err(resource_failure)?,
+        OperatorLimits::new(sizing.raw).map_err(governor_failure)?,
+        RecoveryReserve::new(sizing.recovery_capacity).map_err(governor_failure)?,
         sizing.cardinality,
         DiskPressureThresholds::new(
             recovery_disk,
@@ -219,11 +219,11 @@ fn system_diagnostics_resource_configuration(
             recovery_disk.saturating_add(2),
             disk,
         )
-        .map_err(resource_failure)?,
+        .map_err(governor_failure)?,
     )
-    .map_err(resource_failure)?;
-    let policy = GovernorPolicy::system_only(ordinary_pool_policy().map_err(resource_failure)?);
-    ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(resource_failure)
+    .map_err(governor_failure)?;
+    let policy = GovernorPolicy::system_only(ordinary_pool_policy().map_err(governor_failure)?);
+    ResourceGovernorConfiguration::new(inventory, policy, sizing.recovery).map_err(governor_failure)
 }
 
 fn registered_resource_bounds(
@@ -349,6 +349,69 @@ fn multiply(
     ]))
 }
 
+use super::{
+    BootstrapResourceReason as Reason, BootstrapResourceSource as Source,
+    BootstrapResourceStage as Stage,
+};
+
+fn observation_failure(failure: positron_kernel::CapacityObservationFailure) -> BootstrapFailure {
+    use positron_kernel::{CapacityObservationFailure as F, CapacityObservationSource as S};
+    let (reason, source) = match failure {
+        F::UnsupportedPlatform => (Reason::UnsupportedPlatform, None),
+        F::ObservationUnavailable { source } => (Reason::ObservationUnavailable, Some(source)),
+        F::MalformedLimit { source } => (Reason::MalformedLimit, Some(source)),
+        F::AmbiguousHierarchy => (Reason::AmbiguousHierarchy, None),
+        F::Arithmetic { source } => (Reason::Arithmetic, Some(source)),
+        F::AllocationUnavailable { source } => (Reason::AllocationUnavailable, Some(source)),
+        F::ZeroCapacity { .. } => (Reason::ZeroCapacity, None),
+    };
+    let source = source.map(|source| match source {
+        S::RegisteredBounds => Source::RegisteredBounds,
+        S::HostCpu => Source::HostCpu,
+        S::HostMemory => Source::HostMemory,
+        S::CgroupMembership => Source::CgroupMembership,
+        S::CgroupMounts => Source::CgroupMounts,
+        S::CgroupCpu => Source::CgroupCpu,
+        S::CgroupMemory => Source::CgroupMemory,
+        S::ProcessFileDescriptors => Source::ProcessFileDescriptors,
+        S::PrimaryVolumeFilesystem => Source::PrimaryVolumeFilesystem,
+    });
+    BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable).with_resource_context(
+        super::BootstrapResourceContext::new(Stage::Observation, reason, source).with_dimension(
+            match failure {
+                F::ZeroCapacity { dimension } => Some(dimension),
+                _ => None,
+            },
+        ),
+    )
+}
+
+fn governor_failure(failure: positron_kernel::GovernorFailure) -> BootstrapFailure {
+    use positron_kernel::GovernorFailure as F;
+    let reason = match failure {
+        F::InvalidConfiguration => Reason::InvalidConfiguration,
+        F::PolicyCardinalityExceeded => Reason::PolicyCardinalityExceeded,
+        F::GovernorBootstrapInventoryUnavailable { .. } => Reason::BootstrapInventoryUnavailable,
+        F::InsufficientOutstandingProgress { .. } => Reason::InsufficientOutstandingProgress,
+        F::TenantProgressUnavailable { .. } => Reason::TenantProgressUnavailable,
+        F::SystemRecoveryProgressUnavailable { .. } => Reason::SystemRecoveryProgressUnavailable,
+        F::InvalidRecoveryScope => Reason::InvalidRecoveryScope,
+        F::GovernorContended { .. } => Reason::GovernorContended,
+        F::PrimaryVolumeObservationUnavailable => Reason::PrimaryVolumeObservationUnavailable,
+        F::ObservedVolumeMismatch => Reason::ObservedVolumeMismatch,
+        F::InternalFenced => Reason::InternalFenced,
+    };
+    let dimension = match failure {
+        F::TenantProgressUnavailable { dimension, .. }
+        | F::SystemRecoveryProgressUnavailable { dimension, .. } => Some(dimension),
+        _ => None,
+    };
+    BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable).with_resource_context(
+        super::BootstrapResourceContext::new(Stage::Governor, reason, None)
+            .with_dimension(dimension),
+    )
+}
+
 fn resource_failure<T>(_failure: T) -> BootstrapFailure {
     BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable)
 }
@@ -391,6 +454,86 @@ mod tests {
     use super::*;
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn bootstrap_resource_refusal_reports_only_closed_observation_context() {
+        let failure = observation_failure(
+            positron_kernel::CapacityObservationFailure::MalformedLimit {
+                source: positron_kernel::CapacityObservationSource::CgroupMemory,
+            },
+        );
+        assert_eq!(failure.code(), BootstrapFailureCode::ResourceUnavailable);
+        let state = crate::health::ProcessState::starting();
+        state.record_dependency_status(Some(failure));
+        assert_eq!(state.health().liveness(), crate::Liveness::Live);
+        assert_eq!(state.health().readiness(), crate::Readiness::NotReady);
+        let event = state
+            .health()
+            .operational_telemetry()
+            .take_pending()
+            .expect("pending")
+            .expect("event")
+            .json();
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "event": "dependency_resources_unavailable", "severity": "warn", "component": "runtime",
+                "resource_stage": "observation", "resource_reason": "malformed_limit",
+                "resource_source": "cgroup_memory"
+            })
+        );
+    }
+
+    #[test]
+    fn bootstrap_resource_context_omits_unknown_detail_and_redacts_tenant_identity() {
+        let event = |failure: BootstrapFailure| {
+            let state = crate::health::ProcessState::starting();
+            state.record_dependency_status(Some(failure));
+            assert_eq!(state.health().liveness(), crate::Liveness::Live);
+            assert_eq!(state.health().readiness(), crate::Readiness::NotReady);
+            state
+                .health()
+                .operational_telemetry()
+                .take_pending()
+                .expect("pending")
+                .expect("event")
+                .json()
+        };
+        assert_eq!(
+            event(BootstrapFailure::new(
+                BootstrapFailureCode::ResourceUnavailable
+            )),
+            serde_json::json!({
+                "event": "dependency_resources_unavailable", "severity": "warn", "component": "runtime"
+            })
+        );
+        let failure = governor_failure(
+            positron_kernel::GovernorFailure::TenantProgressUnavailable {
+                tenant: TenantId::from_bytes([0x5a; 16]).expect("canary identity"),
+                class: positron_kernel::WorkClass::Ingest,
+                dimension: ResourceDimension::MemoryBytes,
+            },
+        );
+        assert_eq!(failure.code(), BootstrapFailureCode::ResourceUnavailable);
+        assert_eq!(
+            event(failure),
+            serde_json::json!({
+                "event": "dependency_resources_unavailable", "severity": "warn", "component": "runtime",
+                "resource_stage": "governor", "resource_reason": "tenant_progress_unavailable",
+                "resource_dimension": "memory_bytes"
+            })
+        );
+        let zero = observation_failure(positron_kernel::CapacityObservationFailure::ZeroCapacity {
+            dimension: ResourceDimension::CpuWorkUnits,
+        });
+        assert_eq!(
+            event(zero),
+            serde_json::json!({
+                "event": "dependency_resources_unavailable", "severity": "warn", "component": "runtime",
+                "resource_stage": "observation", "resource_reason": "zero_capacity", "resource_dimension": "cpu_work_units"
+            })
+        );
+    }
 
     #[test]
     fn direct_capacity_values_enforce_kernel_bounds_and_checked_aggregation() {
