@@ -25,6 +25,121 @@ def command(arguments, *, data=None, timeout=60, check=True):
     return result
 
 
+def wait_operand(lifecycle, *, previous_uid=None, pending=False, timeout=180):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise AssertionError("operand transition did not complete within its readiness budget")
+        result = lifecycle.kube("get", "pod", lifecycle.pod, "-o", "json", "--request-timeout=3s", timeout=min(5, remaining), check=False)
+        if not result.returncode:
+            state = json.loads(result.stdout)
+            changed = previous_uid is None or state["metadata"]["uid"] != previous_uid
+            conditions = state.get("status", {}).get("conditions", [])
+            ready = any(item["type"] == "Ready" and item["status"] == "True" for item in conditions)
+            unscheduled = any(item["type"] == "PodScheduled" and item["status"] == "False" and item.get("reason") == "Unschedulable" for item in conditions)
+            if changed and (unscheduled if pending else ready): return state
+        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+
+
+def drain_operand(case, lifecycle, state, image, ca, expected):
+    worker = state["spec"]["nodeName"]
+    selector = "positron-interruption=" + state["metadata"]["namespace"]
+    lifecycle.kube("label", "pod", lifecycle.pod, selector)
+    pending = None
+    try:
+        lifecycle.kube("drain", worker, "--ignore-daemonsets", "--delete-emptydir-data", "--pod-selector=" + selector, "--timeout=90s", timeout=100)
+        pending = wait_operand(lifecycle, previous_uid=state["metadata"]["uid"], pending=True)
+        case.assertEqual(pending["status"]["phase"], "Pending")
+        case.assertFalse(pending["spec"].get("nodeName"))
+        case.assertFalse(pending["status"].get("podIP"))
+        slices = json.loads(lifecycle.kube("get", "endpointslices", "-l", "kubernetes.io/service-name=native-positron", "-o", "json").stdout)
+        case.assertFalse(any(endpoint.get("conditions", {}).get("ready") for item in slices["items"] for endpoint in (item.get("endpoints") or [])))
+        with case.assertRaises((subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+            lifecycle.query_on_node(worker, state["status"]["podIP"], image, ca, stage="wire")
+    finally:
+        lifecycle.kube("uncordon", worker)
+        recovered = wait_operand(lifecycle)
+        case.assertEqual(recovered["spec"]["nodeName"], worker)
+    case.assertEqual(recovered["metadata"]["uid"], pending["metadata"]["uid"])
+    case.assertNotEqual(recovered["metadata"]["uid"], state["metadata"]["uid"])
+    case.assertEqual(lifecycle.query_on_node(worker, recovered["status"]["podIP"], image, ca, stage="wire"), expected)
+    return recovered
+
+
+def evict_operand(case, lifecycle, state):
+    namespace, uid = state["metadata"]["namespace"], state["metadata"]["uid"]
+    eviction = {"apiVersion": "policy/v1", "kind": "Eviction", "metadata": {"name": lifecycle.pod, "namespace": namespace},
+                "deleteOptions": {"preconditions": {"uid": uid}}}
+    lifecycle.kube("create", "--raw", f"/api/v1/namespaces/{namespace}/pods/{lifecycle.pod}/eviction", "-f", "-", data=json.dumps(eviction).encode())
+    replacement = wait_operand(lifecycle, previous_uid=uid)
+    case.assertNotEqual(replacement["metadata"]["uid"], uid)
+    return replacement
+
+
+def api_outage(case, lifecycle, control_plane, state, image, ca, expected):
+    if not re.fullmatch(r"positron-120-[a-z0-9]+(?:-[a-z0-9]+)*-control-plane", control_plane):
+        raise ValueError("explicit owned kind control plane required")
+    docker = ["docker", "exec", control_plane]
+    containers = json.loads(command([*docker, "crictl", "ps", "--name", "kube-apiserver", "-o", "json"]).stdout)["containers"]
+    case.assertEqual(len(containers), 1)
+    pid = json.loads(command([*docker, "crictl", "inspect", containers[0]["id"]]).stdout)["info"]["pid"]
+    case.assertIs(type(pid), int)
+    case.assertGreater(pid, 1)
+    case.assertEqual(command([*docker, "cat", f"/proc/{pid}/comm"]).stdout, b"kube-apiserver\n")
+    try:
+        command([*docker, "kill", "-STOP", str(pid)], timeout=5)
+        unavailable = lifecycle.kube("get", "pod", lifecycle.pod, "--request-timeout=3s", timeout=5, check=False)
+        case.assertNotEqual(unavailable.returncode, 0, "the API request must actually fail")
+        case.assertEqual(lifecycle.query_on_node(state["spec"]["nodeName"], state["status"]["podIP"], image, ca, stage="wire"), expected)
+    finally:
+        # Resume only this verified API process, even when the query or STOP acknowledgement fails.
+        command([*docker, "kill", "-CONT", str(pid)], timeout=5)
+        recovered = wait_operand(lifecycle)
+        case.assertEqual(recovered["metadata"]["uid"], state["metadata"]["uid"])
+
+
+def storage_identities(lifecycle, *, worker=None):
+    claims = json.loads(lifecycle.kube("get", "pvc", "-o", "json").stdout)["items"]
+    identities = {}
+    for claim in claims:
+        volume = json.loads(lifecycle.kube("get", "pv", claim["spec"]["volumeName"], "-o", "json").stdout)
+        if worker:
+            terms = volume["spec"]["nodeAffinity"]["required"]["nodeSelectorTerms"]
+            lifecycle.case.assertTrue(terms)
+            for term in terms:
+                lifecycle.case.assertTrue(any(expression["key"] == "kubernetes.io/hostname" and expression["operator"] == "In" and expression["values"] == [worker] for expression in term.get("matchExpressions", [])))
+        lifecycle.case.assertEqual(volume["spec"]["claimRef"]["uid"], claim["metadata"]["uid"])
+        identities[claim["metadata"]["name"]] = [claim["metadata"]["uid"], volume["metadata"]["name"], volume["metadata"]["uid"]]
+    return identities
+
+
+def exercise_interruptions(case, lifecycle, control_plane, image, ca, expected):
+    state = wait_operand(lifecycle)
+    worker = state["spec"]["nodeName"]
+    nodes = json.loads(lifecycle.kube("get", "nodes", "-o", "json").stdout)["items"]
+    case.assertEqual({node["metadata"]["name"] for node in nodes}, {control_plane, worker})
+    case.assertNotEqual(control_plane, worker)
+    for node in nodes:
+        taints = node["spec"].get("taints", [])
+        case.assertEqual(any(taint["effect"] == "NoSchedule" for taint in taints), node["metadata"]["name"] == control_plane)
+        case.assertFalse(node["spec"].get("unschedulable", False))
+    retained = storage_identities(lifecycle, worker=worker)
+    original_image = state["spec"]["containers"][0]["image"]
+    def verify(stage, observed):
+        case.assertEqual(storage_identities(lifecycle), retained)
+        case.assertEqual(observed["spec"]["containers"][0]["image"], original_image)
+        case.assertEqual(lifecycle.query_on_node(observed["spec"]["nodeName"], observed["status"]["podIP"], image, ca, stage="wire"), expected)
+        print(json.dumps({"interruption": stage, "namespace": observed["metadata"]["namespace"], "pod_uid": observed["metadata"]["uid"],
+                          "node": observed["spec"]["nodeName"], "image": original_image, "result_digest": expected, "storage": retained}), flush=True)
+    verify("healthy", state)
+    api_outage(case, lifecycle, control_plane, state, image, ca, expected)
+    verify("api_recovered", wait_operand(lifecycle))
+    state = evict_operand(case, lifecycle, state)
+    verify("eviction_recovered", state)
+    state = drain_operand(case, lifecycle, state, image, ca, expected)
+    verify("local_path_drain_recovered", state)
+
+
 def owned_storage_class(context, storage_class, expected_context):
     if not expected_context or context != expected_context:
         raise ValueError("context must match the explicitly owned cluster creation")
@@ -104,6 +219,10 @@ def assert_retained_claims(case, before, after, extra_names=()):
 
 
 class KubernetesLifecycle(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE"), "requires an explicitly owned two-node kind topology")
+    def test_native_api_outage_eviction_and_local_path_drain(self):
+        self.exercise_native(True, False, include_interruptions=True)
+
     def test_native_tls_initialization_restart_drain_and_retained_private_mounts(self):
         self.exercise_native(False, False)
 
@@ -115,7 +234,7 @@ class KubernetesLifecycle(unittest.TestCase):
     def test_native_upgrade_preserves_verified_data_and_drain(self):
         self.exercise_native(True, True)
 
-    def exercise_native(self, include_data, include_upgrade):
+    def exercise_native(self, include_data, include_upgrade, include_interruptions=False):
         kubeconfig = Path(os.environ["POSITRON_TEST_KUBECONFIG"]).resolve(strict=True)
         chart = Path(os.environ["POSITRON_TEST_HELM_CHART"]).resolve(strict=True)
         image = os.environ["POSITRON_TEST_HELM_IMAGE"]
@@ -197,6 +316,10 @@ class KubernetesLifecycle(unittest.TestCase):
                     lifecycle.prepare(configuration)
                     lifecycle.ingest()
                     expected = lifecycle.query(stage="initial")
+                    if include_interruptions:
+                        control_plane = os.environ["POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE"]
+                        self.assertEqual(control_plane, context.removeprefix("kind-") + "-control-plane")
+                        exercise_interruptions(self, lifecycle, control_plane, image.split("@", 1)[1], root / "ca.pem", expected)
                 # Restart reattaches the same PVCs under fsGroup OnRootMismatch.
                 claims = json.loads(kube("get", "pvc", "-o", "json").stdout)["items"]
                 retained = {item["metadata"]["name"]: item["metadata"]["uid"] for item in claims}

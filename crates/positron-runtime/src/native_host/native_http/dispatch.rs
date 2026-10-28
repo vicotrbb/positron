@@ -1,4 +1,3 @@
-use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 
 use zeroize::Zeroizing;
@@ -24,6 +23,49 @@ use crate::{
 use super::super::ControlDiagnosticsFailure;
 
 use super::MAX_API_BODY_BYTES;
+
+fn bootstrap_claim_response(
+    administrator: &str,
+    ingest: Option<&str>,
+    query: Option<&str>,
+) -> Result<Response, Response> {
+    let fields = [
+        ("administrator_secret", Some(administrator)),
+        ("ingest_secret", ingest),
+        ("query_secret", query),
+    ];
+    let length = fields
+        .iter()
+        .try_fold(0_usize, |length, (name, secret)| {
+            secret.map_or(Some(length), |secret| {
+                length
+                    .checked_add(name.len())?
+                    .checked_add(secret.len())?
+                    .checked_add(2)
+            })
+        })
+        .filter(|length| *length <= 512)
+        .ok_or_else(|| Response::empty(503))?;
+    let mut body = Zeroizing::new(Vec::new());
+    body.try_reserve_exact(length)
+        .map_err(|_| Response::empty(503))?;
+    // The complete bound is reserved before any credential bytes are copied.
+    for (name, secret) in fields {
+        if let Some(secret) = secret {
+            body.extend_from_slice(name.as_bytes());
+            body.push(b'=');
+            body.extend_from_slice(secret.as_bytes());
+            body.push(b'\n');
+        }
+    }
+    Ok(Response {
+        status: 200,
+        content_type: "text/plain; charset=utf-8",
+        body: std::mem::take(&mut *body),
+        retry_after_seconds: None,
+        response_reservation: None,
+    })
+}
 
 const MAX_CONTROL_SUPPORT_BUNDLE_REQUEST_BYTES: usize = 8 * 1024;
 
@@ -767,20 +809,7 @@ fn route_inner<S: Read + Write>(
                 return Ok(Response::empty(400));
             }
             let claim = health.claim_bootstrap().map_err(|_| Response::empty(503))?;
-            let mut body = format!("administrator_secret={}\n", claim.secret());
-            if let Some(secret) = claim.ingest_secret() {
-                writeln!(&mut body, "ingest_secret={secret}").map_err(|_| Response::empty(503))?;
-            }
-            if let Some(secret) = claim.query_secret() {
-                writeln!(&mut body, "query_secret={secret}").map_err(|_| Response::empty(503))?;
-            }
-            Ok(Response {
-                status: 200,
-                content_type: "text/plain; charset=utf-8",
-                body: body.into_bytes(),
-                retry_after_seconds: None,
-                response_reservation: None,
-            })
+            bootstrap_claim_response(claim.secret(), claim.ingest_secret(), claim.query_secret())
         },
         (ListenerRole::Control, "GET", "/control/fenced/inspection" | "/control/doctor")
             if health.phase() == ProcessPhase::Fenced =>
@@ -951,6 +980,51 @@ mod tests {
         BootstrapPaths, CatalogConfigurationPublication, InitializationPlan, InstanceBootstrap,
         ListenerRole, RuntimeConfiguration, ServiceHandle, health::ProcessState,
     };
+
+    #[test]
+    fn bootstrap_claim_response_preserves_every_optional_credential_combination() {
+        let administrator = format!("pos_{}", "e".repeat(64));
+        let ingest = format!("pos_{}", "a".repeat(64));
+        let query = format!("pos_{}", "b".repeat(64));
+        for (include_ingest, include_query) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let response = match super::bootstrap_claim_response(
+                &administrator,
+                include_ingest.then_some(ingest.as_str()),
+                include_query.then_some(query.as_str()),
+            ) {
+                Ok(response) => response,
+                Err(_) => panic!("valid credential response refused"),
+            };
+            let mut expected = format!("administrator_secret={administrator}\n");
+            if include_ingest {
+                expected.push_str(&format!("ingest_secret={ingest}\n"));
+            }
+            if include_query {
+                expected.push_str(&format!("query_secret={query}\n"));
+            }
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.body(), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn bootstrap_claim_response_refuses_an_oversized_body_without_reflecting_secrets() {
+        let canary = "protected-canary".repeat(64);
+        for (administrator, ingest, query) in [
+            (canary.as_str(), None, None),
+            ("pos_fixed", Some(canary.as_str()), None),
+            ("pos_fixed", None, Some(canary.as_str())),
+        ] {
+            let response = match super::bootstrap_claim_response(administrator, ingest, query) {
+                Err(response) => response,
+                Ok(_) => panic!("oversized credential body accepted"),
+            };
+            assert_eq!(response.status(), 503);
+            assert!(response.body().is_empty());
+        }
+    }
 
     #[test]
     fn administrative_http_preserves_exact_generation_refusal() {

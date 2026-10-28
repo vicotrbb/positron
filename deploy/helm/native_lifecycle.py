@@ -57,6 +57,8 @@ class NativeLifecycle(DataLifecycle):
             process.stderr.close()
 
     def online(self, family, action=None, *args, credential=None, compose=None, timeout=35):
+        if callable(compose):
+            return super().online(family, action, *args, credential=credential, compose=compose, timeout=timeout)
         arguments = [family] + ([action] if action else [])
         if action == "wait" and "--operation-id" in args:
             self.last_operation = (family, args[args.index("--operation-id") + 1])
@@ -69,6 +71,45 @@ class NativeLifecycle(DataLifecycle):
             error = re.sub(br"command terminated with exit code [0-9]+\n$", b"", result.stderr)
             raise subprocess.CalledProcessError(result.returncode, ["positron", family], output=result.stdout, stderr=error)
         return result.stdout
+
+    def query_on_node(self, node, pod_ip, image, ca, *, stage):
+        import ipaddress
+        if not re.fullmatch(r"(?:k3d-)?positron-120-[a-z0-9]+(?:-[a-z0-9]+)*", node):
+            raise ValueError("explicit owned node required")
+        address = ipaddress.ip_address(pod_ip)
+        if address.is_unspecified or address.is_loopback or address.is_multicast:
+            raise ValueError("captured operand Pod IP required")
+        public = self.root / "query-public"
+        public.mkdir(mode=0o755, exist_ok=True)
+        for name, source in [("ca.pem", Path(ca)), ("query.json", self.fixture / "export/query.json")]:
+            destination = public / name
+            contents = source.read_bytes()
+            if destination.exists():
+                if destination.read_bytes() != contents:
+                    raise ValueError("captured public query inputs changed during interruption")
+            else:
+                destination.write_bytes(contents)
+                destination.chmod(0o444)
+        endpoint = f"[{address}]:8080" if address.version == 6 else f"{address}:8080"
+        def transport(action, *arguments, **options):
+            if action != "exec" or arguments[:4] != ("-T", "positron", "/usr/bin/positron", "query"):
+                raise ValueError("direct transport is restricted to the native read-only query")
+            native = list(arguments[3:])
+            native[native.index("--endpoint") + 1] = endpoint
+            client = "positron-120-query-" + uuid.uuid4().hex
+            command = ["docker", "run", "--rm", "-i", "--name", client, "--pull=never", "--network", "container:" + node,
+                       "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "65532:65532",
+                       "-v", f"{public / 'ca.pem'}:/etc/positron/tls/ca.pem:ro",
+                       "-v", f"{public / 'query.json'}:{INPUTS}/export/query.json:ro", image, *native]
+            try:
+                result = subprocess.run(command, input=options["input"], timeout=options["timeout"], capture_output=True, check=True)
+                return result.stdout
+            finally:
+                cleanup = subprocess.run(["docker", "rm", "-f", client], capture_output=True, timeout=10, check=False)
+                absent = b"Error response from daemon: No such container: " + client.encode() + b"\n"
+                if cleanup.returncode and cleanup.stderr != absent:
+                    raise RuntimeError("owned direct query client cleanup failed")
+        return self.query(compose=transport, stage=stage)
 
     def diagnostics(self):
         if not self.last_operation: return
@@ -124,7 +165,7 @@ class NativeLifecycle(DataLifecycle):
         environment = dict(os.environ, POSITRON_TEST_COMPOSE_FIXTURE_ROOT=str(self.fixture),
                            POSITRON_TEST_COMPOSE_CURRENT_BINARY=os.environ["POSITRON_TEST_HELM_CURRENT_BINARY"])
         helper = Path(os.environ["POSITRON_TEST_HELM_FIXTURE_HELPER"]).resolve()
-        command = ["docker", "run", "--rm", "-i", "--network", "none", "-v", f"{self.root}:{self.root}",
+        command = ["docker", "run", "--rm", "-i", "--user", f"{os.getuid()}:{os.getgid()}", "--network", "none", "-v", f"{self.root}:{self.root}",
                    "-v", f"{helper.parent}:{helper.parent}:ro", "-v", f"{Path(environment['POSITRON_TEST_COMPOSE_CURRENT_BINARY']).parent}:{Path(environment['POSITRON_TEST_COMPOSE_CURRENT_BINARY']).parent}:ro"]
         for key in ["POSITRON_TEST_COMPOSE_FIXTURE_ROOT", "POSITRON_TEST_COMPOSE_CURRENT_BINARY", "POSITRON_TEST_UPGRADE_BINARY", "POSITRON_TEST_SOURCE_COMMIT", "POSITRON_TEST_CANDIDATE_COMMIT"]:
             command += ["-e", key + "=" + environment[key]]
