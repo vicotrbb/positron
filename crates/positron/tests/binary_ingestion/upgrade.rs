@@ -1,6 +1,6 @@
 //! Automatic native handoff and candidate restart through installed commands.
 use super::*;
-use recovery::{Installed, execute, field, mutate, online, plain};
+use recovery::{Installed, execute, field, invoke, mutate, online, plain};
 use std::path::Path;
 #[path = "../support/upgrade_candidate.rs"]
 mod candidate;
@@ -97,7 +97,34 @@ pub(super) fn run(
     ]);
     let watchdog = Instant::now() + Duration::from_secs(300);
     loop {
-        let advanced = execute(installed.binary, &arguments, None)?;
+        if Instant::now() >= watchdog {
+            return Err("offline Upgrade snapshot watchdog expired".into());
+        }
+        let advanced = invoke(installed.binary, &arguments, None)?;
+        let advanced = if advanced.status.code() == Some(2)
+            && advanced.stdout.is_empty()
+            && String::from_utf8_lossy(&advanced.stderr).trim()
+                == "positron: upgrade remains resumable; inspect and retry after trusted time or capacity recovers"
+        {
+            // The public CLI explicitly permits this same accepted intent to
+            // resume. Inspect its durable truth before the next bounded turn.
+            eprintln!("installed offline Upgrade inspects explicit resumable refusal");
+            let mut status = plain(&["upgrade", "offline", "status", "--config"]);
+            status.extend([
+                installed.config.display().to_string(),
+                "--operation-id".into(),
+                operation.clone(),
+            ]);
+            execute(installed.binary, &status, None)?
+        } else {
+            assert!(
+                advanced.status.success(),
+                "offline Upgrade advance: {}",
+                String::from_utf8_lossy(&advanced.stderr)
+            );
+            advanced
+        };
+        assert_eq!(field(&advanced, "operation_id")?, operation);
         eprintln!(
             "installed offline Upgrade turn: {}",
             String::from_utf8_lossy(&advanced.stdout)
