@@ -136,7 +136,7 @@ class NativeLifecycle(DataLifecycle):
         self.recipient = (self.fixture / "export/recipient").read_text()
         self.candidate_digest = (self.fixture / "export/candidate-digest").read_text()
         self.apply({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": self.inputs_claim},
-                    "spec": {"accessModes": ["ReadWriteOnce"], "volumeMode": "Filesystem", "storageClassName": "standard",
+                    "spec": {"accessModes": ["ReadWriteOnce"], "volumeMode": "Filesystem", "storageClassName": self.values["storageClass"],
                              "resources": {"requests": {"storage": "1Gi"}}}})
         self.install({"inputs/export/" + path.name: path.read_bytes() for path in (self.fixture / "export").iterdir()})
         self.apply({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "native-positron"}, "data": {"positron.toml": self.config}})

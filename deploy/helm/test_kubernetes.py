@@ -1,11 +1,11 @@
-"""Public lifecycle integration against one explicitly selected isolated kind target."""
+"""Public lifecycle integration against an explicitly selected owned kind or k3d target."""
 import base64
 import json
-import hashlib
 import select
 import socket
 import ssl
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -23,6 +23,77 @@ def command(arguments, *, data=None, timeout=60, check=True):
     if check and result.returncode:
         raise RuntimeError(f"{arguments[0]} failed ({result.returncode}): {result.stderr.decode(errors='replace')[:2048]}")
     return result
+
+
+def owned_storage_class(context, storage_class, expected_context):
+    if not expected_context or context != expected_context:
+        raise ValueError("context must match the explicitly owned cluster creation")
+    if not re.fullmatch(r"(?:kind|k3d)-positron-120-[a-z0-9]+(?:-[a-z0-9]+)*", context):
+        raise ValueError("dedicated isolated kind or k3d context required")
+    if not storage_class or storage_class != storage_class.strip():
+        raise ValueError("explicit storage class required")
+    return storage_class
+
+
+def inspect_private_modes(case, kube, apply, workload):
+    from data_lifecycle import ADMIN_IMAGE
+    state = json.loads(kube("get", "statefulset", workload, "-o", "json").stdout)
+    case.assertEqual(state["spec"]["replicas"], 0, "stop the live owner before private inspection")
+    release = workload.removesuffix("-positron")
+    pods = json.loads(kube("get", "pods", "-l", "app.kubernetes.io/instance=" + release, "-o", "json").stdout)
+    case.assertEqual(pods["items"], [], "no live PVC owner may overlap private inspection")
+    name = "native-private-inspection"
+    security = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
+    pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name}, "spec": {
+        "restartPolicy": "Never", "automountServiceAccountToken": False,
+        "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532, "fsGroup": 65532,
+                            "fsGroupChangePolicy": "OnRootMismatch", "seccompProfile": {"type": "RuntimeDefault"}},
+        "containers": [{"name": "inspect", "image": ADMIN_IMAGE,
+            "command": ["stat", "-c", "%u:%g:%a:%i", "/data/instance", "/secrets/instance", "/secrets/instance/local-root-key.v1"],
+            "securityContext": security, "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}, "limits": {"cpu": "50m", "memory": "64Mi"}},
+            "volumeMounts": [{"name": "data", "mountPath": "/data", "readOnly": True}, {"name": "secrets", "mountPath": "/secrets", "readOnly": True}]}],
+        "volumes": [{"name": suffix, "persistentVolumeClaim": {"claimName": workload + "-" + suffix, "readOnly": True}} for suffix in ["data", "secrets"]]}}
+    apply(pod)
+    try:
+        kube("wait", "--for=jsonpath={.status.phase}=Succeeded", "pod/" + name, "--timeout=180s", timeout=190)
+        status = json.loads(kube("get", "pod", name, "-o", "json").stdout)
+        case.assertEqual(status["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"], 0)
+        rows = kube("logs", name).stdout.decode().splitlines()
+        case.assertEqual(len(rows), 3)
+        metadata = [tuple(int(field) for field in row.split(":")) for row in rows]
+        for observed, mode in zip(metadata, [700, 700, 600]):
+            case.assertEqual(len(observed), 4)
+            case.assertEqual(observed[:3], (65532, 65532, mode))
+            case.assertGreater(observed[3], 0)
+        return metadata
+    finally:
+        kube("delete", "pod", name, "--wait=true", "--timeout=90s", timeout=100)
+        kube("wait", "--for=delete", "pod/" + name, "--timeout=90s", timeout=100)
+
+
+def listener_rejection_count(kube, pod, timeout=10):
+    output = kube("logs", pod, "--tail=200", "--limit-bytes=32768", timeout=timeout).stdout
+    count = 0
+    for line in output.splitlines():
+        try: record = json.loads(line)
+        except (ValueError, UnicodeDecodeError): continue
+        if isinstance(record, dict) and record.get("event") == "configuration_reload_rejected" and record.get("category") == "listener_unavailable": count += 1
+    return count
+
+
+def reload_projected_identity(kube, pod, identity, expected, timeout=180, rejection_baseline=None):
+    deadline = time.monotonic() + timeout
+    def remaining():
+        budget = deadline - time.monotonic()
+        if budget <= 0: raise AssertionError("native TLS generation did not establish the expected public outcome")
+        return budget
+    while True:
+        result = kube("exec", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock", timeout=min(10, remaining()))
+        if result.stdout != b"status=reload_requested\n": raise AssertionError("native reload was not acknowledged")
+        try: observed = identity(remaining())
+        except OSError: observed = None
+        if observed == expected and (rejection_baseline is None or listener_rejection_count(kube, pod, timeout=min(10, remaining())) > rejection_baseline): return
+        time.sleep(min(1, remaining()))
 
 
 def assert_retained_claims(case, before, after, extra_names=()):
@@ -49,7 +120,7 @@ class KubernetesLifecycle(unittest.TestCase):
         chart = Path(os.environ["POSITRON_TEST_HELM_CHART"]).resolve(strict=True)
         image = os.environ["POSITRON_TEST_HELM_IMAGE"]
         context = command(["kubectl", "--kubeconfig", str(kubeconfig), "config", "current-context"]).stdout.decode().strip()
-        self.assertTrue(context.startswith("kind-positron-120-"), "dedicated isolated kind context required")
+        storage_class = owned_storage_class(context, os.environ.get("POSITRON_TEST_HELM_STORAGE_CLASS", "standard"), os.environ.get("POSITRON_TEST_HELM_CONTEXT", ""))
         namespace = "positron120-" + uuid.uuid4().hex[:10]
         release = "native"
         workload = release + "-positron"
@@ -68,18 +139,10 @@ class KubernetesLifecycle(unittest.TestCase):
                 time.sleep(0.2)
             kube("wait", "--for=condition=Ready", f"pod/{pod}", "--timeout=180s", timeout=190)
         def private_modes():
-            current = json.loads(kube("get", "pod", pod, "-o", "json").stdout)
-            node = current["spec"]["nodeName"]
-            self.assertTrue(node.startswith("positron-120-"))
-            for suffix in ["data", "secrets"]:
-                claim = json.loads(kube("get", "pvc", workload + "-" + suffix, "-o", "json").stdout)
-                volume = json.loads(kube("get", "pv", claim["spec"]["volumeName"], "-o", "json").stdout)
-                path = volume["spec"]["hostPath"]["path"] + "/instance"
-                metadata = command(["docker", "exec", node, "stat", "-c", "%u:%a", path]).stdout
-                self.assertEqual(metadata.strip(), b"65532:700")
-                if suffix == "secrets":
-                    key = command(["docker", "exec", node, "stat", "-c", "%u:%a", path + "/local-root-key.v1"]).stdout
-                    self.assertEqual(key.strip(), b"65532:600")
+            scale(0)
+            observed = inspect_private_modes(self, kube, apply, workload)
+            scale(1)
+            return observed
         def scale(replicas):
             kube("scale", f"statefulset/{workload}", f"--replicas={replicas}")
             if replicas:
@@ -100,13 +163,13 @@ class KubernetesLifecycle(unittest.TestCase):
                             "type": "Opaque", "data": {name: base64.b64encode((root / name).read_bytes()).decode()
                             for name in ["server.pem", "server-key.pem", "ca.pem"]}}
                 apply(tls_secret())
-                values = {"image": image, "storageClass": "standard", "tlsSecret": "positron-tls"}
+                values = {"image": image, "storageClass": storage_class, "tlsSecret": "positron-tls"}
                 values_file = root / "values.json"
                 values_file.write_text(json.dumps(values))
                 command([*helm, "install", release, str(chart), "-f", str(values_file)])
                 installed = True
                 ready()
-                private_modes()
+                private_before_restart = private_modes()
                 state = json.loads(kube("get", "pod", pod, "-o", "json").stdout)
                 self.assertEqual(state["status"]["initContainerStatuses"][0]["state"]["terminated"]["exitCode"], 0)
                 self.assertTrue(state["spec"]["containers"][0]["securityContext"]["readOnlyRootFilesystem"])
@@ -140,7 +203,7 @@ class KubernetesLifecycle(unittest.TestCase):
                 kube("delete", "pod", pod, "--wait=true", "--timeout=180s", timeout=190)
                 ready()
                 self.assertEqual(retained, {item["metadata"]["name"]: item["metadata"]["uid"] for item in json.loads(kube("get", "pvc", "-o", "json").stdout)["items"]})
-                private_modes()
+                self.assertEqual(private_modes(), private_before_restart)
                 if lifecycle:
                     self.assertEqual(lifecycle.query(stage="restart"), expected)
                     lifecycle.backup()
@@ -154,46 +217,40 @@ class KubernetesLifecycle(unittest.TestCase):
                 old_ca = (root / "ca.pem").read_bytes()
                 material(root)
                 (root / "ca.pem").write_bytes(old_ca + b"\n" + (root / "ca.pem").read_bytes())
-                valid_key = (root / "server-key.pem").read_bytes()
                 forward = subprocess.Popen([*kubectl, "port-forward", "pod/" + pod, "0:13133", "--address", "127.0.0.1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 try:
                     self.assertTrue(select.select([forward.stdout], [], [], 15)[0], "TLS port-forward did not bind")
                     port = int(forward.stdout.readline().decode().split("127.0.0.1:", 1)[1].split(" ", 1)[0])
                     trust = ssl.create_default_context(cafile=str(root / "ca.pem"))
-                    def active_identity():
-                        with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+                    def active_identity(timeout=5):
+                        deadline = time.monotonic() + timeout
+                        with socket.create_connection(("127.0.0.1", port), timeout=min(5, timeout)) as connection:
+                            budget = deadline - time.monotonic()
+                            if budget <= 0: raise TimeoutError("TLS observation deadline expired")
+                            connection.settimeout(min(5, budget))
                             with trust.wrap_socket(connection, server_hostname="localhost") as tls:
                                 return tls.getpeercert(binary_form=True)
                     prior_identity = active_identity()
                     new_identity = ssl.PEM_cert_to_DER_cert((root / "server.pem").read_text())
                     self.assertNotEqual(prior_identity, new_identity)
-                    def publish_and_reload():
+                    def publish_and_reload(expected, rejected=False):
+                        baseline = listener_rejection_count(kube, pod) if rejected else None
                         apply(tls_secret())
-                        node = prior_state["spec"]["nodeName"]
-                        projected_key = "/var/lib/kubelet/pods/" + prior_state["metadata"]["uid"] + "/volumes/kubernetes.io~secret/tls/server-key.pem"
-                        expected_hash = hashlib.sha256((root / "server-key.pem").read_bytes()).hexdigest()
-                        deadline = time.monotonic() + 180
-                        while True:
-                            observed = command(["docker", "exec", node, "sha256sum", projected_key], check=False).stdout.decode().split()
-                            if observed and observed[0] == expected_hash: break
-                            self.assertLess(time.monotonic(), deadline, "Secret generation did not project")
-                            time.sleep(0.2)
-                        result = kube("exec", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock")
-                        self.assertEqual(result.stdout, b"status=reload_requested\n")
-                    publish_and_reload()
-                    deadline = time.monotonic() + 30
-                    while active_identity() != new_identity:
-                        self.assertLess(time.monotonic(), deadline, "native TLS reload did not publish new identity")
-                        time.sleep(0.1)
+                        reload_projected_identity(kube, pod, active_identity, expected, rejection_baseline=baseline)
+                    publish_and_reload(new_identity)
                     (root / "server-key.pem").write_bytes(b"invalid candidate key")
-                    publish_and_reload()
-                    time.sleep(0.5)
+                    publish_and_reload(new_identity, rejected=True)
                     probe[probe.index("wrong.invalid")] = "localhost"
                     for _ in range(3):
                         self.assertEqual(active_identity(), new_identity)
                         self.assertEqual(kube("exec", pod, "--", "/usr/bin/positron", *probe).stdout, b"status=live\n")
-                    (root / "server-key.pem").write_bytes(valid_key)
-                    publish_and_reload()
+                    overlap = (root / "ca.pem").read_bytes()
+                    material(root)
+                    (root / "ca.pem").write_bytes(overlap + b"\n" + (root / "ca.pem").read_bytes())
+                    trust.load_verify_locations(cafile=str(root / "ca.pem"))
+                    repaired_identity = ssl.PEM_cert_to_DER_cert((root / "server.pem").read_text())
+                    self.assertNotEqual(repaired_identity, new_identity)
+                    publish_and_reload(repaired_identity)
                     ready()
                     after_rotation = json.loads(kube("get", "pod", pod, "-o", "json").stdout)
                     self.assertEqual(after_rotation["metadata"]["uid"], prior_state["metadata"]["uid"])

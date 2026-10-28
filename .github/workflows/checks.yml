@@ -530,6 +530,7 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/helm-tools/kind"
           export PATH="$RUNNER_TEMP/helm-tools:$RUNNER_TEMP/helm-tools/linux-$architecture:$PATH"
           cluster="positron-120-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export POSITRON_TEST_HELM_CONTEXT="kind-$cluster"
           echo "$cluster" > "$RUNNER_TEMP/helm-cluster-name"
           export POSITRON_TEST_KUBECONFIG="$RUNNER_TEMP/helm-kubeconfig"
           kind create cluster --name "$cluster" --kubeconfig "$POSITRON_TEST_KUBECONFIG" --image kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f --wait 180s
