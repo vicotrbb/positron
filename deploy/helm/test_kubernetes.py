@@ -1,6 +1,10 @@
 """Public lifecycle integration against one explicitly selected isolated kind target."""
 import base64
 import json
+import hashlib
+import select
+import socket
+import ssl
 import os
 from pathlib import Path
 import subprocess
@@ -106,7 +110,7 @@ class KubernetesLifecycle(unittest.TestCase):
                 state = json.loads(kube("get", "pod", pod, "-o", "json").stdout)
                 self.assertEqual(state["status"]["initContainerStatuses"][0]["state"]["terminated"]["exitCode"], 0)
                 self.assertTrue(state["spec"]["containers"][0]["securityContext"]["readOnlyRootFilesystem"])
-                probe = ["doctor", "--ready", "--endpoint", "127.0.0.1:13133", "--server-name", "localhost", "--trust-file", "/etc/positron/tls/ca.pem"]
+                probe = ["doctor", "--ready", "--endpoint", "127.0.0.1:13133", "--server-name", "localhost", "--trust-file", "/etc/positron/tls/..data/ca.pem"]
                 self.assertEqual(kube("exec", pod, "--", "/usr/bin/positron", *probe).stdout, b"status=ready\n")
                 probe[1] = "--live"
                 self.assertEqual(kube("exec", pod, "--", "/usr/bin/positron", *probe).stdout, b"status=live\n")
@@ -145,14 +149,63 @@ class KubernetesLifecycle(unittest.TestCase):
                     print("native_fresh_restore_query_verified=true", flush=True)
                     if include_upgrade:
                         lifecycle.upgrade(expected)
-                # A new CA is not visible through subPath until deliberate replacement.
+                # Whole Secret projections rotate through the native owner, without Pod replacement.
+                prior_state = json.loads(kube("get", "pod", pod, "-o", "json").stdout)
+                old_ca = (root / "ca.pem").read_bytes()
                 material(root)
-                apply(tls_secret())
-                probe[probe.index("wrong.invalid")] = "localhost"
-                self.assertEqual(kube("exec", pod, "--", "/usr/bin/positron", *probe).stdout, b"status=live\n")
-                kube("delete", "pod", pod, "--wait=true", "--timeout=180s", timeout=190)
-                ready()
-                self.assertEqual(kube("exec", pod, "--", "/usr/bin/positron", *probe).stdout, b"status=live\n")
+                (root / "ca.pem").write_bytes(old_ca + b"\n" + (root / "ca.pem").read_bytes())
+                valid_key = (root / "server-key.pem").read_bytes()
+                forward = subprocess.Popen([*kubectl, "port-forward", "pod/" + pod, "0:13133", "--address", "127.0.0.1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    self.assertTrue(select.select([forward.stdout], [], [], 15)[0], "TLS port-forward did not bind")
+                    port = int(forward.stdout.readline().decode().split("127.0.0.1:", 1)[1].split(" ", 1)[0])
+                    trust = ssl.create_default_context(cafile=str(root / "ca.pem"))
+                    def active_identity():
+                        with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+                            with trust.wrap_socket(connection, server_hostname="localhost") as tls:
+                                return tls.getpeercert(binary_form=True)
+                    prior_identity = active_identity()
+                    new_identity = ssl.PEM_cert_to_DER_cert((root / "server.pem").read_text())
+                    self.assertNotEqual(prior_identity, new_identity)
+                    def publish_and_reload():
+                        apply(tls_secret())
+                        node = prior_state["spec"]["nodeName"]
+                        projected_key = "/var/lib/kubelet/pods/" + prior_state["metadata"]["uid"] + "/volumes/kubernetes.io~secret/tls/server-key.pem"
+                        expected_hash = hashlib.sha256((root / "server-key.pem").read_bytes()).hexdigest()
+                        deadline = time.monotonic() + 180
+                        while True:
+                            observed = command(["docker", "exec", node, "sha256sum", projected_key], check=False).stdout.decode().split()
+                            if observed and observed[0] == expected_hash: break
+                            self.assertLess(time.monotonic(), deadline, "Secret generation did not project")
+                            time.sleep(0.2)
+                        result = kube("exec", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock")
+                        self.assertEqual(result.stdout, b"status=reload_requested\n")
+                    publish_and_reload()
+                    deadline = time.monotonic() + 30
+                    while active_identity() != new_identity:
+                        self.assertLess(time.monotonic(), deadline, "native TLS reload did not publish new identity")
+                        time.sleep(0.1)
+                    (root / "server-key.pem").write_bytes(b"invalid candidate key")
+                    publish_and_reload()
+                    time.sleep(0.5)
+                    probe[probe.index("wrong.invalid")] = "localhost"
+                    for _ in range(3):
+                        self.assertEqual(active_identity(), new_identity)
+                        self.assertEqual(kube("exec", pod, "--", "/usr/bin/positron", *probe).stdout, b"status=live\n")
+                    (root / "server-key.pem").write_bytes(valid_key)
+                    publish_and_reload()
+                    ready()
+                    after_rotation = json.loads(kube("get", "pod", pod, "-o", "json").stdout)
+                    self.assertEqual(after_rotation["metadata"]["uid"], prior_state["metadata"]["uid"])
+                    self.assertEqual(after_rotation["status"]["containerStatuses"][0]["restartCount"], prior_state["status"]["containerStatuses"][0]["restartCount"])
+                finally:
+                    forward.terminate()
+                    try: forward.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        forward.kill()
+                        forward.wait(timeout=5)
+                    forward.stdout.close()
+                    forward.stderr.close()
                 scale(0)
                 command([*helm, "uninstall", release])
                 installed = False

@@ -45,6 +45,69 @@ pub(crate) fn connect_owner_control(path: &Path, deadline: Duration) -> io::Resu
     Ok(stream)
 }
 
+/// Exchanges one bounded request under one absolute deadline. The caller's
+/// typed decoder may recognize a complete frame before the peer closes.
+pub(crate) fn owner_control_request(
+    path: &Path,
+    request: &[u8],
+    maximum_response_bytes: usize,
+    complete: impl Fn(&[u8]) -> bool,
+) -> io::Result<Vec<u8>> {
+    let timeout = Duration::from_secs(5);
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+    let stream = connect_owner_control(path, timeout)?;
+    stream.set_nonblocking(true)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()?;
+    runtime.block_on(async {
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            let stream = tokio::net::UnixStream::from_std(stream)?;
+            let mut pending = request;
+            while !pending.is_empty() {
+                stream.writable().await?;
+                match stream.try_write(pending) {
+                    Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                    Ok(written) => {
+                        pending = pending
+                            .get(written..)
+                            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                    Err(error) => return Err(error),
+                }
+            }
+            let mut response = Vec::with_capacity(maximum_response_bytes.min(8192));
+            let mut buffer = [0_u8; 1024];
+            loop {
+                stream.readable().await?;
+                match stream.try_read(&mut buffer) {
+                    Ok(0) => return Ok(response),
+                    Ok(read) => {
+                        if read > maximum_response_bytes.saturating_sub(response.len()) {
+                            return Err(io::Error::from(io::ErrorKind::InvalidData));
+                        }
+                        response.extend_from_slice(
+                            buffer
+                                .get(..read)
+                                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?,
+                        );
+                        if complete(&response) {
+                            return Ok(response);
+                        }
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+    })
+}
 fn trusted_endpoint(path: &Path) -> io::Result<Metadata> {
     let metadata = fs::symlink_metadata(path)?;
     let mode = metadata.permissions().mode() & 0o777;

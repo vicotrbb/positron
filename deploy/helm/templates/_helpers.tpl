@@ -36,7 +36,7 @@ initContainers:
     image: {{ .Values.image | quote }}
     imagePullPolicy: IfNotPresent
     command: [/usr/bin/positron]
-    args: [bootstrap, prepare-storage, --config, /etc/positron/positron.toml]
+    args: [bootstrap, prepare-storage, --config, /etc/positron/config/positron.toml]
     securityContext:
       allowPrivilegeEscalation: false
       readOnlyRootFilesystem: true
@@ -46,7 +46,7 @@ initContainers:
     volumeMounts:
       - {name: data, mountPath: /var/lib/positron}
       - {name: secrets, mountPath: /var/lib/positron-secrets}
-      - {name: configuration, mountPath: /etc/positron/positron.toml, subPath: positron.toml, readOnly: true}
+      - {name: configuration, mountPath: /etc/positron/config, readOnly: true}
       - {name: runtime, mountPath: /run/positron}
 containers:
   - name: positron
@@ -56,7 +56,7 @@ containers:
     {{- if .Values.maintenance.enabled }}
     args: {{ .Values.maintenance.args | toJson }}
     {{- else }}
-    args: [serve, --init-if-empty, --config, /etc/positron/positron.toml]
+    args: [serve, --init-if-empty, --config, /etc/positron/config/positron.toml]
     {{- end }}
     securityContext:
       allowPrivilegeEscalation: false
@@ -72,18 +72,18 @@ containers:
       - {name: loki-push, containerPort: 3100}
     startupProbe:
       exec:
-        command: [/usr/bin/positron, doctor, --live, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/ca.pem]
+        command: [/usr/bin/positron, doctor, --live, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/..data/ca.pem]
       periodSeconds: 5
       timeoutSeconds: 6
       failureThreshold: 60
     readinessProbe:
       exec:
-        command: [/usr/bin/positron, doctor, --ready, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/ca.pem]
+        command: [/usr/bin/positron, doctor, --ready, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/..data/ca.pem]
       periodSeconds: 10
       timeoutSeconds: 6
     livenessProbe:
       exec:
-        command: [/usr/bin/positron, doctor, --live, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/ca.pem]
+        command: [/usr/bin/positron, doctor, --live, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/..data/ca.pem]
       periodSeconds: 10
       timeoutSeconds: 6
     {{- end }}
@@ -91,10 +91,8 @@ containers:
       - {name: data, mountPath: /var/lib/positron}
       - {name: secrets, mountPath: /var/lib/positron-secrets}
       - {name: backups, mountPath: /var/lib/positron-backups}
-      - {name: configuration, mountPath: /etc/positron/positron.toml, subPath: positron.toml, readOnly: true}
-      - {name: tls, mountPath: /etc/positron/tls/server.pem, subPath: server.pem, readOnly: true}
-      - {name: tls, mountPath: /etc/positron/tls/server-key.pem, subPath: server-key.pem, readOnly: true}
-      - {name: tls, mountPath: /etc/positron/tls/ca.pem, subPath: ca.pem, readOnly: true}
+      - {name: configuration, mountPath: /etc/positron/config, readOnly: true}
+      - {name: tls, mountPath: /etc/positron/tls, readOnly: true}
       - {name: runtime, mountPath: /run/positron}
       {{- if .Values.operationInputsClaim }}
       - {name: operation-inputs, mountPath: /etc/positron/operations, readOnly: true}

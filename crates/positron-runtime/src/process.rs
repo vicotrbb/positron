@@ -642,6 +642,12 @@ impl RunningProcess {
         self.services.clone()
     }
 
+    /// Consumes one coalesced request at the process owner's signal boundary.
+    #[must_use]
+    pub fn take_configuration_reload_request(&self) -> bool {
+        self.state.health().take_configuration_reload_request()
+    }
+
     /// Applies one pending integrity-fence request at the sole owner of
     /// listeners, tasks, key custody, and mutable volume authority.
     ///
@@ -808,10 +814,12 @@ impl RunningProcess {
         let observed = runtime.observed()?;
         let plan = observed.effective().semantic_diff(&candidate).plan();
         let tls_material_listener_set = tls_material_listener_set(&candidate)?;
-        if !matches!(
+        let stage_listeners = matches!(
             plan,
             ConfigurationDiffPlan::DrainThenPublish | ConfigurationDiffPlan::NoChange
-        ) {
+        ) || (plan == ConfigurationDiffPlan::PublishLive
+            && tls_material_listener_set.is_some());
+        if !stage_listeners {
             return self.with_catalog_operation(|| runtime.reload_with(candidate, publication));
         }
         let Some(factory) = self.listener_generation_factory.as_ref() else {
@@ -883,7 +891,7 @@ impl RunningProcess {
             }
         }
         let outcome = match self.with_catalog_operation(|| {
-            if plan == ConfigurationDiffPlan::NoChange {
+            if plan != ConfigurationDiffPlan::DrainThenPublish {
                 runtime.reload_with(Arc::clone(&candidate), publication)
             } else {
                 runtime.publish_staged_listener_reload(

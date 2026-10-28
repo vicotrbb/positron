@@ -1,3 +1,4 @@
+mod reload;
 use std::{path::Path, process::ExitCode};
 
 use positron_config::{
@@ -29,6 +30,9 @@ fn execute(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> Result<String, OperatorFailure> {
     match parse(arguments)? {
+        Command::Reload(path) => {
+            reload::request(Path::new(&path)).map_err(|()| OperatorFailure::ReloadUnavailable)
+        },
         Command::Validate(inputs) => {
             let effective = resolve_inputs(inputs, environment)?;
             Ok(format!(
@@ -185,6 +189,7 @@ fn domain_description(domain: ValueDomain) -> String {
 }
 
 enum Command {
+    Reload(String),
     Validate(InputOptions),
     Explain(Option<String>),
     Effective(InputOptions),
@@ -200,6 +205,16 @@ struct InputOptions {
 
 fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, OperatorFailure> {
     match arguments.next().as_deref() {
+        Some("reload") => {
+            if arguments.next().as_deref() != Some("--control-path") {
+                return Err(OperatorFailure::Usage);
+            }
+            let path = arguments.next().ok_or(OperatorFailure::Usage)?;
+            if arguments.next().is_some() {
+                return Err(OperatorFailure::Usage);
+            }
+            Ok(Command::Reload(path))
+        },
         Some("validate") => Ok(Command::Validate(parse_inputs(arguments, false)?)),
         Some("explain") => Ok(Command::Explain(parse_explain(arguments)?)),
         Some("effective") => Ok(Command::Effective(parse_effective(arguments)?)),
@@ -289,6 +304,7 @@ fn parse_migrate(mut arguments: impl Iterator<Item = String>) -> Result<Command,
 }
 
 enum OperatorFailure {
+    ReloadUnavailable,
     Usage,
     RedactionRequired,
     UnknownExplainSetting,
@@ -300,7 +316,8 @@ enum OperatorFailure {
 impl OperatorFailure {
     fn render(&self) -> String {
         match self {
-            Self::Usage => "usage: positron config validate [--config PATH] [--set PATH=VALUE] | explain [--setting PATH] | effective --redacted [--config PATH] [--set PATH=VALUE] | diff --current PATH --candidate PATH | migrate --config PATH --output PATH".to_owned(),
+            Self::ReloadUnavailable => "configuration reload request unavailable; application not confirmed".to_owned(),
+            Self::Usage => "usage: positron config validate [--config PATH] [--set PATH=VALUE] | explain [--setting PATH] | effective --redacted [--config PATH] [--set PATH=VALUE] | diff --current PATH --candidate PATH | migrate --config PATH --output PATH | reload --control-path PATH".to_owned(),
             Self::RedactionRequired => "effective configuration requires --redacted".to_owned(),
             Self::UnknownExplainSetting => "configuration_rejected code=unknown_setting retry=after_input_correction completion=rejected source=command_line_override".to_owned(),
             Self::Input(ConfigurationInputFailure::DocumentUnavailable) => "configuration_rejected code=configuration_document_unavailable retry=after_input_correction completion=rejected source=configuration_document".to_owned(),
@@ -329,4 +346,9 @@ impl OperatorFailure {
             Self::Candidate(ConfigurationCandidateFailure::CleanupFailed) => "configuration_rejected code=candidate_cleanup_failed retry=after_input_correction completion=rejected source=configuration_document".to_owned(),
         }
     }
+}
+
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_reload_response(bytes: &[u8]) {
+    let _parsed = reload::validate_response(bytes);
 }

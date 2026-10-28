@@ -109,6 +109,36 @@ fn exercise_live_claim(lost_response: bool) {
         stream.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 404"));
     }
+    // The startup Control listener reaches the sole process reload owner.
+    let reload = Command::new(binary)
+        .args(["config", "reload", "--control-path"])
+        .arg(&socket)
+        .output()
+        .unwrap();
+    assert!(
+        reload.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reload.stderr)
+    );
+    assert_eq!(reload.stdout, b"status=reload_requested\n");
+    for endpoint in [endpoints[0], endpoints[1]] {
+        let mut stream = TcpStream::connect(endpoint).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream.write_all(b"POST /control/configuration/reload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 404"));
+    }
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(b"POST /control/configuration/reload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx").unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400"));
     // An unexpected request body cannot consume a claim.
     let mut stream = UnixStream::connect(&socket).unwrap();
     stream

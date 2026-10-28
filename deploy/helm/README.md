@@ -43,9 +43,26 @@ Provision `server.pem`, `server-key.pem` and `ca.pem` in a namespace-local Secre
 The certificate must include `localhost` for native Operations probes plus DNS
 names used by clients, such as `example-positron.NAMESPACE.svc`. The private key
 is projected read-only with mode 0440 for the pod's exclusive fsGroup. Secret
-files use subPath mounts because native trust-file loading rejects symlinks.
-Kubernetes does not update subPath mounts on Secret replacement: deliberately
-restart the database after certificate rotation and verify the new certificate.
+files mount as a whole projected Secret. Probes read the regular CA leaf through
+`/etc/positron/tls/..data/ca.pem`, preserving the native final-component no-follow
+policy. The native configuration has its own projected directory at
+`/etc/positron/config/positron.toml`.
+
+For CA rotation, first publish a bounded overlap bundle containing both old and
+new authorities. Wait for the projected generation to become visible and verify
+native readiness before replacing the server identity. After replacing the Secret
+or ConfigMap, request the existing process-owned reload without replacing the Pod:
+
+```console
+kubectl --namespace NAMESPACE exec example-positron-0 -- /usr/bin/positron config reload --control-path /run/positron/control/control.sock
+```
+
+`status=reload_requested` acknowledges a coalesced request, not successful
+application. Verify the active TLS identity and readiness before retiring the old
+CA. Invalid certificate/key candidates retain the previous native listener
+identity. A malformed or prematurely narrowed probe trust bundle is an operator
+error and can fail probes even while the previous listener remains valid. The
+Control request is available only in Serving; recovery does not consume it.
 Never disable verification or put TLS private bytes in Helm values.
 
 ```console

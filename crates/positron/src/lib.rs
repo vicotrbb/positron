@@ -67,11 +67,12 @@ pub fn fuzz_doctor_status(bytes: &[u8]) -> Option<String> {
     doctor_cli::fuzz_status(bytes)
 }
 
-/// Exercise the bounded owner-local claim response codec without storage or output.
+/// Exercise bounded owner-local claim and reload response codecs without I/O.
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub fn fuzz_bootstrap_control_response(bytes: &[u8]) {
     let _parsed = bootstrap_cli::control::response_body(bytes);
+    config_cli::fuzz_reload_response(bytes);
 }
 
 const EXIT_OK: u8 = 0;
@@ -452,7 +453,10 @@ fn wait_for_shutdown(
         let iteration = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _applied_integrity_fence = process.apply_pending_integrity_fence();
             let mut termination_count = 0_u8;
-            for signal in signals.pending() {
+            let requested_reload = process
+                .take_configuration_reload_request()
+                .then_some(SIGHUP);
+            for signal in signals.pending().chain(requested_reload) {
                 if matches!(signal, SIGINT | SIGTERM) {
                     termination_count = termination_count.saturating_add(1);
                     continue;

@@ -744,6 +744,21 @@ fn route_inner<S: Read + Write>(
             )?;
             policy_activate_response(services, &bearer, &body)
         },
+        (ListenerRole::Control, "POST", "/control/configuration/reload") => {
+            if head.content_length != 0 || head.bearer.is_some() {
+                return Ok(Response::empty(400));
+            }
+            health
+                .request_configuration_reload()
+                .map_err(|_| Response::empty(503))?;
+            Ok(Response {
+                status: 202,
+                content_type: "text/plain; charset=utf-8",
+                body: b"status=reload_requested\n".to_vec(),
+                retry_after_seconds: None,
+                response_reservation: None,
+            })
+        },
         (ListenerRole::Control, "POST", "/control/bootstrap/claim") => {
             if health.phase() != ProcessPhase::Serving {
                 return Ok(Response::empty(503));

@@ -442,6 +442,49 @@ fn same_path_tls_rotation_replaces_valid_identity_and_retains_the_previous_ident
         )?,
         405,
     );
+    let live_document = format!("{document}\n[diagnostics]\nlog_level = 'debug'\n");
+    let live_candidate = Arc::new(resolve(ConfigurationInputs::try_new(
+        Some(&live_document),
+        EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+        CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
+    )?)?);
+    assert!(matches!(
+        process.reload_configuration(Arc::clone(&live_candidate)),
+        Err(positron_runtime::ConfigurationRuntimeFailure::ListenerUnavailable)
+    ));
+    assert_eq!(
+        process
+            .configuration()
+            .ok_or("configuration runtime missing")?
+            .observed()?
+            .generation(),
+        configuration_generation
+    );
+    std::fs::copy(fixture("api-test-cert.pem"), &certificate)?;
+    std::fs::copy(fixture("api-test-key.pem"), &private_key)?;
+    assert!(matches!(
+        process.reload_configuration(live_candidate)?,
+        positron_runtime::ConfigurationReloadOutcome::PublishedLive { .. }
+    ));
+    assert!(
+        process
+            .configuration()
+            .ok_or("configuration runtime missing")?
+            .observed()?
+            .generation()
+            > configuration_generation
+    );
+    assert_status(
+        tls_http_with_client_identity(
+            api,
+            &certificate,
+            &fixture("mtls-client-cert.pem"),
+            &fixture("mtls-client-key.pem"),
+            "GET",
+            "/v1/capabilities:negotiate",
+        )?,
+        405,
+    );
     assert_eq!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         positron_runtime::ExitOutcome::Graceful

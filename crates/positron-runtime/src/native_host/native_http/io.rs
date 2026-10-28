@@ -669,6 +669,7 @@ pub(in crate::native_host) fn write_response<S: Write>(
 ) -> Result<(), std::io::Error> {
     let reason = match response.status {
         200 => "OK",
+        202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",

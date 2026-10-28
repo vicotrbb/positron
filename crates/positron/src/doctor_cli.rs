@@ -63,9 +63,10 @@ fn execute(
 #[cfg(test)]
 mod tests;
 
-/// Exercises the bounded untrusted Doctor response boundary without I/O.
+/// Exercises bounded untrusted Doctor responses and trust bundles without I/O.
 #[cfg(fuzzing)]
 pub(crate) fn fuzz_status(bytes: &[u8]) -> Option<String> {
+    online::fuzz_trust_certificates(bytes);
     if bytes.len() > 8192 {
         return None;
     }

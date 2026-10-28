@@ -18,7 +18,7 @@ from data_lifecycle import DataLifecycle, fields
 
 INPUTS = "/etc/positron/operations"
 BACKUPS = "/var/lib/positron-backups/private"
-CONFIG = "/etc/positron/positron.toml"
+CONFIG = "/etc/positron/config/positron.toml"
 REPOSITORY = "11111111-1111-4111-8111-111111111111"
 
 
@@ -62,7 +62,7 @@ class NativeLifecycle(DataLifecycle):
             self.last_operation = (family, args[args.index("--operation-id") + 1])
         result = self.kube("exec", "-i", "-c", "positron", compose or self.pod, "--", "/usr/bin/positron", *arguments,
                            "--endpoint", "127.0.0.1:8080", "--server-name", "localhost",
-                           "--trust-file", "/etc/positron/tls/ca.pem", "--credential-stdin", *args,
+                           "--trust-file", "/etc/positron/tls/..data/ca.pem", "--credential-stdin", *args,
                            data=(credential or self.admin).encode(), timeout=timeout, check=False)
         if result.returncode:
             # Strip only kubectl's exact process-exit footer; preserve native diagnostics.

@@ -304,6 +304,7 @@ pub struct HealthState {
     critical_worker_failed: Arc<AtomicBool>,
     dependency_unavailable: Arc<AtomicBool>,
     pending_integrity_fence: Arc<AtomicU8>,
+    pending_configuration_reload: Arc<AtomicBool>,
     integrity_fence_reason: Arc<AtomicU8>,
     integrity_degraded: Arc<AtomicBool>,
     plaintext_listener_roles: Arc<AtomicU8>,
@@ -329,6 +330,21 @@ impl std::fmt::Debug for HealthState {
 }
 
 impl HealthState {
+    /// Coalesces owner-local requests; only the process owner applies configuration.
+    pub(crate) fn request_configuration_reload(&self) -> Result<(), ()> {
+        if self.phase() != ProcessPhase::Serving {
+            return Err(());
+        }
+        self.pending_configuration_reload
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn take_configuration_reload_request(&self) -> bool {
+        self.pending_configuration_reload
+            .swap(false, Ordering::AcqRel)
+    }
+
     /// The owner-local Control listener can outlive startup's service installation.
     /// Delegate to the current retained instance without opening another volume.
     pub(crate) fn claim_bootstrap(&self) -> Result<crate::BootstrapClaim, ()> {
@@ -1075,6 +1091,7 @@ impl ProcessState {
                 critical_worker_failed: Arc::new(AtomicBool::new(false)),
                 dependency_unavailable: Arc::new(AtomicBool::new(false)),
                 pending_integrity_fence: Arc::new(AtomicU8::new(0)),
+                pending_configuration_reload: Arc::new(AtomicBool::new(false)),
                 integrity_fence_reason: Arc::new(AtomicU8::new(0)),
                 integrity_degraded: Arc::new(AtomicBool::new(false)),
                 plaintext_listener_roles: Arc::new(AtomicU8::new(0)),
@@ -1258,6 +1275,22 @@ mod tests {
     };
 
     use super::{ProcessPhase, ProcessState, lower_class_queue_delay_breached};
+
+    #[test]
+    fn configuration_reload_requests_are_phase_gated_and_coalesced() {
+        let state = ProcessState::starting();
+        assert!(state.health().request_configuration_reload().is_err());
+        assert!(!state.health().take_configuration_reload_request());
+        state.transition(ProcessPhase::Serving);
+        for _ in 0..100 {
+            assert!(state.health().request_configuration_reload().is_ok());
+        }
+        assert!(state.health().take_configuration_reload_request());
+        assert!(!state.health().take_configuration_reload_request());
+        state.transition(ProcessPhase::Draining);
+        assert!(state.health().request_configuration_reload().is_err());
+        assert!(!state.health().take_configuration_reload_request());
+    }
 
     #[test]
     fn operational_log_snapshot_excludes_records_before_a_monotonic_cutoff() {
