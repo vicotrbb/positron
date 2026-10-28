@@ -1,29 +1,15 @@
 //! One non-retrying owner-local claim request. Failed delivery never recreates a claim.
-use std::{
-    io::{Read, Write},
-    path::Path,
-    time::Duration,
-};
-use zeroize::Zeroizing;
+use std::{io::Write, path::Path};
 
 const UNAVAILABLE: &str = "bootstrap claim unavailable; consumed credentials cannot be redisplayed";
 
 pub(super) fn claim(path: &Path) -> Result<(), &'static str> {
-    let deadline = Duration::from_secs(5);
-    let mut stream =
-        crate::control_socket::connect_owner_control(path, deadline).map_err(|_| UNAVAILABLE)?;
-    stream
-        .set_read_timeout(Some(deadline))
-        .map_err(|_| UNAVAILABLE)?;
-    stream
-        .set_write_timeout(Some(deadline))
-        .map_err(|_| UNAVAILABLE)?;
-    stream.write_all(b"POST /control/bootstrap/claim HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").map_err(|_| UNAVAILABLE)?;
-    let mut bytes = Zeroizing::new(Vec::with_capacity(512));
-    stream
-        .take(4097)
-        .read_to_end(&mut bytes)
-        .map_err(|_| UNAVAILABLE)?;
+    let bytes = crate::control_socket::owner_control_request(
+        path,
+        b"POST /control/bootstrap/claim HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        4096,
+        |bytes| response_body(bytes).is_ok(),
+    ).map_err(|_| UNAVAILABLE)?;
     let body = response_body(&bytes)?;
     std::io::stdout()
         .lock()
@@ -40,12 +26,20 @@ pub(crate) fn response_body(bytes: &[u8]) -> Result<&str, &'static str> {
     if !head.starts_with("HTTP/1.1 200 OK\r\n") || !valid_claim(body) {
         return Err(UNAVAILABLE);
     }
-    let mut lengths = head
-        .lines()
-        .filter_map(|line| line.strip_prefix("Content-Length: "));
-    if lengths.next().and_then(|value| value.parse::<usize>().ok()) != Some(body.len())
-        || lengths.next().is_some()
-    {
+    let mut length = None;
+    for header in head.lines().skip(1) {
+        let (name, value) = header.split_once(':').ok_or(UNAVAILABLE)?;
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(UNAVAILABLE);
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if length.is_some() {
+                return Err(UNAVAILABLE);
+            }
+            length = Some(value.trim().parse::<usize>().map_err(|_| UNAVAILABLE)?);
+        }
+    }
+    if length != Some(body.len()) {
         return Err(UNAVAILABLE);
     }
     Ok(body)
@@ -72,4 +66,32 @@ fn valid_claim(body: &str) -> bool {
         seen |= mask;
     }
     seen & 1 != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::response_body;
+
+    #[test]
+    fn claim_completion_requires_a_complete_unambiguous_credential_frame() {
+        let body = format!("administrator_secret=pos_{}\n", "00".repeat(32));
+        let frame = |headers: &str| format!("HTTP/1.1 200 OK\r\n{headers}\r\n{body}");
+        let length = format!("Content-Length: {}\r\n", body.len());
+        let valid = frame(&length);
+        assert_eq!(response_body(valid.as_bytes()), Ok(body.as_str()));
+        for rejected in [
+            valid[..valid.len() - 1].to_owned(),
+            format!("{valid}x"),
+            frame(&format!("{length}content-length: {}\r\n", body.len())),
+            frame(&format!("{length}Transfer-Encoding: chunked\r\n")),
+            frame(&format!("{length}transfer-encoding: identity\r\n")),
+            frame(""),
+            "x".repeat(4097),
+        ] {
+            assert!(
+                response_body(rejected.as_bytes()).is_err(),
+                "ambiguous claim frame accepted"
+            );
+        }
+    }
 }

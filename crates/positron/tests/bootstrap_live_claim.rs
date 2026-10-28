@@ -293,3 +293,132 @@ fn rejected_response_requires_complete_bounded_framing() {
         assert!(rejection_response(&mut std::io::Cursor::new(invalid)).is_err());
     }
 }
+
+#[test]
+fn bootstrap_claim_transport_returns_a_complete_frame_before_peer_eof() {
+    exercise_claim_transport(false);
+}
+
+#[test]
+fn bootstrap_claim_transport_bounds_the_whole_response_when_peer_drips_bytes() {
+    exercise_claim_transport(true);
+}
+
+fn exercise_claim_transport(drip: bool) {
+    use std::os::unix::net::UnixListener;
+    // Lifecycle fixtures already execute preparation before serving. Keep cold
+    // executable loading outside the independently bounded transport interval.
+    assert!(
+        Command::new(native_binary::executable())
+            .args(["config", "explain", "--setting", "storage.data_directory"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let root = std::env::temp_dir().join(format!(
+        "p120-claim-transport-{}-{drip}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let socket = root.join("control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let (finished, stop) = std::sync::mpsc::channel();
+    let (observed, request_seen) = std::sync::mpsc::channel();
+    let body = format!("administrator_secret=pos_{}\n", "00".repeat(32));
+    let expected = body.as_bytes().to_vec();
+    let peer = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+            assert!(request.len() < 512);
+        }
+        assert_eq!(request, b"POST /control/bootstrap/claim HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        observed.send(Instant::now()).unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        if drip {
+            for byte in response.bytes() {
+                if stop.try_recv().is_ok() || stream.write_all(&[byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        } else {
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        if !drip {
+            let _ = stop.recv_timeout(Duration::from_secs(8));
+        }
+        listener.set_nonblocking(true).unwrap();
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "claim client opened another connection"
+        );
+    });
+    let start = Instant::now();
+    let mut child = Command::new(native_binary::executable())
+        .args(["bootstrap", "claim", "--control-path"])
+        .arg(&socket)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = start + Duration::from_secs(7);
+    let completed = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = child.wait_with_output().unwrap();
+    let elapsed = start.elapsed();
+    let _ = finished.send(());
+    peer.join().unwrap();
+    fs::remove_dir_all(root).unwrap();
+    let accepted = request_seen.try_recv().ok();
+    eprintln!(
+        "claim_transport drip={drip} completed={completed} spawn_to_exit_ms={} request_to_exit_ms={:?}",
+        elapsed.as_millis(),
+        accepted.map(|instant| (start + elapsed).duration_since(instant).as_millis())
+    );
+    assert!(completed, "claim CLI exceeded the whole-request watchdog");
+    let transport_elapsed = (start + elapsed).duration_since(accepted.expect("request observed"));
+    if drip {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            transport_elapsed < Duration::from_secs(6),
+            "claim request reset its deadline between bytes"
+        );
+        assert!(
+            !output
+                .stderr
+                .windows(expected.len())
+                .any(|window| window == expected)
+        );
+    } else {
+        assert!(
+            output.status.success(),
+            "complete claim frame was withheld until EOF"
+        );
+        assert_eq!(output.stdout, expected);
+        assert!(
+            transport_elapsed < Duration::from_secs(2),
+            "complete claim frame waited for EOF"
+        );
+    }
+}

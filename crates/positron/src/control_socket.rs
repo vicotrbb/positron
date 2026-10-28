@@ -52,7 +52,7 @@ pub(crate) fn owner_control_request(
     request: &[u8],
     maximum_response_bytes: usize,
     complete: impl Fn(&[u8]) -> bool,
-) -> io::Result<Vec<u8>> {
+) -> io::Result<zeroize::Zeroizing<Vec<u8>>> {
     let timeout = Duration::from_secs(5);
     let deadline = std::time::Instant::now()
         .checked_add(timeout)
@@ -80,11 +80,12 @@ pub(crate) fn owner_control_request(
                     Err(error) => return Err(error),
                 }
             }
-            let mut response = Vec::with_capacity(maximum_response_bytes.min(8192));
-            let mut buffer = [0_u8; 1024];
+            let mut response =
+                zeroize::Zeroizing::new(Vec::with_capacity(maximum_response_bytes.min(8192)));
+            let mut buffer = zeroize::Zeroizing::new([0_u8; 1024]);
             loop {
                 stream.readable().await?;
-                match stream.try_read(&mut buffer) {
+                match stream.try_read(&mut *buffer) {
                     Ok(0) => return Ok(response),
                     Ok(read) => {
                         if read > maximum_response_bytes.saturating_sub(response.len()) {

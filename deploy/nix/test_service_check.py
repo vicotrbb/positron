@@ -545,9 +545,10 @@ class RestartReadinessObservation(unittest.TestCase):
                     "disk_pressure": "healthy", "usable_disk_bytes": 123456}}},
                 "unrelated": "protected-canary"}
 
-    def invoke(self, response=None, failure=True, collector_error=False, systemd_output=None, collector_result=None):
+    def invoke(self, response=None, failure=True, collector_error=False, systemd_output=None, collector_result=None, ingest_failure=False):
         import textwrap
         self.observations = []
+        self.commands = []
         self.http = []
         self.reads = []
         self.systemd = []
@@ -559,6 +560,9 @@ class RestartReadinessObservation(unittest.TestCase):
             restarted = False
 
             def succeed(self, command):
+                owner.commands.append(command)
+                if ingest_failure and command == "python /etc/positron-service-check.py ingest":
+                    raise original
                 if command == "systemctl restart positron":
                     self.restarted = True
                 return ""
@@ -650,6 +654,12 @@ class RestartReadinessObservation(unittest.TestCase):
         self.assertLessEqual(sum(count for _, count in self.reads), 65537)
         self.assertTrue(all(not options for _, options in self.waits),
                         "preserve the driver's original readiness timeout")
+
+    def test_ingest_failure_observes_once_without_replay_or_replacing_the_failure(self):
+        self.invoke(ingest_failure=True)
+        self.observed()
+        self.assertEqual(self.commands.count("python /etc/positron-service-check.py ingest"), 1)
+        self.assertNotIn("protected", self.output)
 
     def test_failure_observes_closed_clock_and_resource_facts_before_same_exception(self):
         output = self.invoke()

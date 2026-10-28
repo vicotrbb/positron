@@ -1,0 +1,5 @@
+0::/worker
+1:freezer:/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+41 29 0:33 net:[1] /run/docker/netns/fixture rw - nsfs nsfs rw
+36 29 0:32 / /control rw - cgroup2 cgroup rw
+42 29 0:34 mnt:[2] /run/mountns/fixture rw - nsfs nsfs rw

@@ -8,6 +8,50 @@ from test_kubernetes import assert_retained_claims, owned_storage_class, inspect
 
 
 class NativeAdapter(unittest.TestCase):
+    def test_provisioning_preserves_exact_private_modes_under_setgid_mount_roots(self):
+        import json
+        import stat
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mounts = root / "mounts"
+            mounts.mkdir()
+            for name in ["inputs", "backups"]:
+                (mounts / name).mkdir(mode=0o2777)
+                (mounts / name).chmod(0o2777)
+            before = [(path.stat().st_ino, stat.S_IMODE(path.stat().st_mode)) for path in [mounts / "inputs", mounts / "backups"]]
+            applied = []
+            def kube(*args, **kwargs):
+                if args[0] == "attach":
+                    command = applied[-1]["spec"]["containers"][0]["command"]
+                    result = subprocess.run([str(mounts) if part == "/work" else part for part in command], input=kwargs["data"], capture_output=True, check=True)
+                    return result
+                if args[:2] == ("get", "pod"):
+                    return subprocess.CompletedProcess([], 0, json.dumps({"status": {"containerStatuses": [{"state": {"terminated": {"exitCode": 0}}}]}}).encode(), b"")
+                return subprocess.CompletedProcess([], 0, b"", b"")
+            lifecycle = NativeLifecycle(self, root, kube, applied.append, None, "pod", [], None, {}, b"administrator_secret=fixed-admin query_secret=fixed-query")
+            lifecycle.install({"inputs/export/static": b"fixture"}, initialize=True)
+            for name in ["backups/private", "backups/private/repository", "inputs/export"]:
+                self.assertEqual(stat.S_IMODE((mounts / name).stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE((mounts / "inputs/export/static").stat().st_mode), 0o600)
+            private = [(path.stat().st_ino, path.stat().st_uid, path.stat().st_gid, stat.S_IMODE(path.stat().st_mode)) for path in [mounts / name for name in ["backups/private", "backups/private/repository", "inputs/export"]]]
+            lifecycle.install({"inputs/export/static": b"replacement"})
+            self.assertEqual((mounts / "inputs/export/static").read_bytes(), b"replacement")
+            self.assertEqual(private, [(path.stat().st_ino, path.stat().st_uid, path.stat().st_gid, stat.S_IMODE(path.stat().st_mode)) for path in [mounts / name for name in ["backups/private", "backups/private/repository", "inputs/export"]]])
+            (mounts / "backups/private").chmod(0o2700)
+            with self.assertRaises(subprocess.CalledProcessError):
+                lifecycle.install({"inputs/export/static": b"refused"})
+            self.assertEqual((mounts / "inputs/export/static").read_bytes(), b"replacement")
+            self.assertEqual(stat.S_IMODE((mounts / "backups/private").stat().st_mode), 0o2700)
+            self.assertEqual(before, [(path.stat().st_ino, stat.S_IMODE(path.stat().st_mode)) for path in [mounts / "inputs", mounts / "backups"]])
+            broken = root / "broken"
+            broken.mkdir()
+            for name in ["inputs", "backups"]: (broken / name).mkdir()
+            command = applied[0]["spec"]["containers"][0]["command"]
+            failure = subprocess.run([str(broken) if part == "/work" else part for part in command], input=b"invalid tar", capture_output=True)
+            self.assertNotEqual(failure.returncode, 0)
+            self.assertFalse((broken / "backups/private").exists())
+            self.assertFalse((broken / "inputs/export").exists())
+
     def test_explicit_owned_kind_and_k3d_targets_keep_the_selected_storage_class(self):
         for context in ["kind-positron-120-123", "k3d-positron-120-k3s-123"]:
             self.assertEqual(owned_storage_class(context, "qualified-class", context), "qualified-class")

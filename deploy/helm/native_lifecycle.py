@@ -138,7 +138,7 @@ class NativeLifecycle(DataLifecycle):
         self.apply({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": self.inputs_claim},
                     "spec": {"accessModes": ["ReadWriteOnce"], "volumeMode": "Filesystem", "storageClassName": self.values["storageClass"],
                              "resources": {"requests": {"storage": "1Gi"}}}})
-        self.install({"inputs/export/" + path.name: path.read_bytes() for path in (self.fixture / "export").iterdir()})
+        self.install({"inputs/export/" + path.name: path.read_bytes() for path in (self.fixture / "export").iterdir()}, initialize=True)
         self.apply({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "native-positron"}, "data": {"positron.toml": self.config}})
         self.values["configuration"] = self.config
         self.values["operationInputsClaim"] = self.inputs_claim
@@ -148,11 +148,10 @@ class NativeLifecycle(DataLifecycle):
         subprocess.run([*self.helm, "upgrade", "native", str(self.chart), "-f", str(values_file), "--set", "replicas=0"], check=True, capture_output=True)
         self.scale(1)
 
-    def install(self, files):
+    def install(self, files, *, initialize=False):
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode="w") as archive:
-            directories = {"backups/private", "backups/private/repository"}
-            directories.update(str(parent) for name in files for parent in Path(name).parents if str(parent) not in [".", "inputs", "backups"])
+            directories = {"backups/private", "backups/private/repository", "inputs/export"} if initialize else set()
             for name in sorted(directories, key=lambda value: (len(Path(value).parts), value)):
                 member = tarfile.TarInfo(name)
                 member.type, member.mode, member.uid, member.gid = tarfile.DIRTYPE, 0o700, 65532, 65532
@@ -161,13 +160,17 @@ class NativeLifecycle(DataLifecycle):
                 member = tarfile.TarInfo(name)
                 member.size, member.mode, member.uid, member.gid = len(data), 0o600, 65532, 65532
                 archive.addfile(member, io.BytesIO(data))
+        if initialize:
+            extract = 'cd "$1"; test ! -e backups/private; test ! -L backups/private; test ! -e inputs/export; test ! -L inputs/export; tar -xf -; chmod -- 00700 backups/private backups/private/repository inputs/export'
+        else:
+            extract = 'cd "$1"; for path in backups/private backups/private/repository inputs/export; do test "$(find "$path" -prune -type d -perm 0700 -user "$(id -u)" -print)" = "$path"; done; tar -xf -'
         name = "native-input-provision"
         security = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
         pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name}, "spec": {
             "restartPolicy": "Never", "automountServiceAccountToken": False,
             "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532, "fsGroup": 65532,
                                 "fsGroupChangePolicy": "OnRootMismatch", "seccompProfile": {"type": "RuntimeDefault"}},
-            "containers": [{"name": "provision", "image": data_lifecycle.ADMIN_IMAGE, "command": ["tar", "-xf", "-", "-C", "/work"],
+            "containers": [{"name": "provision", "image": data_lifecycle.ADMIN_IMAGE, "command": ["sh", "-ec", extract, "provision", "/work"],
                             "stdin": True, "stdinOnce": True, "securityContext": security,
                             "volumeMounts": [{"name": "inputs", "mountPath": "/work/inputs"}, {"name": "backups", "mountPath": "/work/backups"}]}],
             "volumes": [{"name": "inputs", "persistentVolumeClaim": {"claimName": self.inputs_claim}},
