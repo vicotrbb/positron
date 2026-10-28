@@ -70,9 +70,10 @@ Data APIs have a ClusterIP Service; Operations stays loopback-only and the
 Control Listener remains owner-only. Provision NetworkPolicy/ingress and client
 trust according to your environment. The chart does not create public trust.
 
-The startup/readiness probes use native `doctor --ready` over verified TLS.
-Liveness uses the same client policy against `/health/live`, independently of
-readiness; dependency outages must not turn not-ready into a fabricated crash.
+Startup and liveness use native `doctor --live` over verified TLS. Readiness
+uses `doctor --ready` independently. A recoverable dependency outage may stay
+alive and not-ready beyond the startup threshold without triggering a readiness-
+driven restart loop; only native liveness failure can fail startup or liveness.
 Kubernetes sends SIGTERM directly to the binary. The termination allowance is
 generated from the Configuration Contract maximum Drain deadline plus five
 seconds (currently 3605 seconds); successful Drain exits immediately. No sleep

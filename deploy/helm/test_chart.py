@@ -1,5 +1,10 @@
 """Integration tests of the generated artifact through the real Helm CLI."""
 import os
+import http.server
+import ssl
+import sys
+import tempfile
+import threading
 from pathlib import Path
 import subprocess
 import unittest
@@ -42,6 +47,7 @@ class HelmChart(unittest.TestCase):
         self.assertFalse(preparer["securityContext"]["allowPrivilegeEscalation"])
         self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
         self.assertEqual(container["securityContext"]["capabilities"]["drop"], ["ALL"])
+        self.assertIn("--live", container["startupProbe"]["exec"]["command"])
         self.assertIn("--live", container["livenessProbe"]["exec"]["command"])
         self.assertIn("--ready", container["readinessProbe"]["exec"]["command"])
         self.assertIn("--trust-file", container["readinessProbe"]["exec"]["command"])
@@ -58,6 +64,44 @@ class HelmChart(unittest.TestCase):
         self.assertEqual(native["storage"]["secrets_directory"], "/var/lib/positron-secrets/instance")
         self.assertEqual(native["listener"]["api_bind_address"], "0.0.0.0:8080")
         self.assertEqual(native["listener"]["api_tls_private_key_file"], "/etc/positron/tls/server-key.pem")
+
+    @unittest.skipUnless(os.environ.get("POSITRON_TEST_HELM_CURRENT_BINARY"), "requires the built native probe executable")
+    def test_live_but_not_ready_process_satisfies_startup_and_liveness_without_admitting_traffic(self):
+        import yaml
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "compose"))
+        from tls_fixture import material
+        rendered = self.render()
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        workload, = [obj for obj in yaml.safe_load_all(rendered.stdout) if obj["kind"] == "StatefulSet"]
+        container, = workload["spec"]["template"]["spec"]["containers"]
+        class Operations(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200 if self.path == "/health/live" else 503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            def log_message(self, *args): pass
+        with tempfile.TemporaryDirectory(prefix="positron-helm-probes-") as directory:
+            root = Path(directory)
+            material(root)
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Operations)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(root / "server.pem", root / "server-key.pem")
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                for _ in range(3):
+                    for probe, expected in [("startupProbe", True), ("livenessProbe", True), ("readinessProbe", False)]:
+                        arguments = list(container[probe]["exec"]["command"])
+                        arguments[0] = os.environ["POSITRON_TEST_HELM_CURRENT_BINARY"]
+                        arguments[arguments.index("--endpoint") + 1] = "127.0.0.1:" + str(server.server_port)
+                        arguments[arguments.index("--trust-file") + 1] = str(root / "ca.pem")
+                        result = subprocess.run(arguments, capture_output=True, timeout=10)
+                        self.assertEqual(result.returncode == 0, expected, probe)
+            finally:
+                server.shutdown()
+                thread.join(timeout=10)
+                server.server_close()
 
     def test_refuses_unsafe_or_unknown_values(self):
         for value in ["replicas=2", "replicas=-1", "image=positron:latest", "storageClass=", "tlsSecret=",

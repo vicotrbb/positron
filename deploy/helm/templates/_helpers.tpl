@@ -72,7 +72,7 @@ containers:
       - {name: loki-push, containerPort: 3100}
     startupProbe:
       exec:
-        command: [/usr/bin/positron, doctor, --ready, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/ca.pem]
+        command: [/usr/bin/positron, doctor, --live, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/ca.pem]
       periodSeconds: 5
       timeoutSeconds: 6
       failureThreshold: 60
