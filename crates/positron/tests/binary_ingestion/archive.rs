@@ -109,7 +109,9 @@ pub(super) fn query_response(
     let completion_deadline = parent_deadline.map_or(completion_deadline, |parent| {
         parent.min(completion_deadline)
     });
+    let mut attempt = 0_u32;
     loop {
+        attempt += 1;
         if Instant::now() >= launch_deadline {
             return Err("public query capacity launch window expired".into());
         }
@@ -172,6 +174,16 @@ pub(super) fn query_response(
             || output.stderr != b"positron: query capacity unavailable; retry after backoff\n"
             || Instant::now() + Duration::from_secs(1) >= launch_deadline
         {
+            eprintln!(
+                "query_launch_refused attempt={attempt} exit_code={:?} elapsed_ms={} stdout_empty={} canonical_capacity_stderr={} remaining_launch_ms={}",
+                output.status.code(),
+                started.elapsed().as_millis(),
+                output.stdout.is_empty(),
+                output.stderr == b"positron: query capacity unavailable; retry after backoff\n",
+                launch_deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
+            );
             return Err("public query refused outside its capacity launch policy".into());
         }
         std::thread::sleep(Duration::from_secs(1));

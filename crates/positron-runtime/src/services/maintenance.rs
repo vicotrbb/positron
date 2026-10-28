@@ -1852,6 +1852,7 @@ pub(super) fn drive_upgrade_backup(
     use positron_governance::{DurableOperationAdministration, DurableOperationKind};
     #[cfg(feature = "test-support")]
     let driver_started = std::time::Instant::now();
+    let mut readmission_progress = false;
     'dispatch: loop {
         let inspect = || {
             let _gate = services
@@ -1899,6 +1900,9 @@ pub(super) fn drive_upgrade_backup(
                     .as_millis()
             );
         }
+        if lifecycle_time == Err(UpgradeFailure::CapacityUnavailable) && readmission_progress {
+            return inspect();
+        }
         lifecycle_time?;
         let instance = &services.instance;
         let coordinator = instance.maintenance_coordinator();
@@ -1941,7 +1945,14 @@ pub(super) fn drive_upgrade_backup(
         if execution.is_err() {
             diagnostic.report("coordinator_start_refused", &initial_status, None);
         }
-        let execution = execution.map_err(|_| UpgradeFailure::CapacityUnavailable)?;
+        let execution = match execution {
+            Ok(execution) => execution,
+            Err(
+                positron_kernel::MaintenanceFailure::CapacityExceeded
+                | positron_kernel::MaintenanceFailure::ResourceAdmissionRefused,
+            ) if readmission_progress => return inspect(),
+            Err(_) => return Err(UpgradeFailure::CapacityUnavailable),
+        };
         let Some(execution) = execution else {
             #[cfg(feature = "test-support")]
             diagnostic.report("queued_return", &initial_status, None);
@@ -2004,6 +2015,7 @@ pub(super) fn drive_upgrade_backup(
                 {
                     // Readmission published a larger claim. Release the old grant
                     // before the same task asks the Governor for that exact claim.
+                    readmission_progress = true;
                     drop(execution);
                     continue 'dispatch;
                 }
@@ -2036,7 +2048,8 @@ pub(super) fn drive_upgrade_backup(
                 drop(catalog);
                 drop(_gate);
                 let current = inspect()?;
-                if !current.status().is_terminal()
+                if !readmission_progress
+                    && !current.status().is_terminal()
                     && current.revision() == operation.revision()
                     && status
                         .checkpoint()

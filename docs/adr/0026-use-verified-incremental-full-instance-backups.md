@@ -29,9 +29,10 @@ admission, and the single-range work bound remain checked for each advance.
 This operation checkpoint version does not change the
 Backup Format Epoch or snapshot format. Native Catalog and audit verification
 still authenticates every required file and reconstructs its semantic state.
-When a bounded offline turn ends without changing the durable operation or its
-verification checkpoint, it safely requeues the owner and reports retryable
-capacity unavailability; it does not present volatile work as durable progress.
+When a bounded offline turn ends without changing the durable operation, its
+verification checkpoint, or a strictly larger persisted reservation for the same
+task with no resource dimension decreased, it safely requeues the owner and
+reports retryable capacity unavailability; it does not present volatile work as durable progress.
 If a recovered lifecycle clock has not yet reached an authenticated operation
 timestamp, the same offline owner waits for genuine trusted elapsed time within
 the caller's original deadline. Expiry reports retryable capacity unavailability
