@@ -1850,6 +1850,8 @@ pub(super) fn drive_upgrade_backup(
 ) -> Result<positron_governance::DurableOperation, crate::upgrade::UpgradeFailure> {
     use crate::upgrade::UpgradeFailure;
     use positron_governance::{DurableOperationAdministration, DurableOperationKind};
+    #[cfg(feature = "test-support")]
+    let driver_started = std::time::Instant::now();
     let inspect = || {
         let _gate = services
             .catalog_operation()
@@ -1883,15 +1885,36 @@ pub(super) fn drive_upgrade_backup(
     if lifecycle_time == Err(UpgradeFailure::CapacityUnavailable) {
         eprintln!("upgrade-backup-capacity stage=trusted-time-wait");
     }
+    #[cfg(feature = "test-support")]
+    if let Err(failure) = lifecycle_time {
+        eprintln!(
+            "upgrade_backup_driver_refused operation={id:?} kind={:?} stage=trusted_time failure={failure:?} starting_ms={} remaining_ms={}",
+            operation.kind(),
+            deadline
+                .saturating_duration_since(driver_started)
+                .as_millis(),
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+        );
+    }
     lifecycle_time?;
     let instance = &services.instance;
     let coordinator = instance.maintenance_coordinator();
-    let initial_progress = coordinator
+    let initial_status = coordinator
         .status(
             positron_kernel::MaintenanceTaskId::new(id.to_bytes())
                 .map_err(|_| UpgradeFailure::InvalidRequest)?,
         )
-        .map_err(|_| UpgradeFailure::PersistenceUnavailable)?
+        .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+    #[cfg(feature = "test-support")]
+    let mut diagnostic = super::backup_administration::DriverDiagnostic::new(
+        operation,
+        driver_started,
+        deadline,
+        &initial_status,
+    );
+    let initial_progress = initial_status
         .checkpoint()
         .map(|checkpoint| checkpoint.opaque_progress().to_vec());
     let execution = {
@@ -1915,10 +1938,12 @@ pub(super) fn drive_upgrade_backup(
     };
     #[cfg(feature = "test-support")]
     if execution.is_err() {
-        super::backup_administration::report_verification_turn("coordinator_start_refused", None);
+        diagnostic.report("coordinator_start_refused", &initial_status, None);
     }
     let execution = execution.map_err(|_| UpgradeFailure::CapacityUnavailable)?;
     let Some(execution) = execution else {
+        #[cfg(feature = "test-support")]
+        diagnostic.report("queued_return", &initial_status, None);
         return inspect();
     };
     let mut execution = InstalledMaintenanceExecution::BackupSnapshot {
@@ -1929,6 +1954,10 @@ pub(super) fn drive_upgrade_backup(
         #[cfg(feature = "test-support")]
         let step_started = std::time::Instant::now();
         let step_result = complete_installed_maintenance(services, None, &mut execution);
+        #[cfg(feature = "test-support")]
+        {
+            diagnostic.steps += 1;
+        }
         #[cfg(feature = "test-support")]
         {
             let elapsed = step_started.elapsed();
@@ -1957,14 +1986,15 @@ pub(super) fn drive_upgrade_backup(
             .status(owner.task().identity())
             .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
         if status.phase() != MaintenanceTaskPhase::Running {
+            #[cfg(feature = "test-support")]
+            if status.phase() == MaintenanceTaskPhase::Queued {
+                diagnostic.report("task_queued", &status, work.as_ref());
+            }
             return inspect();
         }
         if std::time::Instant::now() >= deadline {
             #[cfg(feature = "test-support")]
-            super::backup_administration::report_verification_turn(
-                "deadline_discard",
-                work.as_ref(),
-            );
+            diagnostic.report("deadline_discard", &status, work.as_ref());
             *work = None;
             let binding = positron_kernel::RepositoryOperationBinding::from_execution(owner)
                 .map_err(|_| UpgradeFailure::UnsafeState)?;

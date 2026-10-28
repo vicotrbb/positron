@@ -5,7 +5,7 @@ pub(in crate::services) mod registered;
 mod verification;
 #[cfg(feature = "test-support")]
 pub(super) use verification::{
-    report_readmission as report_verification_readmission,
+    DriverDiagnostic, report_readmission as report_verification_readmission,
     report_timed_turn as report_verification_timed_turn, report_turn as report_verification_turn,
 };
 mod wire;
