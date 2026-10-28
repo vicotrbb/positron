@@ -52,7 +52,10 @@ fn query(
 
 #[test]
 fn actual_cli_capacity_backoff_preserves_request_and_complete_or_incomplete_truth() -> TestResult {
-    for response in [complete()?, encoded_budget_incomplete()?] {
+    for (case, response) in [
+        ("complete", complete()?),
+        ("incomplete", encoded_budget_incomplete()?),
+    ] {
         let fixture = fixture()?;
         let (result, requests) = scripted_requests(
             &[
@@ -61,6 +64,12 @@ fn actual_cli_capacity_backoff_preserves_request_and_complete_or_incomplete_trut
             ],
             |endpoint| query(&fixture, endpoint, None),
         )?;
+        if result.is_err() {
+            eprintln!(
+                "query_launch_case_failed case={case} request_count={}",
+                requests.len()
+            );
+        }
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&result?)?,
             response

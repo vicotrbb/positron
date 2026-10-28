@@ -106,6 +106,15 @@ impl OfflineUpgradeSession {
             };
         }
         if Instant::now() >= deadline {
+            #[cfg(feature = "test-support")]
+            eprintln!(
+                "offline_upgrade_pre_verification_deadline operation={:?} snapshot={:?} remaining_ms={}",
+                self.id,
+                snapshot.operation_id(),
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+            );
             return self.status();
         }
         let verification = self.verification_operation(&operation, &snapshot, deadline)?;

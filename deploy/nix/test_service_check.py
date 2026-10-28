@@ -721,6 +721,39 @@ class RestartReadinessObservation(unittest.TestCase):
 
 
 class UpgradeAdmissionObservation(unittest.TestCase):
+    def test_upgrade_timeout_preserves_bounded_last_admission_facts(self):
+        owner = RepositoryAdmissionReconciliation()
+        errors = [b"positron: stale resource generation; inspect current state before retrying",
+                  b"positron: administration unavailable; inspect or retry the same operation",
+                  b"positron: capacity unavailable; retry the same idempotent request"]
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), mock.patch("time.sleep"), \
+                self.assertRaisesRegex(RuntimeError, "admission outcome unknown at deadline"):
+            owner.invoke([*[owner.response(code=2, error=error) for error in errors],
+                          subprocess.TimeoutExpired(["protected-canary"], 30,
+                              output=b"protected-canary", stderr=b"protected-canary")],
+                         kind="upgrade", action="start", advances=[10, 10, 10, 30])
+        self.assertTrue(output.getvalue(), "timed-out admission must retain closed last-attempt facts")
+        self.assertEqual(json.loads(output.getvalue()), {
+            "event": "lifecycle_admission_failed", "attempt": 4, "phase": "upgrade_start",
+            "last_rejection": "capacity_unavailable", "elapsed_ms": 60000, "remaining_ms": 0})
+        self.assertEqual([options["timeout"] for _, options in owner.calls], [60, 50, 40, 30])
+        self.assertEqual(len(owner.generations), 4)
+        self.assertNotIn("protected", output.getvalue())
+
+    def test_upgrade_repository_status_timeout_is_distinguished_without_output(self):
+        owner = RepositoryAdmissionReconciliation()
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), self.assertRaisesRegex(RuntimeError, "outcome unknown"):
+            owner.invoke([subprocess.TimeoutExpired(["protected-canary"], 60,
+                              stderr=b"protected-canary")], kind="upgrade", action="start",
+                         real_generation=True, advances=[60])
+        self.assertEqual(json.loads(output.getvalue()), {
+            "event": "lifecycle_admission_failed", "attempt": 1, "phase": "repository_status",
+            "last_rejection": "none", "elapsed_ms": 60000, "remaining_ms": 0})
+        self.assertEqual(len(owner.calls), 1)
+        self.assertNotIn("protected", output.getvalue())
+
     def test_upgrade_unknown_fatal_preserves_the_original_decision_and_closed_class(self):
         owner = RepositoryAdmissionReconciliation()
         with self.assertRaisesRegex(RuntimeError, "code=transport_unknown"):

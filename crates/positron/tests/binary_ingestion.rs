@@ -35,8 +35,60 @@ impl Drop for Fixture {
             let _ = child.kill();
             let _ = child.wait();
         }
+        if std::thread::panicking() {
+            eprintln!("{}", self.root.display());
+            return;
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn fixture_failure_reaps_child_and_retains_protected_evidence() -> TestResult {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root =
+        fs::canonicalize("/tmp")?.join(format!("p-bin-retention-{}-{nonce}", std::process::id()));
+    fs::create_dir(&root)?;
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    fs::create_dir(root.join("secrets"))?;
+    fs::set_permissions(root.join("secrets"), fs::Permissions::from_mode(0o700))?;
+    let child = Command::new("/bin/sleep").arg("60").spawn()?;
+    let pid = rustix::process::Pid::from_raw(child.id().try_into()?).ok_or("child PID")?;
+    let fixture = Fixture {
+        root: root.clone(),
+        child: Some(child),
+    };
+    assert!(
+        std::thread::spawn(move || {
+            let _fixture = fixture;
+            panic!("controlled fixture failure");
+        })
+        .join()
+        .is_err()
+    );
+    assert!(
+        matches!(
+            rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::NOHANG),
+            Err(rustix::io::Errno::CHILD)
+        ),
+        "fixture must reap before retaining evidence"
+    );
+    assert!(
+        root.exists(),
+        "failed fixture evidence must remain available"
+    );
+    for path in [&root, &root.join("secrets")] {
+        assert_eq!(fs::metadata(path)?.permissions().mode() & 0o777, 0o700);
+    }
+    drop(Fixture {
+        root: root.clone(),
+        child: None,
+    });
+    assert!(
+        !root.exists(),
+        "successful fixture cleanup must remain unchanged"
+    );
+    Ok(())
 }
 
 fn request(port: u16, path: &str, headers: &[(&str, &str)], body: &[u8]) -> TestResult<String> {

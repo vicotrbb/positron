@@ -171,6 +171,12 @@ pub(crate) fn verify_payloads(
         {
             return Err(ReleaseError::IdentityMismatch);
         }
+        if artifact.surface == Surface::Compose
+            && bundle.read(&artifact.file, 65_536)?
+                != crate::compose_deployment(inventory)?.as_bytes()
+        {
+            return Err(ReleaseError::IdentityMismatch);
+        }
         crate::archive_scan::scan_bundle_contents(bundle, &artifact.file, canaries)?;
         if let Some(payload) = &artifact.payload {
             crate::archive_scan::scan_bundle_contents(bundle, payload, canaries)?;

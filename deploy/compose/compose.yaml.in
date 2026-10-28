@@ -1,0 +1,43 @@
+# Generated from the canonical Release Inventory; source @SOURCE@.
+# Supply the generated native configuration and protected TLS files in ./config.
+services:
+  positron:
+    image: ghcr.io/vicotrbb/positron@sha256:@INDEX_SHA256@
+    command: [serve, --init-if-empty, --config, /etc/positron/positron.toml]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: @STOP_GRACE_SECONDS@s
+    cpus: 2.0
+    mem_limit: 2g
+    pids_limit: 256
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - data:/var/lib/positron
+      - secrets:/var/lib/positron-secrets
+      - type: bind
+        source: ./config
+        target: /etc/positron
+        read_only: true
+        bind:
+          create_host_path: false
+      - backups:/var/lib/positron-backups
+    tmpfs:
+      - /run/positron:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size=67108864
+    healthcheck:
+      test: [CMD, /usr/bin/positron, doctor, --ready, --endpoint, "127.0.0.1:13133", --server-name, localhost, --trust-file, /etc/positron/tls/ca.pem]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 3
+volumes:
+  data:
+  secrets:
+  backups:

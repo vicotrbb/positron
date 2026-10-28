@@ -38,12 +38,42 @@ fn operations_status(options: &Options, bearer: &str) -> Result<serde_json::Valu
     if let Some(path) = options.control_path.as_deref() {
         return control_status(path, bearer);
     }
+    let (builder, target) = operations_client(options)?;
+    let response = builder
+        .build()
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?
+        .get(format!("{target}/status"))
+        .bearer_auth(bearer)
+        .send()
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    if response.status().as_u16() == 401 {
+        return Err(DoctorFailure::AuthenticationRejected);
+    }
+    if !response.status().is_success() {
+        return Err(DoctorFailure::EndpointUnavailable);
+    }
+    let mut bytes = Vec::with_capacity(8_192);
+    response
+        .take(8_193)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    if bytes.len() > 8_192 {
+        return Err(DoctorFailure::EndpointUnavailable);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| DoctorFailure::EndpointUnavailable)
+}
+
+// Both public consumers use one TLS/trust policy; readiness requires no bearer.
+fn operations_client(
+    options: &Options,
+) -> Result<(reqwest::blocking::ClientBuilder, String), DoctorFailure> {
     let endpoint = options.endpoint.ok_or(DoctorFailure::Arguments)?;
     if endpoint.port() == 0 {
         return Err(DoctorFailure::Arguments);
     }
     let mut builder = reqwest::blocking::Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(5));
     let target = if options.allow_plaintext {
@@ -69,28 +99,21 @@ fn operations_status(options: &Options, bearer: &str) -> Result<serde_json::Valu
             .resolve(name, endpoint);
         format!("https://{name}:{}", endpoint.port())
     };
+    Ok((builder, target))
+}
+
+pub(super) fn ready(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {
+    let (builder, target) = operations_client(options)?;
     let response = builder
         .build()
         .map_err(|_| DoctorFailure::EndpointUnavailable)?
-        .get(format!("{target}/status"))
-        .bearer_auth(bearer)
+        .get(format!("{target}/health/ready"))
         .send()
         .map_err(|_| DoctorFailure::EndpointUnavailable)?;
-    if response.status().as_u16() == 401 {
-        return Err(DoctorFailure::AuthenticationRejected);
-    }
-    if !response.status().is_success() {
+    if response.status() != reqwest::StatusCode::OK {
         return Err(DoctorFailure::EndpointUnavailable);
     }
-    let mut bytes = Vec::with_capacity(8_192);
-    response
-        .take(8_193)
-        .read_to_end(&mut bytes)
-        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
-    if bytes.len() > 8_192 {
-        return Err(DoctorFailure::EndpointUnavailable);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| DoctorFailure::EndpointUnavailable)
+    Ok((ExitCode::SUCCESS, "status=ready\n".to_owned()))
 }
 
 fn read_trust_file(path: &std::path::Path) -> Result<Vec<u8>, DoctorFailure> {

@@ -74,11 +74,14 @@ def observe_snapshot(status, started, outcome, error="none"):
     print(json.dumps(record), flush=True)
 
 
-def advance_snapshot(common, started):
+def advance_snapshot(common, started, deadline):
     command = ["runuser", "-u", "positron", "--", "positron", "upgrade", "offline", "advance"]
+    command_timeout = 180
+    command_deadline = time.monotonic() + command_timeout
+    resumed = False
     try:
         result = subprocess.run(command + common + ["--seconds", "60"],
-                                input=None, capture_output=True, timeout=180)
+                                input=None, capture_output=True, timeout=command_timeout)
     except subprocess.TimeoutExpired:
         observe_snapshot({}, started, "failed", "command_timeout")
         raise RuntimeError("offline upgrade advance failed: command_timeout") from None
@@ -95,14 +98,38 @@ def advance_snapshot(common, started):
             b"positron: upgrade outcome unknown; inspect the same operation before retrying": "outcome_unknown",
             b"positron: upgrade verification failed; use the explicit rollback or fresh-target restore boundary": "verification_failed",
         }.get(result.stderr.strip(), "other")
-        observe_snapshot({}, started, "failed", category)
-        raise RuntimeError("offline upgrade advance failed: " + category)
+        if result.returncode == 2 and not result.stdout and category == "resumable":
+            remaining = min(command_deadline, deadline) - time.monotonic()
+            if remaining <= 0:
+                observe_snapshot({}, started, "deadline")
+                raise RuntimeError("authenticated upgrade snapshot did not complete")
+            try:
+                result = subprocess.run(command[:-1] + ["status"] + common,
+                                        input=None, capture_output=True, timeout=remaining)
+            except subprocess.TimeoutExpired:
+                observe_snapshot({}, started, "failed", "command_timeout")
+                raise RuntimeError("offline upgrade advance failed: command_timeout") from None
+            resumed = result.returncode == 0
+            if not resumed:
+                category = "status_refused"
+        if not resumed:
+            observe_snapshot({}, started, "failed", category)
+            raise RuntimeError("offline upgrade advance failed: " + category)
     try:
         status = fields(result.stdout.decode())
     except UnicodeDecodeError:
         observe_snapshot({}, started, "failed", "invalid_receipt")
         raise RuntimeError("offline upgrade advance failed: invalid_receipt") from None
-    observe_snapshot(status, started, "advanced")
+    if resumed:
+        if time.monotonic() >= deadline:
+            observe_snapshot({}, started, "deadline")
+            raise RuntimeError("authenticated upgrade snapshot did not complete")
+        if (status.get("operation_id") != common[-1] or status.get("status") != "Running"
+                or status.get("stage") not in ["Some(Snapshot)", "Some(Publishing)"]):
+            observe_snapshot({}, started, "failed", "invalid_receipt")
+            raise RuntimeError("offline upgrade advance failed: invalid_receipt")
+    observe_snapshot(status, started, "resumable" if resumed else "advanced",
+                     "resumable" if resumed else "none")
     return status
 
 
@@ -111,17 +138,36 @@ credential = claim["administrator_secret"].encode()
 transport = ["--endpoint", "127.0.0.1:4311", "--credential-stdin", "--allow-plaintext"]
 
 def admit(kind, action, arguments):
-    deadline = time.monotonic() + 60
+    started = time.monotonic()
+    deadline = started + 60
+    attempt = 0
+    last_rejection = "none"
+
+    def failed(phase):
+        if kind == "upgrade" and action == "start":
+            now = time.monotonic()
+            print(json.dumps({"event": "lifecycle_admission_failed", "attempt": attempt,
+                              "phase": phase, "last_rejection": last_rejection,
+                              "elapsed_ms": int((now - started) * 1000),
+                              "remaining_ms": int(max(0, deadline - now) * 1000)}),
+                  file=sys.stderr, flush=True)
 
     def execute(command):
+        nonlocal last_rejection
+        phase = "repository_status" if command[1:3] == ["repository", "status"] else "upgrade_start"
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            failed(phase)
             raise RuntimeError("native lifecycle admission deadline exhausted")
         try:
             result = subprocess.run(command, input=credential, capture_output=True, timeout=remaining)
         except subprocess.TimeoutExpired:
+            failed(phase)
             raise RuntimeError("native lifecycle admission outcome unknown at deadline") from None
+        if result.returncode:
+            last_rejection = repository_failure(result)
         if time.monotonic() >= deadline:
+            failed(phase)
             raise RuntimeError("native lifecycle admission deadline exhausted")
         return result
 
@@ -156,6 +202,7 @@ def admit(kind, action, arguments):
         return receipt
 
     while True:
+        attempt += 1
         command = None
         result = execute(["positron", "repository", "status"] + transport)
         if result.returncode == 0:
@@ -331,7 +378,7 @@ elif sys.argv[1] == "publish-upgrade":
     # verification starts. Bound the full fixture journey, retaining 60-second turns.
     deadline = started + 600
     while True:
-        status = advance_snapshot(common, started)
+        status = advance_snapshot(common, started, deadline)
         if status["stage"] == "Some(Publishing)":
             break
         if time.monotonic() >= deadline:

@@ -602,13 +602,24 @@ pub(super) fn report_snapshot_stage(
 fn report_state(
     stage: &'static str,
     work: Option<&VerificationWork>,
-    readmission: Option<(ServiceFailure, u64, u64)>,
+    readmission: Option<(&'static str, u64, u64)>,
     elapsed_ms: Option<u128>,
     remaining_ms: Option<u128>,
 ) {
     if !take_diagnostic_permit() {
         return;
     }
+    report_cursor(stage, work, readmission, elapsed_ms, remaining_ms);
+}
+
+#[cfg(feature = "test-support")]
+fn report_cursor(
+    stage: &'static str,
+    work: Option<&VerificationWork>,
+    readmission: Option<(&'static str, u64, u64)>,
+    elapsed_ms: Option<u128>,
+    remaining_ms: Option<u128>,
+) {
     if let Some(work) = work {
         eprintln!(
             "upgrade_verification_turn stage={stage} readmission_failure_requested_granted={readmission:?} remote_complete={:?} remote_progress={:?} elapsed_ms={elapsed_ms:?} remaining_ms={remaining_ms:?} native_file_index={} native_file_total={:?} catalog_ready={} schema_index={} schema_total={:?} key_index={}",
@@ -628,7 +639,9 @@ fn report_state(
             work.recovered_keys
         );
     } else {
-        eprintln!("upgrade_verification_turn stage={stage} verification_work=false");
+        eprintln!(
+            "upgrade_verification_turn stage={stage} verification_work=false readmission_failure_requested_granted={readmission:?} elapsed_ms={elapsed_ms:?} remaining_ms={remaining_ms:?}"
+        );
     }
 }
 
@@ -639,16 +652,99 @@ pub(in crate::services) fn report_readmission(
     requested_memory: u64,
     granted_memory: u64,
 ) {
-    let Some(BackupWork::Verification(work)) = work else {
-        return;
-    };
-    report_state(
+    // Requeue exits this driver turn, so this is at most one event per call.
+    // It must survive an exhausted process-wide slow-step diagnostic budget.
+    report_cursor(
         "readmission_discard",
-        Some(work),
-        Some((failure, requested_memory, granted_memory)),
+        match work {
+            Some(BackupWork::Verification(work)) => Some(work),
+            _ => None,
+        },
+        Some((
+            match failure {
+                ServiceFailure::BackupControlMemoryRequired { .. } => "control_memory_required",
+                ServiceFailure::StorageUnavailable => "storage_unavailable",
+                ServiceFailure::CapacityUnavailable => "capacity_unavailable",
+                _ => "other_failure",
+            },
+            requested_memory,
+            granted_memory,
+        )),
         None,
         None,
     );
+}
+
+/// One exit record per admitted driver call, independent of other tests' logs.
+#[cfg(feature = "test-support")]
+pub(in crate::services) struct DriverDiagnostic {
+    operation: DurableOperation,
+    started: std::time::Instant,
+    deadline: std::time::Instant,
+    initial_checkpoint: Option<positron_kernel::MaintenanceCheckpoint>,
+    pub steps: u64,
+}
+
+#[cfg(feature = "test-support")]
+impl DriverDiagnostic {
+    pub fn new(
+        operation: DurableOperation,
+        started: std::time::Instant,
+        deadline: std::time::Instant,
+        status: &positron_kernel::MaintenanceTaskStatus,
+    ) -> Self {
+        Self {
+            operation,
+            started,
+            deadline,
+            initial_checkpoint: status.checkpoint().cloned(),
+            steps: 0,
+        }
+    }
+
+    pub fn report(
+        &self,
+        stage: &'static str,
+        status: &positron_kernel::MaintenanceTaskStatus,
+        work: Option<&BackupWork>,
+    ) {
+        eprintln!(
+            "upgrade_backup_driver_exit stage={stage} operation={:?} kind={:?} starting_ms={} remaining_ms={} steps={} initial_sequence={:?} final_sequence={:?} checkpoint_unchanged={} task_phase={:?} granted_memory={}",
+            self.operation.operation_id(),
+            self.operation.kind(),
+            self.deadline
+                .saturating_duration_since(self.started)
+                .as_millis(),
+            self.deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis(),
+            self.steps,
+            self.initial_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.sequence()),
+            status.checkpoint().map(|checkpoint| checkpoint.sequence()),
+            self.initial_checkpoint.as_ref() == status.checkpoint(),
+            status.phase(),
+            status
+                .task()
+                .reservations()
+                .get(positron_kernel::ResourceDimension::MemoryBytes),
+        );
+        report_cursor(
+            stage,
+            match work {
+                Some(BackupWork::Verification(work)) => Some(work),
+                _ => None,
+            },
+            None,
+            Some(self.started.elapsed().as_millis()),
+            Some(
+                self.deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .as_millis(),
+            ),
+        );
+    }
 }
 
 #[cfg(test)]

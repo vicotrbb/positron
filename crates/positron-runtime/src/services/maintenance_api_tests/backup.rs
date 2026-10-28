@@ -456,6 +456,7 @@ fn wait_for_signed_reservation(
     identity: &RepositoryIdentity,
     operation: &str,
     bearer: &str,
+    worker: &std::thread::JoinHandle<Result<(), crate::ServiceFailure>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = crate::services::maintenance_verification::decode_fixed_hex(operation)
         .ok_or("operation identity")?;
@@ -494,6 +495,9 @@ fn wait_for_signed_reservation(
             | Err(positron_backup::RepositoryFailure::PreconditionFailed)
             | Err(positron_backup::RepositoryFailure::Busy) => {},
             Err(failure) => return Err(failure.into()),
+        }
+        if worker.is_finished() {
+            return Err("backup worker exited before signed reservation".into());
         }
         if std::time::Instant::now() >= deadline {
             let task = positron_kernel::MaintenanceTaskId::new(snapshot)

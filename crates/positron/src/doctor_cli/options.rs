@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum Mode {
     Offline,
     Online,
+    Ready,
 }
 pub(super) struct Options {
     pub(super) mode: Mode,
@@ -32,6 +33,7 @@ impl Options {
             match argument.as_str() {
                 "--offline" if mode.is_none() => mode = Some(Mode::Offline),
                 "--online" if mode.is_none() => mode = Some(Mode::Online),
+                "--ready" if mode.is_none() => mode = Some(Mode::Ready),
                 "--config" if config.is_none() => {
                     config = Some(PathBuf::from(
                         arguments.next().ok_or(DoctorFailure::Arguments)?,
@@ -91,7 +93,16 @@ impl Options {
             {
                 Err(DoctorFailure::Arguments)
             },
-            Mode::Offline | Mode::Online => Ok(Self {
+            Mode::Ready
+                if config.is_some()
+                    || !overrides.is_empty()
+                    || credential_stdin
+                    || control_path.is_some()
+                    || endpoint.is_none() =>
+            {
+                Err(DoctorFailure::Arguments)
+            },
+            Mode::Offline | Mode::Online | Mode::Ready => Ok(Self {
                 mode,
                 config,
                 overrides,

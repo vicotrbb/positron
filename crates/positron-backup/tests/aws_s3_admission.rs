@@ -11,7 +11,13 @@ use std::{fs, os::unix::fs::PermissionsExt};
 #[tokio::test]
 async fn native_s3_requires_admission_before_credential_resolution()
 -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join(format!("positron-s3-admission-{}", std::process::id()));
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "positron-s3-admission-{}-{timestamp}",
+        std::process::id()
+    ));
     fs::create_dir(&path)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     let volume = PrimaryDataVolume::acquire(&path, MountQualification::LocalHost)?;

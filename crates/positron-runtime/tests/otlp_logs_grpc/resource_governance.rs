@@ -54,13 +54,20 @@ async fn saturated_authenticated_stream_rejects_before_payload_decode_and_releas
     };
     if competing_code == Code::Unavailable {
         let retry = harness.authorize(tonic::Request::new(otlp_request("capacity-released")))?;
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), client.export(retry))
-                .await??
-                .into_inner()
-                .partial_success
-                .is_none()
-        );
+        let (metadata, _, body) = retry.into_parts();
+        // The one-record positive probe may replay only an explicit precommit
+        // refusal. Persistent admission leakage still exhausts this deadline.
+        let response = super::authentication::single_record_export(
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            || {
+                let mut client = client.clone();
+                let mut request = tonic::Request::new(body.clone());
+                *request.metadata_mut() = metadata.clone();
+                async move { client.export(request).await }
+            },
+        )
+        .await?;
+        assert!(response.into_inner().partial_success.is_none());
     }
 
     drop(client);

@@ -1850,163 +1850,224 @@ pub(super) fn drive_upgrade_backup(
 ) -> Result<positron_governance::DurableOperation, crate::upgrade::UpgradeFailure> {
     use crate::upgrade::UpgradeFailure;
     use positron_governance::{DurableOperationAdministration, DurableOperationKind};
-    let inspect = || {
-        let _gate = services
-            .catalog_operation()
-            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-        let catalog = services
-            .open_maintenance_catalog()
-            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-        DurableOperationAdministration::inspect(&catalog, id)
-            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?
-            .ok_or(UpgradeFailure::InvalidRequest)
-    };
-    let operation = inspect()?;
-    if !matches!(
-        operation.kind(),
-        DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupVerification
-    ) {
-        return Err(UpgradeFailure::InvalidRequest);
-    }
-    if operation.status().is_terminal() || std::time::Instant::now() >= deadline {
-        return Ok(operation);
-    }
-    // Recovery intentionally retains the authenticated lifecycle anchor. An
-    // accepted operation may be ahead of that conservative clock after restart;
-    // only the clock owner can make its next transition eligible.
-    let lifecycle_time = crate::upgrade::await_lifecycle_time(
-        &services.instance,
-        operation.updated_at_unix_seconds(),
-        deadline,
-    );
-    #[cfg(test)]
-    if lifecycle_time == Err(UpgradeFailure::CapacityUnavailable) {
-        eprintln!("upgrade-backup-capacity stage=trusted-time-wait");
-    }
-    lifecycle_time?;
-    let instance = &services.instance;
-    let coordinator = instance.maintenance_coordinator();
-    let initial_progress = coordinator
-        .status(
-            positron_kernel::MaintenanceTaskId::new(id.to_bytes())
-                .map_err(|_| UpgradeFailure::InvalidRequest)?,
-        )
-        .map_err(|_| UpgradeFailure::PersistenceUnavailable)?
-        .checkpoint()
-        .map(|checkpoint| checkpoint.opaque_progress().to_vec());
-    let execution = {
-        let _gate = services
-            .catalog_operation()
-            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-        let catalog = services
-            .open_maintenance_catalog()
-            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-        coordinator.start_backup_operation_with_reservation_and_persist(
-            &catalog,
-            &instance._authority,
-            services
-                .maintenance_status_now()
-                .map_err(|_| UpgradeFailure::PersistenceUnavailable)?,
-            instance.retention_time.status().state()
-                == positron_kernel::LifecycleClockState::ClockUncertain,
-            positron_kernel::MaintenanceTaskId::new(id.to_bytes())
-                .map_err(|_| UpgradeFailure::InvalidRequest)?,
-        )
-    };
     #[cfg(feature = "test-support")]
-    if execution.is_err() {
-        super::backup_administration::report_verification_turn("coordinator_start_refused", None);
-    }
-    let execution = execution.map_err(|_| UpgradeFailure::CapacityUnavailable)?;
-    let Some(execution) = execution else {
-        return inspect();
-    };
-    let mut execution = InstalledMaintenanceExecution::BackupSnapshot {
-        execution,
-        work: None,
-    };
-    loop {
-        #[cfg(feature = "test-support")]
-        let step_started = std::time::Instant::now();
-        let step_result = complete_installed_maintenance(services, None, &mut execution);
-        #[cfg(feature = "test-support")]
-        {
-            let elapsed = step_started.elapsed();
-            // Diagnostic cadence only; the original turn deadline is unchanged.
-            if elapsed >= std::time::Duration::from_secs(1) {
-                let work = match &execution {
-                    InstalledMaintenanceExecution::BackupSnapshot { work, .. } => work.as_ref(),
-                    _ => None,
-                };
-                super::backup_administration::report_verification_timed_turn(
-                    work,
-                    elapsed,
-                    deadline.saturating_duration_since(std::time::Instant::now()),
-                );
-            }
-        }
-        step_result.map_err(|_| UpgradeFailure::SnapshotUnavailable)?;
-        let InstalledMaintenanceExecution::BackupSnapshot {
-            execution: owner,
-            work,
-        } = &mut execution
-        else {
-            return Err(UpgradeFailure::UnsafeState);
-        };
-        let status = coordinator
-            .status(owner.task().identity())
-            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-        if status.phase() != MaintenanceTaskPhase::Running {
-            return inspect();
-        }
-        if std::time::Instant::now() >= deadline {
-            #[cfg(feature = "test-support")]
-            super::backup_administration::report_verification_turn(
-                "deadline_discard",
-                work.as_ref(),
-            );
-            *work = None;
-            let binding = positron_kernel::RepositoryOperationBinding::from_execution(owner)
-                .map_err(|_| UpgradeFailure::UnsafeState)?;
-            let resources = owner.task().reservations();
+    let driver_started = std::time::Instant::now();
+    let mut readmission_progress = false;
+    'dispatch: loop {
+        let inspect = || {
             let _gate = services
                 .catalog_operation()
                 .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
             let catalog = services
                 .open_maintenance_catalog()
                 .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-            owner
-                .requeue_backup_with_resources_and_persist(
-                    coordinator,
-                    &catalog,
-                    binding,
-                    resources,
-                    services
-                        .maintenance_status_now()
-                        .map_err(|_| UpgradeFailure::PersistenceUnavailable)?,
-                )
+            DurableOperationAdministration::inspect(&catalog, id)
+                .map_err(|_| UpgradeFailure::PersistenceUnavailable)?
+                .ok_or(UpgradeFailure::InvalidRequest)
+        };
+        let operation = inspect()?;
+        if !matches!(
+            operation.kind(),
+            DurableOperationKind::BackupSnapshot | DurableOperationKind::BackupVerification
+        ) {
+            return Err(UpgradeFailure::InvalidRequest);
+        }
+        if operation.status().is_terminal() || std::time::Instant::now() >= deadline {
+            return Ok(operation);
+        }
+        // Recovery intentionally retains the authenticated lifecycle anchor. An
+        // accepted operation may be ahead of that conservative clock after restart;
+        // only the clock owner can make its next transition eligible.
+        let lifecycle_time = crate::upgrade::await_lifecycle_time(
+            &services.instance,
+            operation.updated_at_unix_seconds(),
+            deadline,
+        );
+        #[cfg(test)]
+        if lifecycle_time == Err(UpgradeFailure::CapacityUnavailable) {
+            eprintln!("upgrade-backup-capacity stage=trusted-time-wait");
+        }
+        #[cfg(feature = "test-support")]
+        if let Err(failure) = lifecycle_time {
+            eprintln!(
+                "upgrade_backup_driver_refused operation={id:?} kind={:?} stage=trusted_time failure={failure:?} starting_ms={} remaining_ms={}",
+                operation.kind(),
+                deadline
+                    .saturating_duration_since(driver_started)
+                    .as_millis(),
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .as_millis()
+            );
+        }
+        if lifecycle_time == Err(UpgradeFailure::CapacityUnavailable) && readmission_progress {
+            return inspect();
+        }
+        lifecycle_time?;
+        let instance = &services.instance;
+        let coordinator = instance.maintenance_coordinator();
+        let initial_status = coordinator
+            .status(
+                positron_kernel::MaintenanceTaskId::new(id.to_bytes())
+                    .map_err(|_| UpgradeFailure::InvalidRequest)?,
+            )
+            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+        #[cfg(feature = "test-support")]
+        let mut diagnostic = super::backup_administration::DriverDiagnostic::new(
+            operation,
+            driver_started,
+            deadline,
+            &initial_status,
+        );
+        let initial_progress = initial_status
+            .checkpoint()
+            .map(|checkpoint| checkpoint.opaque_progress().to_vec());
+        let execution = {
+            let _gate = services
+                .catalog_operation()
                 .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
-            drop(catalog);
-            drop(_gate);
-            let current = inspect()?;
-            if !current.status().is_terminal()
-                && current.revision() == operation.revision()
-                && status
-                    .checkpoint()
-                    .map(|checkpoint| checkpoint.opaque_progress())
-                    == initial_progress.as_deref()
+            let catalog = services
+                .open_maintenance_catalog()
+                .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+            coordinator.start_backup_operation_with_reservation_and_persist(
+                &catalog,
+                &instance._authority,
+                services
+                    .maintenance_status_now()
+                    .map_err(|_| UpgradeFailure::PersistenceUnavailable)?,
+                instance.retention_time.status().state()
+                    == positron_kernel::LifecycleClockState::ClockUncertain,
+                positron_kernel::MaintenanceTaskId::new(id.to_bytes())
+                    .map_err(|_| UpgradeFailure::InvalidRequest)?,
+            )
+        };
+        #[cfg(feature = "test-support")]
+        if execution.is_err() {
+            diagnostic.report("coordinator_start_refused", &initial_status, None);
+        }
+        let execution = match execution {
+            Ok(execution) => execution,
+            Err(
+                positron_kernel::MaintenanceFailure::CapacityExceeded
+                | positron_kernel::MaintenanceFailure::ResourceAdmissionRefused,
+            ) if readmission_progress => return inspect(),
+            Err(_) => return Err(UpgradeFailure::CapacityUnavailable),
+        };
+        let Some(execution) = execution else {
+            #[cfg(feature = "test-support")]
+            diagnostic.report("queued_return", &initial_status, None);
+            return inspect();
+        };
+        let dispatched_resources = execution.task().reservations();
+        let mut execution = InstalledMaintenanceExecution::BackupSnapshot {
+            execution,
+            work: None,
+        };
+        loop {
+            #[cfg(feature = "test-support")]
+            let step_started = std::time::Instant::now();
+            let step_result = complete_installed_maintenance(services, None, &mut execution);
+            #[cfg(feature = "test-support")]
             {
-                // Requeue bookkeeping alone is not recoverable progress. A
-                // shorter turn cannot retain the private semantic accumulator;
-                // report the retryable limit rather than loop without progress.
-                #[cfg(feature = "test-support")]
-                super::backup_administration::report_verification_turn(
-                    "turn_no_durable_progress",
-                    None,
-                );
-                return Err(UpgradeFailure::CapacityUnavailable);
+                diagnostic.steps += 1;
             }
-            return Ok(current);
+            #[cfg(feature = "test-support")]
+            {
+                let elapsed = step_started.elapsed();
+                // Diagnostic cadence only; the original turn deadline is unchanged.
+                if elapsed >= std::time::Duration::from_secs(1) {
+                    let work = match &execution {
+                        InstalledMaintenanceExecution::BackupSnapshot { work, .. } => work.as_ref(),
+                        _ => None,
+                    };
+                    super::backup_administration::report_verification_timed_turn(
+                        work,
+                        elapsed,
+                        deadline.saturating_duration_since(std::time::Instant::now()),
+                    );
+                }
+            }
+            step_result.map_err(|_| UpgradeFailure::SnapshotUnavailable)?;
+            let InstalledMaintenanceExecution::BackupSnapshot {
+                execution: owner,
+                work,
+            } = &mut execution
+            else {
+                return Err(UpgradeFailure::UnsafeState);
+            };
+            let status = coordinator
+                .status(owner.task().identity())
+                .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+            if status.phase() != MaintenanceTaskPhase::Running {
+                #[cfg(feature = "test-support")]
+                if status.phase() == MaintenanceTaskPhase::Queued {
+                    diagnostic.report("task_queued", &status, work.as_ref());
+                }
+                let resources = status.task().reservations();
+                if status.phase() == MaintenanceTaskPhase::Queued
+                    && std::time::Instant::now() < deadline
+                    && resources != dispatched_resources
+                    && positron_kernel::ResourceDimension::ALL
+                        .iter()
+                        .all(|dimension| {
+                            resources.get(*dimension) >= dispatched_resources.get(*dimension)
+                        })
+                {
+                    // Readmission published a larger claim. Release the old grant
+                    // before the same task asks the Governor for that exact claim.
+                    readmission_progress = true;
+                    drop(execution);
+                    continue 'dispatch;
+                }
+                return inspect();
+            }
+            if std::time::Instant::now() >= deadline {
+                #[cfg(feature = "test-support")]
+                diagnostic.report("deadline_discard", &status, work.as_ref());
+                *work = None;
+                let binding = positron_kernel::RepositoryOperationBinding::from_execution(owner)
+                    .map_err(|_| UpgradeFailure::UnsafeState)?;
+                let resources = owner.task().reservations();
+                let _gate = services
+                    .catalog_operation()
+                    .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+                let catalog = services
+                    .open_maintenance_catalog()
+                    .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+                owner
+                    .requeue_backup_with_resources_and_persist(
+                        coordinator,
+                        &catalog,
+                        binding,
+                        resources,
+                        services
+                            .maintenance_status_now()
+                            .map_err(|_| UpgradeFailure::PersistenceUnavailable)?,
+                    )
+                    .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
+                drop(catalog);
+                drop(_gate);
+                let current = inspect()?;
+                if !readmission_progress
+                    && !current.status().is_terminal()
+                    && current.revision() == operation.revision()
+                    && status
+                        .checkpoint()
+                        .map(|checkpoint| checkpoint.opaque_progress())
+                        == initial_progress.as_deref()
+                {
+                    // Requeue bookkeeping alone is not recoverable progress. A
+                    // shorter turn cannot retain the private semantic accumulator;
+                    // report the retryable limit rather than loop without progress.
+                    #[cfg(feature = "test-support")]
+                    super::backup_administration::report_verification_turn(
+                        "turn_no_durable_progress",
+                        None,
+                    );
+                    return Err(UpgradeFailure::CapacityUnavailable);
+                }
+                return Ok(current);
+            }
         }
     }
 }

@@ -15,7 +15,7 @@ class SnapshotObservation(unittest.TestCase):
     operation = "0123456789abcdef0123456789abcdef"
 
     def invoke(self, receipt=None, failure=None, stderr=None, stop_after_advance=False,
-               publishing_after=None):
+               publishing_after=None, responses=None):
         self.clock = 0
         self.commands = []
         output = io.StringIO()
@@ -30,6 +30,11 @@ class SnapshotObservation(unittest.TestCase):
             if stop_after_advance and len(self.commands) > (publishing_after or 1):
                 raise RuntimeError("after publication boundary")
             self.clock += 65
+            if responses is not None:
+                response = responses[len(self.commands) - 1]
+                if isinstance(response, Exception):
+                    raise response
+                return types.SimpleNamespace(returncode=response[0], stdout=response[1], stderr=response[2])
             if failure is not None:
                 raise failure
             text = receipt or (f"operation_id={self.operation} status=Running "
@@ -56,6 +61,50 @@ class SnapshotObservation(unittest.TestCase):
         self.error = str(raised.exception)
         self.output = output.getvalue()
         return [json.loads(line) for line in self.output.splitlines()]
+
+    def test_explicit_resumable_advance_inspects_same_operation_then_publishes(self):
+        resumable = b"positron: upgrade remains resumable; inspect and retry after trusted time or capacity recovers"
+        running = (f"operation_id={self.operation} status=Running stage=Some(Snapshot) revision=4").encode()
+        publishing = (f"operation_id={self.operation} status=Running stage=Some(Publishing) revision=5").encode()
+        records = self.invoke(responses=[(2, b"", resumable), (0, running, b""), (0, publishing, b"")],
+                              publishing_after=3, stop_after_advance=True)
+        self.assertEqual([record["outcome"] for record in records], ["resumable", "advanced"])
+        self.assertEqual(records[0]["operation_id"], self.operation)
+        self.assertEqual(self.commands[1][0][-5:], ["status", "--config", "/var/lib/positron-release/positron.toml", "--operation-id", self.operation])
+        self.assertEqual(self.commands[1][1]["timeout"], 115)
+        self.assertEqual(self.commands[0][0], self.commands[2][0])
+        self.assertEqual(self.error, "after publication boundary")
+
+    def test_resumable_retry_requires_exact_exit_class_and_empty_stdout(self):
+        diagnostic = b"positron: upgrade remains resumable; inspect and retry after trusted time or capacity recovers"
+        for response in [(1, b"", diagnostic), (2, b"protected-secret", diagnostic),
+                         (2, b"", diagnostic + b" protected-secret")]:
+            with self.subTest(response=response):
+                records = self.invoke(responses=[response])
+                self.assertEqual(records[-1]["outcome"], "failed")
+                self.assertEqual(len(self.commands), 1)
+                self.assertNotIn("protected", self.output + self.error)
+
+    def test_permanent_resumable_advance_exhausts_original_journey(self):
+        resumable = b"positron: upgrade remains resumable; inspect and retry after trusted time or capacity recovers"
+        running = (f"operation_id={self.operation} status=Running stage=Some(Snapshot) revision=4").encode()
+        records = self.invoke(responses=[(2, b"", resumable), (0, running, b"")] * 5)
+        self.assertEqual([record["outcome"] for record in records], ["resumable"] * 4 + ["deadline"])
+        self.assertEqual(len(self.commands), 10)
+        self.assertEqual(self.commands[-1][1]["timeout"], 15)
+        self.assertEqual(self.error, "authenticated upgrade snapshot did not complete")
+
+    def test_resumable_status_rejects_refusal_wrong_operation_and_terminal_truth(self):
+        resumable = (2, b"", b"positron: upgrade remains resumable; inspect and retry after trusted time or capacity recovers")
+        for status in [(2, b"protected-secret", b"protected-secret"),
+                       (0, b"operation_id=protected-secret status=Running stage=Some(Snapshot)", b""),
+                       (0, f"operation_id={self.operation} status=Failed stage=Some(Snapshot)".encode(), b""),
+                       subprocess.TimeoutExpired(["protected-secret"], 115)]:
+            with self.subTest(status=status):
+                records = self.invoke(responses=[resumable, status])
+                self.assertEqual(records[-1]["outcome"], "failed")
+                self.assertEqual(len(self.commands), 2)
+                self.assertNotIn("protected", self.output + self.error)
 
     def test_progressive_snapshot_and_verification_can_publish_after_three_minutes(self):
         records = self.invoke(publishing_after=4, stop_after_advance=True)
