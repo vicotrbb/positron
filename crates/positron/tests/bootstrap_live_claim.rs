@@ -1,4 +1,6 @@
 //! Owner-only live claim stays on the exec stream, never the server's output.
+#[path = "support/native_binary.rs"]
+mod native_binary;
 use std::{
     fs,
     io::{Read, Write},
@@ -51,7 +53,8 @@ fn exercise_live_claim(lost_response: bool) {
         ));
     }
     fs::write(&config, text).unwrap();
-    let binary = env!("CARGO_BIN_EXE_positron");
+    let executable = native_binary::executable();
+    let binary = executable.as_os_str();
     assert!(
         Command::new(binary)
             .args(["bootstrap", "prepare-storage", "--config"])
@@ -105,8 +108,7 @@ fn exercise_live_claim(lost_response: bool) {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         stream.write_all(b"POST /control/bootstrap/claim HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        let response = rejection_response(&mut stream).unwrap();
         assert!(response.starts_with("HTTP/1.1 404"));
     }
     // The startup Control listener reaches the sole process reload owner.
@@ -127,8 +129,7 @@ fn exercise_live_claim(lost_response: bool) {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         stream.write_all(b"POST /control/configuration/reload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
+        let response = rejection_response(&mut stream).unwrap();
         assert!(response.starts_with("HTTP/1.1 404"));
     }
     let mut stream = UnixStream::connect(&socket).unwrap();
@@ -136,18 +137,24 @@ fn exercise_live_claim(lost_response: bool) {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     stream.write_all(b"POST /control/configuration/reload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx").unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    let response = rejection_response(&mut stream).unwrap();
     assert!(response.starts_with("HTTP/1.1 400"));
+    assert!(
+        root.join("secrets/bootstrap-claim.v1").is_file(),
+        "malformed request must not consume the claim"
+    );
     // An unexpected request body cannot consume a claim.
     let mut stream = UnixStream::connect(&socket).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     stream.write_all(b"POST /control/bootstrap/claim HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx").unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
+    let response = rejection_response(&mut stream).unwrap();
     assert!(response.starts_with("HTTP/1.1 400"));
+    assert!(
+        root.join("secrets/bootstrap-claim.v1").is_file(),
+        "malformed request must not consume the claim"
+    );
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).unwrap();
     let claim = || {
         Command::new(binary)
@@ -211,4 +218,78 @@ fn live_claim_requires_the_owner_socket_and_is_destroyed_before_one_time_deliver
 #[test]
 fn failed_live_response_never_recreates_or_redisplays_consumed_credentials() {
     exercise_live_claim(true);
+}
+
+fn rejection_response(stream: &mut impl Read) -> std::io::Result<String> {
+    let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidData);
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 256];
+    loop {
+        let count = stream.read(&mut chunk)?;
+        if count == 0 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        }
+        if bytes.len() + count > 4096 {
+            return Err(invalid());
+        }
+        bytes.extend_from_slice(chunk.get(..count).ok_or_else(invalid)?);
+        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = std::str::from_utf8(bytes.get(..end).ok_or_else(invalid)?)
+                .map_err(|_| invalid())?;
+            let mut lengths = head.lines().filter_map(|line| {
+                line.split_once(':')
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim())
+            });
+            let length = lengths
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(invalid)?;
+            if length > 512
+                || lengths.next().is_some()
+                || head
+                    .lines()
+                    .any(|line| line.to_ascii_lowercase().starts_with("transfer-encoding:"))
+                || !matches!(
+                    head.lines().next(),
+                    Some("HTTP/1.1 400 Bad Request" | "HTTP/1.1 404 Not Found")
+                )
+                || (head.starts_with("HTTP/1.1 400 ") && length != 0)
+            {
+                return Err(invalid());
+            }
+            let expected = end.checked_add(4 + length).ok_or_else(invalid)?;
+            if bytes.len() > expected {
+                return Err(invalid());
+            }
+            if bytes.len() == expected {
+                return String::from_utf8(bytes).map_err(|_| invalid());
+            }
+        }
+    }
+}
+
+#[test]
+fn rejected_response_requires_complete_bounded_framing() {
+    let valid = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    assert!(rejection_response(&mut std::io::Cursor::new(valid)).is_ok());
+    assert!(
+        rejection_response(&mut std::io::Cursor::new(
+            b"HTTP/1.1 404 Not Found\r\ncontent-length: 2\r\n\r\n{}"
+        ))
+        .is_ok()
+    );
+    for invalid in [
+        valid[..valid.len() - 1].to_vec(),
+        [valid.as_slice(), b"x"].concat(),
+        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 1\r\n\r\nx".to_vec(),
+        b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n".to_vec(),
+        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\ncontent-length: 0\r\n\r\n".to_vec(),
+        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n"
+            .to_vec(),
+        vec![b'x'; 4097],
+    ] {
+        assert!(rejection_response(&mut std::io::Cursor::new(invalid)).is_err());
+    }
 }

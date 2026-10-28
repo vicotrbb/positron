@@ -8,8 +8,13 @@ use positron_config::{CommandLineOverrides, ConfigurationInputs, EnvironmentOver
 fn effective_configuration(
     document: Option<&str>,
 ) -> Result<Arc<positron_config::EffectiveConfiguration>, Box<dyn std::error::Error>> {
+    // Match the explicit plaintext NativeBindings used by these status fixtures.
+    let document = format!(
+        "{}\n[listener]\noperations_transport='plaintext'\napi_transport='plaintext'\notlp_grpc_transport='plaintext'\notlp_http_transport='plaintext'\nloki_push_transport='plaintext'\n",
+        document.unwrap_or("schema_version = 1")
+    );
     let inputs = ConfigurationInputs::try_new(
-        document,
+        Some(&document),
         EnvironmentOverrides::try_from_pairs([] as [(&str, &str); 0])?,
         CommandLineOverrides::try_from_pairs([] as [(&str, &str); 0])?,
     )?;

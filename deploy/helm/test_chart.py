@@ -1,5 +1,6 @@
 """Integration tests of the generated artifact through the real Helm CLI."""
 import os
+import json
 import http.server
 import ssl
 import sys
@@ -139,9 +140,39 @@ class HelmChart(unittest.TestCase):
             config.write_text(configuration)
             subprocess.run([binary, "bootstrap", "prepare-storage", "--config", str(config)], check=True, capture_output=True, timeout=15)
             for listener in bindings: listener.close()
-            process = subprocess.Popen([binary, "serve", "--init-if-empty", "--config", str(config)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            error_path = root / "startup.stderr"
+            with error_path.open("wb") as errors:
+                error_path.chmod(0o600)
+                process = subprocess.Popen([binary, "serve", "--init-if-empty", "--config", str(config)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors)
             try:
                 trust = ssl.create_default_context(cafile=str(projected / "..data/ca.pem"))
+                def startup_diagnostics(doctor=None):
+                    import http.client
+                    report = {"process_exit": process.poll(), "claim_present": (root / "secrets/bootstrap-claim.v1").is_file()}
+                    if doctor is not None:
+                        report["doctor_exit"] = doctor.returncode
+                        report["doctor"] = {key: value for line in doctor.stdout.decode(errors="replace").splitlines() if "=" in line for key, value in [line.split("=", 1)] if key in ["status", "finding_code"] and re.fullmatch(r"[A-Za-z0-9_]{1,80}", value)}
+                    if sys.platform == "linux":
+                        observed = subprocess.run(["stat", "-f", "-c", "%t:%T", str(root)], capture_output=True, timeout=3)
+                        value = observed.stdout.decode().strip()
+                        report["filesystem"] = value if re.fullmatch(r"[A-Za-z0-9_:.-]{1,80}", value) else "unavailable"
+                    for name in ["data", "secrets"]:
+                        if (root / name).exists():
+                            metadata = (root / name).stat()
+                            report[name] = {"uid": metadata.st_uid, "gid": metadata.st_gid, "mode": oct(metadata.st_mode & 0o7777)}
+                    with error_path.open("rb") as errors: log = errors.read(16384).decode(errors="replace")
+                    report["events_observed"] = [event for event in ["process_starting", "process_recovering", "process_serving", "dependency_storage_unavailable", "dependency_key_unavailable", "dependency_resources_unavailable", "dependency_catalog_unavailable", "dependency_recovery_unavailable"] if event in log]
+                    for state in ["live", "ready"]:
+                        connection = http.client.HTTPSConnection("localhost", endpoints[0], context=trust, timeout=3)
+                        try:
+                            connection.request("GET", "/health/" + state)
+                            response = connection.getresponse()
+                            payload = json.loads(response.read(4097))
+                            report[state] = {"http_status": response.status, "status": payload.get("status") if payload.get("status") in ["live", "not_live", "ready", "not_ready"] else "unknown", "warnings": [warning for warning in payload.get("warnings", [])[:16] if isinstance(warning, str) and re.fullmatch(r"[a-z_]{1,80}", warning)]}
+                        except (OSError, ValueError, http.client.HTTPException) as failure:
+                            report[state] = {"error_type": type(failure).__name__}
+                        finally: connection.close()
+                    return report
                 def identity():
                     with socket.create_connection(("127.0.0.1", endpoints[0]), timeout=3) as connection:
                         with trust.wrap_socket(connection, server_hostname="localhost") as tls: return tls.getpeercert(binary_form=True)
@@ -154,12 +185,15 @@ class HelmChart(unittest.TestCase):
                             if expected is None or observed == expected: return observed
                         except (OSError, ssl.SSLError): pass
                         time.sleep(0.05)
-                    self.fail("native listener did not publish expected TLS identity")
+                    self.fail("native listener did not publish expected TLS identity: " + json.dumps(startup_diagnostics(), sort_keys=True))
                 old = wait_identity(None)
                 probe = [binary, "doctor", "--ready", "--endpoint", f"127.0.0.1:{endpoints[0]}", "--server-name", "localhost", "--trust-file", str(projected / "..data/ca.pem")]
                 deadline = time.monotonic() + 20
-                while subprocess.run(probe, capture_output=True, timeout=10).returncode:
-                    self.assertLess(time.monotonic(), deadline, "native process did not become ready")
+                while True:
+                    ready = subprocess.run(probe, capture_output=True, timeout=10)
+                    if ready.returncode == 0: break
+                    if time.monotonic() >= deadline:
+                        self.fail("native process did not become ready: " + json.dumps(startup_diagnostics(ready), sort_keys=True))
                     time.sleep(0.05)
                 claim = subprocess.run([binary, "bootstrap", "claim", "--control-path", str(root / "control.sock")], capture_output=True, check=True, timeout=10)
                 administrator = dict(line.split(b"=", 1) for line in claim.stdout.splitlines())[b"administrator_secret"]
