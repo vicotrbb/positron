@@ -138,17 +138,36 @@ credential = claim["administrator_secret"].encode()
 transport = ["--endpoint", "127.0.0.1:4311", "--credential-stdin", "--allow-plaintext"]
 
 def admit(kind, action, arguments):
-    deadline = time.monotonic() + 60
+    started = time.monotonic()
+    deadline = started + 60
+    attempt = 0
+    last_rejection = "none"
+
+    def failed(phase):
+        if kind == "upgrade" and action == "start":
+            now = time.monotonic()
+            print(json.dumps({"event": "lifecycle_admission_failed", "attempt": attempt,
+                              "phase": phase, "last_rejection": last_rejection,
+                              "elapsed_ms": int((now - started) * 1000),
+                              "remaining_ms": int(max(0, deadline - now) * 1000)}),
+                  file=sys.stderr, flush=True)
 
     def execute(command):
+        nonlocal last_rejection
+        phase = "repository_status" if command[1:3] == ["repository", "status"] else "upgrade_start"
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            failed(phase)
             raise RuntimeError("native lifecycle admission deadline exhausted")
         try:
             result = subprocess.run(command, input=credential, capture_output=True, timeout=remaining)
         except subprocess.TimeoutExpired:
+            failed(phase)
             raise RuntimeError("native lifecycle admission outcome unknown at deadline") from None
+        if result.returncode:
+            last_rejection = repository_failure(result)
         if time.monotonic() >= deadline:
+            failed(phase)
             raise RuntimeError("native lifecycle admission deadline exhausted")
         return result
 
@@ -183,6 +202,7 @@ def admit(kind, action, arguments):
         return receipt
 
     while True:
+        attempt += 1
         command = None
         result = execute(["positron", "repository", "status"] + transport)
         if result.returncode == 0:
