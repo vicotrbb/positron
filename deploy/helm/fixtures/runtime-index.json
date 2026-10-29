@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:d379c5ceffdbd43bad157ec41b7dcf42fa8dc0a43e00b26f000253549e71b5c2",
+      "size": 482,
+      "annotations": {
+        "config.digest": "sha256:9dea56f15e0ca7d550f5cd2b6951b7438ee5519951e6eeec9b40898cc680cb62",
+        "io.containerd.image.name": "ghcr.io/vicotrbb/positron@sha256:d379c5ceffdbd43bad157ec41b7dcf42fa8dc0a43e00b26f000253549e71b5c2",
+        "org.opencontainers.image.ref.name": "ghcr.io/vicotrbb/positron@sha256:d379c5ceffdbd43bad157ec41b7dcf42fa8dc0a43e00b26f000253549e71b5c2"
+      }
+    },
+    {
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "digest": "sha256:91bbb8eb52ca462611c1f9ce5c4cede4172a31bfe64f336e82f29648694a3cfe",
+      "size": 912,
+      "annotations": {
+        "containerd.io/distribution.source.docker.io": "rockylinux/rockylinux",
+        "io.containerd.image.name": "docker.io/rockylinux/rockylinux@sha256:91bbb8eb52ca462611c1f9ce5c4cede4172a31bfe64f336e82f29648694a3cfe",
+        "org.opencontainers.image.ref.name": "docker.io/rockylinux/rockylinux@sha256:91bbb8eb52ca462611c1f9ce5c4cede4172a31bfe64f336e82f29648694a3cfe"
+      }
+    }
+  ]
+}

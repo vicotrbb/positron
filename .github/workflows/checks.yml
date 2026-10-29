@@ -286,7 +286,14 @@ jobs:
               -v "$RUNNER_TEMP/gnu-cargo:/cargo" -w "$GITHUB_WORKSPACE" positron-gnu-builder \
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture
           else
-            cargo test --locked -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture
+            native_suite_status=0
+            cargo test --locked -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture || native_suite_status=$?
+            if [ "$native_suite_status" -ne 0 ] && [ '${{ matrix.target }}' = macos-x86_64 ]; then
+              isolated_native_status=0
+              cargo test --locked -p positron --test upgrade_native_cli offline_recovery::offline_restore_reference_survives_frontiers_that_refuse_continuation -- --exact --nocapture --test-threads=1 || isolated_native_status=$?
+              printf 'isolated_intel_upgrade_diagnostic_exit=%s original_suite_exit=%s\n' "$isolated_native_status" "$native_suite_status"
+            fi
+            exit "$native_suite_status"
           fi
       - name: Run installed offline integrity verification
         shell: bash
@@ -540,6 +547,10 @@ jobs:
           POSITRON_TEST_HELM_FIXTURE_HELPER="$(jq -r 'select(.target.name == "compose_fixture" and .executable != null and .profile.test == true) | .executable' "$RUNNER_TEMP/public-test-build.json")"
           export POSITRON_TEST_SOURCE_COMMIT POSITRON_TEST_CANDIDATE_COMMIT POSITRON_TEST_HELM_FIXTURE_HELPER
           export POSITRON_TEST_HELM_FIXTURE_BUILDER=positron-gnu-builder
+          POSITRON_TEST_HELM_QUERY_IMAGE="$(docker image inspect --format '{{.Id}}' positron-118-test)"
+          export POSITRON_TEST_HELM_QUERY_IMAGE
+          export POSITRON_TEST_HELM_ARCHITECTURE="$architecture"
+          [[ "$POSITRON_TEST_HELM_QUERY_IMAGE" =~ ^sha256:[a-f0-9]{64}$ ]]
           test -x "$POSITRON_TEST_HELM_CURRENT_BINARY"
           test -x "$POSITRON_TEST_UPGRADE_BINARY"
           test -x "$POSITRON_TEST_HELM_FIXTURE_HELPER"
@@ -624,8 +635,13 @@ jobs:
               test "$("${ctr[@]}" images list | awk '$1 == "docker.io/library/positron-120-candidate:latest" { print $3 }')" = "$candidate_digest"
               "${ctr[@]}" images tag --force docker.io/library/positron-118-test:latest "$POSITRON_TEST_HELM_IMAGE"
               "${ctr[@]}" images tag --force docker.io/library/positron-120-candidate:latest "$POSITRON_TEST_HELM_CANDIDATE_IMAGE"
-              "${ctr[@]}" content get "$current_digest" > "$POSITRON_TEST_HELM_INDEX_FILE"
+              "${ctr[@]}" content get "$current_digest" | head -c 1048577 > "$POSITRON_TEST_HELM_INDEX_FILE"
             done
+            manifest_digest="$(PYTHONPATH=deploy/helm python3 -c 'import os; from native_lifecycle import query_image_descriptor; print(query_image_descriptor(os.environ["POSITRON_TEST_HELM_IMAGE"], os.environ["POSITRON_TEST_HELM_INDEX_FILE"], os.environ["POSITRON_TEST_HELM_ARCHITECTURE"])[1]["digest"])')"
+            if [ "$manifest_digest" != "$current_digest" ]; then
+              "${ctr[@]}" content get "$manifest_digest" | head -c 1048577 > "$cell_dir/query-manifest-${manifest_digest#sha256:}.json"
+            fi
+            PYTHONPATH=deploy/helm python3 -c 'import json, os; from native_lifecycle import checked_query_image; print(json.dumps({"node_image": os.environ["POSITRON_TEST_HELM_IMAGE"], "host_image": checked_query_image(os.environ["POSITRON_TEST_HELM_IMAGE"], timeout=10), "architecture": os.environ["POSITRON_TEST_HELM_ARCHITECTURE"]}))' > "$cell_dir/query-image-binding.json"
             cargo test --locked -p positron-release --test helm prepare_runtime_helm_fixture -- --ignored --exact
             test -s "$POSITRON_TEST_HELM_CHART"
             python3 deploy/helm/test_chart.py
@@ -657,6 +673,17 @@ jobs:
           k3d v1.36.5-k3s1 057cfd5a9d51b89f1f0ee139c28d5d5fdd5aa7ddeac2742a0ba90c6dbc0329bb
           k3d v1.35.9-k3s1 ec9868c6a38d4e8c1869832fb5fd1eb8473c39794a0b44d2b952e7ba911951bc
           EOF
+      - name: Preserve public runtime OCI descriptors
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: helm-runtime-descriptors-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/helm-*/runtime-image-index.json
+            ${{ runner.temp }}/helm-*/query-manifest-*.json
+            ${{ runner.temp }}/helm-*/query-image-binding.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Inspect and remove owned isolated Helm cell
         if: always() && runner.os == 'Linux'
         shell: bash

@@ -171,6 +171,8 @@ class NativeAdapter(unittest.TestCase):
     def test_owned_node_query_uses_only_public_mounts_and_stdin_credentials(self):
         import json
         import stat
+        import hashlib
+        import os
         from unittest import mock
         response = json.dumps({"events": [{"record": {"message": "compose-retained"}}, {"terminal": {"state": "complete", "stats": {"records": "1", "resultDigest": "b" * 64}}}]}).encode()
         with tempfile.TemporaryDirectory() as directory:
@@ -180,23 +182,35 @@ class NativeAdapter(unittest.TestCase):
             (lifecycle.fixture / "export/query.json").write_text("{}")
             ca = root / "ca.pem"
             ca.write_text("public test CA")
-            with mock.patch("native_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([],0,response,b"")) as run:
-                self.assertEqual(lifecycle.query_on_node("positron-120-fixture-worker", "10.244.0.7", "checked-native-image", ca, stage="wire"), "b" * 64)
-            command = run.call_args_list[0].args[0]
-            options = run.call_args_list[0].kwargs
+            host_id = "sha256:" + "c" * 64
+            manifest = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {"digest": host_id, "mediaType": "application/vnd.oci.image.config.v1+json", "size": 123}}).encode()
+            index = root / "runtime-index.json"
+            index.write_bytes(manifest)
+            node_image = "ghcr.io/vicotrbb/positron@sha256:" + hashlib.sha256(manifest).hexdigest()
+            def docker(arguments, **options):
+                if arguments[:3] == ["docker", "image", "inspect"]:
+                    return subprocess.CompletedProcess(arguments, 0, json.dumps([host_id, "linux", "arm64"]).encode(), b"")
+                if arguments[:2] == ["docker", "run"] and host_id not in arguments:
+                    raise subprocess.CalledProcessError(125, arguments, stderr=b"No such image: node manifest")
+                return subprocess.CompletedProcess(arguments, 0, response, b"")
+            with mock.patch.dict(os.environ, {"POSITRON_TEST_HELM_QUERY_IMAGE": host_id, "POSITRON_TEST_HELM_INDEX_FILE": str(index), "POSITRON_TEST_HELM_ARCHITECTURE": "arm64"}), mock.patch("native_lifecycle.subprocess.run", side_effect=docker) as run:
+                self.assertEqual(lifecycle.query_on_node("positron-120-fixture-worker", "10.244.0.7", node_image, ca, stage="wire"), "b" * 64)
+            invocation, = [call for call in run.call_args_list if call.args[0][:2] == ["docker", "run"]]
+            command = invocation.args[0]
+            options = invocation.kwargs
             self.assertEqual(command[:3], ["docker", "run", "--rm"])
             self.assertIn("--pull=never", command)
             self.assertIn("container:positron-120-fixture-worker", command)
             self.assertIn("10.244.0.7:8080", command)
             self.assertIn("localhost", command)
-            image_position = command.index("checked-native-image")
+            image_position = command.index(host_id)
             self.assertEqual(command[image_position + 1], "query", "the OCI entrypoint already selects the native executable")
             self.assertNotIn("fixed-query", " ".join(command))
             self.assertNotIn("fixed-admin", " ".join(command))
             self.assertEqual(options["input"], b"fixed-query")
             self.assertGreater(options["timeout"],0)
             self.assertLessEqual(options["timeout"],35)
-            self.assertEqual(run.call_count,2)
+            self.assertEqual(run.call_count,3)
             for index, argument in enumerate(command):
                 if argument == "-v":
                     source, destination, mode = command[index+1].split(":")
@@ -204,6 +218,113 @@ class NativeAdapter(unittest.TestCase):
                     self.assertIn(Path(source).name,["ca.pem","query.json"])
                     self.assertEqual(stat.S_IMODE(Path(source).stat().st_mode),0o444)
             self.assertEqual(stat.S_IMODE(lifecycle.fixture.stat().st_mode),0o700)
+            def refused(arguments, **options):
+                if arguments[:2] == ["docker", "run"]:
+                    raise subprocess.CalledProcessError(125, arguments, stderr=b"No such image: fixed-query fixed-admin /private/path")
+                return subprocess.CompletedProcess(arguments, 0, b"", b"")
+            with mock.patch("native_lifecycle.checked_query_image", return_value=host_id), mock.patch("native_lifecycle.subprocess.run", side_effect=refused) as run:
+                with self.assertRaisesRegex(RuntimeError, "docker_exit=125, reason=image_unavailable") as failure:
+                    lifecycle.query_on_node("positron-120-fixture-worker", "10.244.0.7", node_image, ca, stage="wire")
+                self.assertNotIn("fixed-query", str(failure.exception))
+                self.assertNotIn("fixed-admin", str(failure.exception))
+                self.assertNotIn("/private/path", str(failure.exception))
+                self.assertEqual(run.call_count, 2, "failed start still cleans only its owned client")
+            for elapsed in [30, 36]:
+                clock = [100.0]
+                def inspected(*args, **options):
+                    clock[0] += elapsed
+                    return host_id
+                with self.subTest(inspection_seconds=elapsed), mock.patch("native_lifecycle.time.monotonic", side_effect=lambda: clock[0]), mock.patch("native_lifecycle.checked_query_image", side_effect=inspected), mock.patch("native_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, response, b"")) as run:
+                    if elapsed < 35:
+                        self.assertEqual(lifecycle.query_on_node("positron-120-fixture-worker", "10.244.0.7", node_image, ca, stage="wire"), "b" * 64)
+                        self.assertLessEqual(run.call_args_list[0].kwargs["timeout"], 5)
+                    else:
+                        with self.assertRaises(TimeoutError):
+                            lifecycle.query_on_node("positron-120-fixture-worker", "10.244.0.7", node_image, ca, stage="wire")
+                        run.assert_not_called()
+
+    def test_query_image_binding_follows_the_retained_index_to_its_actual_manifest(self):
+        import hashlib
+        import json
+        import os
+        from unittest import mock
+        from native_lifecycle import checked_query_image
+        fixtures = Path(__file__).with_name("fixtures")
+        encoded = (fixtures / "runtime-index.json").read_bytes()
+        manifest = (fixtures / "runtime-manifest.json").read_bytes()
+        manifest_id = "sha256:" + hashlib.sha256(manifest).hexdigest()
+        config_id = json.loads(manifest)["config"]["digest"]
+        node_image = "ghcr.io/vicotrbb/positron@sha256:" + hashlib.sha256(encoded).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = root / "runtime-image-index.json"
+            index.write_bytes(encoded)
+            (root / ("query-manifest-" + manifest_id.removeprefix("sha256:") + ".json")).write_bytes(manifest)
+            for host_id in [config_id, manifest_id]:
+                with self.subTest(host_id=host_id), mock.patch.dict(os.environ, {"POSITRON_TEST_HELM_QUERY_IMAGE": host_id, "POSITRON_TEST_HELM_INDEX_FILE": str(index), "POSITRON_TEST_HELM_ARCHITECTURE": "arm64"}), mock.patch("native_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, json.dumps([host_id, "linux", "arm64"]).encode(), b"")):
+                    self.assertEqual(checked_query_image(node_image, timeout=5), host_id)
+            root_id = node_image.split("@", 1)[1]
+            with mock.patch.dict(os.environ, {"POSITRON_TEST_HELM_QUERY_IMAGE": root_id, "POSITRON_TEST_HELM_INDEX_FILE": str(index), "POSITRON_TEST_HELM_ARCHITECTURE": "arm64"}), mock.patch("native_lifecycle.subprocess.run") as run:
+                with self.assertRaisesRegex(ValueError, "does not match"):
+                    checked_query_image(node_image, timeout=5)
+                run.assert_not_called()
+            bad_indexes = []
+            for change in ["size", "media", "platform", "ambiguous"]:
+                value = json.loads(encoded)
+                selected = value["manifests"][0]
+                if change == "size": selected["size"] += 1
+                elif change == "media": selected["mediaType"] = "application/vnd.docker.distribution.manifest.v2+json"
+                elif change == "platform": selected["platform"] = {"os": "linux", "architecture": "amd64"}
+                else: value["manifests"].append(dict(selected))
+                bad_indexes.append(value)
+            for value in bad_indexes:
+                data = json.dumps(value).encode()
+                index.write_bytes(data)
+                node = "ghcr.io/vicotrbb/positron@sha256:" + hashlib.sha256(data).hexdigest()
+                with self.subTest(index=value), mock.patch.dict(os.environ, {"POSITRON_TEST_HELM_QUERY_IMAGE": config_id, "POSITRON_TEST_HELM_INDEX_FILE": str(index), "POSITRON_TEST_HELM_ARCHITECTURE": "arm64"}), mock.patch("native_lifecycle.subprocess.run") as run:
+                    with self.assertRaises(ValueError): checked_query_image(node, timeout=5)
+                    run.assert_not_called()
+            index.write_bytes(encoded)
+            child = root / ("query-manifest-" + manifest_id.removeprefix("sha256:") + ".json")
+            child.write_bytes(manifest + b" ")
+            with mock.patch.dict(os.environ, {"POSITRON_TEST_HELM_QUERY_IMAGE": config_id, "POSITRON_TEST_HELM_INDEX_FILE": str(index), "POSITRON_TEST_HELM_ARCHITECTURE": "arm64"}), mock.patch("native_lifecycle.subprocess.run") as run:
+                with self.assertRaisesRegex(ValueError, "binding changed"):
+                    checked_query_image(node_image, timeout=5)
+                run.assert_not_called()
+
+    def test_query_image_binding_accepts_both_docker_stores_and_refuses_substitution(self):
+        import hashlib
+        import json
+        import os
+        from unittest import mock
+        from native_lifecycle import checked_query_image
+        config_id = "sha256:" + "c" * 64
+        encoded = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {"digest": config_id, "mediaType": "application/vnd.oci.image.config.v1+json", "size": 123}}).encode()
+        manifest_id = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        node_image = "ghcr.io/vicotrbb/positron@" + manifest_id
+        with tempfile.TemporaryDirectory() as directory:
+            index = Path(directory) / "runtime-index.json"
+            index.write_bytes(encoded)
+            for host_id in [config_id, manifest_id]:
+                with self.subTest(store_id=host_id), mock.patch.dict(os.environ, {"POSITRON_TEST_HELM_QUERY_IMAGE": host_id, "POSITRON_TEST_HELM_INDEX_FILE": str(index), "POSITRON_TEST_HELM_ARCHITECTURE": "arm64"}), mock.patch("native_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, json.dumps([host_id, "linux", "arm64"]).encode(), b"")) as run:
+                    self.assertEqual(checked_query_image(node_image, timeout=5), host_id)
+                    self.assertEqual(run.call_args.args[0][-1], host_id)
+                    self.assertEqual(run.call_args.kwargs["timeout"], 5)
+            for node, host, data in [
+                (manifest_id, config_id, encoded),
+                (node_image, "mutable:latest", encoded),
+                (node_image, "sha256:" + "d" * 64, encoded),
+                (node_image, config_id, encoded + b" "),
+                (node_image, config_id, b" " * 1_048_577),
+            ]:
+                index.write_bytes(data)
+                with self.subTest(node=node, host=host), mock.patch.dict(os.environ, {"POSITRON_TEST_HELM_QUERY_IMAGE": host, "POSITRON_TEST_HELM_INDEX_FILE": str(index), "POSITRON_TEST_HELM_ARCHITECTURE": "arm64"}), mock.patch("native_lifecycle.subprocess.run") as run:
+                    with self.assertRaises(ValueError): checked_query_image(node, timeout=5)
+                    run.assert_not_called()
+            index.write_bytes(encoded)
+            with mock.patch.dict(os.environ, {"POSITRON_TEST_HELM_QUERY_IMAGE": config_id, "POSITRON_TEST_HELM_INDEX_FILE": str(index), "POSITRON_TEST_HELM_ARCHITECTURE": "arm64"}), mock.patch("native_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, json.dumps(["different-id", "linux", "arm64"]).encode(), b"")):
+                with self.assertRaisesRegex(ValueError, "identity changed"):
+                    checked_query_image(node_image, timeout=5)
 
     def test_native_fixture_helper_uses_the_callers_numeric_identity_and_keeps_exports_private(self):
         import os

@@ -1,5 +1,6 @@
 """Exact-cluster adapter for the existing public native lifecycle assertions."""
 import io
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,68 @@ INPUTS = "/etc/positron/operations"
 BACKUPS = "/var/lib/positron-backups/private"
 CONFIG = "/etc/positron/config/positron.toml"
 REPOSITORY = "11111111-1111-4111-8111-111111111111"
+
+
+IMAGE_MANIFEST_TYPES = ("application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json")
+IMAGE_INDEX_TYPES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
+
+
+def image_metadata(path):
+    with Path(path).open("rb") as source:
+        encoded = source.read(1_048_577)
+    if len(encoded) > 1_048_576:
+        raise ValueError("runtime OCI metadata exceeds its bound")
+    value = json.loads(encoded)
+    if not isinstance(value, dict) or value.get("schemaVersion") != 2:
+        raise ValueError("runtime OCI schema version 2 required")
+    return encoded, value
+
+
+def query_image_descriptor(node_image, index_file, architecture):
+    match = re.fullmatch(r"ghcr[.]io/vicotrbb/positron@(sha256:[a-f0-9]{64})", node_image)
+    encoded, root = image_metadata(index_file)
+    if not match or "sha256:" + hashlib.sha256(encoded).hexdigest() != match[1]:
+        raise ValueError("node image does not match the captured OCI descriptor")
+    if architecture not in ("amd64", "arm64"):
+        raise ValueError("qualified Linux runtime architecture required")
+    media_type = root.get("mediaType")
+    if media_type in IMAGE_MANIFEST_TYPES:
+        return match[1], {"mediaType": media_type, "digest": match[1], "size": len(encoded)}
+    entries = root.get("manifests")
+    if media_type not in IMAGE_INDEX_TYPES or not isinstance(entries, list) or not 1 <= len(entries) <= 16:
+        raise ValueError("bounded runtime image index required")
+    direct = [entry for entry in entries if isinstance(entry, dict) and entry.get("mediaType") in IMAGE_MANIFEST_TYPES]
+    selected = [entry for entry in direct if isinstance(entry.get("platform"), dict) and entry["platform"].get("os") == "linux" and entry["platform"].get("architecture") == architecture]
+    if not selected and len(direct) == 1 and "platform" not in direct[0]:
+        selected = direct
+    if len(selected) != 1:
+        raise ValueError("one qualified runtime image manifest required")
+    descriptor, = selected
+    if not isinstance(descriptor.get("digest"), str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", descriptor["digest"]) or type(descriptor.get("size")) is not int or not 0 < descriptor["size"] <= 1_048_576:
+        raise ValueError("bounded image manifest descriptor required")
+    return match[1], descriptor
+
+
+def checked_query_image(node_image, *, timeout):
+    host_image = os.environ.get("POSITRON_TEST_HELM_QUERY_IMAGE", "")
+    if not re.fullmatch(r"sha256:[a-f0-9]{64}", host_image):
+        raise ValueError("immutable Docker host image ID required")
+    index = Path(os.environ["POSITRON_TEST_HELM_INDEX_FILE"])
+    architecture = os.environ["POSITRON_TEST_HELM_ARCHITECTURE"]
+    root_digest, descriptor = query_image_descriptor(node_image, index, architecture)
+    manifest_path = index if descriptor["digest"] == root_digest else index.with_name("query-manifest-" + descriptor["digest"].removeprefix("sha256:") + ".json")
+    encoded, manifest = image_metadata(manifest_path)
+    if len(encoded) != descriptor["size"] or "sha256:" + hashlib.sha256(encoded).hexdigest() != descriptor["digest"] or manifest.get("mediaType") != descriptor["mediaType"]:
+        raise ValueError("selected runtime image manifest binding changed")
+    config = manifest.get("config")
+    if not isinstance(config, dict) or not isinstance(config.get("digest"), str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", config["digest"]) or config.get("mediaType") not in ("application/vnd.oci.image.config.v1+json", "application/vnd.docker.container.image.v1+json") or type(config.get("size")) is not int or not 0 < config["size"] <= 1_048_576:
+        raise ValueError("bounded runtime OCI config descriptor required")
+    if host_image not in (descriptor["digest"], config["digest"]):
+        raise ValueError("Docker host image does not match the captured node payload")
+    inspected = subprocess.run(["docker", "image", "inspect", "--format", "[{{json .Id}},{{json .Os}},{{json .Architecture}}]", host_image], capture_output=True, timeout=timeout, check=True)
+    if len(inspected.stdout) > 1024 or json.loads(inspected.stdout) != [host_image, "linux", architecture]:
+        raise ValueError("Docker host image identity changed or platform differs")
+    return host_image
 
 
 class NativeLifecycle(DataLifecycle):
@@ -94,16 +157,26 @@ class NativeLifecycle(DataLifecycle):
         def transport(action, *arguments, **options):
             if action != "exec" or arguments[:4] != ("-T", "positron", "/usr/bin/positron", "query"):
                 raise ValueError("direct transport is restricted to the native read-only query")
+            deadline = time.monotonic() + options["timeout"]
+            host_image = checked_query_image(image, timeout=min(10, options["timeout"]))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("direct query deadline expired during image inspection")
             native = list(arguments[3:])
             native[native.index("--endpoint") + 1] = endpoint
             client = "positron-120-query-" + uuid.uuid4().hex
             command = ["docker", "run", "--rm", "-i", "--name", client, "--pull=never", "--network", "container:" + node,
                        "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "65532:65532",
                        "-v", f"{public / 'ca.pem'}:/etc/positron/tls/ca.pem:ro",
-                       "-v", f"{public / 'query.json'}:{INPUTS}/export/query.json:ro", image, *native]
+                       "-v", f"{public / 'query.json'}:{INPUTS}/export/query.json:ro", host_image, *native]
             try:
-                result = subprocess.run(command, input=options["input"], timeout=options["timeout"], capture_output=True, check=True)
+                result = subprocess.run(command, input=options["input"], timeout=remaining, capture_output=True, check=True)
                 return result.stdout
+            except subprocess.CalledProcessError as error:
+                if error.returncode != 125:
+                    raise
+                reason = "image_unavailable" if b"No such image" in (error.stderr or b"") else "start_refused"
+                raise RuntimeError(f"owned direct query container start failed (docker_exit=125, reason={reason})") from None
             finally:
                 cleanup = subprocess.run(["docker", "rm", "-f", client], capture_output=True, timeout=10, check=False)
                 absent = b"Error response from daemon: No such container: " + client.encode() + b"\n"

@@ -319,7 +319,7 @@ class KubernetesLifecycle(unittest.TestCase):
                     if include_interruptions:
                         control_plane = os.environ["POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE"]
                         self.assertEqual(control_plane, context.removeprefix("kind-") + "-control-plane")
-                        exercise_interruptions(self, lifecycle, control_plane, image.split("@", 1)[1], root / "ca.pem", expected)
+                        exercise_interruptions(self, lifecycle, control_plane, image, root / "ca.pem", expected)
                 # Restart reattaches the same PVCs under fsGroup OnRootMismatch.
                 claims = json.loads(kube("get", "pvc", "-o", "json").stdout)["items"]
                 retained = {item["metadata"]["name"]: item["metadata"]["uid"] for item in claims}
