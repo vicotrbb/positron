@@ -331,7 +331,7 @@ impl std::fmt::Debug for HealthState {
 
 impl HealthState {
     /// Coalesces owner-local requests; only the process owner applies configuration.
-    pub(crate) fn request_configuration_reload(&self) -> Result<(), ()> {
+    fn queue_configuration_reload(&self) -> Result<(), ()> {
         if self.phase() != ProcessPhase::Serving {
             return Err(());
         }
@@ -478,11 +478,30 @@ impl HealthState {
         Ok(Some((destination, reservation)))
     }
 
+    pub(crate) fn request_configuration_reload(
+        &self,
+        bearer: &str,
+    ) -> Result<(), ServingDiagnosticsFailure> {
+        self.with_authenticated_serving_owner(bearer, |_, _, _| self.queue_configuration_reload())
+    }
+
     /// Runs one bounded diagnostic collection against the current serving
     /// owner.  Callers receive neither key material nor an authorization
     /// cache: the bearer is attributed against the live instance immediately
     /// before collection and the opaque signer remains kernel-owned.
     pub fn with_authenticated_serving_diagnostics<T>(
+        &self,
+        bearer: &str,
+        collect: impl FnOnce(
+            &InitializedInstance,
+            positron_governance::AuthorizedContext,
+            Arc<RuntimeConfiguration>,
+        ) -> Result<T, ()>,
+    ) -> Result<T, ServingDiagnosticsFailure> {
+        self.with_authenticated_serving_owner(bearer, collect)
+    }
+
+    fn with_authenticated_serving_owner<T>(
         &self,
         bearer: &str,
         collect: impl FnOnce(
@@ -1281,16 +1300,16 @@ mod tests {
     #[test]
     fn configuration_reload_requests_are_phase_gated_and_coalesced() {
         let state = ProcessState::starting();
-        assert!(state.health().request_configuration_reload().is_err());
+        assert!(state.health().queue_configuration_reload().is_err());
         assert!(!state.health().take_configuration_reload_request());
         state.transition(ProcessPhase::Serving);
         for _ in 0..100 {
-            assert!(state.health().request_configuration_reload().is_ok());
+            assert!(state.health().queue_configuration_reload().is_ok());
         }
         assert!(state.health().take_configuration_reload_request());
         assert!(!state.health().take_configuration_reload_request());
         state.transition(ProcessPhase::Draining);
-        assert!(state.health().request_configuration_reload().is_err());
+        assert!(state.health().queue_configuration_reload().is_err());
         assert!(!state.health().take_configuration_reload_request());
     }
 

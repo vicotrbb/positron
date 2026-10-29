@@ -54,8 +54,11 @@ native readiness before replacing the server identity. After replacing the Secre
 or ConfigMap, request the existing process-owned reload without replacing the Pod:
 
 ```console
-kubectl --namespace NAMESPACE exec example-positron-0 -- /usr/bin/positron config reload --control-path /run/positron/control/control.sock
+kubectl --namespace NAMESPACE exec -i example-positron-0 -- /usr/bin/positron config reload --control-path /run/positron/control/control.sock --credential-stdin < /protected/administrator-credential
 ```
+
+The input file must contain the current instance system-administrator credential.
+Keep it private; the credential is read from stdin and never supplied in arguments.
 
 `status=reload_requested` acknowledges a coalesced request, not successful
 application. Verify the active TLS identity and readiness before retiring the old

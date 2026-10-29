@@ -1,5 +1,10 @@
 {{- define "positron.name" -}}
-{{- printf "%s-positron" .Release.Name | trunc 52 | trimSuffix "-" -}}
+{{- $name := printf "%s-positron" .Release.Name -}}
+{{- if gt (len $name) 52 -}}
+{{- printf "%s-%s" ($name | trunc 35 | trimSuffix "-") ($name | sha256sum | trunc 16) -}}
+{{- else -}}
+{{- $name -}}
+{{- end -}}
 {{- end -}}
 {{- define "positron.validate" -}}
 {{- if not (has (int .Values.replicas) (list 0 1)) -}}{{ fail "standalone replicas must be 0 or 1" }}{{- end -}}

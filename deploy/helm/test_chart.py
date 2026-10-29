@@ -14,9 +14,9 @@ import unittest
 class HelmChart(unittest.TestCase):
     chart = Path(os.environ["POSITRON_TEST_HELM_CHART"]).resolve()
 
-    def render(self, *extra):
+    def render(self, *extra, release="sample"):
         return subprocess.run([
-            "helm", "template", "sample", str(self.chart),
+            "helm", "template", release, str(self.chart),
             "--set", "storageClass=standard", "--set", "tlsSecret=positron-tls",
             *extra,
         ], capture_output=True, text=True, check=False)
@@ -227,7 +227,7 @@ class HelmChart(unittest.TestCase):
                 def reload(generation):
                     (projected / "..next").symlink_to(generation)
                     (projected / "..next").replace(projected / "..data")
-                    result = subprocess.run([binary, "config", "reload", "--control-path", str(root / "control.sock")], capture_output=True, timeout=10)
+                    result = subprocess.run([binary, "config", "reload", "--control-path", str(root / "control.sock"), "--credential-stdin"], input=administrator + b"\n", capture_output=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, b"status=reload_requested\n")
                 config.write_text(configuration.replace('log_level = "info"', 'log_level = "debug"'))
@@ -296,6 +296,42 @@ class HelmChart(unittest.TestCase):
                 server.shutdown()
                 thread.join(timeout=10)
                 server.server_close()
+
+    def test_long_release_names_have_disjoint_resources_and_consistent_references(self):
+        import yaml
+        identities = []
+        for release in ["a" * 52 + "b", "a" * 52 + "c"]:
+            result = self.render(release=release)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            objects = list(yaml.safe_load_all(result.stdout))
+            names = {(obj["kind"], obj["metadata"]["name"]) for obj in objects}
+            for _, name in names:
+                self.assertLessEqual(len(name), 63)
+                self.assertRegex(name, r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+            stateful, = [obj for obj in objects if obj["kind"] == "StatefulSet"]
+            service, = [obj for obj in objects if obj["kind"] == "Service"]
+            config, = [obj for obj in objects if obj["kind"] == "ConfigMap"]
+            claims = {obj["metadata"]["name"] for obj in objects if obj["kind"] == "PersistentVolumeClaim"}
+            pod = stateful["spec"]["template"]["spec"]
+            volumes = {volume["name"]: volume for volume in pod["volumes"]}
+            self.assertEqual(stateful["spec"]["serviceName"], service["metadata"]["name"])
+            self.assertEqual(volumes["configuration"]["configMap"]["name"], config["metadata"]["name"])
+            for role in ["data", "secrets", "backups"]:
+                self.assertIn(volumes[role]["persistentVolumeClaim"]["claimName"], claims)
+            maintenance = self.render(
+                "--set", "replicas=0", "--set", "maintenance.enabled=true",
+                "--set", "maintenance.name=abcdefghij", "--set-json", 'maintenance.args=["verify","--offline"]',
+                release=release,
+            )
+            self.assertEqual(maintenance.returncode, 0, maintenance.stderr)
+            job, = [obj for obj in yaml.safe_load_all(maintenance.stdout) if obj["kind"] == "Job"]
+            self.assertLessEqual(len(job["metadata"]["name"]), 63)
+            self.assertEqual(job["metadata"]["name"], stateful["metadata"]["name"] + "-abcdefghij")
+            job_volumes = {volume["name"]: volume for volume in job["spec"]["template"]["spec"]["volumes"]}
+            self.assertEqual(job_volumes, volumes)
+            names.add(("Job", job["metadata"]["name"]))
+            identities.append(names)
+        self.assertTrue(identities[0].isdisjoint(identities[1]), "different releases must not share resources or claims")
 
     def test_refuses_unsafe_or_unknown_values(self):
         for value in ["replicas=2", "replicas=-1", "image=positron:latest", "storageClass=", "tlsSecret=",

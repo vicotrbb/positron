@@ -402,4 +402,6 @@ pub(crate) fn readiness_under_gate(
 }
 
 #[cfg(test)]
-pub(in crate::services) use execution::test_stops::{StopPoint, hit as hit_stop, stop_after};
+pub(in crate::services) use execution::test_stops::{
+    StopPoint, expire_turn_after, hit as hit_stop, stop_after, turn_expired,
+};

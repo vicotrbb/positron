@@ -955,21 +955,43 @@ fn fenced_native_process_stays_alive_until_signal_and_retains_ownership()
     );
     let config_path = root.join("positron.toml");
     fs::write(&config_path, configuration)?;
+    // Cold native launch precedes every listener. Use the same bounded startup
+    // allowance as binary_ingestion's native readiness fixture; the shorter
+    // status-probe allowance is for an already running process.
+    let startup_deadline = Instant::now() + Duration::from_secs(10);
     let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
         .args(["serve", "--init-if-empty", "--config"])
         .arg(&config_path)
         .spawn()?;
-
-    wait_for_readiness(operations_port, "HTTP/1.1 503 ")?;
+    if let Err(failure) = wait_for_fenced_startup(
+        operations_port,
+        &process_control_path(&root),
+        startup_deadline,
+    ) {
+        let alive = child.try_wait()?.is_none();
+        if alive {
+            let delivered = Command::new("/bin/kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status()?;
+            if !delivered.success() {
+                return Err("failed to stop owned Fenced fixture child".into());
+            }
+        }
+        let shutdown = wait_for_child(&mut child)?;
+        return Err(format!("Fenced startup probe failed: shutdown={shutdown}; {failure}").into());
+    }
     assert!(child.try_wait()?.is_none());
-    assert!(
-        positron_kernel::PrimaryDataVolume::acquire(
-            &roots.data,
-            positron_kernel::MountQualification::LocalHost,
-        )
-        .is_err()
+    let failure = positron_kernel::PrimaryDataVolume::acquire(
+        &roots.data,
+        positron_kernel::MountQualification::LocalHost,
+    )
+    .expect_err("the Fenced process retains its volume owner until shutdown");
+    assert_eq!(failure.code(), positron_kernel::VolumeFailureCode::Busy);
+    assert_eq!(
+        failure.operation(),
+        positron_kernel::VolumeOperation::AcquireOwnershipLock
     );
-    std::thread::sleep(Duration::from_millis(50));
+    assert!(child.try_wait()?.is_none());
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &child.id().to_string()])
@@ -1111,6 +1133,7 @@ fn wait_for_published_configuration(
             &format!("\"effective_digest\":\"{effective_digest}\""),
             &format!("\"desired_digest\":\"{desired_digest}\""),
         ],
+        Instant::now() + STARTUP_PROBE_BUDGET,
     )
 }
 

@@ -196,14 +196,14 @@ def listener_rejection_count(kube, pod, timeout=10):
     return count
 
 
-def reload_projected_identity(kube, pod, identity, expected, timeout=180, rejection_baseline=None):
+def reload_projected_identity(kube, pod, identity, expected, administrator, timeout=180, rejection_baseline=None):
     deadline = time.monotonic() + timeout
     def remaining():
         budget = deadline - time.monotonic()
         if budget <= 0: raise AssertionError("native TLS generation did not establish the expected public outcome")
         return budget
     while True:
-        result = kube("exec", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock", timeout=min(10, remaining()))
+        result = kube("exec", "-i", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock", "--credential-stdin", data=administrator, timeout=min(10, remaining()))
         if result.stdout != b"status=reload_requested\n": raise AssertionError("native reload was not acknowledged")
         try: observed = identity(remaining())
         except OSError: observed = None
@@ -359,7 +359,7 @@ class KubernetesLifecycle(unittest.TestCase):
                     def publish_and_reload(expected, rejected=False):
                         baseline = listener_rejection_count(kube, pod) if rejected else None
                         apply(tls_secret())
-                        reload_projected_identity(kube, pod, active_identity, expected, rejection_baseline=baseline)
+                        reload_projected_identity(kube, pod, active_identity, expected, claim.splitlines()[0].split(b"=", 1)[1], rejection_baseline=baseline)
                     publish_and_reload(new_identity)
                     (root / "server-key.pem").write_bytes(b"invalid candidate key")
                     publish_and_reload(new_identity, rejected=True)

@@ -261,9 +261,13 @@ class NativeAdapter(unittest.TestCase):
         calls = []
         def kube(*args, **kwargs):
             calls.append(args)
+            self.assertEqual(args[:2], ("exec", "-i"))
+            self.assertIn("--credential-stdin", args)
+            self.assertEqual(kwargs["data"], b"reload-test-administrator")
+            self.assertNotIn("reload-test-administrator", args)
             return subprocess.CompletedProcess([], 0, b"status=reload_requested\n", b"")
         def identity(_timeout): return b"new" if len(calls) >= 2 else b"old"
-        reload_projected_identity(kube, "native-positron-0", identity, b"new", timeout=2)
+        reload_projected_identity(kube, "native-positron-0", identity, b"new", b"reload-test-administrator", timeout=2)
         self.assertGreaterEqual(len(calls), 2)
 
     def test_invalid_projection_requires_a_fresh_native_listener_rejection(self):
@@ -275,14 +279,14 @@ class NativeAdapter(unittest.TestCase):
                 requests.append(args)
                 body = b"status=reload_requested\n"
             return subprocess.CompletedProcess([], 0, body, b"")
-        reload_projected_identity(kube, "native-positron-0", lambda _timeout: b"retained", b"retained", timeout=2, rejection_baseline=0)
+        reload_projected_identity(kube, "native-positron-0", lambda _timeout: b"retained", b"retained", b"reload-test-administrator", timeout=2, rejection_baseline=0)
         self.assertEqual(len(requests), 2)
         def unchanged(*args, **kwargs): return subprocess.CompletedProcess([], 0, b"" if args[0] == "logs" else b"status=reload_requested\n", b"")
-        with self.assertRaises(AssertionError): reload_projected_identity(unchanged, "native-positron-0", lambda _timeout: b"retained", b"retained", timeout=0.01, rejection_baseline=0)
+        with self.assertRaises(AssertionError): reload_projected_identity(unchanged, "native-positron-0", lambda _timeout: b"retained", b"retained", b"reload-test-administrator", timeout=0.01, rejection_baseline=0)
         def old_event(*args, **kwargs):
             body = b'{"event":"configuration_reload_rejected","category":"listener_unavailable"}\n' if args[0] == "logs" else b"status=reload_requested\n"
             return subprocess.CompletedProcess([], 0, body, b"")
-        with self.assertRaises(AssertionError): reload_projected_identity(old_event, "native-positron-0", lambda _timeout: b"retained", b"retained", timeout=0.01, rejection_baseline=1)
+        with self.assertRaises(AssertionError): reload_projected_identity(old_event, "native-positron-0", lambda _timeout: b"retained", b"retained", b"reload-test-administrator", timeout=0.01, rejection_baseline=1)
 
     def test_retained_claims_allow_only_exact_fresh_target_names_and_preserve_every_original_uid(self):
         before = {"native-data": "source-data-id", "native-secrets": "source-key-id"}

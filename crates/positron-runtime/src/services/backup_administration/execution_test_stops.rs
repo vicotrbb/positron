@@ -29,6 +29,7 @@ struct Stop {
     operation: [u8; 16],
     point: StopPoint,
     observed: Arc<AtomicBool>,
+    expire_turn: bool,
 }
 static STOP: Mutex<Option<Stop>> = Mutex::new(None);
 pub(super) fn armed(
@@ -83,6 +84,39 @@ pub(in crate::services) fn stop_after(
     operation: [u8; 16],
     point: StopPoint,
 ) -> Result<StopGuard, ServiceFailure> {
+    install_stop(instance, operation, point, false)
+}
+
+pub(in crate::services) fn expire_turn_after(
+    instance: [u8; 16],
+    operation: [u8; 16],
+    point: StopPoint,
+) -> Result<StopGuard, ServiceFailure> {
+    install_stop(instance, operation, point, true)
+}
+
+pub(in crate::services) fn turn_expired(
+    instance: [u8; 16],
+    operation: [u8; 16],
+) -> Result<bool, ServiceFailure> {
+    Ok(STOP
+        .lock()
+        .map_err(|_| ServiceFailure::Internal)?
+        .as_ref()
+        .is_some_and(|stop| {
+            stop.instance == instance
+                && stop.operation == operation
+                && stop.expire_turn
+                && stop.observed.load(Ordering::Acquire)
+        }))
+}
+
+fn install_stop(
+    instance: [u8; 16],
+    operation: [u8; 16],
+    point: StopPoint,
+    expire_turn: bool,
+) -> Result<StopGuard, ServiceFailure> {
     let mut stop = STOP.lock().map_err(|_| ServiceFailure::Internal)?;
     if stop.is_some() {
         return Err(ServiceFailure::Internal);
@@ -93,6 +127,7 @@ pub(in crate::services) fn stop_after(
         operation,
         point,
         observed: Arc::clone(&observed),
+        expire_turn,
     });
     Ok(StopGuard { observed })
 }
@@ -106,6 +141,12 @@ pub(in crate::services) fn hit(
     if stop.as_ref().is_some_and(|stop| {
         stop.instance == instance && stop.operation == operation && stop.point == point
     }) {
+        if let Some(stop) = stop.as_ref()
+            && stop.expire_turn
+        {
+            stop.observed.store(true, Ordering::Release);
+            return Ok(());
+        }
         let stop = stop.take().ok_or(ServiceFailure::Internal)?;
         stop.observed.store(true, Ordering::Release);
         if point == StopPoint::TransferCheckpointPublication {

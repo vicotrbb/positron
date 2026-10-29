@@ -922,6 +922,19 @@ pub(in crate::services) fn reject_repository(
 }
 
 impl BackupWork {
+    pub(in crate::services) fn checkpoint_native(
+        &mut self,
+        services: &ServiceHandle,
+        execution: &mut MaintenanceExecution<'_>,
+        force: bool,
+    ) -> Result<Option<positron_kernel::ResourceAmounts>, ServiceFailure> {
+        match self {
+            Self::Verification(work) => {
+                super::verification::checkpoint_native(services, execution, work, force)
+            },
+            _ => Ok(None),
+        }
+    }
     pub(in crate::services) fn persist_registry(
         &self,
         services: &ServiceHandle,

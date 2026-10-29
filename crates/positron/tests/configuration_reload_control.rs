@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::{fs::PermissionsExt, net::UnixListener},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 #[test]
@@ -45,7 +45,7 @@ fn exercise(fragmented: bool, hold_open: bool) {
             request.push(byte[0]);
             assert!(request.len() < 512);
         }
-        assert_eq!(request,b"POST /control/configuration/reload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        assert_eq!(request,b"POST /control/configuration/reload HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer reload-test-administrator\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let padding = if fragmented {
             format!("X-Padding: {}\r\n", "x".repeat(512))
         } else {
@@ -61,11 +61,22 @@ fn exercise(fragmented: bool, hold_open: bool) {
                 .unwrap();
         }
     });
-    let output = Command::new(env!("CARGO_BIN_EXE_positron"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
         .args(["config", "reload", "--control-path"])
         .arg(&path)
-        .output()
+        .arg("--credential-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"reload-test-administrator\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
     if hold_open {
         done.send(()).unwrap();
     }
@@ -77,4 +88,32 @@ fn exercise(fragmented: bool, hold_open: bool) {
     assert_eq!(output.stdout, b"status=reload_requested\n");
     server.join().unwrap();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn configuration_reload_refuses_invalid_stdin_without_echoing_it() {
+    for input in [
+        Vec::new(),
+        b"reload-canary\nInjected: value".to_vec(),
+        vec![b'x'; 1025],
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
+            .args([
+                "config",
+                "reload",
+                "--control-path",
+                "/nonexistent/positron-control.sock",
+                "--credential-stdin",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"positron: invalid credential input\n");
+    }
 }

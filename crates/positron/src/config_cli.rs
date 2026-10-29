@@ -31,7 +31,10 @@ fn execute(
 ) -> Result<String, OperatorFailure> {
     match parse(arguments)? {
         Command::Reload(path) => {
-            reload::request(Path::new(&path)).map_err(|()| OperatorFailure::ReloadUnavailable)
+            let bearer =
+                crate::administrative_cli::credential().map_err(OperatorFailure::Credential)?;
+            reload::request(Path::new(&path), bearer.trim_end_matches(['\r', '\n']))
+                .map_err(|()| OperatorFailure::ReloadUnavailable)
         },
         Command::Validate(inputs) => {
             let effective = resolve_inputs(inputs, environment)?;
@@ -210,7 +213,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, Operato
                 return Err(OperatorFailure::Usage);
             }
             let path = arguments.next().ok_or(OperatorFailure::Usage)?;
-            if arguments.next().is_some() {
+            if arguments.next().as_deref() != Some("--credential-stdin")
+                || arguments.next().is_some()
+            {
                 return Err(OperatorFailure::Usage);
             }
             Ok(Command::Reload(path))
@@ -304,6 +309,7 @@ fn parse_migrate(mut arguments: impl Iterator<Item = String>) -> Result<Command,
 }
 
 enum OperatorFailure {
+    Credential(&'static str),
     ReloadUnavailable,
     Usage,
     RedactionRequired,
@@ -316,8 +322,9 @@ enum OperatorFailure {
 impl OperatorFailure {
     fn render(&self) -> String {
         match self {
+            Self::Credential(message) => (*message).to_owned(),
             Self::ReloadUnavailable => "configuration reload request unavailable; application not confirmed".to_owned(),
-            Self::Usage => "usage: positron config validate [--config PATH] [--set PATH=VALUE] | explain [--setting PATH] | effective --redacted [--config PATH] [--set PATH=VALUE] | diff --current PATH --candidate PATH | migrate --config PATH --output PATH | reload --control-path PATH".to_owned(),
+            Self::Usage => "usage: positron config validate [--config PATH] [--set PATH=VALUE] | explain [--setting PATH] | effective --redacted [--config PATH] [--set PATH=VALUE] | diff --current PATH --candidate PATH | migrate --config PATH --output PATH | reload --control-path PATH --credential-stdin".to_owned(),
             Self::RedactionRequired => "effective configuration requires --redacted".to_owned(),
             Self::UnknownExplainSetting => "configuration_rejected code=unknown_setting retry=after_input_correction completion=rejected source=command_line_override".to_owned(),
             Self::Input(ConfigurationInputFailure::DocumentUnavailable) => "configuration_rejected code=configuration_document_unavailable retry=after_input_correction completion=rejected source=configuration_document".to_owned(),

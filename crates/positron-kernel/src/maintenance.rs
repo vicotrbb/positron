@@ -1590,6 +1590,7 @@ pub fn fuzz_maintenance_stateful(data: &[u8]) {
     if data.len() > 16_384 {
         return;
     }
+    repository_operation::verification_fuzz::exercise(data);
     let _ = MaintenanceCoordinator::restore([MaintenanceTaskRecord(data.to_vec())]);
     let coordinator = MaintenanceCoordinator::new();
     let mut identity = [1_u8; 16];

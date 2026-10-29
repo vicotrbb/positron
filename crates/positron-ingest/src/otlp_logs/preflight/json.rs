@@ -37,7 +37,9 @@ impl Validator<'_> {
         self.cursor.object_start()?;
         while let Some(field) = self.cursor.field()? {
             if field.is("resourceLogs") {
-                self.resource_logs()?;
+                if !self.cursor.take_null()? {
+                    self.resource_logs()?;
+                }
             } else {
                 self.cursor.skip_value(0, self.limits.nesting_depth)?;
             }

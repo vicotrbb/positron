@@ -548,7 +548,6 @@ jobs:
           docker buildx build --load --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=0 --file deploy/oci/Dockerfile --tag positron-120-candidate "$RUNNER_TEMP/helm-candidate"
           python3 -m pip install --break-system-packages 'PyYAML==6.0.3'
           python3 deploy/helm/test_native_adapter.py
-          python3 deploy/helm/test_chart.py
           helm version --short
           kind version
           k3d version
@@ -629,6 +628,7 @@ jobs:
             done
             cargo test --locked -p positron-release --test helm prepare_runtime_helm_fixture -- --ignored --exact
             test -s "$POSITRON_TEST_HELM_CHART"
+            python3 deploy/helm/test_chart.py
             test -s "$POSITRON_TEST_HELM_INDEX_FILE"
             test -n "$POSITRON_TEST_HELM_CANDIDATE_IMAGE"
             kubectl --kubeconfig "$KUBECONFIG" version --output=json

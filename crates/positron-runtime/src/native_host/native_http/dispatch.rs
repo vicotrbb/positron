@@ -787,12 +787,21 @@ fn route_inner<S: Read + Write>(
             policy_activate_response(services, &bearer, &body)
         },
         (ListenerRole::Control, "POST", "/control/configuration/reload") => {
-            if head.content_length != 0 || head.bearer.is_some() {
+            if head.content_length != 0 {
                 return Ok(Response::empty(400));
             }
+            if health.phase() != ProcessPhase::Serving {
+                return Ok(Response::empty(503));
+            }
+            let bearer = zeroize::Zeroizing::new(head.bearer.ok_or_else(|| Response::empty(401))?);
             health
-                .request_configuration_reload()
-                .map_err(|_| Response::empty(503))?;
+                .request_configuration_reload(&bearer)
+                .map_err(|failure| {
+                    Response::empty(match failure {
+                        crate::health::ServingDiagnosticsFailure::AuthenticationRejected => 401,
+                        crate::health::ServingDiagnosticsFailure::Unavailable => 503,
+                    })
+                })?;
             Ok(Response {
                 status: 202,
                 content_type: "text/plain; charset=utf-8",
@@ -959,6 +968,10 @@ fn route_inner<S: Read + Write>(
         (ListenerRole::Control, _, _) | (_, _, _) => Ok(Response::empty(404)),
     }
 }
+
+#[cfg(test)]
+#[path = "configuration_reload_tests.rs"]
+mod configuration_reload_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1257,6 +1270,33 @@ mod tests {
             )
             .status(),
             401
+        );
+        assert_eq!(source_listing(&data, &secrets)?, before);
+
+        assert_eq!(state.health().phase(), crate::ProcessPhase::Serving);
+        assert_eq!(state.health().readiness(), crate::Readiness::Ready);
+        let unavailable = instance._authority.with_control_contention_for_test(|| {
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/status",
+                Some(administrator.clone()),
+            )
+        })?;
+        assert_eq!(unavailable.status(), 503);
+        assert!(unavailable.body().is_empty());
+        assert_eq!(
+            request_for_role(
+                &state.health(),
+                ListenerRole::Operations,
+                "GET",
+                "/status",
+                Some(administrator.clone()),
+            )
+            .status(),
+            200,
+            "the same current credential succeeds after canonical contention releases"
         );
         assert_eq!(source_listing(&data, &secrets)?, before);
 

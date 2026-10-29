@@ -6,6 +6,107 @@ use positron_governance::{
 use std::time::{Duration, Instant};
 
 #[test]
+fn upgrade_verification_completes_after_each_native_turn_expires_and_reopens()
+-> Result<(), Box<dyn std::error::Error>> {
+    cold_verification_after_expiry(
+        crate::services::backup_administration::StopPoint::VerificationNativeFileVerified,
+        2,
+    )
+}
+
+#[test]
+fn upgrade_verification_finishes_after_metadata_turn_expires_and_reopens()
+-> Result<(), Box<dyn std::error::Error>> {
+    cold_verification_after_expiry(
+        crate::services::backup_administration::StopPoint::VerificationMetadataVerified,
+        1,
+    )
+}
+
+fn cold_verification_after_expiry(
+    point: crate::services::backup_administration::StopPoint,
+    minimum_turns: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::backup_administration::expire_turn_after;
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let fixture = crate::services::tests::schema_maintenance::Fixture::new()?;
+    let (instance, _, _, administrator) = fixture.initialized_with_admin()?;
+    let export = fixture.recovery_export_directory()?;
+    let identity = age::x25519::Identity::generate();
+    let bundle = export.join("cold-native-turns.age");
+    instance.create_recovery_bundle(
+        &bundle,
+        &positron_kernel::RecoveryRecipients::parse(&[identity.to_public().to_string()])?,
+    )?;
+    instance.verify_recovery_bundle(
+        &bundle,
+        positron_kernel::RecoveryUnlock::Identity(&identity),
+    )?;
+    let services = super::super::ServiceHandle::new(instance.clone())?;
+    super::tests::initialize_registered_repository(&instance, &services, &administrator, &export)?;
+    let snapshot = {
+        let catalog = crate::services::tests::schema_maintenance::open_catalog(&instance)?;
+        Administration::inspect_by_idempotency(
+            &catalog,
+            AdministrativeIdempotencyKey::new([22; 16])?,
+        )?
+        .ok_or("completed registered snapshot")?
+    };
+    let actor = services
+        .authorize_system_administration(&administrator)
+        .map_err(|failure| format!("actor: {failure:?}"))?;
+    let mut operation = services.accept_upgrade_verification(
+        actor,
+        snapshot,
+        AdministrativeIdempotencyKey::new([0x91; 16])?,
+        super::tests::generation(&instance)?,
+    )?;
+    drop((services, instance));
+    let mut native_turns = 0;
+    let mut last_checkpoint = None;
+    for _ in 0..128 {
+        let (instance, services) =
+            ready_cold_services(&fixture, operation.updated_at_unix_seconds())?;
+        let boundary = expire_turn_after(
+            instance.instance.to_bytes(),
+            operation.operation_id().to_bytes(),
+            point,
+        )?;
+        operation = services
+            .drive_upgrade_backup_operation(operation.operation_id(), Instant::now() + Duration::from_secs(30))
+            .map_err(|failure| format!("cold bounded verification must preserve successful native progress: {failure:?}"))?;
+        native_turns += usize::from(boundary.observed());
+        let status = instance
+            .maintenance_coordinator()
+            .status(
+                positron_kernel::MaintenanceTaskId::new(operation.operation_id().to_bytes())
+                    .map_err(|failure| format!("task identity: {failure:?}"))?,
+            )
+            .map_err(|failure| format!("task status: {failure:?}"))?;
+        let checkpoint = status
+            .checkpoint()
+            .map(|checkpoint| checkpoint.opaque_progress().to_vec());
+        assert!(
+            operation.status().is_terminal()
+                || boundary.observed()
+                || checkpoint != last_checkpoint,
+            "a cold turn must publish progress or complete its public verification outcome"
+        );
+        last_checkpoint = checkpoint;
+        if operation.status().is_terminal() {
+            break;
+        }
+    }
+    assert!(
+        native_turns >= minimum_turns,
+        "verification crossed the requested genuine native turn boundaries"
+    );
+    assert_eq!(operation.status(), DurableOperationStatus::Succeeded);
+    assert!(operation.backup_verification_report().is_some());
+    Ok(())
+}
+
+#[test]
 fn upgrade_bounded_verification_turns_survive_cold_service_reconstruction()
 -> Result<(), Box<dyn std::error::Error>> {
     let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
@@ -213,20 +314,33 @@ fn upgrade_bounded_verification_turns_survive_cold_service_reconstruction()
                         status.phase(),
                         positron_kernel::MaintenanceTaskPhase::Queued
                     );
-                    for dimension in positron_kernel::ResourceDimension::ALL {
-                        if dimension == positron_kernel::ResourceDimension::MemoryBytes {
-                            assert!(
-                                after_resources.get(dimension) > before_resources.get(dimension),
-                                "readmission must strictly grow its required memory"
-                            );
-                        } else {
-                            assert_eq!(
-                                after_resources.get(dimension),
-                                before_resources.get(dimension),
-                                "memory readmission must preserve every other dimension"
-                            );
-                        }
-                    }
+                    eprintln!(
+                        "cold_verification_readmission before={before_resources:?} after={after_resources:?}"
+                    );
+                    assert!(
+                        positron_kernel::ResourceDimension::ALL
+                            .iter()
+                            .all(|dimension| after_resources.get(*dimension)
+                                >= before_resources.get(*dimension)),
+                        "readmission preserves every previously admitted resource peak"
+                    );
+                    assert!(
+                        positron_kernel::ResourceDimension::ALL
+                            .iter()
+                            .any(|dimension| after_resources.get(*dimension)
+                                > before_resources.get(*dimension)),
+                        "readmission must strictly increase an actual resource demand"
+                    );
+                    assert!(
+                        after_resources.get(positron_kernel::ResourceDimension::MemoryBytes) > 0
+                    );
+                    assert!(
+                        after_resources.get(positron_kernel::ResourceDimension::DiskHeadroomBytes)
+                            > 0,
+                        "native continuation has a durable storage reservation"
+                    );
+                    // The next cold turn must use exactly this published grant;
+                    // its authenticated native resume must converge successfully.
                     expected_cold_resources = Some(after_resources);
                 }
                 assert!(

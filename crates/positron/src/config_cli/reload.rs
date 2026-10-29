@@ -1,13 +1,15 @@
 //! One bounded, non-retrying request to the existing process reload owner.
 use std::path::Path;
 
-pub(super) fn request(path: &Path) -> Result<String, ()> {
-    let response = crate::control_socket::owner_control_request(
-        path,
-        b"POST /control/configuration/reload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        1024,
-        |bytes| validate_response(bytes).is_ok(),
-    ).map_err(|_| ())?;
+pub(super) fn request(path: &Path, bearer: &str) -> Result<String, ()> {
+    let request = zeroize::Zeroizing::new(format!(
+        "POST /control/configuration/reload HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {bearer}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    ));
+    let response =
+        crate::control_socket::owner_control_request(path, request.as_bytes(), 1024, |bytes| {
+            validate_response(bytes).is_ok()
+        })
+        .map_err(|_| ())?;
     validate_response(&response)?;
     Ok("status=reload_requested\n".to_owned())
 }

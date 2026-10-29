@@ -3,6 +3,16 @@ use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+#[path = "verification_continuation.rs"]
+mod continuation;
+#[cfg(fuzzing)]
+#[path = "verification_continuation_fuzz.rs"]
+pub(super) mod fuzz;
+pub use continuation::{
+    BackupVerificationBinding, BackupVerificationNativeState, BackupVerificationProgress,
+    BackupVerificationReference,
+};
+
 /// Holds bounded authenticated metadata while an asynchronous caller streams
 /// and checks every ciphertext file against `files()`. No live state is changed.
 pub struct BackupCaptureVerification {

@@ -111,18 +111,14 @@ fn exercise_live_claim(lost_response: bool) {
         let response = rejection_response(&mut stream).unwrap();
         assert!(response.starts_with("HTTP/1.1 404"));
     }
-    // The startup Control listener reaches the sole process reload owner.
+    // Socket ownership alone does not authorize a privileged Serving command.
     let reload = Command::new(binary)
         .args(["config", "reload", "--control-path"])
         .arg(&socket)
         .output()
         .unwrap();
-    assert!(
-        reload.status.success(),
-        "{}",
-        String::from_utf8_lossy(&reload.stderr)
-    );
-    assert_eq!(reload.stdout, b"status=reload_requested\n");
+    assert!(!reload.status.success());
+    assert!(reload.stdout.is_empty());
     for endpoint in [endpoints[0], endpoints[1]] {
         let mut stream = TcpStream::connect(endpoint).unwrap();
         stream
@@ -187,6 +183,34 @@ fn exercise_live_claim(lost_response: bool) {
             String::from_utf8_lossy(&delivered.stderr)
         );
         assert!(delivered.stdout.starts_with(b"administrator_secret=pos_"));
+        let credential = std::str::from_utf8(&delivered.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("administrator_secret="))
+            .unwrap();
+        let mut reload = Command::new(binary)
+            .args(["config", "reload", "--control-path"])
+            .arg(&socket)
+            .arg("--credential-stdin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        reload
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(credential.as_bytes())
+            .unwrap();
+        let output = reload.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"status=reload_requested\n");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(credential));
     }
     assert!(!root.join("secrets/bootstrap-claim.v1").exists());
     let refused = claim();
