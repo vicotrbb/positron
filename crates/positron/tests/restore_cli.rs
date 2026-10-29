@@ -313,6 +313,63 @@ fn native_restore_commands_own_durable_start_status_wait_cancel_and_reopen() -> 
             arguments.extend([key.into(), value]);
         }
         let secrets = [private.expose_secret(), claim.secret()];
+        if cancelled {
+            // Refuse a separate target once; never replay an ambiguous start.
+            let refused_target = root.join("refused");
+            directory(&refused_target)?;
+            directory(&refused_target.join("data"))?;
+            directory(&refused_target.join("secrets"))?;
+            let refused_repository = root.join("private-empty-repository");
+            directory(&refused_repository)?;
+            let refused_config = refused_target.join("private-request-config.toml");
+            fs::write(
+                &refused_config,
+                format!(
+                    "schema_version = 1\n[storage]\ndata_directory = {:?}\nsecrets_directory = {:?}\n",
+                    refused_target.join("data"),
+                    refused_target.join("secrets")
+                ),
+            )?;
+            let mut refused_arguments = arguments.clone();
+            for (flag, value) in [
+                ("--config", refused_config.to_string_lossy().into_owned()),
+                (
+                    "--locator",
+                    refused_repository.to_string_lossy().into_owned(),
+                ),
+                (
+                    "--idempotency-key",
+                    "88888888-8888-4888-8888-888888888888".into(),
+                ),
+            ] {
+                let position = refused_arguments
+                    .iter()
+                    .position(|item| item == flag)
+                    .ok_or("restore option")?;
+                *refused_arguments
+                    .get_mut(position + 1)
+                    .ok_or("restore value")? = value;
+            }
+            let refused = command("start", &refused_arguments, &secrets)?;
+            assert_eq!(refused.status.code(), Some(2));
+            assert!(
+                refused.stdout.is_empty(),
+                "a refused start must not render an accepted receipt"
+            );
+            let error = std::str::from_utf8(&refused.stderr)?;
+            assert!(error.contains("restore unavailable; require a fresh target or the exact accepted restore identity and sufficient admitted resources"), "refusal must reach runtime begin");
+            let code = error
+                .lines()
+                .find_map(|line| line.strip_prefix("positron: restore begin refused; code="))
+                .ok_or("closed restore begin code missing")?;
+            assert!(
+                !code.is_empty()
+                    && code.len() <= 64
+                    && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            );
+            assert!(!error.contains(root.to_str().ok_or("private root")?));
+            assert!(!error.contains("BootstrapFailure {"));
+        }
         assert!(!command("status", &arguments, &secrets)?.status.success());
         assert!(!target.join("data/catalog").exists());
         let started = command("start", &arguments, &secrets)?;

@@ -1,4 +1,8 @@
 """The Kubernetes subprocess seam preserves native CLI outcomes for existing consumers."""
+import contextlib
+import io
+import json
+from unittest.mock import patch
 from pathlib import Path
 import subprocess
 import tempfile
@@ -446,6 +450,139 @@ class NativeAdapter(unittest.TestCase):
                         lifecycle.online("repository", "status")
                     self.assertEqual(failure.exception.stderr, b"positron: native permission denied\n")
                     self.assertEqual(failure.exception.returncode, 3)
+
+
+
+
+class RestoreFailure(unittest.TestCase):
+    def run_restore_failure(self, response, *, terminal=True, cleanup=None, metadata_expired=False):
+        with tempfile.TemporaryDirectory() as root:
+            lifecycle = NativeLifecycle.__new__(NativeLifecycle)
+            lifecycle.case = self
+            lifecycle.root = Path(root)
+            lifecycle.values = {}
+            lifecycle.helm = ['helm']
+            lifecycle.chart = Path('chart')
+            lifecycle.inputs_claim = 'inputs'
+            lifecycle.backup_claim = 'backup'
+            lifecycle.sequence = 0
+            lifecycle.snapshot = 'snapshot'
+            lifecycle.checksum = 'checksum'
+            lifecycle.pin = dict.fromkeys(['instance', 'root_key_id', 'root_created_at', 'root_fingerprint', 'integrity_public_key', 'integrity_fingerprint'], 'identity')
+            lifecycle.scale = lambda _: None
+            commands, cleaned, metadata_reads = [], [], []
+            def render(release, values):
+                args = values['maintenance']['args']
+                commands.append(args)
+                if len(commands) == 2: self.assertEqual(cleaned, ['job', 'pod'])
+                return [{'kind': 'Job', 'metadata': {'name': values['maintenance']['name']}}]
+            lifecycle.render = render
+            lifecycle.apply = lambda _: None
+            def kube(*args, **kwargs):
+                body = {}
+                if '--request-timeout=3s' in args: metadata_reads.append(args)
+                if args[:2] == ('get', 'statefulset'): body = {'spec': {'replicas': 0}}
+                elif args[:2] == ('get', 'pods'): body = {'items': []}
+                elif args[:2] == ('get', 'pvc'): body = {'metadata': {'uid': args[2]}, 'spec': {}}
+                elif args[:2] == ('get', 'job'):
+                    failed = {'failed': 1}
+                    if terminal: failed['conditions'] = [{'type': 'Failed', 'status': 'True'}]
+                    body = {'status': failed if lifecycle.sequence == 1 or response is None else {'succeeded': 1}}
+                elif args[0] == 'logs':
+                    return subprocess.CompletedProcess([], 0, b'original start refusal' if lifecycle.sequence == 1 else response or b'status refused', b'')
+                elif args[:2] == ('delete', 'job'):
+                    if cleanup == 'job': raise RuntimeError('initial Job cleanup refused')
+                    cleaned.append('job')
+                elif args[:3] == ('wait', '--for=delete', 'pod') and 'job-name=op1' in args:
+                    if cleanup == 'pod': raise RuntimeError('initial Pod cleanup refused')
+                    cleaned.append('pod')
+                return subprocess.CompletedProcess([], 0, json.dumps(body).encode(), b'')
+            lifecycle.kube = kube
+            ticks = iter([0, 181] if not terminal else [0, 1, 2, 12, 13])
+            clock = (lambda: next(ticks, 14)) if not terminal or metadata_expired else __import__('time').monotonic
+            output = io.StringIO()
+            expected = 'initial Job cleanup refused' if cleanup == 'job' else 'initial Pod cleanup refused' if cleanup == 'pod' else 'offline native operation did not terminate' if not terminal else 'native offline operation refused: original start refusal'
+            with patch('native_lifecycle.subprocess.run'), patch('native_lifecycle.time.monotonic', side_effect=clock), contextlib.redirect_stdout(output):
+                with self.assertRaisesRegex(RuntimeError if cleanup else AssertionError, '^' + expected + '$'):
+                    lifecycle.restore('digest')
+            return commands, output.getvalue(), metadata_reads
+
+    def test_terminal_start_failure_is_preserved_after_one_same_identity_status(self):
+        success = b'{"kind":"backup_restore","operation_revision":4,"operation":{"status":"running"}}'
+        for response in [success, b'not json', None]:
+            with self.subTest(response=response):
+                commands, output, _ = self.run_restore_failure(response)
+                self.assertIn('restore_status_diagnostic', output)
+                self.assertEqual(len(commands), 2)
+                self.assertEqual(commands[0][:3], ['backup', 'restore', 'start'])
+                self.assertEqual(commands[1][:3], ['backup', 'restore', 'status'])
+                self.assertEqual(commands[0][3:], commands[1][3:])
+                self.assertNotIn('--wait-seconds', commands[1])
+                self.assertNotIn('--operation-id', commands[1])
+                self.assertNotIn('original start refusal', output)
+                if response == success:
+                    records = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
+                    self.assertIn({"restore_status_diagnostic": {"status": "running", "operation_revision": 4}}, records)
+                else: self.assertIn('restore_status_diagnostic_unavailable', output)
+
+    def test_failed_pod_count_without_terminal_job_condition_cannot_open_status(self):
+        commands, output, reads = self.run_restore_failure(None, terminal=False)
+        self.assertEqual([args[2] for args in commands], ['start'])
+        self.assertNotIn('restore_status_diagnostic', output)
+        self.assertEqual(reads, [])
+
+    def test_initial_job_or_pod_cleanup_refusal_cannot_open_status(self):
+        for boundary in ['job', 'pod']:
+            with self.subTest(boundary=boundary):
+                commands, output, _ = self.run_restore_failure(None, cleanup=boundary)
+                self.assertEqual([args[2] for args in commands], ['start'])
+                self.assertNotIn('restore_status_diagnostic', output)
+
+    def test_metadata_deadline_stops_reads_without_losing_original_start_failure(self):
+        response = b'{"kind":"backup_restore","operation_revision":4,"operation":{"status":"running"}}'
+        commands, output, reads = self.run_restore_failure(response, metadata_expired=True)
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(reads[0][:2], ('get', 'pods'))
+        self.assertIn('restore_failure_resources_unavailable', output)
+        self.assertNotIn('"restore_failure_resources":', output)
+        self.assertIn('"restore_status_diagnostic":', output)
+        self.assertEqual([args[2] for args in commands], ['start', 'status'])
+
+    def test_resource_capture_emits_only_public_whitelist_and_closed_failures(self):
+        lifecycle = NativeLifecycle.__new__(NativeLifecycle)
+        calls = []
+        secret = "PRIVATE_SENTINEL_DO_NOT_EMIT"
+        def kube(*args, **kwargs):
+            calls.append((args, kwargs))
+            self.assertGreater(kwargs["timeout"], 0)
+            self.assertLessEqual(kwargs["timeout"], 5)
+            if args[1] == "pods":
+                body = {"items": [{"metadata": {"uid": "pod-uid", "annotations": {"secret": secret}}, "spec": {"containers": [{"env": [{"value": secret}], "resources": {"requests": {"cpu": "250m", "memory": "256Mi", "private": secret}, "limits": {"memory": "512Mi"}}}]}, "status": {"phase": "Failed", "containerStatuses": [{"state": {"terminated": {"exitCode": 2, "reason": "Error", "message": secret}}}]}}]}
+            elif args[1] == "pvc": body = {"metadata": {"uid": "claim-uid"}, "spec": {"volumeName": "owned-pv"}}
+            else: body = {"metadata": {"uid": "pv-uid"}, "spec": {"claimRef": {"uid": "claim-uid"}, "nodeAffinity": {"required": {"nodeSelectorTerms": [{"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": ["owned-worker"]}]}]}}}}
+            return subprocess.CompletedProcess([], 0, json.dumps(body).encode(), b'')
+        lifecycle.kube = kube
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            lifecycle.restore_failure_resources({"metadata": {"name": "op1"}}, {"failed": 1})
+        self.assertNotIn(secret, output.getvalue())
+        result = json.loads(output.getvalue())["restore_failure_resources"]
+        self.assertEqual(result["pods"][0]["exits"], [{"exit_code": 2, "reason": "Error"}])
+        self.assertEqual(result["pods"][0]["resources"], [{"requests": {"cpu": "250m", "memory": "256Mi"}, "limits": {"memory": "512Mi"}}])
+        self.assertEqual(result["claims"][0]["node_affinity"], [["owned-worker"]])
+        self.assertEqual(len(calls), 9)
+        lifecycle.kube = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(secret))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): lifecycle.restore_failure_resources({"metadata": {"name": "op1"}}, {"failed": 1})
+        self.assertEqual(output.getvalue(), "restore_failure_resources_unavailable\n")
+
+    def test_status_output_rejects_untrusted_values_without_echoing_them(self):
+        lifecycle = NativeLifecycle.__new__(NativeLifecycle)
+        for value in [b'{"kind":"backup_restore","operation_revision":1,"operation":{"status":"PRIVATE_SENTINEL"}}', b'{"kind":"backup_restore","operation_revision":true,"operation":{"status":"running"}}']:
+            lifecycle.offline = lambda *args, **kwargs: value
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output): lifecycle.restore_failure_status(["backup", "restore", "start"], "restored")
+            self.assertEqual(output.getvalue(), "restore_status_diagnostic_unavailable\n")
 
 
 if __name__ == "__main__": unittest.main()

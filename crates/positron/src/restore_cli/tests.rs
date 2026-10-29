@@ -118,3 +118,48 @@ fn restore_requires_exact_public_pins_and_closed_bounded_options()
     std::fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn begin_failure_diagnostic_emits_only_the_existing_closed_code() {
+    for (code, expected) in [
+        (BootstrapFailureCode::CorruptState, "CorruptState"),
+        (
+            BootstrapFailureCode::ResourceUnavailable,
+            "ResourceUnavailable",
+        ),
+        (
+            BootstrapFailureCode::StorageUnavailable,
+            "StorageUnavailable",
+        ),
+        (BootstrapFailureCode::IdentityMismatch, "IdentityMismatch"),
+    ] {
+        let mut diagnostic = Vec::new();
+        assert_eq!(
+            report_begin_failure(code, &mut diagnostic),
+            "restore unavailable; require a fresh target or the exact accepted restore identity and sufficient admitted resources"
+        );
+        assert_eq!(
+            diagnostic,
+            format!("positron: restore begin refused; code={expected}\n").as_bytes()
+        );
+    }
+}
+
+#[test]
+fn begin_failure_diagnostic_write_refusal_remains_an_explicit_restore_failure() {
+    struct Refused;
+    impl Write for Refused {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("private-sink-detail"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let error = report_begin_failure(BootstrapFailureCode::ResourceUnavailable, &mut Refused);
+    assert_eq!(
+        error,
+        "restore unavailable; begin failed and its diagnostic could not be written; inspect the same target before retrying"
+    );
+    assert!(!error.contains("private-sink-detail"));
+}

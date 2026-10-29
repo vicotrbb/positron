@@ -287,7 +287,7 @@ jobs:
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture
           else
             native_suite_status=0
-            cargo test --locked -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture || native_suite_status=$?
+            cargo test --locked -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture -- --test-threads=1 || native_suite_status=$?
             if [ "$native_suite_status" -ne 0 ] && [ '${{ matrix.target }}' = macos-x86_64 ]; then
               isolated_native_status=0
               cargo test --locked -p positron --test upgrade_native_cli offline_recovery::offline_restore_reference_survives_frontiers_that_refuse_continuation -- --exact --nocapture --test-threads=1 || isolated_native_status=$?

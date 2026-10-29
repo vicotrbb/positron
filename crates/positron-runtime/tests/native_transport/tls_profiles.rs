@@ -867,11 +867,20 @@ fn role_specific_tls_profiles_serve_operations_api_otlp_http_and_loki()
     let loki = address(&endpoints, positron_runtime::ListenerRole::LokiPush)?;
 
     assert_status(
-        tls_http(operations, &certificate, "GET", "/health/live", &[], &[])?,
+        tls_http_for_role(
+            "operations",
+            operations,
+            &certificate,
+            "GET",
+            "/health/live",
+            &[],
+            &[],
+        )?,
         200,
     );
     assert_status(
-        tls_http(
+        tls_http_for_role(
+            "api",
             api,
             &certificate,
             "POST",
@@ -886,7 +895,8 @@ fn role_specific_tls_profiles_serve_operations_api_otlp_http_and_loki()
         claim.ingest_secret().ok_or("ingest secret missing")?
     );
     assert_status(
-        tls_http(
+        tls_http_for_role(
+            "otlp_http",
             otlp,
             &certificate,
             "POST",
@@ -900,7 +910,8 @@ fn role_specific_tls_profiles_serve_operations_api_otlp_http_and_loki()
         200,
     );
     assert_status(
-        tls_http(
+        tls_http_for_role(
+            "loki_push",
             loki,
             &certificate,
             "POST",
@@ -1225,5 +1236,65 @@ fn native_bindings_reject_unsafe_and_colliding_endpoints() -> Result<(), Box<dyn
             positron_runtime::ListenerRole::Operations
         ))
     ));
+    Ok(())
+}
+
+#[test]
+fn complete_tls_response_without_peer_close_retains_read_deadline_diagnostic()
+-> Result<(), Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let certificates = CertificateDer::pem_file_iter(fixture("api-test-cert.pem"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = PrivateKeyDer::from_pem_file(fixture("api-test-key.pem"))?;
+    let configuration = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)?;
+    let (release, held) = std::sync::mpsc::sync_channel(1);
+    let result = std::thread::scope(|scope| {
+        let server = scope.spawn(move || -> std::io::Result<()> {
+            let (socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            socket.set_write_timeout(Some(Duration::from_secs(2)))?;
+            let connection = rustls::ServerConnection::new(Arc::new(configuration))
+                .map_err(std::io::Error::other)?;
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0_u8; 1];
+                stream.read_exact(&mut byte)?;
+                request.push(byte[0]);
+                if request.len() > 1024 {
+                    return Err(std::io::Error::other("fixture request bound"));
+                }
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")?;
+            stream.flush()?;
+            held.recv_timeout(Duration::from_secs(10))
+                .map_err(std::io::Error::other)?;
+            Ok(())
+        });
+        let response = tls_http(address, &fixture("api-test-cert.pem"), "GET", "/", &[], &[]);
+        let released = release.send(());
+        let finished = server.join();
+        released.map_err(|_| "fixture release failed")?;
+        finished.map_err(|_| "fixture server panicked")??;
+        response
+    });
+    let error = result
+        .expect_err("complete response must still require peer closure")
+        .to_string();
+    assert!(
+        error.contains("stage=read-response"),
+        "closed read stage missing: {error}"
+    );
+    assert!(
+        error.contains("headers_present=true"),
+        "header state missing: {error}"
+    );
+    assert!(
+        error.contains("content_length_complete=true"),
+        "complete body state missing: {error}"
+    );
     Ok(())
 }

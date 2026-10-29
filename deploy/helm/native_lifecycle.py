@@ -23,6 +23,10 @@ CONFIG = "/etc/positron/config/positron.toml"
 REPOSITORY = "11111111-1111-4111-8111-111111111111"
 
 
+class RestoreStartRefused(AssertionError):
+    """A failed terminal start Job, whose Pod must be removed before inspection."""
+
+
 IMAGE_MANIFEST_TYPES = ("application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json")
 IMAGE_INDEX_TYPES = ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json")
 
@@ -221,17 +225,86 @@ class NativeLifecycle(DataLifecycle):
             deadline = time.monotonic() + 180
             while True:
                 status = json.loads(self.kube("get", "job", name, "-o", "json").stdout).get("status", {})
-                if status.get("succeeded") or status.get("failed"): break
+                terminal_start_failure = arguments[:3] == ["backup", "restore", "start"] and any(condition.get("type") == "Failed" and condition.get("status") == "True" for condition in status.get("conditions", []))
+                if status.get("succeeded") or (terminal_start_failure if arguments[:3] == ["backup", "restore", "start"] else status.get("failed")): break
                 if time.monotonic() >= deadline: raise AssertionError("offline native operation did not terminate")
                 time.sleep(0.2)
             output = self.kube("logs", f"job/{name}").stdout
             self.case.assertNotIn(b"administrator_secret=", output)
             if not status.get("succeeded"):
-                raise AssertionError("native offline operation refused: " + output.decode(errors="replace")[:2048])
+                failure = AssertionError
+                if arguments[:3] == ["backup", "restore", "start"]:
+                    self.restore_failure_resources(job, status)
+                    failure = RestoreStartRefused
+                raise failure("native offline operation refused: " + output.decode(errors="replace")[:2048])
             return output
         finally:
             self.kube("delete", "job", name, "--wait=true", "--timeout=90s", timeout=100)
             self.kube("wait", "--for=delete", "pod", "-l", f"job-name={name}", "--timeout=90s", timeout=100)
+
+    def restore_failure_status(self, start, release):
+        args = list(start)
+        args[2] = "status"
+        try:
+            result = json.loads(self.offline(*args, compose=release))
+            status = result["operation"]["status"]
+            revision = result["operation_revision"]
+            if result.get("kind") != "backup_restore" or status not in ["pending", "running", "succeeded", "failed", "cancelled"] or type(revision) is not int or not 0 <= revision < 2**64:
+                raise ValueError("invalid restore status")
+            print(json.dumps({"restore_status_diagnostic": {"status": status, "operation_revision": revision}}), flush=True)
+        except Exception:
+            # Admission or inspection refusal does not prove that start was unaccepted.
+            print("restore_status_diagnostic_unavailable", flush=True)
+
+    def restore_failure_resources(self, job, status):
+        deadline = time.monotonic() + 10
+        def read(kind, name, *options):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError("diagnostic deadline")
+            return json.loads(self.kube("get", kind, *([name] if name else []), *options, "-o", "json", "--request-timeout=3s", timeout=min(5, remaining)).stdout)
+        def identity(value):
+            return value if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,253}", value) else None
+        def quantities(container):
+            result = {}
+            for dimension in ["requests", "limits"]:
+                result[dimension] = {key: value for key, value in container.get("resources", {}).get(dimension, {}).items()
+                                     if key in ["cpu", "memory"] and isinstance(value, str) and re.fullmatch(r"[0-9]{1,20}(?:[.][0-9]{1,9})?(?:m|Ki|Mi|Gi|Ti|K|M|G|T)?", value)}
+            return result
+        try:
+            name = job["metadata"]["name"]
+            pods = read("pods", "", "-l", "job-name=" + name)["items"]
+            if len(pods) > 4: raise ValueError("unexpected Job Pod count")
+            selected = []
+            for pod in pods:
+                exits = []
+                for container in pod.get("status", {}).get("containerStatuses", []):
+                    terminal = container.get("state", {}).get("terminated", {})
+                    code = terminal.get("exitCode")
+                    reason = terminal.get("reason")
+                    exits.append({"exit_code": code if type(code) is int and 0 <= code <= 255 else None,
+                                  "reason": reason if reason in ["Completed", "Error", "OOMKilled", "ContainerCannotRun", "DeadlineExceeded"] else None})
+                selected.append({"uid": identity(pod.get("metadata", {}).get("uid")),
+                                 "phase": pod.get("status", {}).get("phase") if pod.get("status", {}).get("phase") in ["Pending", "Running", "Succeeded", "Failed", "Unknown"] else None,
+                                 "exits": exits, "resources": [quantities(c) for c in pod.get("spec", {}).get("containers", [])]})
+            claims = []
+            for release in ["native", "restored"]:
+                for suffix in ["data", "secrets"]:
+                    claim = read("pvc", release + "-positron-" + suffix)
+                    volume = claim.get("spec", {}).get("volumeName")
+                    pv = read("pv", volume) if identity(volume) else {}
+                    affinity = pv.get("spec", {}).get("nodeAffinity", {}).get("required", {}).get("nodeSelectorTerms", [])
+                    terms = []
+                    for term in affinity[:4]:
+                        for expression in term.get("matchExpressions", [])[:4]:
+                            if expression.get("key") == "kubernetes.io/hostname" and expression.get("operator") == "In":
+                                terms.append([identity(v) for v in expression.get("values", [])[:4]])
+                    claims.append({"claim": release + "-positron-" + suffix, "uid": identity(claim.get("metadata", {}).get("uid")),
+                                   "volume": identity(volume), "volume_uid": identity(pv.get("metadata", {}).get("uid")),
+                                   "bound_claim_uid": identity(pv.get("spec", {}).get("claimRef", {}).get("uid")), "node_affinity": terms})
+            print(json.dumps({"restore_failure_resources": {"job": identity(name), "failed": status.get("failed") == 1,
+                                                         "pods": selected, "claims": claims}}), flush=True)
+        except Exception:
+            print("restore_failure_resources_unavailable", flush=True)
 
     def prepare(self, configuration):
         self.scale(0)
@@ -318,7 +391,12 @@ class NativeLifecycle(DataLifecycle):
                     "--identity-file", INPUTS + "/export/recovery.identity"]
             for flag, key in [("--instance", "instance"), ("--root-key-id", "root_key_id"), ("--root-created-at", "root_created_at"), ("--root-fingerprint", "root_fingerprint"), ("--integrity-public-key", "integrity_public_key"), ("--integrity-fingerprint", "integrity_fingerprint")]:
                 args += [flag, self.pin[key]]
-            operation = json.loads(self.offline(*args, compose=release))["operation"]["id"]
+            try:
+                operation = json.loads(self.offline(*args, compose=release))["operation"]["id"]
+            except RestoreStartRefused:
+                # offline has removed the terminal Job and its Pod; never repeat start.
+                self.restore_failure_status(args, release)
+                raise
             target = [json.loads(self.kube("get", "pvc", "restored-positron-" + suffix, "-o", "json").stdout) for suffix in ["data", "secrets"]]
             self.case.assertEqual(len({claim["spec"]["volumeName"] for claim in source + target}), 4)
             args[2] = "wait"
