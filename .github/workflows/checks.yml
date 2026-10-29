@@ -483,7 +483,7 @@ jobs:
         run: |
           executable=$(jq -r 'select(.target.name == "binary_ingestion" and .executable != null and .profile.test == true) | .executable' "$RUNNER_TEMP/public-test-build.json")
           source_commit=$(git rev-parse HEAD)
-          candidate="$GITHUB_WORKSPACE/target/native-upgrade-fixture/native-release-v1/$source_commit"
+          candidate="$RUNNER_TEMP/native-target/tmp/native-upgrade-fixture/native-release-v1/$source_commit"
           test -f "$candidate/target/release/positron"
           docker create --name positron-oci-tools positron-gnu-builder
           docker cp positron-oci-tools:/bin/kill "$RUNNER_TEMP/oci-kill"
@@ -540,7 +540,7 @@ jobs:
           chmod 0755 "$RUNNER_TEMP/helm-tools/kind" "$RUNNER_TEMP/helm-tools/k3d"
           export PATH="$RUNNER_TEMP/helm-tools:$RUNNER_TEMP/helm-tools/linux-$architecture:$PATH"
           POSITRON_TEST_SOURCE_COMMIT="$(git rev-parse HEAD)"
-          candidate="$GITHUB_WORKSPACE/target/native-upgrade-fixture/native-release-v1/$POSITRON_TEST_SOURCE_COMMIT"
+          candidate="$RUNNER_TEMP/native-target/tmp/native-upgrade-fixture/native-release-v1/$POSITRON_TEST_SOURCE_COMMIT"
           export POSITRON_TEST_UPGRADE_BINARY="$candidate/target/release/positron"
           POSITRON_TEST_CANDIDATE_COMMIT="$(cat "$candidate/candidate-commit")"
           export POSITRON_TEST_HELM_CURRENT_BINARY="$RUNNER_TEMP/first/positron"
