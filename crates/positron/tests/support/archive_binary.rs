@@ -5,10 +5,21 @@ pub fn executable() -> Result<PathBuf, Box<dyn std::error::Error>> {
         return Ok(super::native_binary::executable());
     }
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    build_in(&workspace)
+}
+pub(super) fn build_in(workspace: &std::path::Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    build_in_at(
+        workspace,
+        &std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("native-archive-test-release"),
+    )
+}
+pub(super) fn build_in_at(
+    workspace: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     // A separate Cargo target avoids the outer test command's artifact lock.
-    let target = workspace.join("target/native-archive-test-release");
     let status = Command::new(env!("CARGO"))
-        .current_dir(&workspace)
+        .current_dir(workspace)
         .args([
             "build",
             "--locked",
@@ -17,7 +28,12 @@ pub fn executable() -> Result<PathBuf, Box<dyn std::error::Error>> {
             "positron",
             "--target-dir",
         ])
-        .arg(&target)
+        .arg(target)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .env_remove("LLVM_PROFILE_FILE")
+        .env("RUSTC_WRAPPER", "")
+        .env("RUSTC_WORKSPACE_WRAPPER", "")
         .status()?;
     if !status.success() {
         return Err("bounded native archive test release build failed".into());
