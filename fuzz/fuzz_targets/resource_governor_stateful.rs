@@ -274,10 +274,12 @@ fuzz_target!(|data: &[u8]| {
         match command[0] % 9 {
             0 => {
                 drop(slots[slot_index].take());
-                let kind = ordinary_kind(command[2]);
+                let system_read = command[2] & 0x80 != 0;
+                let kind = if system_read { WorkKind::OrdinaryMaintenanceBackup } else { ordinary_kind(command[2]) };
                 let amount = u64::from(command[4] % 20) + 1;
                 let claim =
                     ResourceAmounts::only(dimension(command[3]), amount).and_then(|amounts| {
+                        if system_read { return WorkClaim::backup_repository_read(amounts); }
                         WorkClaim::authenticated(
                             tenants[usize::from(command[2]) % 2],
                             PrincipalId::from_bytes([command[4] & 1; 16]).map_err(|_| {
@@ -414,7 +416,11 @@ fuzz_target!(|data: &[u8]| {
                             operation,
                             is_operation_root,
                         } = slot;
-                        let transferred = owned.transfer();
+                        let mut transferred = owned.transfer();
+                        let requested = ResourceAmounts::only(dimension(command[3]), u64::from(command[4] % 20) + 1);
+                        if let Ok(requested) = requested {
+                            let _ = transferred.try_resize_preserving_capacity(governor, requested);
+                        }
                         if let Ok(reservation) = transferred.reclaim(governor) {
                             slots[slot_index] = Some(Slot {
                                 reservation,

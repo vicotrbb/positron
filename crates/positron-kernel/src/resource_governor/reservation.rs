@@ -262,6 +262,34 @@ impl<'authority> ResourceReservation<'authority> {
 }
 
 impl TransferredResourceReservation {
+    /// Resizes the same live accounting capability without releasing it on refusal.
+    pub fn try_resize_preserving_capacity(
+        &mut self,
+        governor: ResourceGovernor<'_>,
+        new_amounts: ResourceAmounts,
+    ) -> Result<ResizeOutcome, ResizeFailure> {
+        if !self.active || !self.can_reclaim_with(governor) {
+            return Err(ResizeFailure::inactive(
+                self.identity.class(),
+                governor.inner.pressure_for_failure(),
+            ));
+        }
+        let mut reservation = ResourceReservation::new(
+            governor.inner,
+            self.owner,
+            self.identity,
+            self.amounts,
+            self.slot,
+            self.operation.clone(),
+        );
+        let result = reservation.try_resize_preserving_capacity(new_amounts);
+        self.owner = reservation.owner;
+        self.amounts = reservation.amounts;
+        self.active = reservation.active;
+        reservation.active = false;
+        result
+    }
+
     pub(crate) fn granted(&self) -> ResourceAmounts {
         self.amounts
     }

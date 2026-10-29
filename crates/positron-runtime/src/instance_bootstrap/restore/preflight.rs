@@ -11,7 +11,7 @@ impl InstanceBootstrap {
             authority,
             access,
             layout: _,
-            resources,
+            mut resources,
             runtime,
             repository,
             identity,
@@ -259,27 +259,6 @@ impl InstanceBootstrap {
             })
             .and_then(|bytes| bytes.checked_add(16 * 1024))
             .ok_or_else(failure)?;
-        let carry = authority
-            .governor()
-            .reserve(
-                WorkClaim::backup_repository_read(ResourceAmounts::new([
-                    carry_memory,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ]))
-                .map_err(|_| failure())?,
-            )
-            .map_err(|failure| grant_failure(BootstrapResourceStage::RestoreCarryGrant, failure))?;
-        drop(repository);
-        drop(resources);
         let phase_memory = carry_memory
             .checked_add(BackupPublisher::control_read_memory_bytes())
             .and_then(|bytes| {
@@ -291,16 +270,13 @@ impl InstanceBootstrap {
             positron_kernel::ResourceDimension::ALL
                 .map(|dimension| phase_base.get(dimension).max(native.get(dimension))),
         );
-        let resources = NativeAwsResources::new(
-            authority
-                .governor()
-                .reserve(WorkClaim::backup_repository_read(phase_amounts).map_err(|_| failure())?)
-                .map_err(|failure| {
-                    grant_failure(BootstrapResourceStage::RestorePhaseGrant, failure)
-                })?
-                .transfer(),
-        );
-        drop(carry);
+        handoff_resources(
+            &authority,
+            &mut resources,
+            repository,
+            carry_memory,
+            phase_amounts,
+        )?;
         let (reopened_identity, repository) = runtime
             .block_on(
                 crate::services::repository_administration::open_for_recovery(
@@ -558,4 +534,55 @@ impl InstanceBootstrap {
             native_cursor: None,
         })
     }
+}
+
+pub(super) fn handoff_resources(
+    authority: &StorageKernelResourceAuthority,
+    resources: &mut Arc<NativeAwsResources>,
+    repository: Box<dyn Repository>,
+    carry_memory: u64,
+    phase_amounts: ResourceAmounts,
+) -> Result<(), BootstrapFailure> {
+    // Close the completed transport before asking for exclusive ownership. The
+    // original grant continues charging all retained restore state throughout.
+    drop(repository);
+    if phase_amounts.is_at_most(resources.granted())
+        && let Some(owner) = Arc::get_mut(resources)
+    {
+        owner
+            .try_resize_preserving_capacity(authority.governor(), phase_amounts)
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))?;
+        return Ok(());
+    }
+    let carry = authority
+        .governor()
+        .reserve(
+            WorkClaim::backup_repository_read(ResourceAmounts::new([
+                carry_memory,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]))
+            .map_err(|_| failure())?,
+        )
+        .map_err(|failure| grant_failure(BootstrapResourceStage::RestoreCarryGrant, failure))?;
+    // Keep the charge in the caller's early binding, including on phase refusal.
+    // No transport opens while this memory-only carry grant is installed.
+    *resources = NativeAwsResources::new(carry.transfer());
+    let phase = NativeAwsResources::new(
+        authority
+            .governor()
+            .reserve(WorkClaim::backup_repository_read(phase_amounts).map_err(|_| failure())?)
+            .map_err(|failure| grant_failure(BootstrapResourceStage::RestorePhaseGrant, failure))?
+            .transfer(),
+    );
+    *resources = phase;
+    Ok(())
 }

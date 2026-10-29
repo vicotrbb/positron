@@ -71,6 +71,16 @@ pub(super) mod tests {
         budget: Duration,
         run: fn(&RepositoryServiceClient, &str, &RepositoryRequest, Instant) -> Inspection,
     ) -> TestResult<(Inspection, Vec<Vec<u8>>, Duration)> {
+        scripted_with_timing(responses, request, budget, run, false)
+    }
+
+    fn scripted_with_timing(
+        responses: &[(u16, &str)],
+        request: &RepositoryRequest,
+        budget: Duration,
+        run: fn(&RepositoryServiceClient, &str, &RepositoryRequest, Instant) -> Inspection,
+        hold_last_response: bool,
+    ) -> TestResult<(Inspection, Vec<Vec<u8>>, Duration)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let endpoint: SocketAddr = listener.local_addr()?;
@@ -82,64 +92,81 @@ pub(super) mod tests {
             .map(|(status, body)| (*status, body.to_string()))
             .collect::<Vec<_>>();
         let (done, finished) = mpsc::channel::<()>();
-        let server = std::thread::spawn(move || -> Result<Vec<Vec<u8>>, String> {
-            let mut requests = Vec::new();
-            for (status, body) in responses {
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            if matches!(finished.try_recv(), Err(mpsc::TryRecvError::Disconnected))
-                            {
-                                return Ok(requests);
-                            }
-                            std::thread::sleep(Duration::from_millis(5));
-                        },
-                        Err(error) => return Err(error.to_string()),
-                    }
-                };
-                stream
-                    .set_nonblocking(false)
-                    .map_err(|error| error.to_string())?;
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .map_err(|error| error.to_string())?;
-                let mut headers = Vec::new();
-                while !headers.ends_with(b"\r\n\r\n") {
-                    let mut byte = [0];
+        let server = std::thread::spawn(
+            move || -> Result<(Vec<Vec<u8>>, Option<std::io::ErrorKind>), String> {
+                let mut requests = Vec::new();
+                let response_count = responses.len();
+                for (index, (status, body)) in responses.into_iter().enumerate() {
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                if matches!(
+                                    finished.try_recv(),
+                                    Err(mpsc::TryRecvError::Disconnected)
+                                ) {
+                                    return Ok((requests, None));
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            },
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    };
                     stream
-                        .read_exact(&mut byte)
+                        .set_nonblocking(false)
                         .map_err(|error| error.to_string())?;
-                    headers.extend_from_slice(&byte);
-                    if headers.len() > 8192 {
-                        return Err("headers exceeded bound".into());
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .map_err(|error| error.to_string())?;
+                    let mut headers = Vec::new();
+                    while !headers.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        stream
+                            .read_exact(&mut byte)
+                            .map_err(|error| error.to_string())?;
+                        headers.extend_from_slice(&byte);
+                        if headers.len() > 8192 {
+                            return Err("headers exceeded bound".into());
+                        }
+                    }
+                    let text = std::str::from_utf8(&headers).map_err(|error| error.to_string())?;
+                    let length = text
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .ok_or("content length")?;
+                    if length > 4096 {
+                        return Err("body exceeded bound".into());
+                    }
+                    let mut bytes = vec![0; length];
+                    stream
+                        .read_exact(&mut bytes)
+                        .map_err(|error| error.to_string())?;
+                    headers.extend_from_slice(&bytes);
+                    requests.push(headers);
+                    if hold_last_response && index + 1 == response_count {
+                        // The client must exhaust its original deadline before this
+                        // response write. No wall-clock sleep controls the ordering.
+                        let _ = finished.recv();
+                        match stream.shutdown(std::net::Shutdown::Both) {
+                            Ok(()) => {},
+                            Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {},
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    }
+                    if status != 0
+                        && let Err(error) = write_response(&mut stream, status, &body)
+                    {
+                        return Ok((requests, Some(error.kind())));
                     }
                 }
-                let text = std::str::from_utf8(&headers).map_err(|error| error.to_string())?;
-                let length = text
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())
-                            .flatten()
-                    })
-                    .ok_or("content length")?;
-                if length > 4096 {
-                    return Err("body exceeded bound".into());
-                }
-                let mut bytes = vec![0; length];
-                stream
-                    .read_exact(&mut bytes)
-                    .map_err(|error| error.to_string())?;
-                headers.extend_from_slice(&bytes);
-                requests.push(headers);
-                if status != 0 {
-                    write!(stream, "HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(|error| error.to_string())?;
-                }
-            }
-            Ok(requests)
-        });
+                Ok((requests, None))
+            },
+        );
         let started = Instant::now();
         let result = run(
             &client,
@@ -149,8 +176,101 @@ pub(super) mod tests {
         );
         let elapsed = started.elapsed();
         drop(done);
-        let requests = server.join().map_err(|_| "server panicked")??;
+        let (requests, write_failure) = server.join().map_err(|_| "server panicked")??;
+        let (result, requests) = finish_script(result, requests, write_failure)?;
         Ok((result, requests, elapsed))
+    }
+
+    fn write_response(writer: &mut impl Write, status: u16, body: &str) -> std::io::Result<()> {
+        write!(
+            writer,
+            "HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn finish_script(
+        result: Inspection,
+        requests: Vec<Vec<u8>>,
+        write_failure: Option<std::io::ErrorKind>,
+    ) -> TestResult<(Inspection, Vec<Vec<u8>>)> {
+        if let Some(kind) = write_failure {
+            let deadline = matches!(
+                result.as_ref().err().map(String::as_str),
+                Some("repository status inspection deadline" | "lookup_deadline")
+            );
+            if !deadline
+                || !matches!(
+                    kind,
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                )
+            {
+                return Err(format!("scripted response write: {kind:?}").into());
+            }
+        }
+        Ok((result, requests))
+    }
+
+    #[test]
+    fn closed_response_writer_preserves_only_exact_client_deadline_outcomes() -> TestResult {
+        struct RefusingWriter(std::io::ErrorKind);
+        impl Write for RefusingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(self.0.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+        ] {
+            let failure = write_response(&mut RefusingWriter(kind), 200, "{}")
+                .expect_err("closed response writer");
+            for deadline in ["repository status inspection deadline", "lookup_deadline"] {
+                let (outcome, requests) = finish_script(
+                    Err(deadline.into()),
+                    vec![b"captured request".to_vec()],
+                    Some(failure.kind()),
+                )?;
+                assert_eq!(outcome, Err(deadline.into()));
+                assert_eq!(requests, vec![b"captured request".to_vec()]);
+            }
+            assert!(finish_script(Err("Transport".into()), vec![vec![1]], Some(kind)).is_err());
+            assert!(
+                finish_script(
+                    Ok(RepositoryResponse::decode(br#"{"catalog_generation":7}"#)?),
+                    vec![vec![1]],
+                    Some(kind)
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            finish_script(
+                Err("lookup_deadline".into()),
+                vec![vec![1]],
+                Some(std::io::ErrorKind::PermissionDenied)
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn client_deadline_keeps_captured_request_when_response_write_is_closed() -> TestResult {
+        let request = RepositoryRequest::decode(br#"{"action":"status"}"#)?;
+        let (result, requests, _) = scripted_with_timing(
+            &[(200, r#"{"catalog_generation":7}"#)],
+            &request,
+            Duration::from_millis(40),
+            inspect,
+            true,
+        )?;
+        assert_eq!(result, Err("repository status inspection deadline".into()));
+        assert_eq!(requests.len(), 1);
+        Ok(())
     }
 
     #[test]

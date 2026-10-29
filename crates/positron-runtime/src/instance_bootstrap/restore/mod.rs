@@ -113,7 +113,6 @@ pub struct BackupRestoreSession {
     repository: Box<dyn Repository>,
     identity: RepositoryIdentity,
     signer: positron_kernel::BackupControlSigner,
-    resources: Arc<NativeAwsResources>,
     registry: BackupRegistryVerification,
     remote: BackupSnapshotVerification,
     manifest: BackupManifest,
@@ -126,6 +125,9 @@ pub struct BackupRestoreSession {
     native_scopes: Vec<positron_kernel::SegmentScope>,
     native_index: usize,
     native_cursor: Option<positron_kernel::IntegrityScrubContinuation>,
+    // Struct fields drop in declaration order; retain the grant through all
+    // repository and source-state destruction, including LocalFilesystem.
+    resources: Arc<NativeAwsResources>,
 }
 impl InstanceBootstrap {
     pub fn begin_restore(

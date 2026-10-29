@@ -1,4 +1,4 @@
-//! One init admission; any capacity ambiguity may only be resolved by same-key lookup.
+//! Resolve init capacity ambiguity by same-key lookup and at most one exact replay.
 use positron_api::repository::{
     RepositoryRequest, RepositoryResponse, RepositoryServiceClient,
     RepositoryServiceClientFailure as WireFailure,
@@ -49,8 +49,9 @@ pub(super) fn admit_once(
         Err(WireFailure::CapacityUnavailable) => {},
         result => return result.map_err(Failure::Refused),
     }
-    // Capacity may be projected after durable acceptance: freeze the same key,
-    // never refresh the generation or send init again after this ambiguity.
+    // Capacity may be projected after durable acceptance: freeze the same key
+    // and request. Only an authenticated stale-basis refusal can return control
+    // to the existing outer refresh; lookup absence alone cannot do so.
     let mut replayed = false;
     let lookup = RepositoryRequest {
         action: "lookup".into(),
@@ -111,6 +112,11 @@ pub(super) fn admit_once(
                         return Ok(response);
                     },
                     Err(WireFailure::CapacityUnavailable) => {},
+                    // This authenticated response is produced only after Governance
+                    // checked committed bindings and recovered prepared acceptance.
+                    Err(WireFailure::StaleGeneration) => {
+                        return Err(Failure::Refused(WireFailure::StaleGeneration));
+                    },
                     Err(failure) => {
                         return Err(Failure::Unresolved(match failure {
                             WireFailure::SourceUnavailable => "replay_binding_unavailable",
@@ -364,14 +370,44 @@ mod tests {
     }
 
     #[test]
+    fn exact_replay_stale_generation_returns_to_existing_basis_refresh() -> TestResult {
+        let request = RepositoryRequest::decode(br#"{"action":"init","expected_catalog_generation":6,"idempotency_key":"61616161-6161-4161-8161-616161616161","repository_id":"62626262-6262-4262-8262-626262626262","locator":"/owned/fixture"}"#)?;
+        let (result, requests, _) = super::super::status_http::tests::scripted_with(
+            &[
+                (503, CAPACITY),
+                (404, r#"{"code":"source_unavailable"}"#),
+                (409, r#"{"code":"stale_generation"}"#),
+            ],
+            &request,
+            Duration::from_secs(10),
+            |client, credential, request, deadline| match admit_once(
+                client, credential, request, deadline, &mut 0, &mut 0,
+            ) {
+                Err(Failure::Refused(WireFailure::StaleGeneration)) => {
+                    Err("refreshable_stale_generation".into())
+                },
+                Err(other) => Err(other.label().into()),
+                Ok(response) => Ok(response),
+            },
+        )?;
+        assert_eq!(
+            result.expect_err("stale basis"),
+            "refreshable_stale_generation"
+        );
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests.first(),
+            requests.get(2),
+            "only exact original replay may establish stale basis"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn replay_refusal_or_second_unavailable_binding_cannot_send_another_init() -> TestResult {
         let unavailable = r#"{"code":"source_unavailable"}"#;
         for (status, body, expected) in [
-            (
-                409,
-                r#"{"code":"stale_generation"}"#,
-                "replay_stale_generation",
-            ),
+            (409, r#"{"code":"stale_generation"}"#, "stale_generation"),
             (409, r#"{"code":"idempotency_conflict"}"#, "replay_conflict"),
             (
                 401,

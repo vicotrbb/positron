@@ -11,6 +11,10 @@ pub(super) fn active_bindings(
     accepted: DurableOperation,
 ) -> TestResult {
     let generation = catalog.pin()?.number();
+    assert!(
+        request.accepted_generation() < generation,
+        "committed binding wins over an advanced Catalog generation"
+    );
     assert_eq!(
         DurableOperationAdministration::accept_repository(catalog, actor, request, parameters)?,
         accepted
@@ -66,6 +70,54 @@ pub(super) fn active_bindings(
         DurableOperationAdministration::inspect_by_idempotency(catalog, request.idempotency_key())?,
         Some(accepted)
     );
+    Ok(())
+}
+
+pub(super) fn stale_absence(
+    catalog: &Catalog<'_>,
+    actor: crate::AuthorizedContext,
+    parameters: crate::RepositoryOperationParameters,
+    instance: [u8; 16],
+) -> TestResult {
+    let basis = catalog.pin()?.number();
+    let key = AdministrativeIdempotencyKey::new([0x95; 16])?;
+    let stale = DurableOperationRequest::repository(
+        actor.principal_id(),
+        key,
+        instance,
+        basis.checked_sub(1).ok_or("prior generation")?,
+        24,
+        parameters.intent_digest(),
+    )?;
+    assert_eq!(
+        DurableOperationAdministration::accept_repository(catalog, actor, stale, parameters),
+        Err(DurableOperationFailure::StaleGeneration)
+    );
+    assert_eq!(catalog.pin()?.number(), basis);
+    assert!(DurableOperationAdministration::inspect_by_idempotency(catalog, key)?.is_none());
+    let fresh = DurableOperationRequest::repository(
+        actor.principal_id(),
+        key,
+        instance,
+        basis,
+        24,
+        parameters.intent_digest(),
+    )?;
+    let accepted =
+        DurableOperationAdministration::accept_repository(catalog, actor, fresh, parameters)?;
+    let committed = catalog.pin()?.number();
+    assert_eq!(
+        DurableOperationAdministration::accept_repository(catalog, actor, fresh, parameters)?,
+        accepted
+    );
+    assert_eq!(catalog.pin()?.number(), committed);
+    // Once a competing acceptance owns the key, changing its basis is a conflict,
+    // not another stale-basis opportunity.
+    assert_eq!(
+        DurableOperationAdministration::accept_repository(catalog, actor, stale, parameters),
+        Err(DurableOperationFailure::IdempotencyConflict)
+    );
+    assert_eq!(catalog.pin()?.number(), committed);
     Ok(())
 }
 
