@@ -202,7 +202,7 @@ fn probe_timeout(deadline: Instant) -> std::io::Result<Duration> {
 }
 
 #[cfg(unix)]
-fn probe_response(
+pub(crate) fn probe_response(
     port: u16,
     mut request: &[u8],
     deadline: Instant,

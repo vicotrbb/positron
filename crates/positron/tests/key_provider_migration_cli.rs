@@ -74,7 +74,10 @@ fn status(
     bearer: &str,
     operation: Option<String>,
     deadline: Instant,
+    stage: &'static str,
 ) -> TestResult<ProviderMigrationResponse> {
+    let started = Instant::now();
+    let mut attempt = 0_u64;
     loop {
         let request = ProviderMigrationRequest {
             action: "status".into(),
@@ -83,12 +86,268 @@ fn status(
             configuration_reference: None,
             operation_id: operation.clone(),
         };
-        match client.manage(bearer, &request) {
+        attempt += 1;
+        let call_started = Instant::now();
+        let result = client.manage(bearer, &request);
+        let call_ms = call_started.elapsed().as_millis();
+        match result {
             Ok(response) => return Ok(response),
             Err(positron_api::provider_migration::ProviderMigrationServiceClientFailure::CapacityUnavailable) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(format!("provider migration status read: {error:?}").into()),
+            Err(error) => {
+                let elapsed_ms = started.elapsed().as_millis();
+                let remaining_ms = deadline.saturating_duration_since(Instant::now()).as_millis();
+                let operation_present = operation.is_some();
+                return Err(format!(
+                    "provider migration status read: {error:?}; stage={stage} action=status operation_present={operation_present} attempt={attempt} elapsed_ms={elapsed_ms} call_ms={call_ms} remaining_ms={remaining_ms}"
+                ).into());
+            },
         }
     }
+}
+
+fn scripted_provider_status_peer(
+    listener: std::net::TcpListener,
+    responses: Vec<Option<(u16, &'static str)>>,
+    deadline: Instant,
+) -> (Vec<ProviderMigrationRequest>, std::io::Result<()>) {
+    use std::io::Read;
+    let mut requests = Vec::new();
+    let outcome = (|| -> std::io::Result<()> {
+        listener.set_nonblocking(true)?;
+        for response in responses {
+            let mut stream = loop {
+                if Instant::now() >= deadline {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(
+                            Duration::from_millis(1)
+                                .min(deadline.saturating_duration_since(Instant::now())),
+                        );
+                    },
+                    Err(error) => return Err(error),
+                }
+            };
+            stream.set_nonblocking(true)?;
+            let mut bytes = Vec::new();
+            let request = loop {
+                if Instant::now() >= deadline {
+                    return Err(std::io::ErrorKind::TimedOut.into());
+                }
+                let mut buffer = [0; 512];
+                match stream.read(&mut buffer) {
+                    Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+                    Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(
+                            Duration::from_millis(1)
+                                .min(deadline.saturating_duration_since(Instant::now())),
+                        );
+                        continue;
+                    },
+                    Err(error) => return Err(error),
+                }
+                if bytes.len() > 4096 + positron_api::provider_migration::MAX_REQUEST_BYTES {
+                    return Err(std::io::Error::other(
+                        "provider request exceeds existing bound",
+                    ));
+                }
+                let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
+                    if bytes.len() > 4096 {
+                        return Err(std::io::Error::other(
+                            "provider request headers exceed bound",
+                        ));
+                    }
+                    continue;
+                };
+                let headers =
+                    std::str::from_utf8(&bytes[..header_end]).map_err(std::io::Error::other)?;
+                if !headers.starts_with("POST /v1/key-provider-migrations:manage HTTP/1.1\r\n") {
+                    return Err(std::io::Error::other("unexpected provider request route"));
+                }
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .ok_or_else(|| std::io::Error::other("provider request length missing"))?
+                    .parse::<usize>()
+                    .map_err(std::io::Error::other)?;
+                if length > positron_api::provider_migration::MAX_REQUEST_BYTES {
+                    return Err(std::io::Error::other(
+                        "provider request exceeds existing bound",
+                    ));
+                }
+                let body = &bytes[header_end + 4..];
+                if body.len() < length {
+                    continue;
+                }
+                break ProviderMigrationRequest::decode(body)
+                    .map_err(|_| std::io::Error::other("invalid provider request"))?;
+            };
+            requests.push(request);
+            if let Some((code, body)) = response {
+                let response = format!(
+                    "HTTP/1.1 {code} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let mut remaining = response.as_bytes();
+                while !remaining.is_empty() {
+                    if Instant::now() >= deadline {
+                        return Err(std::io::ErrorKind::TimedOut.into());
+                    }
+                    match stream.write(remaining) {
+                        Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                        Ok(written) => remaining = &remaining[written..],
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(
+                                Duration::from_millis(1)
+                                    .min(deadline.saturating_duration_since(Instant::now())),
+                            );
+                        },
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    (requests, outcome)
+}
+
+fn assert_provider_status_diagnostic(responses: &[Option<(u16, &'static str)>]) -> TestResult {
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let endpoint = listener.local_addr()?;
+    let responses = responses.to_vec();
+    let expected_attempts = responses.len();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let server =
+        std::thread::spawn(move || scripted_provider_status_peer(listener, responses, deadline));
+    let client =
+        ProviderMigrationServiceClient::new(ProviderMigrationTransport::PlaintextOptOut {
+            endpoint,
+        })?;
+    let outcome = status(
+        &client,
+        "provider-status-secret-canary",
+        None,
+        deadline,
+        "transport_regression",
+    );
+    let (requests, peer_outcome) = server.join().map_err(|_| "provider server panicked")?;
+    peer_outcome?;
+    assert_eq!(requests.len(), expected_attempts);
+    for request in requests {
+        assert_eq!(request.action, "status");
+        assert!(request.operation_id.is_none());
+        assert!(request.idempotency_key.is_none());
+        assert!(request.configuration_reference.is_none());
+        assert!(request.expected_catalog_generation.is_none());
+    }
+    let failure = outcome
+        .expect_err("closed response must remain a Transport failure")
+        .to_string();
+    assert!(failure.starts_with("provider migration status read: Transport"));
+    assert!(!failure.contains("provider-status-secret-canary"));
+    assert!(failure.contains("action=status"));
+    assert!(failure.contains("operation_present=false"));
+    assert!(failure.contains("stage=transport_regression"));
+    assert!(failure.contains(&format!("attempt={expected_attempts}")));
+    for field in ["call_ms=", "elapsed_ms=", "remaining_ms="] {
+        let value = failure
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix(field))
+            .ok_or("diagnostic duration missing")?
+            .parse::<u128>()?;
+        assert!(
+            value <= 10_000,
+            "fixture diagnostic duration exceeded original deadline"
+        );
+    }
+    assert!(failure.len() < 1024);
+    Ok(())
+}
+
+#[test]
+fn provider_status_peer_finishes_when_no_second_request_arrives() -> TestResult {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    let endpoint = listener.local_addr()?;
+    let peer_deadline = Instant::now() + Duration::from_millis(100);
+    let (finished, completion) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let result = scripted_provider_status_peer(
+            listener,
+            vec![Some((503, r#"{"code":"capacity_unavailable"}"#)), None],
+            peer_deadline,
+        );
+        let _ = finished.send(());
+        result
+    });
+    let client =
+        ProviderMigrationServiceClient::new(ProviderMigrationTransport::PlaintextOptOut {
+            endpoint,
+        })?;
+    // An expired caller budget permits the existing first request but forbids a capacity retry.
+    let outcome = status(
+        &client,
+        "peer-secret-canary",
+        None,
+        Instant::now(),
+        "no_second_request",
+    );
+    let finished_before_fallback = completion.recv_timeout(Duration::from_millis(250)).is_ok();
+    // Always unblock the old peer and join before assertions, including a failing baseline.
+    if !finished_before_fallback {
+        drop(std::net::TcpStream::connect(endpoint)?);
+    }
+    let (requests, peer_outcome) = server.join().map_err(|_| "provider peer panicked")?;
+    let failure = outcome
+        .expect_err("expired capacity must remain refused")
+        .to_string();
+    assert!(failure.starts_with("provider migration status read: CapacityUnavailable"));
+    assert!(!failure.contains("peer-secret-canary"));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests.first().map(|request| request.action.as_str()),
+        Some("status")
+    );
+    assert!(
+        finished_before_fallback,
+        "peer did not finish after its absolute deadline"
+    );
+    assert_eq!(
+        peer_outcome
+            .expect_err("missing request must time out")
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_status_transport_failure_retains_safe_call_context() -> TestResult {
+    assert_provider_status_diagnostic(&[None])
+}
+
+#[test]
+fn provider_status_malformed_success_retains_safe_call_context() -> TestResult {
+    assert_provider_status_diagnostic(&[Some((200, "provider-status-secret-canary"))])
+}
+
+#[test]
+fn provider_status_unknown_failure_retains_safe_call_context() -> TestResult {
+    assert_provider_status_diagnostic(&[Some((599, r#"{"code":"provider-status-secret-canary"}"#))])
+}
+
+#[test]
+fn provider_status_capacity_then_transport_retains_safe_call_context() -> TestResult {
+    assert_provider_status_diagnostic(&[Some((503, r#"{"code":"capacity_unavailable"}"#)), None])
 }
 
 // Startup/reopen can discover a finite scrub -> retention -> scrub cascade.
@@ -146,7 +405,8 @@ fn wait_for_maintenance(
             )
             .into());
         }
-        let generation = status(client, bearer, None, deadline)?.catalog_generation;
+        let generation =
+            status(client, bearer, None, deadline, "maintenance_quiescence")?.catalog_generation;
         let pending = tasks.iter().any(|task| {
             matches!(task.phase.as_str(), "queued" | "running" | "deferred")
                 && task.blocked_precondition.as_deref() != Some("scheduled_start_time")
@@ -181,7 +441,13 @@ fn phase(
     wait_for_maintenance(endpoint, client, bearer)?;
     let admission_deadline = Instant::now() + Duration::from_secs(10);
     let (rendered, completion_deadline) = loop {
-        let current = status(client, bearer, None, admission_deadline)?;
+        let current = status(
+            client,
+            bearer,
+            None,
+            admission_deadline,
+            "admission_generation",
+        )?;
         let mut arguments = vec![
             "--expected-generation".into(),
             current.catalog_generation.to_string(),
@@ -225,7 +491,13 @@ fn phase(
         .ok_or("operation ID")?
         .to_owned();
     let terminal = loop {
-        let current = status(client, bearer, Some(operation.clone()), completion_deadline)?;
+        let current = status(
+            client,
+            bearer,
+            Some(operation.clone()),
+            completion_deadline,
+            "accepted_operation_poll",
+        )?;
         if current
             .operation
             .as_ref()
@@ -392,6 +664,7 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
         claim.secret(),
         None,
         Instant::now() + Duration::from_secs(10),
+        "final_verification",
     )?;
     assert_eq!(final_status.active_epoch, 2);
     assert_eq!(final_status.predecessor_epoch, Some(1));
@@ -457,6 +730,7 @@ fn canonical_owner_commands_preserve_cancelled_routes_and_verify_before_retireme
             claim.secret(),
             None,
             Instant::now() + Duration::from_secs(10),
+            "restart_verification",
         )?
         .predecessor_epoch,
         None

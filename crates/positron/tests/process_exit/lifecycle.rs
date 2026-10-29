@@ -808,20 +808,257 @@ fn bounded_crash_record_observation(
 
 #[cfg(unix)]
 fn terminate_and_describe_child(child: &mut std::process::Child, authorization: &str) -> String {
-    let termination = match Command::new("/bin/kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-    {
-        Ok(status) if status.success() => "term=sent".to_owned(),
-        Ok(status) => format!("term=exit_{status}"),
-        Err(error) => format!("term_error={error}"),
-    };
-    let exit = match wait_for_child(child) {
-        Ok(status) => format!("exit={status}"),
-        Err(error) => format!("exit_error={error}"),
+    let (termination, exit) = match child.try_wait() {
+        Ok(Some(status)) => ("term=not_needed".to_owned(), format!("exit={status}")),
+        Ok(None) | Err(_) => {
+            let termination = match Command::new("/bin/kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status()
+            {
+                Ok(status) if status.success() => "term=sent".to_owned(),
+                Ok(status) => format!("term=exit_{status}"),
+                Err(error) => format!("term_error={error}"),
+            };
+            let exit = match wait_for_child(child) {
+                Ok(status) => format!("exit={status}"),
+                Err(error) => format!("exit_error={error}"),
+            };
+            (termination, exit)
+        },
     };
     let stderr = bounded_child_stderr(child, authorization);
     format!("child_cleanup {termination} {exit} stderr={stderr:?}")
+}
+
+#[cfg(unix)]
+fn wait_for_recovery_readiness(
+    child: &mut std::process::Child,
+    port: u16,
+    expected_status: &str,
+    deadline: Instant,
+    stage: &str,
+    authorization: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let started = Instant::now();
+    match wait_for_readiness_until(port, expected_status, deadline) {
+        Ok(()) => Ok(()),
+        Err(failure) => {
+            let elapsed_ms = started.elapsed().as_millis();
+            let child_state = match child.try_wait() {
+                Ok(Some(_)) => "exited",
+                Ok(None) => "running",
+                Err(_) => "unavailable",
+            };
+            let cleanup = terminate_and_describe_child(child, authorization);
+            Err(format!(
+                "{failure}; stage={stage} elapsed_ms={elapsed_ms} child_state={child_state}; {cleanup}"
+            )
+            .into())
+        },
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn already_reaped_child_cleanup_retains_status_without_signal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authorization = "Bearer already-reaped-canary";
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "printf 'Bearer already-reaped-canary\\n' >&2; exit 7"])
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let original_status = child.wait()?;
+    assert_eq!(original_status.code(), Some(7));
+    let observation = terminate_and_describe_child(&mut child, authorization);
+    assert!(observation.contains("term=not_needed"), "{observation}");
+    assert!(
+        observation.contains(&format!("exit={original_status}")),
+        "{observation}"
+    );
+    assert!(observation.contains("<redacted>"), "{observation}");
+    assert!(!observation.contains("already-reaped-canary"));
+    assert!(observation.len() < 4096);
+    assert_eq!(child.try_wait()?.and_then(|status| status.code()), Some(7));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn expired_recovery_readiness_reaps_child_and_retains_redacted_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authorization = "Bearer readiness-cleanup-canary";
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf 'Bearer readiness-cleanup-canary\\n' >&2; printf 'ready\\n'; read -r line",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let observation = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let stdout = child.stdout.take().ok_or("child marker pipe unavailable")?;
+        let mut marker = String::new();
+        BufReader::new(stdout).read_line(&mut marker)?;
+        if marker != "ready\n" {
+            return Err("child marker unavailable".into());
+        }
+        let failure = match wait_for_recovery_readiness(
+            &mut child,
+            0,
+            "HTTP/1.1 200 ",
+            Instant::now(),
+            "post_ownership_release",
+            authorization,
+        ) {
+            Ok(()) => return Err("an expired readiness deadline unexpectedly succeeded".into()),
+            Err(failure) => failure.to_string(),
+        };
+        let reaped_before_fallback = child.try_wait()?.is_some();
+        Ok((failure, reaped_before_fallback))
+    })();
+    // The baseline must not leak its child even when the regression assertion fails.
+    let fallback_cleanup = terminate_and_describe_child(&mut child, authorization);
+    let (failure, reaped_before_fallback) = observation?;
+    assert!(failure.starts_with("readiness deadline expired before expected response:"));
+    assert!(
+        child.try_wait()?.is_some(),
+        "fallback cleanup: {fallback_cleanup}"
+    );
+    assert!(!fallback_cleanup.contains("readiness-cleanup-canary"));
+    assert!(
+        reaped_before_fallback,
+        "the readiness failure must reap its owned child before returning; {failure}"
+    );
+    assert!(failure.contains("stage=post_ownership_release"));
+    assert!(failure.contains("child_cleanup"));
+    assert!(!failure.contains("readiness-cleanup-canary"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn cold_recovery_listener_observation_keeps_ownership_held()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _serial = PROCESS_TEST
+        .lock()
+        .map_err(|_| "process test lock poisoned")?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "positron-cold-listener-diagnostic-{}-{nonce}",
+        std::process::id()
+    ));
+    let data = root.join("data");
+    let secrets = root.join("secrets");
+    fs::create_dir_all(&data)?;
+    fs::create_dir_all(&secrets)?;
+    fs::set_permissions(&secrets, fs::Permissions::from_mode(0o700))?;
+    let [
+        operations_port,
+        api_port,
+        otlp_grpc_port,
+        otlp_http_port,
+        loki_push_port,
+    ] = available_ports()?;
+    let config_path = root.join("positron.toml");
+    fs::write(
+        &config_path,
+        process_configuration(
+            &root,
+            &data,
+            &secrets,
+            [
+                operations_port,
+                api_port,
+                otlp_grpc_port,
+                otlp_http_port,
+                loki_push_port,
+            ],
+        ),
+    )?;
+    let ownership = positron_kernel::PrimaryDataVolume::acquire(
+        &data,
+        positron_kernel::MountQualification::LocalHost,
+    )?;
+    let started = Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_positron"))
+        .args(["serve", "--init-if-empty", "--config"])
+        .arg(&config_path)
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let deadline = started + Duration::from_secs(10);
+    let checkpoint = started + STARTUP_PROBE_BUDGET;
+    let observation = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut first_control_ms = None;
+        let mut first_response_ms = None;
+        let mut checkpoint_recorded = false;
+        let mut last = "no_response";
+        loop {
+            let now = Instant::now();
+            if first_control_ms.is_none() && process_control_path(&root).exists() {
+                first_control_ms = Some(started.elapsed().as_millis());
+            }
+            if !checkpoint_recorded && now >= checkpoint {
+                let state = match child.try_wait()? {
+                    Some(_) => "exited",
+                    None => "running",
+                };
+                eprintln!(
+                    "cold_listener original_checkpoint elapsed_ms={} observation={last} child_state={state} first_observed_control_ms={first_control_ms:?} first_complete_response_ms={first_response_ms:?}",
+                    started.elapsed().as_millis()
+                );
+                checkpoint_recorded = true;
+            }
+            if now >= deadline {
+                return Err(format!("cold listener diagnostic deadline: last={last} first_observed_control_ms={first_control_ms:?} first_complete_response_ms={first_response_ms:?}").into());
+            }
+            match probe_response(
+                operations_port,
+                b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+                deadline.min(now + Duration::from_millis(100)),
+            ) {
+                Ok(response) => {
+                    let elapsed_ms = started.elapsed().as_millis();
+                    first_response_ms.get_or_insert(elapsed_ms);
+                    last = if response.starts_with("HTTP/1.1 503 ") {
+                        "http_503"
+                    } else {
+                        "unexpected_http_status"
+                    };
+                    eprintln!(
+                        "cold_listener first_complete_response elapsed_ms={elapsed_ms} late={} observation={last} first_observed_control_ms={first_control_ms:?}",
+                        Instant::now() >= checkpoint
+                    );
+                    if last != "http_503" {
+                        return Err("ownership-held listener must report HTTP503".into());
+                    }
+                    if !checkpoint_recorded {
+                        eprintln!(
+                            "cold_listener original_checkpoint not_reached response_before_deadline=true"
+                        );
+                    }
+                    return Ok(());
+                },
+                Err(_) => last = "probe_unavailable",
+            }
+            std::thread::sleep(
+                Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+    })();
+    let cleanup = terminate_and_describe_child(&mut child, "");
+    drop(ownership);
+    eprintln!("cold_listener cleanup={cleanup}");
+    let reaped = child.try_wait()?.is_some();
+    observation?;
+    if !reaped {
+        return Err("cold listener diagnostic child not reaped".into());
+    }
+    fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -876,7 +1113,15 @@ fn native_recovery_survives_the_old_deadline_and_sighup_then_restores_readiness(
         .stderr(Stdio::piped())
         .spawn()?;
 
-    wait_for_readiness(operations_port, "HTTP/1.1 503 ")?;
+    // Cold process launch uses the same allowance as the fenced startup fixture.
+    wait_for_recovery_readiness(
+        &mut child,
+        operations_port,
+        "HTTP/1.1 503 ",
+        Instant::now() + Duration::from_secs(10),
+        "pre_sighup",
+        "",
+    )?;
     assert!(
         Command::new("/bin/kill")
             .args(["-HUP", &child.id().to_string()])
@@ -888,14 +1133,28 @@ fn native_recovery_survives_the_old_deadline_and_sighup_then_restores_readiness(
         child.try_wait()?.is_none(),
         "recoverable dependency outage must remain alive after the old deadline"
     );
-    wait_for_readiness(operations_port, "HTTP/1.1 503 ")?;
+    wait_for_recovery_readiness(
+        &mut child,
+        operations_port,
+        "HTTP/1.1 503 ",
+        Instant::now() + STARTUP_PROBE_BUDGET,
+        "post_sighup",
+        "",
+    )?;
     assert!(
         std::net::TcpStream::connect(("127.0.0.1", api_port)).is_err(),
         "data listener must remain unbound throughout the dependency outage"
     );
 
     drop(ownership);
-    wait_for_ready(operations_port)?;
+    wait_for_recovery_readiness(
+        &mut child,
+        operations_port,
+        "HTTP/1.1 200 ",
+        Instant::now() + STARTUP_PROBE_BUDGET,
+        "post_ownership_release",
+        "",
+    )?;
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &child.id().to_string()])
