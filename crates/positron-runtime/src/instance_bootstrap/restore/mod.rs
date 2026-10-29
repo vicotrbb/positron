@@ -23,6 +23,20 @@ mod execution;
 mod input;
 mod preflight;
 mod purge;
+fn grant_failure(
+    stage: BootstrapResourceStage,
+    failure: positron_kernel::AdmissionFailure,
+) -> BootstrapFailure {
+    BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable).with_resource_context(
+        BootstrapResourceContext::new(
+            stage,
+            BootstrapResourceReason::ResourceAdmissionRefused,
+            None,
+        )
+        .with_dimension(failure.limiting_dimension())
+        .with_admission(failure),
+    )
+}
 fn failure() -> BootstrapFailure {
     BootstrapFailure::new(BootstrapFailureCode::CorruptState)
 }

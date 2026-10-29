@@ -98,3 +98,65 @@ fn native_repository_restore_demand_covers_simultaneous_reader_and_transport()
     fs::remove_dir_all(root)?;
     Ok(())
 }
+
+#[test]
+fn restore_grant_refusals_retain_the_kernel_dimension_and_numeric_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = fs::canonicalize(std::env::temp_dir())?.join(format!(
+        "positron-restore-grant-diagnostic-{}",
+        std::process::id()
+    ));
+    fs::create_dir(&root)?;
+    {
+        let authority = native_authority::authority(&root, ResourceAmounts::new([1; 11]))?;
+        let request = ResourceAmounts::new([1 << 50, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0]);
+        let refusal = authority
+            .governor()
+            .reserve(WorkClaim::backup_repository_read(request)?)
+            .expect_err("one pebibyte must exceed this real observed host inventory");
+        assert_eq!(
+            refusal.limiting_dimension(),
+            Some(positron_kernel::ResourceDimension::MemoryBytes)
+        );
+        assert_eq!(refusal.requested(), 1 << 50);
+        assert!(refusal.allowed() < refusal.requested());
+        for (stage, label) in [
+            (
+                BootstrapResourceStage::RestoreInitialGrant,
+                "restore_initial_grant",
+            ),
+            (
+                BootstrapResourceStage::RestoreCarryGrant,
+                "restore_carry_grant",
+            ),
+            (
+                BootstrapResourceStage::RestorePhaseGrant,
+                "restore_phase_grant",
+            ),
+        ] {
+            let failure = super::super::grant_failure(stage, refusal);
+            assert_eq!(failure.code(), BootstrapFailureCode::ResourceUnavailable);
+            // This existing getter is the baseline RED seam: the old mapping discards all evidence.
+            let context = failure
+                .resource_context()
+                .ok_or("restore grant context discarded")?;
+            let mut value = serde_json::json!({});
+            context.append_json(&mut value);
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "resource_stage": label, "resource_reason": "resource_admission_refused",
+                    "resource_dimension": "memory_bytes",
+                    "admission_code": format!("{:?}", refusal.code()),
+                    "admission_scope": format!("{:?}", refusal.limiting_scope()),
+                    "admission_class": "OrdinaryMaintenanceBackup",
+                    "admission_pressure": format!("{:?}", refusal.pressure_state()),
+                    "admission_allowed": refusal.allowed(), "admission_in_use": refusal.in_use(),
+                    "admission_requested": refusal.requested()
+                })
+            );
+        }
+    }
+    fs::remove_dir_all(root)?;
+    Ok(())
+}

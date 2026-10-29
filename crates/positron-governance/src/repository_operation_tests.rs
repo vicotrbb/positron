@@ -1,4 +1,6 @@
 use super::*;
+#[path = "repository_replay_contracts.rs"]
+mod replay_contracts;
 #[test]
 fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -105,6 +107,7 @@ fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
     let accepted =
         DurableOperationAdministration::accept_repository(&catalog, actor, request, parameters)?;
     assert_eq!(accepted.status(), DurableOperationStatus::Pending);
+    replay_contracts::active_bindings(&catalog, actor, request, parameters, accepted)?;
     assert_eq!(
         DurableOperationAdministration::accept_repository(&catalog, actor, request, parameters)?,
         accepted
@@ -339,6 +342,11 @@ fn repository_acceptance_is_atomic_replay_safe_and_reopens_exact_parameters()
     assert_eq!(receipt.status(), DurableOperationStatus::Succeeded);
     assert_eq!(receipt.repository_policy(), Some(policy));
     assert_eq!(receipt.repository_parameters(), Some(parameters));
+    replay_contracts::wrong_kind(&reopened, actor, parameters, instance.to_bytes())?;
+    drop(reopened);
+    replay_contracts::prepared_and_expired(
+        &authority, &keys, instance, actor, parameters, request, receipt,
+    )?;
     Ok(())
 }
 

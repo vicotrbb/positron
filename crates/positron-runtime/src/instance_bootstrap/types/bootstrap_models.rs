@@ -74,6 +74,9 @@ pub(crate) enum BootstrapResourceStage {
     Governor,
     Catalog,
     Ledger,
+    RestoreInitialGrant,
+    RestoreCarryGrant,
+    RestorePhaseGrant,
 }
 impl BootstrapResourceStage {
     const fn label(self) -> &'static str {
@@ -82,6 +85,9 @@ impl BootstrapResourceStage {
             Self::Governor => "governor",
             Self::Catalog => "catalog",
             Self::Ledger => "ledger",
+            Self::RestoreInitialGrant => "restore_initial_grant",
+            Self::RestoreCarryGrant => "restore_carry_grant",
+            Self::RestorePhaseGrant => "restore_phase_grant",
         }
     }
 }
@@ -172,6 +178,11 @@ pub(crate) struct BootstrapResourceContext {
     reason: BootstrapResourceReason,
     source: Option<BootstrapResourceSource>,
     dimension: Option<positron_kernel::ResourceDimension>,
+    admission_code: Option<positron_kernel::AdmissionFailureCode>,
+    admission_scope: positron_kernel::LimitingScope,
+    admission_class: positron_kernel::WorkClass,
+    admission_pressure: positron_kernel::DiskPressureState,
+    admission_amounts: [u64; 3],
 }
 impl BootstrapResourceContext {
     pub(in crate::instance_bootstrap) const fn new(
@@ -184,7 +195,24 @@ impl BootstrapResourceContext {
             reason,
             source,
             dimension: None,
+            admission_code: None,
+            admission_scope: positron_kernel::LimitingScope::Global,
+            admission_class: positron_kernel::WorkClass::OrdinaryMaintenanceBackup,
+            admission_pressure: positron_kernel::DiskPressureState::Healthy,
+            admission_amounts: [0; 3],
         }
+    }
+    pub(in crate::instance_bootstrap) const fn with_admission(
+        mut self,
+        failure: positron_kernel::AdmissionFailure,
+    ) -> Self {
+        // Keep only the closed projection, not unused retry/completion evidence in every Copy failure.
+        self.admission_code = Some(failure.code());
+        self.admission_scope = failure.limiting_scope();
+        self.admission_class = failure.work_class();
+        self.admission_pressure = failure.pressure_state();
+        self.admission_amounts = [failure.allowed(), failure.in_use(), failure.requested()];
+        self
     }
     pub(in crate::instance_bootstrap) const fn with_dimension(
         mut self,
@@ -194,6 +222,17 @@ impl BootstrapResourceContext {
         self
     }
     pub(crate) fn append_json(self, value: &mut serde_json::Value) {
+        if let Some(code) = self.admission_code {
+            // These getters return payload-free closed enums, never resource identities or external errors.
+            value["admission_code"] = format!("{code:?}").into();
+            value["admission_scope"] = format!("{:?}", self.admission_scope).into();
+            value["admission_class"] = format!("{:?}", self.admission_class).into();
+            value["admission_pressure"] = format!("{:?}", self.admission_pressure).into();
+            let [allowed, in_use, requested] = self.admission_amounts;
+            value["admission_allowed"] = allowed.into();
+            value["admission_in_use"] = in_use.into();
+            value["admission_requested"] = requested.into();
+        }
         value["resource_stage"] = self.stage.label().into();
         value["resource_reason"] = self.reason.label().into();
         if let Some(source) = self.source {
@@ -219,6 +258,14 @@ impl BootstrapResourceContext {
     }
 }
 
+// The checkpoint task and resource refusal are distinct failure outcomes, never simultaneous.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BootstrapDiagnostic {
+    None,
+    MaintenanceTask(MaintenanceTaskId),
+    Resource(BootstrapResourceContext),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootstrapFailure {
     code: BootstrapFailureCode,
@@ -226,20 +273,32 @@ pub struct BootstrapFailure {
     quota_generation_conflict: Option<positron_governance::TenantQuotaGenerationConflict>,
     display_generation_conflict: Option<TenantDisplayGenerationConflict>,
     retention_generation_conflict: Option<positron_governance::TenantRetentionGenerationConflict>,
-    maintenance_task: Option<MaintenanceTaskId>,
-    resource_context: Option<BootstrapResourceContext>,
+    diagnostic: BootstrapDiagnostic,
 }
 
 impl BootstrapFailure {
+    /// Closed diagnostic fields only; omits unavailable context and every resource identity.
+    #[must_use]
+    pub fn resource_diagnostic(self) -> Option<serde_json::Value> {
+        if self.code != BootstrapFailureCode::ResourceUnavailable {
+            return None;
+        }
+        let mut value = serde_json::json!({});
+        self.resource_context()?.append_json(&mut value);
+        Some(value)
+    }
     pub(in crate::instance_bootstrap) const fn with_resource_context(
         mut self,
         context: BootstrapResourceContext,
     ) -> Self {
-        self.resource_context = Some(context);
+        self.diagnostic = BootstrapDiagnostic::Resource(context);
         self
     }
     pub(crate) const fn resource_context(self) -> Option<BootstrapResourceContext> {
-        self.resource_context
+        match self.diagnostic {
+            BootstrapDiagnostic::Resource(context) => Some(context),
+            BootstrapDiagnostic::None | BootstrapDiagnostic::MaintenanceTask(_) => None,
+        }
     }
     pub(crate) const fn new(code: BootstrapFailureCode) -> Self {
         Self {
@@ -248,8 +307,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: None,
             retention_generation_conflict: None,
-            maintenance_task: None,
-            resource_context: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -262,8 +320,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: None,
             retention_generation_conflict: None,
-            maintenance_task: None,
-            resource_context: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -276,8 +333,7 @@ impl BootstrapFailure {
             quota_generation_conflict: Some(conflict),
             display_generation_conflict: None,
             retention_generation_conflict: None,
-            maintenance_task: None,
-            resource_context: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -290,8 +346,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: Some(conflict),
             retention_generation_conflict: None,
-            maintenance_task: None,
-            resource_context: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -304,8 +359,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: None,
             retention_generation_conflict: Some(conflict),
-            maintenance_task: None,
-            resource_context: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -318,8 +372,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: None,
             retention_generation_conflict: None,
-            maintenance_task: Some(maintenance_task),
-            resource_context: None,
+            diagnostic: BootstrapDiagnostic::MaintenanceTask(maintenance_task),
         }
     }
 
@@ -366,14 +419,17 @@ impl BootstrapFailure {
     /// governance audit checkpoint request.
     #[must_use]
     pub const fn maintenance_task(&self) -> Option<MaintenanceTaskId> {
-        self.maintenance_task
+        match self.diagnostic {
+            BootstrapDiagnostic::MaintenanceTask(task) => Some(task),
+            BootstrapDiagnostic::None | BootstrapDiagnostic::Resource(_) => None,
+        }
     }
 }
 
 impl Display for BootstrapFailure {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         if self.code == BootstrapFailureCode::GovernanceAuditCheckpointInProgress
-            && let Some(maintenance_task) = self.maintenance_task
+            && let Some(maintenance_task) = self.maintenance_task()
         {
             formatter.write_str(
                 "governance audit checkpoint is in progress; retry the same request with maintenance task ",
@@ -655,5 +711,37 @@ impl InitializedInstance {
     #[must_use]
     pub(crate) const fn administrator(&self) -> PrincipalId {
         self.administrator
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_diagnostic_preserves_checkpoint_task_and_closed_resource_outcomes() {
+        let task = MaintenanceTaskId::new([0x41; 16]).expect("task identity");
+        let checkpoint = BootstrapFailure::governance_audit_checkpoint_in_progress(task);
+        assert_eq!(checkpoint.maintenance_task(), Some(task));
+        assert!(checkpoint.resource_context().is_none());
+        assert!(checkpoint.resource_diagnostic().is_none());
+        assert!(checkpoint.to_string().ends_with(&"41".repeat(16)));
+        let resource = BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable)
+            .with_resource_context(BootstrapResourceContext::new(
+                BootstrapResourceStage::Governor,
+                BootstrapResourceReason::InvalidConfiguration,
+                None,
+            ));
+        assert!(resource.maintenance_task().is_none());
+        assert_eq!(
+            resource.resource_diagnostic(),
+            Some(serde_json::json!({
+                "resource_stage": "governor", "resource_reason": "invalid_configuration"
+            }))
+        );
+        assert_eq!(resource.to_string(), "instance bootstrap failed");
+        let unknown = BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable);
+        assert!(unknown.maintenance_task().is_none());
+        assert!(unknown.resource_diagnostic().is_none());
     }
 }

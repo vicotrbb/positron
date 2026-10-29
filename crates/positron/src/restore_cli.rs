@@ -172,7 +172,18 @@ fn begin(
             unlock(options, passphrase)?,
         ),
     };
-    result.map_err(|failure| report_begin_failure(failure.code(), &mut std::io::stderr()))
+    result.map_err(|failure| {
+        let mut diagnostic = std::io::stderr();
+        let message = report_begin_failure(failure.code(), &mut diagnostic);
+        if let Some(context) = failure.resource_diagnostic()
+            && (write!(diagnostic, "positron: restore resource refusal; ").is_err()
+                || serde_json::to_writer(&mut diagnostic, &context).is_err()
+                || writeln!(diagnostic).is_err())
+        {
+            return "restore unavailable; begin failed and its diagnostic could not be written; inspect the same target before retrying";
+        }
+        message
+    })
 }
 fn report_begin_failure(code: BootstrapFailureCode, diagnostic: &mut impl Write) -> &'static str {
     match writeln!(diagnostic, "positron: restore begin refused; code={code:?}") {

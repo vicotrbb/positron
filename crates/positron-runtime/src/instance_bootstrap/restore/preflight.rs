@@ -216,7 +216,19 @@ impl InstanceBootstrap {
             &mut objects,
             configuration,
             &secret,
-        )?;
+        )
+        .map_err(|failure| {
+            // This boundary's ResourceUnavailable is the existing configuration Vec reserve.
+            if failure.code() == BootstrapFailureCode::ResourceUnavailable {
+                failure.with_resource_context(BootstrapResourceContext::new(
+                    BootstrapResourceStage::Catalog,
+                    BootstrapResourceReason::AllocationUnavailable,
+                    None,
+                ))
+            } else {
+                failure
+            }
+        })?;
         let record = execution::record(request.pin, &custody, governance)?;
         let origin = origin
             .with_restored_objects(objects)
@@ -265,7 +277,7 @@ impl InstanceBootstrap {
                 ]))
                 .map_err(|_| failure())?,
             )
-            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))?;
+            .map_err(|failure| grant_failure(BootstrapResourceStage::RestoreCarryGrant, failure))?;
         drop(repository);
         drop(resources);
         let phase_memory = carry_memory
@@ -283,7 +295,9 @@ impl InstanceBootstrap {
             authority
                 .governor()
                 .reserve(WorkClaim::backup_repository_read(phase_amounts).map_err(|_| failure())?)
-                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))?
+                .map_err(|failure| {
+                    grant_failure(BootstrapResourceStage::RestorePhaseGrant, failure)
+                })?
                 .transfer(),
         );
         drop(carry);

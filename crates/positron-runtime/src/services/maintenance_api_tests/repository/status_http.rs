@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use positron_api::repository::{RepositoryRequest, RepositoryResponse, RepositoryServiceClient};
 
-type Inspection = Result<RepositoryResponse, String>;
+pub(super) type Inspection = Result<RepositoryResponse, String>;
 
 pub(super) fn inspect(
     client: &RepositoryServiceClient,
@@ -48,7 +48,7 @@ pub(super) fn inspect(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use positron_api::repository::RepositoryTransport;
     use std::io::{Read, Write};
@@ -61,6 +61,15 @@ mod tests {
         responses: &[(u16, &str)],
         request: &RepositoryRequest,
         budget: Duration,
+    ) -> TestResult<(Inspection, Vec<Vec<u8>>, Duration)> {
+        scripted_with(responses, request, budget, inspect)
+    }
+
+    pub(crate) fn scripted_with(
+        responses: &[(u16, &str)],
+        request: &RepositoryRequest,
+        budget: Duration,
+        run: fn(&RepositoryServiceClient, &str, &RepositoryRequest, Instant) -> Inspection,
     ) -> TestResult<(Inspection, Vec<Vec<u8>>, Duration)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
@@ -132,7 +141,7 @@ mod tests {
             Ok(requests)
         });
         let started = Instant::now();
-        let result = inspect(
+        let result = run(
             &client,
             "status-credential-canary",
             request,
