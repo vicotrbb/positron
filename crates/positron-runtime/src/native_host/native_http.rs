@@ -100,10 +100,10 @@ pub(super) fn serve_connection<S: Read + Write + TimeoutStream>(
         dependencies,
         protection,
     );
-    if let Err(response) = result {
-        io::write_response(stream, response).map_err(|_| ConnectionFailure)?;
-    }
-    Ok(())
+    let response = match result {
+        Ok(response) | Err(response) => response,
+    };
+    io::write_response(stream, response).map_err(|_| ConnectionFailure)
 }
 
 pub(super) struct ConnectionFailure;
@@ -126,10 +126,10 @@ pub(super) fn serve_tls_connection<S: Read + Write + TimeoutStream>(
         dependencies,
         protection,
     );
-    if let Err(response) = result {
-        io::write_response(stream, response).map_err(|_| ConnectionFailure)?;
-    }
-    Ok(())
+    let response = match result {
+        Ok(response) | Err(response) => response,
+    };
+    io::write_response(stream, response).map_err(|_| ConnectionFailure)
 }
 
 fn serve_checked<S: Read + Write + TimeoutStream>(
@@ -140,7 +140,7 @@ fn serve_checked<S: Read + Write + TimeoutStream>(
     health: &HealthState,
     dependencies: RouteDependencies<'_>,
     protection: ConnectionProtection,
-) -> Result<(), Response> {
+) -> Result<Response, Response> {
     let started = Instant::now();
     let mut header = DeadlineStream::new(
         stream,
@@ -170,7 +170,7 @@ fn serve_checked<S: Read + Write + TimeoutStream>(
     if Instant::now() > request_deadline {
         return Err(Response::empty(408));
     }
-    io::write_response(stream, response).map_err(|_| Response::empty(500))
+    Ok(response)
 }
 
 pub(super) trait TimeoutStream {
