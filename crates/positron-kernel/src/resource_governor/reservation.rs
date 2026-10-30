@@ -52,6 +52,7 @@ impl<'authority> ResourceReservation<'authority> {
     /// Transfers drop-based release across an asynchronous boundary without
     /// creating another capacity authority.
     pub fn transfer(mut self) -> TransferredResourceReservation {
+        let active = self.active;
         self.active = false;
         TransferredResourceReservation {
             drop_ledger: Arc::clone(&self.governor.drop_ledger),
@@ -60,7 +61,7 @@ impl<'authority> ResourceReservation<'authority> {
             identity: self.identity,
             amounts: self.amounts,
             operation: self.operation.clone(),
-            active: true,
+            active,
         }
     }
 
@@ -323,15 +324,18 @@ impl TransferredResourceReservation {
             governor.inner.mark_foreign_release();
             return Err(GovernorFailure::InternalFenced);
         }
+        let active = self.active;
         self.active = false;
-        Ok(ResourceReservation::new(
+        let mut reservation = ResourceReservation::new(
             governor.inner,
             self.owner,
             self.identity,
             self.amounts,
             self.slot,
             self.operation.clone(),
-        ))
+        );
+        reservation.active = active;
+        Ok(reservation)
     }
 
     /// Returns this slot to the same Resource Governor that granted it.

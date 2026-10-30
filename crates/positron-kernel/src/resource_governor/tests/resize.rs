@@ -136,6 +136,38 @@ fn interruptible_growth_failure_cancels_old_grant_and_frees_capacity()
 }
 
 #[test]
+fn cancelled_reservation_stays_inactive_after_transfer_and_reclaim()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = tenant(63)?;
+    let kernel = establish(tenant, 100)?;
+    let mut grant = kernel.reserve(WorkClaim::tenant(
+        tenant,
+        WorkKind::InteractiveQueryTail,
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, 50)?,
+    )?)?;
+    let failure = grant
+        .try_resize(ResourceAmounts::only(ResourceDimension::MemoryBytes, 51)?)
+        .expect_err("refused interruptible growth cancels the reservation");
+    assert_eq!(
+        failure.existing_capacity(),
+        ExistingCapacityDisposition::CancelledBeforeLimit
+    );
+    assert!(!grant.is_active());
+    assert_eq!(grant.granted(), ResourceAmounts::zero());
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+
+    let transferred = grant.transfer();
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    let reclaimed = transferred.reclaim(kernel.governor())?;
+    assert!(!reclaimed.is_active());
+    assert_eq!(reclaimed.granted(), ResourceAmounts::zero());
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    drop(reclaimed);
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    Ok(())
+}
+
+#[test]
 fn durability_growth_failure_retains_exact_existing_capacity()
 -> Result<(), Box<dyn std::error::Error>> {
     let tenant = tenant(64)?;
