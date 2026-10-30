@@ -181,7 +181,7 @@ class OpenBaoFixture:
                 "automountServiceAccountToken": False,
                 "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532, "fsGroup": 65532,
                                     "seccompProfile": {"type": "RuntimeDefault"}},
-                "containers": [{"name": "openbao", "image": self.image, "command": ["/bin/bao", "server", "-config=/config/server.hcl"],
+                "containers": [{"name": "openbao", "image": self.image, "args": ["server", "-config=/config/server.hcl"],
                                 "securityContext": security, "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
                                 "readinessProbe": {"tcpSocket": {"port": 8200}, "periodSeconds": 1},
                                 "volumeMounts": [{"name": "configuration", "mountPath": "/config", "readOnly": True}]}],

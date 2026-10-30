@@ -13,6 +13,26 @@ from test_kubernetes import assert_retained_claims, owned_storage_class, inspect
 
 
 class NativeAdapter(unittest.TestCase):
+    def test_openbao_workload_uses_the_exact_images_native_entrypoint(self):
+        from test_kubernetes import OpenBaoFixture
+        class BeforeProviderStart(Exception): pass
+        with tempfile.TemporaryDirectory() as directory:
+            applied = []
+            class Lifecycle:
+                root = Path(directory)
+                apply = staticmethod(applied.append)
+                def kube(self, *args, **kwargs):
+                    self_args = ("rollout", "status", "deployment/native-openbao", "--timeout=180s")
+                    if args != self_args: raise AssertionError("unexpected fixture call")
+                    raise BeforeProviderStart()
+            with self.assertRaises(BeforeProviderStart):
+                OpenBaoFixture(self, Lifecycle())
+            deployment, = [value for value in applied if value["kind"] == "Deployment"]
+            container, = deployment["spec"]["template"]["spec"]["containers"]
+            self.assertEqual(container["image"], OpenBaoFixture.image)
+            self.assertNotIn("command", container, "the pinned image owns its executable path")
+            self.assertEqual(container["args"], ["server", "-config=/config/server.hcl"])
+
     @unittest.skipUnless(os.environ.get("POSITRON_TEST_OPENBAO_BINARY"), "requires explicitly selected exact OpenBao2.7.1 binary")
     def test_exact_openbao_fixture_configuration_serves_verified_tls_health(self):
         import http.client
