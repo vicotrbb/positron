@@ -266,6 +266,7 @@ jobs:
           cp "$RUNNER_TEMP/homebrew-fixture/positron.rb" "$tap_root/Formula/positron.rb"
           formula=positronqualification/native/positron
           brew ruby -- -c "$tap_root/Formula/positron.rb"
+          brew trust --formula "$formula"
           cached=$(brew --cache --build-from-source "$formula")
           mkdir -p "$(dirname "$cached")"
           cp "$RUNNER_TEMP/first/native.tar.gz" "$cached"
@@ -332,6 +333,7 @@ jobs:
           POSITRON_TEST_HOMEBREW_FORMULA: positronqualification/native/positron
         run: |
           cargo test --locked -p positron --test homebrew_cli homebrew_service_drains_restarts_and_retains_state_across_uninstall -- --test-threads=1
+          brew untrust --formula "$POSITRON_TEST_HOMEBREW_FORMULA"
           rm -r "$(brew --repository)/Library/Taps/positronqualification/homebrew-native"
       - name: Build Linux native packages twice
         if: runner.os == 'Linux'
