@@ -3,6 +3,8 @@ mod execution;
 mod purge_barrier;
 pub(in crate::services) mod registered;
 mod verification;
+#[cfg(test)]
+pub(in crate::services) use verification::publish_old_empty_native_reference;
 #[cfg(feature = "test-support")]
 pub(super) use verification::{
     DriverDiagnostic, report_readmission as report_verification_readmission,

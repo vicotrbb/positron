@@ -6,6 +6,145 @@ use positron_kernel::{
 };
 use sha2::{Digest, Sha256};
 
+/// Builds a valid pre-prospective-admission reference through the same public
+/// Kernel publication contract, without injecting private verification work.
+#[cfg(test)]
+pub(in crate::services) fn publish_old_empty_native_reference(
+    services: &ServiceHandle,
+    operation: DurableOperation,
+) -> Result<ResourceAmounts, Box<dyn std::error::Error>> {
+    let coordinator = services.instance.maintenance_coordinator();
+    let task = positron_kernel::MaintenanceTaskId::new(operation.operation_id().to_bytes())
+        .map_err(|failure| format!("old task: {failure:?}"))?;
+    let mut execution = {
+        let _gate = services.catalog_operation()?;
+        let catalog = services
+            .open_maintenance_catalog()
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+        coordinator
+            .start_backup_operation_with_reservation_and_persist(
+                &catalog,
+                &services.instance._authority,
+                services
+                    .maintenance_status_now()
+                    .map_err(|_| ServiceFailure::StorageUnavailable)?,
+                false,
+                task,
+            )
+            .map_err(|failure| format!("old dispatch: {failure:?}"))?
+            .ok_or("old dispatch")?
+    };
+    let binding = RepositoryOperationBinding::from_execution(&execution)
+        .map_err(|failure| format!("old binding: {failure:?}"))?;
+    let owner = BackupOwner::open(services, &mut execution, operation)?;
+    let (_, checkpoint) = execution::checkpoint::current(services, &execution, binding)?;
+    let (_, encoded) = execution::checkpoint::unpack(&checkpoint)?;
+    let parameters = operation
+        .backup_verification_parameters()
+        .ok_or("verification parameters")?;
+    let publisher = owner.publisher(0)?;
+    let mut remote = owner.runtime.block_on(async {
+        if encoded.is_empty() {
+            publisher
+                .begin_snapshot_verification(
+                    parameters.snapshot_id(),
+                    binding.operation_id(),
+                    binding.intent_digest(),
+                )
+                .await
+        } else {
+            publisher
+                .resume_snapshot_verification(
+                    encoded,
+                    binding.operation_id(),
+                    binding.intent_digest(),
+                )
+                .await
+        }
+    })?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !remote.complete() {
+        if std::time::Instant::now() >= deadline {
+            return Err("old remote fixture deadline".into());
+        }
+        owner
+            .runtime
+            .block_on(publisher.snapshot_verification_step(&mut remote))?;
+    }
+    let remote_progress = publisher.snapshot_verification_checkpoint(&remote)?;
+    let index = owner.runtime.block_on(publisher.read_snapshot_file(
+        remote.manifest(),
+        remote.manifest().capture_index(),
+        8 * 1024 * 1024,
+    ))?;
+    drop(publisher);
+    execution::checkpoint::persist(services, &execution, binding, None, Some(&remote_progress))?;
+    let (capture_operation, capture_request) = remote
+        .manifest()
+        .capture_binding()
+        .ok_or("capture binding")?;
+    let native_binding = BackupVerificationBinding {
+        operation: binding.operation_id(),
+        intent: binding.intent_digest(),
+        capture_operation,
+        capture_request,
+        manifest: remote.manifest_checksum(),
+        index: Sha256::digest(&index).into(),
+        registry: Sha256::digest(owner.registry_checkpoint()?.ok_or("registry checkpoint")?).into(),
+    };
+    let reference = {
+        let _gate = services.catalog_operation()?;
+        let catalog = services
+            .open_maintenance_catalog()
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+        let metadata = catalog.begin_backup_capture_verification(
+            capture_operation,
+            capture_request,
+            &index,
+        )?;
+        let mut semantic = b"POSBVS01".to_vec();
+        semantic.extend_from_slice(&[0; 16]);
+        let progress = BackupVerificationProgress {
+            native: BackupVerificationNativeState::Metadata(Box::new(metadata)),
+            semantic,
+        };
+        let reference = catalog.persist_backup_verification_continuation(
+            coordinator,
+            &mut execution,
+            native_binding,
+            None,
+            &index,
+            &progress,
+        )?;
+        catalog.resume_backup_verification_continuation(
+            native_binding,
+            reference,
+            &index,
+            progress.continuation_resources(&index)?,
+        )?;
+        reference
+    };
+    execution::checkpoint::set_native_reference(services, &execution, binding, Some(reference))?;
+    drop(owner);
+    let resources = execution.task().reservations();
+    let _gate = services.catalog_operation()?;
+    let catalog = services
+        .open_maintenance_catalog()
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+    execution
+        .requeue_backup_with_resources_and_persist(
+            coordinator,
+            &catalog,
+            binding,
+            resources,
+            services
+                .maintenance_status_now()
+                .map_err(|_| ServiceFailure::StorageUnavailable)?,
+        )
+        .map_err(|failure| format!("old requeue: {failure:?}"))?;
+    Ok(resources)
+}
+
 fn binding(
     work: &VerificationWork,
     owner: RepositoryOperationBinding,
@@ -192,7 +331,11 @@ pub(super) fn checkpoint(
     work: &mut VerificationWork,
     force: bool,
 ) -> Result<Option<ResourceAmounts>, ServiceFailure> {
-    if work.native_steps == 0 || (!force && work.native_steps < execution::MAX_BACKUP_STEP_ADVANCES)
+    let needs_admission =
+        work.continuation_bound.is_none() && (work.metadata.is_some() || work.catalog.is_some());
+    if !needs_admission
+        && (work.native_steps == 0
+            || (!force && work.native_steps < execution::MAX_BACKUP_STEP_ADVANCES))
     {
         return Ok(None);
     }
@@ -207,9 +350,16 @@ pub(super) fn checkpoint(
     };
     let progress = BackupVerificationProgress { native, semantic };
     let result = (|| {
-        let mut required = progress
-            .continuation_resources(&work.native_index)
-            .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+        let mut required = match work.continuation_bound {
+            Some(required) => required,
+            None => {
+                let required = progress
+                    .prospective_continuation_resources(&work.native_index)
+                    .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+                work.continuation_bound = Some(required);
+                required
+            },
+        };
         let remote = work
             .remote
             .as_ref()
@@ -232,6 +382,11 @@ pub(super) fn checkpoint(
             required.get(*dimension) > execution.task().reservations().get(*dimension)
         }) {
             return Ok(Some(required));
+        }
+        if work.native_steps == 0
+            || (!force && work.native_steps < execution::MAX_BACKUP_STEP_ADVANCES)
+        {
+            return Ok(None);
         }
         let reference = {
             let _gate = services.catalog_operation()?;

@@ -1,5 +1,6 @@
 //! Bounded post-authentication continuation parsing on a valid native basis.
 use super::*;
+use crate::ResourceDimension;
 
 pub(in crate::catalog::backup_capture) fn exercise(catalog: &Catalog<'_>, data: &[u8]) {
     if data.len() > 128 {
@@ -60,6 +61,11 @@ fn run(catalog: &Catalog<'_>, data: &[u8]) -> Result<(), CatalogFailure> {
     index.extend_from_slice(&epoch.value().to_be_bytes());
     index.extend_from_slice(&protected);
     let base = || catalog.begin_backup_capture_verification(operation, request, &index);
+    let admission = BackupVerificationProgress {
+        native: BackupVerificationNativeState::Metadata(Box::new(base()?)),
+        semantic: Vec::new(),
+    }
+    .prospective_continuation_resources(&index)?;
     let (first, ciphertext) = files.first().expect("two fixed native files");
     let mut native = base()?;
     native.verify_file(catalog, first.identity, ciphertext)?;
@@ -125,7 +131,14 @@ fn run(catalog: &Catalog<'_>, data: &[u8]) -> Result<(), CatalogFailure> {
             }
         },
     }
-    let _decoded = BackupVerificationProgress::decode(&mutated, base()?);
+    if let Ok(decoded) = BackupVerificationProgress::decode(&mutated, base()?) {
+        let exact = decoded.continuation_resources(&index)?;
+        let prospective = decoded.prospective_continuation_resources(&index)?;
+        for dimension in ResourceDimension::ALL {
+            assert!(admission.get(dimension) >= exact.get(dimension));
+            assert!(prospective.get(dimension) >= exact.get(dimension));
+        }
+    }
     let _raw = BackupVerificationProgress::decode(data, base()?);
     Ok(())
 }

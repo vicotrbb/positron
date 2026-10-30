@@ -209,7 +209,7 @@ pub(super) fn check<'authority>(
     Err("cleanup did not finish".into())
 }
 
-fn generation_count(
+pub(super) fn generation_count(
     catalog: &Catalog<'_>,
     operation: [u8; 16],
 ) -> Result<usize, Box<dyn std::error::Error>> {

@@ -359,31 +359,40 @@ fn partial_and_finished_verification_continuations_reopen_exact_authenticated_st
         "a candidate cannot replace its unpublished predecessor"
     );
     let exact = finished.continuation_resources(&index)?;
+    let before_refusal = catalog.pin()?.identity();
+    let generations = lifecycle::generation_count(&catalog, binding.operation)?;
+    let memory = exact
+        .get(ResourceDimension::MemoryBytes)
+        .checked_sub(1)
+        .ok_or("one-byte-short memory")?;
+    let disk = exact.get(ResourceDimension::DiskHeadroomBytes);
     assert!(
         catalog
             .resume_backup_verification_continuation(
                 binding,
                 next,
                 &index,
-                ResourceAmounts::new([
-                    exact
-                        .get(ResourceDimension::MemoryBytes)
-                        .checked_sub(1)
-                        .ok_or("one-byte-short")?,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    exact.get(ResourceDimension::DiskHeadroomBytes)
-                ])
+                ResourceAmounts::new([memory, 0, 0, 0, 0, 0, 0, 0, 0, 0, disk])
             )
             .is_err(),
-        "an underfunded continuation must refuse before allocating its decoded state"
+        "underfunded memory must refuse before decoded-state allocation"
+    );
+    assert_eq!(catalog.pin()?.identity(), before_refusal);
+    assert_eq!(
+        lifecycle::generation_count(&catalog, binding.operation)?,
+        generations
+    );
+    assert_eq!(
+        catalog
+            .resume_backup_verification_continuation(
+                binding,
+                reference,
+                &index,
+                execution.task().reservations()
+            )?
+            .semantic,
+        b"partial semantics",
+        "refusal must preserve the authenticated predecessor"
     );
     assert!(
         catalog

@@ -3,6 +3,12 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 #[test]
+fn initial_continuation_admission_covers_every_native_prefix_and_completed_catalog()
+-> Result<(), Box<dyn std::error::Error>> {
+    round_trip(8, 32, 2, 64)
+}
+
+#[test]
 fn continuation_preserves_the_full_native_audit_intent_limit()
 -> Result<(), Box<dyn std::error::Error>> {
     round_trip(256, 65_536, 1, 32)
@@ -118,21 +124,48 @@ fn round_trip(
     index.extend_from_slice(&epoch.value().to_be_bytes());
     index.extend_from_slice(&encrypted_index);
     drop(encrypted_index);
-    let mut native = BackupCaptureVerification::open(
+    let native = BackupCaptureVerification::open(
         instance,
         &secret(),
         capture_operation,
         capture_request,
         &index,
     )?;
-    for (descriptor, ciphertext) in files {
-        native.verify_protected_file(&secret(), descriptor.identity(), &ciphertext)?;
-    }
-    let progress = BackupVerificationProgress {
+    let mut progress = BackupVerificationProgress {
         native: BackupVerificationNativeState::Metadata(Box::new(native)),
         semantic: Vec::new(),
     };
-    let resources = progress.continuation_resources(&index)?;
+    let resources = progress.prospective_continuation_resources(&index)?;
+    let file_count = files.len();
+    for (offset, (descriptor, ciphertext)) in files.into_iter().enumerate() {
+        let BackupVerificationNativeState::Metadata(native) = &mut progress.native else {
+            return Err("native metadata phase".into());
+        };
+        native.verify_protected_file(&secret(), descriptor.identity(), &ciphertext)?;
+        // The small regression checks every prefix; legal-limit fixtures sample
+        // prefixes without adding quadratic estimator work to the test itself.
+        if file_count <= 64 || offset % 1024 == 0 || offset + 1 == file_count {
+            let required = progress.continuation_resources(&index)?;
+            for dimension in ResourceDimension::ALL {
+                assert!(
+                    resources.get(dimension) >= required.get(dimension),
+                    "initial admission must cover native prefix {offset}: {dimension:?}"
+                );
+            }
+        }
+    }
+    progress.semantic = vec![0; 65_536];
+    let required = progress.continuation_resources(&index)?;
+    for dimension in ResourceDimension::ALL {
+        assert!(
+            resources.get(dimension) >= required.get(dimension),
+            "initial admission must cover maximum semantic progress: {dimension:?}"
+        );
+    }
+    progress.semantic.push(0);
+    assert!(progress.prospective_continuation_resources(&index).is_err());
+    assert!(progress.continuation_resources(&index).is_err());
+    assert_eq!(progress.semantic.pop(), Some(0));
     let unit = resources
         .get(ResourceDimension::MemoryBytes)
         .max(resources.get(ResourceDimension::DiskHeadroomBytes))
@@ -155,7 +188,23 @@ fn round_trip(
     let coordinator = MaintenanceCoordinator::new();
     let owner = RepositoryOperationBinding::new([0x41; 16], [0x42; 32])
         .map_err(|failure| format!("binding: {failure:?}"))?;
-    let reservation = ResourceAmounts::new([unit, 1, 1, 0, 1, 0, 1, 1, 1, 8, unit]);
+    let reservation = ResourceAmounts::new([
+        resources
+            .get(ResourceDimension::MemoryBytes)
+            .max(4 * 1024 * 1024),
+        1,
+        1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        1,
+        8,
+        resources
+            .get(ResourceDimension::DiskHeadroomBytes)
+            .max(16_384),
+    ]);
     let task = coordinator
         .submit_backup_operation_with_resources_and_persist(
             &catalog,
@@ -214,6 +263,17 @@ fn round_trip(
         return Err("native metadata continuation phase".into());
     };
     let snapshot = native.finish()?;
+    let completed = BackupVerificationProgress {
+        native: BackupVerificationNativeState::Catalog(snapshot.clone()),
+        semantic: vec![0; 65_536],
+    };
+    let required = completed.continuation_resources(&index)?;
+    for dimension in ResourceDimension::ALL {
+        assert!(
+            resources.get(dimension) >= required.get(dimension),
+            "initial admission must cover completed Catalog: {dimension:?}"
+        );
+    }
     assert_eq!(snapshot.object_count(), object_count);
     assert_eq!(snapshot.governance_audit_frontier(), records);
     assert_eq!(snapshot.identity().to_bytes(), source_catalog);

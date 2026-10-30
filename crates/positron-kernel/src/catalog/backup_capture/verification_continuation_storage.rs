@@ -115,6 +115,58 @@ impl BackupVerificationProgress {
         };
         continuation_resources(length, native, index.len())
     }
+
+    /// Inventory-derived bound covers every native prefix, bounded semantic
+    /// progress, signed-index opening, and codec/AEAD copies before native reads.
+    pub fn prospective_continuation_resources(
+        &self,
+        index: &[u8],
+    ) -> Result<ResourceAmounts, CatalogFailure> {
+        let current_length = self.encoded_length()?;
+        let (length, native) = match &self.native {
+            BackupVerificationNativeState::Metadata(state) => {
+                let metadata = state.prospective_memory_bytes()?;
+                // Catalog form has the larger fixed prefix, including its
+                // frontier. Metadata also retains accepted identities and audits.
+                let mut length = 109usize
+                    .checked_add(MAX_SERVICE_PROGRESS)
+                    .ok_or_else(corrupt)?;
+                let mut objects = 0usize;
+                for file in &state.files {
+                    let overhead = match file.kind() {
+                        BackupCaptureFileKind::CatalogObject => {
+                            objects = objects.checked_add(1).ok_or_else(corrupt)?;
+                            36
+                        },
+                        BackupCaptureFileKind::GovernanceAudit
+                        | BackupCaptureFileKind::AuditCheckpoint => 4,
+                        _ => continue,
+                    };
+                    let plaintext = usize::try_from(file.size())
+                        .map_err(|_| corrupt())?
+                        .checked_sub(PROTECTION_BYTES)
+                        .ok_or_else(corrupt)?;
+                    length = length
+                        .checked_add(32)
+                        .and_then(|bytes| bytes.checked_add(overhead))
+                        .and_then(|bytes| bytes.checked_add(plaintext))
+                        .ok_or_else(corrupt)?;
+                }
+                (length, metadata.max(Self::catalog_memory(objects, length)?))
+            },
+            BackupVerificationNativeState::Catalog(snapshot) => {
+                let length = current_length
+                    .checked_sub(self.semantic.len())
+                    .and_then(|bytes| bytes.checked_add(MAX_SERVICE_PROGRESS))
+                    .ok_or_else(corrupt)?;
+                (
+                    length,
+                    Self::catalog_memory(snapshot.object_count(), length)?,
+                )
+            },
+        };
+        continuation_resources(length, native, index.len())
+    }
 }
 
 impl Catalog<'_> {

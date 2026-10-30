@@ -2,10 +2,14 @@
 use super::execution::{BackupWork, owner::BackupOwner, provider_failure};
 use super::*;
 use positron_backup::BackupSnapshotVerification;
-use positron_kernel::{BackupCaptureFileKind, BackupCaptureVerification, MaintenanceExecution};
+use positron_kernel::{
+    BackupCaptureFileKind, BackupCaptureVerification, MaintenanceExecution, ResourceAmounts,
+};
 
 #[path = "verification_continuation.rs"]
 mod continuation;
+#[cfg(test)]
+pub(in crate::services) use continuation::publish_old_empty_native_reference;
 
 pub(in crate::services) struct VerificationWork {
     pub(super) owner: BackupOwner,
@@ -23,6 +27,8 @@ pub(in crate::services) struct VerificationWork {
     native_index: Vec<u8>,
     native_reference: Option<positron_kernel::BackupVerificationReference>,
     native_steps: usize,
+    // Pre-admission estimate; Catalog independently enforces exact persistence charges.
+    continuation_bound: Option<ResourceAmounts>,
 }
 
 fn parameters(
@@ -136,6 +142,7 @@ pub(super) fn complete(
                 )
                 .map_err(super::super::maintenance::map_failure)?,
             native_steps: 0,
+            continuation_bound: None,
         })));
     }
     let Some(BackupWork::Verification(work)) = work.as_mut() else {
@@ -331,10 +338,10 @@ pub(super) fn complete(
                 work.next_file += 1;
                 work.native_steps += 1;
                 #[cfg(test)]
-                execution::test_stops::hit(
+                execution::test_stops::native_file_verified(
                     services.instance.instance.to_bytes(),
                     binding.operation_id(),
-                    execution::test_stops::StopPoint::VerificationNativeFileVerified,
+                    file.identity(),
                     cancellation,
                 )?;
                 return Ok(false);

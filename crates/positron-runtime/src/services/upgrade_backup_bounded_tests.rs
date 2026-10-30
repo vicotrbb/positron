@@ -23,12 +23,13 @@ fn upgrade_verification_finishes_after_metadata_turn_expires_and_reopens()
     )
 }
 
-fn cold_verification_after_expiry(
-    point: crate::services::backup_administration::StopPoint,
-    minimum_turns: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::services::backup_administration::expire_turn_after;
-    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+fn verification_fixture() -> Result<
+    (
+        crate::services::tests::schema_maintenance::Fixture,
+        positron_governance::DurableOperation,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let fixture = crate::services::tests::schema_maintenance::Fixture::new()?;
     let (instance, _, _, administrator) = fixture.initialized_with_admin()?;
     let export = fixture.recovery_export_directory()?;
@@ -55,14 +56,90 @@ fn cold_verification_after_expiry(
     let actor = services
         .authorize_system_administration(&administrator)
         .map_err(|failure| format!("actor: {failure:?}"))?;
-    let mut operation = services.accept_upgrade_verification(
+    let operation = services.accept_upgrade_verification(
         actor,
         snapshot,
         AdministrativeIdempotencyKey::new([0x91; 16])?,
         super::tests::generation(&instance)?,
     )?;
     drop((services, instance));
+    Ok((fixture, operation))
+}
+
+#[test]
+fn old_exact_native_reference_readmits_before_reading_another_file()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::backup_administration::{StopPoint, expire_turn_after};
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let (fixture, mut operation) = verification_fixture()?;
+    let (instance, services) = ready_cold_services(&fixture, operation.updated_at_unix_seconds())?;
+    let remote_boundary = expire_turn_after(
+        instance.instance.to_bytes(),
+        operation.operation_id().to_bytes(),
+        StopPoint::VerificationRemoteCheckpointDue,
+    )?;
+    operation = services.drive_upgrade_backup_operation(
+        operation.operation_id(),
+        Instant::now() + Duration::from_secs(30),
+    )?;
+    assert!(remote_boundary.observed());
+    drop(remote_boundary);
+    let old = crate::services::backup_administration::publish_old_empty_native_reference(
+        &services, operation,
+    )?;
+    drop((services, instance));
+    let (instance, services) = ready_cold_services(&fixture, operation.updated_at_unix_seconds())?;
+    let admission = expire_turn_after(
+        instance.instance.to_bytes(),
+        operation.operation_id().to_bytes(),
+        StopPoint::ResourcesRequeued,
+    )?;
+    operation = services.drive_upgrade_backup_operation(
+        operation.operation_id(),
+        Instant::now() + Duration::from_secs(30),
+    )?;
+    assert!(
+        admission.observed(),
+        "old exact grant must request the future continuation footprint"
+    );
+    assert_eq!(
+        admission.verified_file()?,
+        None,
+        "restored metadata must admit its prospective footprint before another native read"
+    );
+    let status = instance
+        .maintenance_coordinator()
+        .status(
+            positron_kernel::MaintenanceTaskId::new(operation.operation_id().to_bytes())
+                .map_err(|failure| format!("old task identity: {failure:?}"))?,
+        )
+        .map_err(|failure| format!("old task status: {failure:?}"))?;
+    assert!(
+        positron_kernel::ResourceDimension::ALL
+            .iter()
+            .any(|dimension| status.task().reservations().get(*dimension) > old.get(*dimension))
+    );
+    drop((admission, services, instance));
+    let (instance, services) = ready_cold_services(&fixture, operation.updated_at_unix_seconds())?;
+    operation = services.drive_upgrade_backup_operation(
+        operation.operation_id(),
+        Instant::now() + Duration::from_secs(30),
+    )?;
+    assert_eq!(operation.status(), DurableOperationStatus::Succeeded);
+    assert!(operation.backup_verification_report().is_some());
+    drop((services, instance));
+    Ok(())
+}
+
+fn cold_verification_after_expiry(
+    point: crate::services::backup_administration::StopPoint,
+    minimum_turns: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::backup_administration::expire_turn_after;
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let (fixture, mut operation) = verification_fixture()?;
     let mut native_turns = 0;
+    let mut verified_files = std::collections::BTreeSet::new();
     let mut last_checkpoint = None;
     for _ in 0..128 {
         let (instance, services) =
@@ -76,6 +153,18 @@ fn cold_verification_after_expiry(
             .drive_upgrade_backup_operation(operation.operation_id(), Instant::now() + Duration::from_secs(30))
             .map_err(|failure| format!("cold bounded verification must preserve successful native progress: {failure:?}"))?;
         native_turns += usize::from(boundary.observed());
+        if point
+            == crate::services::backup_administration::StopPoint::VerificationNativeFileVerified
+            && boundary.observed()
+        {
+            let identity = boundary
+                .verified_file()?
+                .ok_or("verified native file identity")?;
+            assert!(
+                verified_files.insert(identity),
+                "cold continuation must not reread an already verified native file: {identity:?}"
+            );
+        }
         let status = instance
             .maintenance_coordinator()
             .status(
