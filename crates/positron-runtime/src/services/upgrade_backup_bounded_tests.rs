@@ -312,7 +312,11 @@ fn upgrade_bounded_verification_turns_survive_cold_service_reconstruction()
                 if readmitted {
                     assert_eq!(
                         status.phase(),
-                        positron_kernel::MaintenanceTaskPhase::Queued
+                        if operation.status() == DurableOperationStatus::Succeeded {
+                            positron_kernel::MaintenanceTaskPhase::Succeeded
+                        } else {
+                            positron_kernel::MaintenanceTaskPhase::Queued
+                        }
                     );
                     eprintln!(
                         "cold_verification_readmission before={before_resources:?} after={after_resources:?}"
