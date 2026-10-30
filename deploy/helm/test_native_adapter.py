@@ -44,6 +44,7 @@ class NativeAdapter(unittest.TestCase):
             with self.assertRaises(BeforeProviderStart):
                 OpenBaoFixture(self, Lifecycle())
             deployment, = [value for value in applied if value["kind"] == "Deployment"]
+            self.assertTrue(deployment["spec"]["template"]["spec"]["shareProcessNamespace"], "the provider must not be PID 1, which ignores SIGSTOP")
             container, = deployment["spec"]["template"]["spec"]["containers"]
             self.assertEqual(container["image"], OpenBaoFixture.image)
             self.assertNotIn("command", container, "the pinned image owns its executable path")
@@ -95,6 +96,8 @@ class NativeAdapter(unittest.TestCase):
     def test_provider_expiry_checks_live_not_ready_before_cold_restart_and_recovers_same_provider(self):
         from test_kubernetes import exercise_provider_outage
         calls = []
+        process, process_state = b"7\n", b"Name:\tbao\nState:\tT (stopped)\n"
+        resume_failure = False
         class Lifecycle:
             config, values, pod = "[security]\nlocal_key_file='/secrets/root'\n", {}, "operand"
             def install(self, files): pass
@@ -110,9 +113,13 @@ class NativeAdapter(unittest.TestCase):
                 return "digest"
             def kube(self, *args, **kwargs):
                 calls.append(args)
+                if args[-1] == "kill -CONT 7" and resume_failure: raise RuntimeError("raw-private-kubectl-detail")
                 body = b""
                 code = 0
                 if args[:2] == ("get", "pods"): body = b'{"items":[{"metadata":{"name":"owned-provider"}}]}'
+                if args[-2:] == ("pidof", "bao"): body = process
+                if args[-2:] == ("cat", "/proc/7/comm"): body = b"bao\n"
+                if args[-2:] == ("cat", "/proc/7/status"): body = process_state
                 if "--live" in args: body = b"status=live\n"
                 if "--ready" in args or "--for=condition=Ready" in args: code = 1
                 return subprocess.CompletedProcess([], code, body, b"")
@@ -123,9 +130,29 @@ class NativeAdapter(unittest.TestCase):
         between = calls[refused + 1:stopped]
         self.assertTrue(any("--live" in call for call in between))
         self.assertTrue(any("--ready" in call for call in between))
-        signals = [call for call in calls if "kill -STOP 1" in call or "kill -CONT 1" in call]
+        signals = [call for call in calls if "kill -STOP 7" in call or "kill -CONT 7" in call]
         self.assertEqual([call[1] for call in signals], ["owned-provider", "owned-provider"])
+        self.assertTrue(any(call[-2:] == ("cat", "/proc/7/status") for call in calls[:refused]))
         self.assertEqual(calls[-1], ("query", "openbao_recovered"))
+        for process in [b"1\n", b"7 8\n", b""]:
+            with self.subTest(process=process), patch("test_kubernetes.OpenBaoFixture"):
+                calls.clear()
+                with self.assertRaises(AssertionError):
+                    exercise_provider_outage(self, Lifecycle(), "digest")
+                self.assertFalse(any("kill -STOP 7" in call for call in calls))
+        process, process_state = b"7\n", b"Name:\tbao\nState:\tS (sleeping)\n"
+        calls.clear()
+        with patch("test_kubernetes.OpenBaoFixture"), self.assertRaises(AssertionError):
+            exercise_provider_outage(self, Lifecycle(), "digest")
+        self.assertEqual(calls[-1][-1], "kill -CONT 7")
+        self.assertNotIn(("query", "openbao_cached_outage"), calls)
+        resume_failure = True
+        with patch("test_kubernetes.OpenBaoFixture"), self.assertRaises(AssertionError) as primary:
+            exercise_provider_outage(self, Lifecycle(), "digest")
+        self.assertEqual(primary.exception.__notes__, ["owned OpenBao process resume unavailable"])
+        process_state = b"Name:\tbao\nState:\tT (stopped)\n"
+        with patch("test_kubernetes.OpenBaoFixture"), patch("test_kubernetes.time.sleep"), patch("test_kubernetes.wait_operand"), self.assertRaisesRegex(RuntimeError, "^owned OpenBao process resume unavailable$"):
+            exercise_provider_outage(self, Lifecycle(), "digest")
 
     def test_openbao_migration_unknown_outcome_is_not_replayed_or_activated(self):
         from test_kubernetes import exercise_provider_outage

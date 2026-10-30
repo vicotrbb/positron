@@ -178,7 +178,7 @@ class OpenBaoFixture:
         lifecycle.apply({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "native-openbao"}, "spec": {
             "replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": {"app": "native-openbao"}},
             "template": {"metadata": {"labels": {"app": "native-openbao"}}, "spec": {
-                "automountServiceAccountToken": False,
+                "automountServiceAccountToken": False, "shareProcessNamespace": True,
                 "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532, "fsGroup": 65532,
                                     "seccompProfile": {"type": "RuntimeDefault"}},
                 "containers": [{"name": "openbao", "image": self.image, "args": ["server", "-config=/config/server.hcl"],
@@ -258,8 +258,15 @@ def exercise_provider_outage(case, lifecycle, expected):
     provider = json.loads(lifecycle.kube("get", "pods", "-l", "app=native-openbao", "-o", "json").stdout)["items"]
     case.assertEqual(len(provider), 1)
     provider_pod = provider[0]["metadata"]["name"]
+    process = lifecycle.kube("exec", provider_pod, "--", "pidof", "bao").stdout.strip()
+    case.assertRegex(process, rb"\A[1-9][0-9]{0,9}\Z")
+    pid = int(process)
+    case.assertGreater(pid, 1, "namespace init ignores SIGSTOP")
+    case.assertEqual(lifecycle.kube("exec", provider_pod, "--", "cat", f"/proc/{pid}/comm").stdout, b"bao\n")
     try:
-        lifecycle.kube("exec", provider_pod, "--", "/bin/sh", "-c", "kill -STOP 1", timeout=5)
+        lifecycle.kube("exec", provider_pod, "--", "/bin/sh", "-c", f"kill -STOP {pid}", timeout=5)
+        state = lifecycle.kube("exec", provider_pod, "--", "cat", f"/proc/{pid}/status").stdout
+        case.assertIn(b"State:\tT (stopped)", state)
         case.assertEqual(lifecycle.query(stage="openbao_cached_outage"), expected)
         # Expiry is governed by the configured five-second native cache lease.
         time.sleep(5.1)
@@ -280,7 +287,12 @@ def exercise_provider_outage(case, lifecycle, expected):
                               "--server-name", "localhost", "--trust-file", "/etc/positron/tls/..data/ca.pem")
         case.assertEqual(live.stdout, b"status=live\n")
     finally:
-        lifecycle.kube("exec", provider_pod, "--", "/bin/sh", "-c", "kill -CONT 1", timeout=5)
+        failure = sys.exception()
+        try:
+            lifecycle.kube("exec", provider_pod, "--", "/bin/sh", "-c", f"kill -CONT {pid}", timeout=5)
+        except Exception:
+            if failure is None: raise RuntimeError("owned OpenBao process resume unavailable") from None
+            failure.add_note("owned OpenBao process resume unavailable")
     wait_operand(lifecycle)
     case.assertEqual(lifecycle.query(stage="openbao_recovered"), expected)
 
