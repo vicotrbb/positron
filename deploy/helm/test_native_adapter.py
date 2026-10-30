@@ -13,6 +13,22 @@ from test_kubernetes import assert_retained_claims, owned_storage_class, inspect
 
 
 class NativeAdapter(unittest.TestCase):
+    def test_provider_migration_subcommand_precedes_connection_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+            def kube(*args, **kwargs):
+                calls.append((args, kwargs))
+                return subprocess.CompletedProcess([], 0, b"catalog_generation=42\n", b"")
+            lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=test-admin query_secret=test-query")
+            for action in ["status", "prepare", "activate", "wait"]:
+                lifecycle.online("keys", "migrate", action)
+                arguments, options = calls[-1]
+                command = arguments[arguments.index("/usr/bin/positron") + 1:]
+                self.assertEqual(command[:3], ("keys", "migrate", action))
+                self.assertEqual(command[3:5], ("--endpoint", "127.0.0.1:8080"))
+                self.assertEqual(options["data"], b"test-admin")
+            self.assertEqual(len(calls), 4)
+
     def test_openbao_workload_uses_the_exact_images_native_entrypoint(self):
         from test_kubernetes import OpenBaoFixture
         class BeforeProviderStart(Exception): pass
