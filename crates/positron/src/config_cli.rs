@@ -34,7 +34,7 @@ fn execute(
             let bearer =
                 crate::administrative_cli::credential().map_err(OperatorFailure::Credential)?;
             reload::request(Path::new(&path), bearer.trim_end_matches(['\r', '\n']))
-                .map_err(|()| OperatorFailure::ReloadUnavailable)
+                .map_err(OperatorFailure::ReloadUnavailable)
         },
         Command::Validate(inputs) => {
             let effective = resolve_inputs(inputs, environment)?;
@@ -310,7 +310,7 @@ fn parse_migrate(mut arguments: impl Iterator<Item = String>) -> Result<Command,
 
 enum OperatorFailure {
     Credential(&'static str),
-    ReloadUnavailable,
+    ReloadUnavailable(reload::Failure),
     Usage,
     RedactionRequired,
     UnknownExplainSetting,
@@ -323,7 +323,7 @@ impl OperatorFailure {
     fn render(&self) -> String {
         match self {
             Self::Credential(message) => (*message).to_owned(),
-            Self::ReloadUnavailable => "configuration reload request unavailable; application not confirmed".to_owned(),
+            Self::ReloadUnavailable(failure) => format!("configuration reload request unavailable; application not confirmed; reason={}", failure.code()),
             Self::Usage => "usage: positron config validate [--config PATH] [--set PATH=VALUE] | explain [--setting PATH] | effective --redacted [--config PATH] [--set PATH=VALUE] | diff --current PATH --candidate PATH | migrate --config PATH --output PATH | reload --control-path PATH --credential-stdin".to_owned(),
             Self::RedactionRequired => "effective configuration requires --redacted".to_owned(),
             Self::UnknownExplainSetting => "configuration_rejected code=unknown_setting retry=after_input_correction completion=rejected source=command_line_override".to_owned(),
