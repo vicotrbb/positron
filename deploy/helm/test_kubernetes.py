@@ -1,5 +1,7 @@
 """Public lifecycle integration against an explicitly selected owned kind or k3d target."""
 import base64
+import copy
+import http.client
 import json
 import select
 import socket
@@ -13,6 +15,7 @@ import tempfile
 import time
 import unittest
 import uuid
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "compose"))
 from tls_fixture import material
@@ -132,12 +135,189 @@ def exercise_interruptions(case, lifecycle, control_plane, image, ca, expected):
         print(json.dumps({"interruption": stage, "namespace": observed["metadata"]["namespace"], "pod_uid": observed["metadata"]["uid"],
                           "node": observed["spec"]["nodeName"], "image": original_image, "result_digest": expected, "storage": retained}), flush=True)
     verify("healthy", state)
+    exercise_duplicate_writer(case, lifecycle, state, expected)
     api_outage(case, lifecycle, control_plane, state, image, ca, expected)
     verify("api_recovered", wait_operand(lifecycle))
     state = evict_operand(case, lifecycle, state)
     verify("eviction_recovered", state)
     state = drain_operand(case, lifecycle, state, image, ca, expected)
     verify("local_path_drain_recovered", state)
+
+
+def duplicate_writer_pod(state):
+    spec = copy.deepcopy(state["spec"])
+    spec.pop("initContainers", None)
+    spec.pop("hostname", None)
+    spec.pop("subdomain", None)
+    spec["restartPolicy"] = "Never"
+    return {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "native-duplicate-writer"}, "spec": spec}
+
+
+def openbao_destination(configuration, endpoint):
+    return configuration + f"\n[security.provider_access]\nuri = '{endpoint}/v1/transit/keys/positron'\nversion = '1'\nauthentication = 'openbao-token'\ntoken_file = '/etc/positron/operations/export/openbao-token'\ntrust_roots_file = '/etc/positron/operations/export/openbao-ca.pem'\n"
+
+
+class OpenBaoFixture:
+    image = "openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf"
+    configuration = b'api_addr = "https://native-openbao:8200"\nstorage "inmem" {}\nlistener "tcp" { \n  address = "0.0.0.0:8200"\n  tls_cert_file = "/config/server.pem"\n  tls_key_file = "/config/server-key.pem"\n }\n'
+
+    def __init__(self, case, lifecycle):
+        self.case, self.lifecycle = case, lifecycle
+        self.root = lifecycle.root / "openbao"
+        self.root.mkdir(mode=0o700)
+        material(self.root)
+        (self.root / "server.ext").write_text("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:native-openbao\n")
+        command(["openssl", "x509", "-req", "-in", str(self.root / "server.csr"), "-CA", str(self.root / "ca.pem"),
+                 "-CAkey", str(self.root / "ca-key.pem"), "-CAcreateserial", "-days", "1", "-sha256",
+                 "-extfile", str(self.root / "server.ext"), "-out", str(self.root / "server.pem")])
+        lifecycle.apply({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "native-openbao"},
+                         "data": {name: base64.b64encode(data).decode() for name, data in
+                                  [("server.hcl", self.configuration), ("server.pem", (self.root / "server.pem").read_bytes()),
+                                   ("server-key.pem", (self.root / "server-key.pem").read_bytes())]}})
+        security = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
+        lifecycle.apply({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "native-openbao"}, "spec": {
+            "replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": {"app": "native-openbao"}},
+            "template": {"metadata": {"labels": {"app": "native-openbao"}}, "spec": {
+                "automountServiceAccountToken": False,
+                "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532, "fsGroup": 65532,
+                                    "seccompProfile": {"type": "RuntimeDefault"}},
+                "containers": [{"name": "openbao", "image": self.image, "command": ["/bin/bao", "server", "-config=/config/server.hcl"],
+                                "securityContext": security, "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
+                                "readinessProbe": {"tcpSocket": {"port": 8200}, "periodSeconds": 1},
+                                "volumeMounts": [{"name": "configuration", "mountPath": "/config", "readOnly": True}]}],
+                "volumes": [{"name": "configuration", "secret": {"secretName": "native-openbao", "defaultMode": 0o440}}]}}}})
+        lifecycle.apply({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "native-openbao"},
+                         "spec": {"selector": {"app": "native-openbao"}, "ports": [{"port": 8200}]}})
+        lifecycle.kube("rollout", "status", "deployment/native-openbao", "--timeout=180s", timeout=190)
+        self.forward = subprocess.Popen(["kubectl", *lifecycle.helm[1:], "port-forward", "service/native-openbao", "0:8200", "--address", "127.0.0.1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            case.assertTrue(select.select([self.forward.stdout], [], [], 15)[0], "provider port-forward did not bind")
+            self.port = int(self.forward.stdout.readline().decode().split("127.0.0.1:", 1)[1].split(" ", 1)[0])
+            self.trust = ssl.create_default_context(cafile=str(self.root / "ca.pem"))
+            initialized = self.request("PUT", "/v1/sys/init", {"secret_shares": 1, "secret_threshold": 1})
+            self.request("PUT", "/v1/sys/unseal", {"key": initialized["keys_base64"][0]})
+            token = initialized["root_token"]
+            case.assertEqual(self.request("GET", "/v1/sys/health")["version"], "2.7.1")
+            self.request("POST", "/v1/sys/mounts/transit", {"type": "transit"}, token)
+            self.request("POST", "/v1/transit/keys/positron", {"type": "aes256-gcm96", "derived": True, "convergent_encryption": False}, token)
+            policy = 'path "transit/keys/positron" { capabilities = ["read"] }\npath "transit/encrypt/positron" { capabilities = ["update"] }\npath "transit/decrypt/positron" { capabilities = ["update"] }'
+            self.request("PUT", "/v1/sys/policies/acl/positron", {"policy": policy}, token)
+            limited = self.request("POST", "/v1/auth/token/create", {"policies": ["positron"], "ttl": "10m", "renewable": True, "num_uses": 0}, token)["auth"]
+            case.assertTrue(limited["renewable"])
+            case.assertGreater(limited["lease_duration"], 0)
+            lifecycle.install({"inputs/export/openbao-token": limited["client_token"].encode(), "inputs/export/openbao-ca.pem": (self.root / "ca.pem").read_bytes()})
+        finally:
+            self.close()
+
+    def request(self, method, path, value=None, token=None):
+        connection = http.client.HTTPSConnection("native-openbao", 8200, timeout=10, context=self.trust)
+        connection.sock = self.trust.wrap_socket(socket.create_connection(("127.0.0.1", self.port), timeout=10), server_hostname="native-openbao")
+        try:
+            headers = {"Content-Type": "application/json"}
+            if token: headers["X-Vault-Token"] = token
+            connection.request(method, path, body=None if value is None else json.dumps(value).encode(), headers=headers)
+            response = connection.getresponse()
+            payload = response.read(32769)
+            self.case.assertLessEqual(len(payload), 32768)
+            self.case.assertIn(response.status, [200, 204], "owned provider request failed")
+            return json.loads(payload) if payload else {}
+        finally:
+            connection.close()
+
+    def close(self):
+        self.forward.terminate()
+        try: self.forward.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.forward.kill()
+            self.forward.wait(timeout=5)
+        self.forward.stdout.close()
+        self.forward.stderr.close()
+
+
+def exercise_provider_outage(case, lifecycle, expected):
+    from data_lifecycle import fields
+    OpenBaoFixture(case, lifecycle)
+    destination = openbao_destination(lifecycle.config, "https://native-openbao:8200")
+    reference = "/etc/positron/operations/export/openbao-target.toml"
+    lifecycle.install({"inputs/export/openbao-target.toml": destination.encode()})
+    for phase in ["prepare", "activate"]:
+        status = fields(lifecycle.online("keys", "migrate", "status"))
+        accepted = fields(lifecycle.online("keys", "migrate", phase, "--target-config", reference,
+                                         "--expected-generation", status["catalog_generation"], "--idempotency-key", str(uuid.uuid4())))
+        operation = accepted["operation_id"]
+        outcome = fields(lifecycle.online("keys", "migrate", "wait", "--operation-id", operation, "--wait-seconds", "60", timeout=65))
+        case.assertEqual(outcome["operation_id"], operation)
+        case.assertEqual(outcome["status"], "succeeded")
+    status = fields(lifecycle.online("keys", "migrate", "status"))
+    case.assertEqual(status["active_provider_family"], "7")
+    case.assertEqual(status["active_provider_version"], "1")
+    lifecycle.config = destination
+    lifecycle.values["configuration"] = destination
+    lifecycle.apply({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "native-positron"}, "data": {"positron.toml": destination}})
+    case.assertEqual(lifecycle.query(stage="openbao_activated"), expected)
+    provider = json.loads(lifecycle.kube("get", "pods", "-l", "app=native-openbao", "-o", "json").stdout)["items"]
+    case.assertEqual(len(provider), 1)
+    provider_pod = provider[0]["metadata"]["name"]
+    try:
+        lifecycle.kube("exec", provider_pod, "--", "/bin/sh", "-c", "kill -STOP 1", timeout=5)
+        case.assertEqual(lifecycle.query(stage="openbao_cached_outage"), expected)
+        # Expiry is governed by the configured five-second native cache lease.
+        time.sleep(5.1)
+        with case.assertRaises(subprocess.CalledProcessError) as unavailable:
+            lifecycle.query(stage="openbao_unavailable")
+        case.assertEqual(unavailable.exception.stderr, b"positron: query unavailable; inspect instance readiness\n")
+        probe = ["/usr/bin/positron", "doctor", "--live", "--endpoint", "127.0.0.1:13133", "--server-name", "localhost",
+                 "--trust-file", "/etc/positron/tls/..data/ca.pem"]
+        case.assertEqual(lifecycle.kube("exec", lifecycle.pod, "--", *probe).stdout, b"status=live\n")
+        probe[2] = "--ready"
+        case.assertNotEqual(lifecycle.kube("exec", lifecycle.pod, "--", *probe, check=False).returncode, 0)
+        lifecycle.scale(0)
+        lifecycle.kube("scale", "statefulset/native-positron", "--replicas=1")
+        lifecycle.kube("wait", "--for=jsonpath={.status.phase}=Running", "pod/" + lifecycle.pod, "--timeout=90s", timeout=100)
+        ready = lifecycle.kube("wait", "--for=condition=Ready", "pod/" + lifecycle.pod, "--timeout=5s", timeout=10, check=False)
+        case.assertNotEqual(ready.returncode, 0)
+        live = lifecycle.kube("exec", lifecycle.pod, "--", "/usr/bin/positron", "doctor", "--live", "--endpoint", "127.0.0.1:13133",
+                              "--server-name", "localhost", "--trust-file", "/etc/positron/tls/..data/ca.pem")
+        case.assertEqual(live.stdout, b"status=live\n")
+    finally:
+        lifecycle.kube("exec", provider_pod, "--", "/bin/sh", "-c", "kill -CONT 1", timeout=5)
+    wait_operand(lifecycle)
+    case.assertEqual(lifecycle.query(stage="openbao_recovered"), expected)
+
+
+def exercise_duplicate_writer(case, lifecycle, state, expected):
+    retained = storage_identities(lifecycle)
+    challenger = duplicate_writer_pod(state)
+    name = challenger["metadata"]["name"]
+    lifecycle.apply(challenger)
+    try:
+        lifecycle.kube("wait", "--for=jsonpath={.status.phase}=Running", "pod/" + name, "--timeout=90s", timeout=100)
+        probe = ["/usr/bin/positron", "doctor", "--live", "--endpoint", "127.0.0.1:13133", "--server-name", "localhost",
+                 "--trust-file", "/etc/positron/tls/..data/ca.pem"]
+        deadline = time.monotonic() + 30
+        while True:
+            result = lifecycle.kube("exec", name, "--", *probe, check=False, timeout=5)
+            if result.returncode == 0:
+                case.assertEqual(result.stdout, b"status=live\n")
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError("duplicate owner did not remain live within its startup budget")
+            time.sleep(0.2)
+        probe[2] = "--ready"
+        case.assertNotEqual(lifecycle.kube("exec", name, "--", *probe, check=False).returncode, 0)
+        observed = json.loads(lifecycle.kube("get", "pod", name, "-o", "json").stdout)
+        case.assertEqual(observed["spec"]["nodeName"], state["spec"]["nodeName"])
+        case.assertFalse(any(item["type"] == "Ready" and item["status"] == "True" for item in observed["status"].get("conditions", [])))
+        records = [json.loads(line) for line in lifecycle.kube("logs", name, "--tail=100", "--limit-bytes=32768").stdout.splitlines()]
+        case.assertTrue(any(record.get("event") == "process_recovering" for record in records))
+        case.assertTrue(any(record.get("event") == "dependency_storage_unavailable" for record in records))
+        with case.assertRaises(subprocess.CalledProcessError) as refused:
+            lifecycle.query(compose=name, stage="duplicate_writer_refused")
+        case.assertEqual(refused.exception.stderr, b"positron: query transport or response unavailable\n")
+        case.assertEqual(lifecycle.query(stage="original_owner_retained"), expected)
+        case.assertEqual(storage_identities(lifecycle), retained)
+    finally:
+        lifecycle.kube("delete", "pod", name, "--wait=true", "--timeout=90s", timeout=100)
 
 
 def owned_storage_class(context, storage_class, expected_context):
@@ -219,6 +399,10 @@ def assert_retained_claims(case, before, after, extra_names=()):
 
 
 class KubernetesLifecycle(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("POSITRON_TEST_HELM_FIXTURE_HELPER"), "requires the existing native signed-input helper")
+    def test_native_openbao_outage_and_cold_recovery(self):
+        self.exercise_native(True, False, include_provider=True)
+
     @unittest.skipUnless(os.environ.get("POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE"), "requires an explicitly owned two-node kind topology")
     def test_native_api_outage_eviction_and_local_path_drain(self):
         self.exercise_native(True, False, include_interruptions=True)
@@ -234,7 +418,7 @@ class KubernetesLifecycle(unittest.TestCase):
     def test_native_upgrade_preserves_verified_data_and_drain(self):
         self.exercise_native(True, True)
 
-    def exercise_native(self, include_data, include_upgrade, include_interruptions=False):
+    def exercise_native(self, include_data, include_upgrade, include_interruptions=False, include_provider=False):
         kubeconfig = Path(os.environ["POSITRON_TEST_KUBECONFIG"]).resolve(strict=True)
         chart = Path(os.environ["POSITRON_TEST_HELM_CHART"]).resolve(strict=True)
         image = os.environ["POSITRON_TEST_HELM_IMAGE"]
@@ -283,6 +467,11 @@ class KubernetesLifecycle(unittest.TestCase):
                             for name in ["server.pem", "server-key.pem", "ca.pem"]}}
                 apply(tls_secret())
                 values = {"image": image, "storageClass": storage_class, "tlsSecret": "positron-tls"}
+                if include_provider:
+                    configuration = yaml.safe_load(command([*helm, "show", "values", str(chart)]).stdout)["configuration"]
+                    configuration = re.sub(r"(?m)^\s*key_cache_lease_seconds\s*=.*\n", "", configuration)
+                    self.assertIn("[security]\n", configuration)
+                    values["configuration"] = configuration.replace("[security]\n", "[security]\nkey_cache_lease_seconds = 5\n", 1)
                 values_file = root / "values.json"
                 values_file.write_text(json.dumps(values))
                 command([*helm, "install", release, str(chart), "-f", str(values_file)])
@@ -316,6 +505,8 @@ class KubernetesLifecycle(unittest.TestCase):
                     lifecycle.prepare(configuration)
                     lifecycle.ingest()
                     expected = lifecycle.query(stage="initial")
+                    if include_provider:
+                        exercise_provider_outage(self, lifecycle, expected)
                     if include_interruptions:
                         control_plane = os.environ["POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE"]
                         self.assertEqual(control_plane, context.removeprefix("kind-") + "-control-plane")
@@ -327,7 +518,7 @@ class KubernetesLifecycle(unittest.TestCase):
                 ready()
                 self.assertEqual(retained, {item["metadata"]["name"]: item["metadata"]["uid"] for item in json.loads(kube("get", "pvc", "-o", "json").stdout)["items"]})
                 self.assertEqual(private_modes(), private_before_restart)
-                if lifecycle:
+                if lifecycle and not include_provider:
                     self.assertEqual(lifecycle.query(stage="restart"), expected)
                     lifecycle.backup()
                     print("native_backup_verified=true", flush=True)
@@ -390,7 +581,7 @@ class KubernetesLifecycle(unittest.TestCase):
                 command([*helm, "uninstall", release])
                 installed = False
                 after = json.loads(kube("get", "pvc", "-o", "json").stdout)["items"]
-                assert_retained_claims(self, retained, {item["metadata"]["name"]: item["metadata"]["uid"] for item in after}, ["restored-positron-data", "restored-positron-secrets"] if include_data else [])
+                assert_retained_claims(self, retained, {item["metadata"]["name"]: item["metadata"]["uid"] for item in after}, ["restored-positron-data", "restored-positron-secrets"] if include_data and not include_provider else [])
                 completed = True
         finally:
             if "lifecycle" in locals() and lifecycle:

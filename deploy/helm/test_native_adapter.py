@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 from unittest.mock import patch
 from pathlib import Path
 import subprocess
@@ -12,6 +13,140 @@ from test_kubernetes import assert_retained_claims, owned_storage_class, inspect
 
 
 class NativeAdapter(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("POSITRON_TEST_OPENBAO_BINARY"), "requires explicitly selected exact OpenBao2.7.1 binary")
+    def test_exact_openbao_fixture_configuration_serves_verified_tls_health(self):
+        import http.client
+        import socket
+        import ssl
+        import time
+        from test_kubernetes import OpenBaoFixture, material
+        binary = str(Path(os.environ["POSITRON_TEST_OPENBAO_BINARY"]).resolve(strict=True))
+        with tempfile.TemporaryDirectory(prefix="positron-120-openbao-parser-") as directory:
+            root = Path(directory)
+            material(root)
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", 0))
+                port = listener.getsockname()[1]
+            configuration = OpenBaoFixture.configuration.decode().replace("/config/", str(root) + "/").replace("0.0.0.0:8200", f"127.0.0.1:{port}")
+            (root / "server.hcl").write_text(configuration)
+            with (root / "server.log").open("wb") as log:
+                process = subprocess.Popen([binary, "server", "-config=" + str(root / "server.hcl")], stdout=log, stderr=subprocess.STDOUT)
+                try:
+                    deadline = time.monotonic() + 10
+                    while True:
+                        self.assertIsNone(process.poll(), "exact provider rejected rendered fixture configuration")
+                        connection = http.client.HTTPSConnection("localhost", port, timeout=1, context=ssl.create_default_context(cafile=str(root / "ca.pem")))
+                        try:
+                            connection.request("GET", "/v1/sys/health")
+                            response = connection.getresponse()
+                            payload = response.read(32769)
+                            self.assertLessEqual(len(payload), 32768)
+                            self.assertEqual(response.status, 501)
+                            self.assertEqual(json.loads(payload)["version"], "2.7.1")
+                            break
+                        except OSError:
+                            if time.monotonic() >= deadline: raise
+                            time.sleep(0.1)
+                        finally:
+                            connection.close()
+                finally:
+                    process.terminate()
+                    try: process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+
+    def test_provider_expiry_checks_live_not_ready_before_cold_restart_and_recovers_same_provider(self):
+        from test_kubernetes import exercise_provider_outage
+        calls = []
+        class Lifecycle:
+            config, values, pod = "[security]\nlocal_key_file='/secrets/root'\n", {}, "operand"
+            def install(self, files): pass
+            def apply(self, value): pass
+            def online(self, *args, **kwargs):
+                if args[2] == "status": return b"catalog_generation=7 active_provider_family=7 active_provider_version=1\n"
+                return b"operation_id=retained-operation status=succeeded\n"
+            def scale(self, count): calls.append(("scale", count))
+            def query(self, *, stage):
+                calls.append(("query", stage))
+                if stage == "openbao_unavailable":
+                    raise subprocess.CalledProcessError(1, ["positron", "query"], stderr=b"positron: query unavailable; inspect instance readiness\n")
+                return "digest"
+            def kube(self, *args, **kwargs):
+                calls.append(args)
+                body = b""
+                code = 0
+                if args[:2] == ("get", "pods"): body = b'{"items":[{"metadata":{"name":"owned-provider"}}]}'
+                if "--live" in args: body = b"status=live\n"
+                if "--ready" in args or "--for=condition=Ready" in args: code = 1
+                return subprocess.CompletedProcess([], code, body, b"")
+        with patch("test_kubernetes.OpenBaoFixture"), patch("test_kubernetes.time.sleep"), patch("test_kubernetes.wait_operand"):
+            exercise_provider_outage(self, Lifecycle(), "digest")
+        refused = calls.index(("query", "openbao_unavailable"))
+        stopped = calls.index(("scale", 0))
+        between = calls[refused + 1:stopped]
+        self.assertTrue(any("--live" in call for call in between))
+        self.assertTrue(any("--ready" in call for call in between))
+        signals = [call for call in calls if "kill -STOP 1" in call or "kill -CONT 1" in call]
+        self.assertEqual([call[1] for call in signals], ["owned-provider", "owned-provider"])
+        self.assertEqual(calls[-1], ("query", "openbao_recovered"))
+
+    def test_openbao_migration_unknown_outcome_is_not_replayed_or_activated(self):
+        from test_kubernetes import exercise_provider_outage
+        calls = []
+        class Lifecycle:
+            config = "[security]\nlocal_key_file='/secrets/root'\n"
+            def install(self, files): pass
+            def online(self, *args, **kwargs):
+                calls.append(args)
+                if args[2] == "status": return b"catalog_generation=7\n"
+                if args[2] == "prepare": return b"operation_id=retained-operation\n"
+                raise subprocess.CalledProcessError(1, ["positron", "keys"], stderr=b"operation outcome remains unknown\n")
+        with patch("test_kubernetes.OpenBaoFixture"):
+            with self.assertRaises(subprocess.CalledProcessError):
+                exercise_provider_outage(self, Lifecycle(), "digest")
+        self.assertEqual([args[2] for args in calls], ["status", "prepare", "wait"])
+        self.assertEqual(calls[2][3:5], ("--operation-id", "retained-operation"))
+
+    def test_openbao_forward_cleanup_reaps_only_its_owned_process(self):
+        from test_kubernetes import OpenBaoFixture
+        from unittest.mock import Mock
+        fixture = object.__new__(OpenBaoFixture)
+        fixture.forward = Mock()
+        fixture.forward.wait.side_effect = [subprocess.TimeoutExpired("owned-forward", 10), 0]
+        fixture.close()
+        fixture.forward.terminate.assert_called_once_with()
+        fixture.forward.kill.assert_called_once_with()
+        self.assertEqual(fixture.forward.wait.call_count, 2)
+        fixture.forward.stdout.close.assert_called_once_with()
+        fixture.forward.stderr.close.assert_called_once_with()
+
+    def test_openbao_destination_preserves_native_configuration_and_protected_file_references(self):
+        import tomllib
+        from test_kubernetes import openbao_destination
+        original = "schema_version=1\n[security]\nlocal_key_file='/secrets/root'\nkey_cache_lease_seconds=1\n[storage]\ndata_directory='/data'\n"
+        target = tomllib.loads(openbao_destination(original, "https://native-openbao:8200"))
+        provider = target["security"].pop("provider_access")
+        self.assertEqual(target, tomllib.loads(original))
+        self.assertEqual(provider, {"uri": "https://native-openbao:8200/v1/transit/keys/positron", "version": "1",
+                                   "authentication": "openbao-token", "token_file": "/etc/positron/operations/export/openbao-token",
+                                   "trust_roots_file": "/etc/positron/operations/export/openbao-ca.pem"})
+
+    def test_duplicate_writer_uses_live_claims_and_private_runtime_without_service_membership(self):
+        from test_kubernetes import duplicate_writer_pod
+        state = {"metadata": {"name": "native-positron-0", "labels": {"app.kubernetes.io/instance": "native"}},
+                 "spec": {"nodeName": "positron-120-fixture-worker", "securityContext": {"runAsUser": 65532},
+                          "containers": [{"name": "positron", "image": "immutable", "volumeMounts": [{"name": "runtime", "mountPath": "/run/positron"}]}],
+                          "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": "original-data"}}, {"name": "runtime", "emptyDir": {}}]}}
+        challenger = duplicate_writer_pod(state)
+        self.assertEqual(challenger["spec"]["nodeName"], state["spec"]["nodeName"])
+        self.assertEqual(challenger["spec"]["volumes"], state["spec"]["volumes"])
+        self.assertNotIn("app.kubernetes.io/instance", challenger["metadata"].get("labels", {}))
+        self.assertNotIn("initContainers", challenger["spec"])
+        self.assertEqual(challenger["spec"]["restartPolicy"], "Never")
+        challenger["spec"]["containers"][0]["image"] = "changed"
+        self.assertEqual(state["spec"]["containers"][0]["image"], "immutable")
+
     def test_local_path_drain_accepts_null_empty_endpoints_and_recovers_the_pending_pod(self):
         import json
         from test_kubernetes import drain_operand
