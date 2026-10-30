@@ -94,6 +94,132 @@ fn first_os_signal_drains_and_exits_successfully() -> Result<(), Box<dyn std::er
 
 #[cfg(unix)]
 #[test]
+fn supervised_cold_launch_retains_original_checkpoint_before_late_readiness()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let ready_at = Instant::now() + Duration::from_millis(2700);
+    let server = std::thread::spawn(move || -> std::io::Result<()> {
+        while !stopped.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false)?;
+                    let io_deadline = Instant::now() + Duration::from_millis(100);
+                    stream.set_read_timeout(Some(
+                        io_deadline.saturating_duration_since(Instant::now()),
+                    ))?;
+                    let mut request = [0; 256];
+                    match stream.read(&mut request) {
+                        Ok(0) => continue,
+                        Ok(_) => {},
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            continue;
+                        },
+                        Err(error) => return Err(error),
+                    }
+                    let status = if Instant::now() >= ready_at {
+                        "200 OK"
+                    } else {
+                        "503 Service Unavailable"
+                    };
+                    let body = "{\"status\":\"not_ready\"}";
+                    let remaining = io_deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        continue;
+                    }
+                    stream.set_write_timeout(Some(remaining))?;
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes())?;
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5))
+                },
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    });
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "read -r line"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut diagnostics = Vec::new();
+    let outcome = wait_for_supervised_readiness(
+        &mut child,
+        port,
+        std::path::Path::new("/unavailable-supervised-test-control.sock"),
+        Instant::now(),
+        true,
+        &mut diagnostics,
+    );
+    stop.store(true, Ordering::Release);
+    let cleanup = terminate_and_describe_child(&mut child, "");
+    let server_outcome = server.join();
+    outcome?;
+    server_outcome.map_err(|_| "scripted readiness server panic")??;
+    let diagnostics = String::from_utf8(diagnostics)?;
+    assert!(diagnostics.contains("original_checkpoint"), "{diagnostics}");
+    assert!(diagnostics.contains("http_503"), "{diagnostics}");
+    assert!(diagnostics.contains("child_state=running"), "{diagnostics}");
+    assert!(
+        diagnostics.contains("first_complete_operations_ms=Some("),
+        "{diagnostics}"
+    );
+    assert!(diagnostics.len() < 2048, "{diagnostics}");
+    assert!(child.try_wait()?.is_some(), "{cleanup}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn supervised_cold_launch_does_not_refresh_an_expired_total_budget()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "read -r line"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .ok_or("monotonic time unavailable")?;
+    let outcome = wait_for_supervised_readiness(
+        &mut child,
+        0,
+        std::path::Path::new("/unavailable-supervised-test-control.sock"),
+        started,
+        false,
+        &mut Vec::new(),
+    );
+    let cleanup = terminate_and_describe_child(&mut child, "");
+    let failure = outcome.expect_err("expired cold-launch budget").to_string();
+    assert!(failure.contains("launch_phase=restart"), "{failure}");
+    assert!(failure.contains("child_state=running"), "{failure}");
+    assert!(
+        failure.contains("first_complete_operations_ms=None"),
+        "{failure}"
+    );
+    assert!(failure.contains("last=no_response"), "{failure}");
+    assert!(child.try_wait()?.is_some(), "{cleanup}");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn supervised_foreground_process_recovers_forced_exit_then_drains_after_restart()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
@@ -117,6 +243,7 @@ fn supervised_foreground_process_recovers_forced_exit_then_drains_after_restart(
     )?;
     let paths = BootstrapPaths::new(&roots.data, &roots.secrets, MountQualification::LocalHost)?;
     for forced in [true, false] {
+        let started = Instant::now();
         let mut command = Command::new(env!("CARGO_BIN_EXE_positron"));
         command.arg("serve");
         if forced {
@@ -130,7 +257,14 @@ fn supervised_foreground_process_recovers_forced_exit_then_drains_after_restart(
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
-        if let Err(failure) = wait_for_ready(ports[0]) {
+        if let Err(failure) = wait_for_supervised_readiness(
+            &mut child,
+            ports[0],
+            &root.join("control.sock"),
+            started,
+            forced,
+            &mut std::io::stderr().lock(),
+        ) {
             if child.try_wait()?.is_none() {
                 child.kill()?;
             }
@@ -828,6 +962,91 @@ fn terminate_and_describe_child(child: &mut std::process::Child, authorization: 
     };
     let stderr = bounded_child_stderr(child, authorization);
     format!("child_cleanup {termination} {exit} stderr={stderr:?}")
+}
+
+#[cfg(unix)]
+fn wait_for_supervised_readiness(
+    child: &mut std::process::Child,
+    port: u16,
+    control: &std::path::Path,
+    started: Instant,
+    initializes: bool,
+    diagnostics: &mut impl std::io::Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Both supervisor iterations launch a new OS process. Match the existing
+    // cold-listener fixtures; retain the old observation window as a checkpoint.
+    let deadline = started + Duration::from_secs(10);
+    let checkpoint = started + STARTUP_PROBE_BUDGET;
+    let launch_phase = if initializes { "initial" } else { "restart" };
+    let mut first_control_ms = None;
+    let mut first_operations_ms = None;
+    let mut checkpoint_recorded = false;
+    let mut last = "no_response".to_owned();
+    loop {
+        if first_control_ms.is_none() && control.exists() {
+            first_control_ms = Some(started.elapsed().as_millis());
+        }
+        let child_state = if child.try_wait()?.is_some() {
+            "exited"
+        } else {
+            "running"
+        };
+        let now = Instant::now();
+        if now >= deadline || child_state == "exited" {
+            return Err(format!("supervised cold-launch readiness unavailable launch_phase={launch_phase} elapsed_ms={} child_state={child_state} control_path_present={} first_observed_control_ms={first_control_ms:?} first_complete_operations_ms={first_operations_ms:?} last={last}", started.elapsed().as_millis(), control.exists()).into());
+        }
+        let ready = match probe_response(
+            port,
+            b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            deadline.min(now + Duration::from_millis(100)),
+        ) {
+            Ok(response) => {
+                first_operations_ms.get_or_insert(started.elapsed().as_millis());
+                let ready = response.starts_with("HTTP/1.1 200 ");
+                let status = if ready {
+                    "http_200"
+                } else if response.starts_with("HTTP/1.1 503 ") {
+                    "http_503"
+                } else {
+                    "unexpected_http_status"
+                };
+                last = format!("{status} {}", bounded_redacted_observation(&response, ""));
+                if !ready && status != "http_503" {
+                    return Err(format!("unexpected supervised readiness response: {last}").into());
+                }
+                ready
+            },
+            Err(error) => {
+                last = bounded_redacted_observation(&format!("probe_unavailable {error}"), "");
+                false
+            },
+        };
+        if !checkpoint_recorded && Instant::now() >= checkpoint {
+            writeln!(
+                diagnostics,
+                "supervised_cold_launch original_checkpoint launch_phase={launch_phase} elapsed_ms={} child_state={child_state} control_path_present={} first_observed_control_ms={first_control_ms:?} first_complete_operations_ms={first_operations_ms:?} last={last}",
+                started.elapsed().as_millis(),
+                control.exists()
+            )?;
+            checkpoint_recorded = true;
+        }
+        if ready {
+            writeln!(
+                diagnostics,
+                "supervised_cold_launch ready launch_phase={launch_phase} elapsed_ms={} original_checkpoint={} first_observed_control_ms={first_control_ms:?} first_complete_operations_ms={first_operations_ms:?}",
+                started.elapsed().as_millis(),
+                if checkpoint_recorded {
+                    "recorded"
+                } else {
+                    "not_reached"
+                }
+            )?;
+            return Ok(());
+        }
+        std::thread::sleep(
+            Duration::from_millis(25).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
 }
 
 #[cfg(unix)]
