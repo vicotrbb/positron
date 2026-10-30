@@ -659,6 +659,7 @@ jobs:
               test -n "$POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE"
               python3 deploy/helm/test_kubernetes.py KubernetesLifecycle.test_native_api_outage_eviction_and_local_path_drain
               unset POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE
+              python3 deploy/helm/test_kubernetes.py KubernetesLifecycle.test_native_openbao_outage_and_cold_recovery
             fi
             if [ "$runtime" = kind ]; then
               kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"
