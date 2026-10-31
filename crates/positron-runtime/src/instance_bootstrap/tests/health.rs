@@ -34,6 +34,8 @@ fn process_health_tracks_system_lease_expiry_and_automatic_owner_refresh()
         positron_kernel::RootRewrapSession::with_key_admission_action(
             move || {
                 assert_eq!(in_flight_health.readiness(), Readiness::NotReady);
+                assert!(in_flight_health.admits_data_or_mutation());
+                assert_eq!(in_flight_health.pending_integrity_fence_request(), None);
                 assert_eq!(in_flight_health.liveness(), Liveness::Live);
                 assert_eq!(in_flight_health.diagnostic_status(), "degraded");
             },
