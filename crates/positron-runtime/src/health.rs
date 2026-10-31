@@ -667,7 +667,7 @@ impl HealthState {
             && !self.dependency_unavailable.load(Ordering::Acquire)
     }
 
-    fn required_resources_ready(&self) -> bool {
+    fn required_dependencies_ready(&self) -> bool {
         let Some(inspection) = self.inspection_authority.get() else {
             // Serving is published only after runtime startup establishes all
             // authorities. Standalone phase views do not own an instance.
@@ -676,6 +676,12 @@ impl HealthState {
         let Some(authority) = inspection.upgrade() else {
             return false;
         };
+        if !authority
+            .data_protection_health()
+            .is_ok_and(|health| health.system_ready && !health.storage_unhealthy)
+        {
+            return false;
+        }
         if authority.retention_time.status().state() == LifecycleClockState::ClockUncertain {
             return false;
         }
@@ -703,6 +709,19 @@ impl HealthState {
         self.integrity_degraded.load(Ordering::Acquire)
     }
 
+    fn key_custody_degraded(&self) -> bool {
+        let Some(inspection) = self.inspection_authority.get() else {
+            return false;
+        };
+        let Some(authority) = inspection.upgrade() else {
+            return true;
+        };
+        match authority.data_protection_health() {
+            Ok(health) => health.provider_degraded || health.storage_unhealthy,
+            Err(_) => true,
+        }
+    }
+
     /// Closed diagnostic status derived from the current Health State.
     #[must_use]
     pub fn diagnostic_status(&self) -> &'static str {
@@ -711,6 +730,7 @@ impl HealthState {
         } else if self.readiness() == Readiness::NotReady
             || self.liveness() == Liveness::Dead
             || self.integrity_degraded()
+            || self.key_custody_degraded()
             || !self.security_warnings().is_empty()
         {
             "degraded"
@@ -721,7 +741,7 @@ impl HealthState {
 
     #[must_use]
     pub fn readiness(&self) -> Readiness {
-        if self.admits_data_or_mutation() && self.required_resources_ready() {
+        if self.admits_data_or_mutation() && self.required_dependencies_ready() {
             Readiness::Ready
         } else {
             Readiness::NotReady
