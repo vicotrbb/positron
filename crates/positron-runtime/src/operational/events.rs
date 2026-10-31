@@ -104,6 +104,8 @@ pub enum OperationalDiagnostic {
     TransportSecurityWarning(positron_config::ConfigurationWarning),
     ConfigurationReloadRejected(OperationalReloadRejection),
     OwnerInspectionUnavailable(OwnerInspectionUnavailableReason),
+    TlsHandshakeFailure(crate::ListenerRole),
+    HttpResponseCompletionFailure(crate::ListenerRole),
     ConfigurationReloadAuditUnavailable,
     RuntimeCrashRecordUnavailable,
     RuntimeCleanupFailure(crate::CleanupRole),
@@ -133,6 +135,9 @@ impl OperationalDiagnostic {
             Self::TransportSecurityWarning(_) => "transport_security_warning",
             Self::ConfigurationReloadRejected(_) => "configuration_reload_rejected",
             Self::OwnerInspectionUnavailable(_) => "owner_inspection_unavailable",
+            Self::TlsHandshakeFailure(_) | Self::HttpResponseCompletionFailure(_) => {
+                "native_http_connection_failed"
+            },
             Self::ConfigurationReloadAuditUnavailable => "configuration_reload_audit_unavailable",
             Self::RuntimeCrashRecordUnavailable => "runtime_crash_record_unavailable",
             Self::RuntimeCleanupFailure(_) => "runtime_cleanup_failure",
@@ -304,6 +309,14 @@ impl OperationalEvent {
                 },
                 OperationalDiagnostic::OwnerInspectionUnavailable(reason) => {
                     value["reason"] = reason.label().into();
+                },
+                OperationalDiagnostic::TlsHandshakeFailure(role) => {
+                    value["stage"] = "tls_handshake".into();
+                    value["listener"] = listener_label(role).into();
+                },
+                OperationalDiagnostic::HttpResponseCompletionFailure(role) => {
+                    value["stage"] = "response_completion".into();
+                    value["listener"] = listener_label(role).into();
                 },
                 OperationalDiagnostic::TransportSecurityWarning(warning) => {
                     value["warning"] = warning.message().into();

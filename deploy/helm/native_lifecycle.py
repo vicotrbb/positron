@@ -189,6 +189,27 @@ class NativeLifecycle(DataLifecycle):
         return self.query(compose=transport, stage=stage)
 
     def diagnostics(self):
+        events = set()
+        try:
+            deadline = time.monotonic() + 1
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: break
+                output = self.kube("logs", self.pod, "--tail=200", "--limit-bytes=32768", timeout=remaining).stdout
+                for line in output[:32768].splitlines():
+                    try: record = json.loads(line)
+                    except (ValueError, UnicodeDecodeError): continue
+                    if not isinstance(record, dict) or record.get("event") != "native_http_connection_failed": continue
+                    listener, stage = record.get("listener"), record.get("stage")
+                    if isinstance(listener, str) and listener in {"control", "operations", "api", "otlp_grpc", "otlp_http", "loki_push"} and isinstance(stage, str) and stage in {"tls_handshake", "response_completion"}:
+                        events.add((listener, stage))
+                if events: break
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        except Exception:
+            pass
+        for listener, stage in sorted(events):
+            print(json.dumps({"event": "native_http_connection_failed", "listener": listener, "stage": stage}), flush=True)
+        if not events: print("native_transport_diagnostic_unavailable", flush=True)
         if not self.last_operation: return
         family, operation = self.last_operation
         try:

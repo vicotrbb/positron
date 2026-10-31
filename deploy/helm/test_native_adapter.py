@@ -13,6 +13,38 @@ from test_kubernetes import assert_retained_claims, owned_storage_class, inspect
 
 
 class NativeAdapter(unittest.TestCase):
+    def test_initial_ingest_failure_diagnostics_emit_only_closed_transport_fields(self):
+        calls = []
+        def kube(*args, **kwargs):
+            calls.append(args)
+            self.assertEqual(args[0], "logs")
+            self.assertIn("--tail=200", args)
+            self.assertIn("--limit-bytes=32768", args)
+            self.assertLessEqual(kwargs["timeout"], 1)
+            return subprocess.CompletedProcess([], 0, b'private log\n{"event":"native_http_connection_failed","listener":"otlp_http","stage":"response_completion","secret":"hidden"}\n{"event":"native_http_connection_failed","listener":"private listener","stage":"tls_handshake"}\n', b"")
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=test-admin query_secret=test-query")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output): lifecycle.diagnostics()
+        self.assertEqual(json.loads(output.getvalue()), {"event": "native_http_connection_failed", "listener": "otlp_http", "stage": "response_completion"})
+        self.assertEqual(len(calls), 1)
+
+    def test_initial_transport_capture_failure_keeps_original_lifecycle_error(self):
+        calls = []
+        def kube(*args, **kwargs):
+            calls.append(args)
+            raise RuntimeError("private capture failure")
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=test-admin query_secret=test-query")
+            output = io.StringIO()
+            original = ValueError("original lifecycle failure")
+            with contextlib.redirect_stdout(output), self.assertRaises(ValueError) as caught:
+                try: raise original
+                finally: lifecycle.diagnostics()
+        self.assertIs(caught.exception, original)
+        self.assertEqual(output.getvalue(), "native_transport_diagnostic_unavailable\n")
+        self.assertEqual(len(calls), 1)
+
     def test_provider_migration_subcommand_precedes_connection_options(self):
         with tempfile.TemporaryDirectory() as directory:
             calls = []

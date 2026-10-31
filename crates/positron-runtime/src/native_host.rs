@@ -2276,6 +2276,13 @@ fn serve_http(
                                             &mut tls,
                                             connection_protection.tls_handshake_deadline(),
                                         )
+                                        .inspect_err(|_| {
+                                            connection_health.operational_telemetry().record(
+                                                crate::operational::OperationalEvent::Diagnostic(
+                                                    crate::OperationalDiagnostic::TlsHandshakeFailure(role),
+                                                ),
+                                            );
+                                        })
                                         .is_ok()
                                     };
                                     if handshaken {

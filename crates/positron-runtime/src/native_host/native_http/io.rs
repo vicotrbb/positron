@@ -843,6 +843,7 @@ mod tests {
             }
         }
         for tls in [false, true] {
+            let health = crate::health::ProcessState::starting().health();
             let mut stream = FailingFlush {
                 stream: MemoryStream {
                     input: Cursor::new(
@@ -862,7 +863,7 @@ mod tests {
                 crate::ListenerRole::Operations,
                 "127.0.0.1:1".parse().expect("loopback peer"),
                 None,
-                &crate::health::ProcessState::starting().health(),
+                &health,
                 super::super::RouteDependencies::new(None, None),
                 crate::ConnectionProtection::new(
                     std::num::NonZeroU16::MIN,
@@ -879,6 +880,16 @@ mod tests {
                 outcome.is_err(),
                 "completion failure must reach the listener owner"
             );
+            let records: Vec<serde_json::Value> = serde_json::from_str(
+                &health
+                    .operational_logs_json()
+                    .expect("bounded operational ring"),
+            )
+            .expect("closed diagnostic JSON");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["event"], "native_http_connection_failed");
+            assert_eq!(records[0]["stage"], "response_completion");
+            assert_eq!(records[0]["listener"], "operations");
         }
     }
 

@@ -16,6 +16,8 @@ mod dispatch;
 pub(super) use dispatch::query_failure_response;
 mod io;
 #[cfg(test)]
+mod tls_rejection_tests;
+#[cfg(test)]
 mod upgrade_deadline_tests;
 mod adapters {
     pub(in crate::native_host::native_http) mod policy;
@@ -103,7 +105,14 @@ pub(super) fn serve_connection<S: Read + Write + TimeoutStream>(
     let response = match result {
         Ok(response) | Err(response) => response,
     };
-    io::write_response(stream, response).map_err(|_| ConnectionFailure)
+    io::write_response(stream, response).map_err(|_| {
+        health
+            .operational_telemetry()
+            .record(crate::operational::OperationalEvent::Diagnostic(
+                crate::OperationalDiagnostic::HttpResponseCompletionFailure(role),
+            ));
+        ConnectionFailure
+    })
 }
 
 pub(super) struct ConnectionFailure;
@@ -129,7 +138,14 @@ pub(super) fn serve_tls_connection<S: Read + Write + TimeoutStream>(
     let response = match result {
         Ok(response) | Err(response) => response,
     };
-    io::write_response(stream, response).map_err(|_| ConnectionFailure)
+    io::write_response(stream, response).map_err(|_| {
+        health
+            .operational_telemetry()
+            .record(crate::operational::OperationalEvent::Diagnostic(
+                crate::OperationalDiagnostic::HttpResponseCompletionFailure(role),
+            ));
+        ConnectionFailure
+    })
 }
 
 fn serve_checked<S: Read + Write + TimeoutStream>(
