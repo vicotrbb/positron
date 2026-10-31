@@ -399,7 +399,28 @@ def reload_projected_identity(kube, pod, identity, expected, administrator, time
         if budget <= 0: raise AssertionError("native TLS generation did not establish the expected public outcome")
         return budget
     while True:
-        result = kube("exec", "-i", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock", "--credential-stdin", data=administrator, timeout=min(10, remaining()))
+        try:
+            result = kube("exec", "-i", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock", "--credential-stdin", data=administrator, timeout=min(10, remaining()))
+        except Exception as failure:
+            try:
+                observation_deadline = min(deadline, time.monotonic() + 1)
+                reasons = set()
+                while True:
+                    budget = observation_deadline - time.monotonic()
+                    if budget <= 0: break
+                    output = kube("logs", pod, "--tail=200", "--limit-bytes=32768", timeout=budget).stdout
+                    for line in output[:32768].splitlines():
+                        try: record = json.loads(line)
+                        except (ValueError, UnicodeDecodeError): continue
+                        if isinstance(record, dict) and record.get("event") == "owner_inspection_unavailable" and isinstance(record.get("reason"), str) and record["reason"] in {"phase", "catalog_operation", "owner_reference", "configuration_reference", "key_custody", "resource_admission", "catalog", "identity", "security_time", "collector"}:
+                            reasons.add(record["reason"])
+                    if reasons: break
+                    time.sleep(min(0.05, max(0, observation_deadline - time.monotonic())))
+                for reason in sorted(reasons): failure.add_note("native owner inspection unavailable: " + reason)
+                if not reasons: failure.add_note("native owner diagnostic unavailable")
+            except Exception:
+                failure.add_note("native owner diagnostic unavailable")
+            raise
         if result.stdout != b"status=reload_requested\n": raise AssertionError("native reload was not acknowledged")
         try: observed = identity(remaining())
         except OSError: observed = None

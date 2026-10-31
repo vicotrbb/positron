@@ -60,6 +60,38 @@ impl OperationalReloadRejection {
     }
 }
 
+/// Closed dependency origins; request data and native error text never enter here.
+#[derive(Clone, Copy, Debug)]
+pub enum OwnerInspectionUnavailableReason {
+    Phase,
+    CatalogOperation,
+    OwnerReference,
+    ConfigurationReference,
+    KeyCustody,
+    ResourceAdmission,
+    Catalog,
+    Identity,
+    SecurityTime,
+    Collector,
+}
+
+impl OwnerInspectionUnavailableReason {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Phase => "phase",
+            Self::CatalogOperation => "catalog_operation",
+            Self::OwnerReference => "owner_reference",
+            Self::ConfigurationReference => "configuration_reference",
+            Self::KeyCustody => "key_custody",
+            Self::ResourceAdmission => "resource_admission",
+            Self::Catalog => "catalog",
+            Self::Identity => "identity",
+            Self::SecurityTime => "security_time",
+            Self::Collector => "collector",
+        }
+    }
+}
+
 /// Closed process diagnostics shared by serving and terminal reporting.
 #[derive(Clone, Copy, Debug)]
 pub enum OperationalDiagnostic {
@@ -71,6 +103,7 @@ pub enum OperationalDiagnostic {
     SignalHandlingUnavailable,
     TransportSecurityWarning(positron_config::ConfigurationWarning),
     ConfigurationReloadRejected(OperationalReloadRejection),
+    OwnerInspectionUnavailable(OwnerInspectionUnavailableReason),
     ConfigurationReloadAuditUnavailable,
     RuntimeCrashRecordUnavailable,
     RuntimeCleanupFailure(crate::CleanupRole),
@@ -99,6 +132,7 @@ impl OperationalDiagnostic {
             Self::SignalHandlingUnavailable => "signal_handling_unavailable",
             Self::TransportSecurityWarning(_) => "transport_security_warning",
             Self::ConfigurationReloadRejected(_) => "configuration_reload_rejected",
+            Self::OwnerInspectionUnavailable(_) => "owner_inspection_unavailable",
             Self::ConfigurationReloadAuditUnavailable => "configuration_reload_audit_unavailable",
             Self::RuntimeCrashRecordUnavailable => "runtime_crash_record_unavailable",
             Self::RuntimeCleanupFailure(_) => "runtime_cleanup_failure",
@@ -267,6 +301,9 @@ impl OperationalEvent {
                 },
                 OperationalDiagnostic::ConfigurationReloadRejected(category) => {
                     value["category"] = category.label().into();
+                },
+                OperationalDiagnostic::OwnerInspectionUnavailable(reason) => {
+                    value["reason"] = reason.label().into();
                 },
                 OperationalDiagnostic::TransportSecurityWarning(warning) => {
                     value["warning"] = warning.message().into();

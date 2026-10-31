@@ -791,6 +791,7 @@ fn route_inner<S: Read + Write>(
                 return Ok(Response::empty(400));
             }
             if health.phase() != ProcessPhase::Serving {
+                health.owner_inspection_unavailable(crate::OwnerInspectionUnavailableReason::Phase);
                 return Ok(Response::empty(503));
             }
             let bearer = zeroize::Zeroizing::new(head.bearer.ok_or_else(|| Response::empty(401))?);

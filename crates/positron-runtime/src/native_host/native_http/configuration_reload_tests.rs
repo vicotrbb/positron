@@ -52,11 +52,33 @@ fn control_reload_rejects_missing_administrator_without_queueing()
         effective, generation,
     )))?;
     state.set_inspection_authority(Arc::clone(&instance))?;
-    let services = ServiceHandle::new(instance)?;
+    let services = ServiceHandle::new(Arc::clone(&instance))?;
     state.set_catalog_operation(services.catalog_operation_gate())?;
     state.transition(crate::ProcessPhase::Serving);
     assert_eq!(request(&state, ListenerRole::Control, None, &[]), 401);
     assert!(!state.health().take_configuration_reload_request());
+    let unavailable = instance._authority.with_control_contention_for_test(|| {
+        request(&state, ListenerRole::Control, Some(claim.secret()), &[])
+    })?;
+    assert_eq!(unavailable, 503);
+    assert!(!state.health().take_configuration_reload_request());
+    let diagnostics = state
+        .health()
+        .operational_logs_json()
+        .map_err(|_| "operational diagnostics unavailable")?;
+    let records: Vec<serde_json::Value> = serde_json::from_str(&diagnostics)?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["event"] == "owner_inspection_unavailable")
+            .count(),
+        1,
+        "{diagnostics}"
+    );
+    assert!(records.iter().any(|record| {
+        record["event"] == "owner_inspection_unavailable"
+            && record["reason"] == "resource_admission"
+    }));
     for rejected in [
         "invalid-credential",
         claim.query_secret().ok_or("query credential missing")?,
@@ -77,6 +99,21 @@ fn control_reload_rejects_missing_administrator_without_queueing()
         400
     );
     assert!(!state.health().take_configuration_reload_request());
+    let records: Vec<serde_json::Value> = serde_json::from_str(
+        &state
+            .health()
+            .operational_logs_json()
+            .map_err(|_| "operational diagnostics unavailable")?,
+    )?;
+    let refusals = records
+        .iter()
+        .filter(|record| record["event"] == "owner_inspection_unavailable")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "authentication rejection adds no owner diagnostic"
+    );
     assert_eq!(
         request(&state, ListenerRole::Control, Some(claim.secret()), &[]),
         202
@@ -88,6 +125,22 @@ fn control_reload_rejects_missing_administrator_without_queueing()
         503
     );
     assert!(!state.health().take_configuration_reload_request());
+    let records: Vec<serde_json::Value> = serde_json::from_str(
+        &state
+            .health()
+            .operational_logs_json()
+            .map_err(|_| "operational diagnostics unavailable")?,
+    )?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["event"] == "owner_inspection_unavailable")
+            .count(),
+        2
+    );
+    assert!(records.iter().any(|record| {
+        record["event"] == "owner_inspection_unavailable" && record["reason"] == "phase"
+    }));
     drop(services);
     fs::remove_dir_all(root)?;
     Ok(())

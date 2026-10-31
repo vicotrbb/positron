@@ -330,6 +330,16 @@ impl std::fmt::Debug for HealthState {
 }
 
 impl HealthState {
+    pub(crate) fn owner_inspection_unavailable(
+        &self,
+        reason: crate::OwnerInspectionUnavailableReason,
+    ) -> ServingDiagnosticsFailure {
+        self.record_operational_event(OperationalEvent::Diagnostic(
+            crate::OperationalDiagnostic::OwnerInspectionUnavailable(reason),
+        ));
+        ServingDiagnosticsFailure::Unavailable
+    }
+
     /// Coalesces owner-local requests; only the process owner applies configuration.
     fn queue_configuration_reload(&self) -> Result<(), ()> {
         if self.phase() != ProcessPhase::Serving {
@@ -511,35 +521,49 @@ impl HealthState {
         ) -> Result<T, ()>,
     ) -> Result<T, ServingDiagnosticsFailure> {
         if self.phase() != ProcessPhase::Serving {
-            return Err(ServingDiagnosticsFailure::Unavailable);
+            return Err(
+                self.owner_inspection_unavailable(crate::OwnerInspectionUnavailableReason::Phase)
+            );
         }
         let catalog_operation = self
             .catalog_operation
             .get()
             .and_then(Weak::upgrade)
-            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
-        let _catalog_operation = catalog_operation
-            .lock()
-            .map_err(|_| ServingDiagnosticsFailure::Unavailable)?;
+            .ok_or_else(|| {
+                self.owner_inspection_unavailable(
+                    crate::OwnerInspectionUnavailableReason::CatalogOperation,
+                )
+            })?;
+        let _catalog_operation = catalog_operation.lock().map_err(|_| {
+            self.owner_inspection_unavailable(
+                crate::OwnerInspectionUnavailableReason::CatalogOperation,
+            )
+        })?;
         let authority = self
             .inspection_authority
             .get()
             .and_then(Weak::upgrade)
-            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
-        let configuration = self
-            .configuration
-            .get()
-            .cloned()
-            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
+            .ok_or_else(|| {
+                self.owner_inspection_unavailable(
+                    crate::OwnerInspectionUnavailableReason::OwnerReference,
+                )
+            })?;
+        let configuration = self.configuration.get().cloned().ok_or_else(|| {
+            self.owner_inspection_unavailable(
+                crate::OwnerInspectionUnavailableReason::ConfigurationReference,
+            )
+        })?;
         let credential = PresentedCredential::parse(bearer)
             .map_err(|_| ServingDiagnosticsFailure::AuthenticationRejected)?;
         let actor = authority.attribute_read_only(
             credential,
             RequestedIntent::SystemAdministration,
             CompatibilityHints::none(),
+            self,
         )?;
-        collect(&authority, actor, configuration)
-            .map_err(|_| ServingDiagnosticsFailure::Unavailable)
+        collect(&authority, actor, configuration).map_err(|_| {
+            self.owner_inspection_unavailable(crate::OwnerInspectionUnavailableReason::Collector)
+        })
     }
 
     /// Runs a bounded diagnostic collection through the Fenced inspection
@@ -570,6 +594,7 @@ impl HealthState {
                     credential,
                     RequestedIntent::SystemAdministration,
                     CompatibilityHints::none(),
+                    self,
                 )
                 .map_err(|failure| match failure {
                     ServingDiagnosticsFailure::AuthenticationRejected => {
@@ -595,6 +620,7 @@ impl HealthState {
                 credential,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
+                self,
             )
             .map_err(|failure| match failure {
                 ServingDiagnosticsFailure::AuthenticationRejected => {
@@ -851,6 +877,7 @@ impl HealthState {
                     .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
+                self,
             )
             .map_err(|failure| match failure {
                 ServingDiagnosticsFailure::AuthenticationRejected => {

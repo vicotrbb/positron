@@ -622,6 +622,50 @@ class NativeAdapter(unittest.TestCase):
             return subprocess.CompletedProcess([], 0, body, b"")
         with self.assertRaises(AssertionError): reload_projected_identity(old_event, "native-positron-0", lambda _timeout: b"retained", b"retained", b"reload-test-administrator", timeout=0.01, rejection_baseline=1)
 
+    def test_reload_refusal_retains_primary_error_and_only_closed_owner_diagnostics(self):
+        calls = []
+        primary = RuntimeError("original reload refusal")
+        def kube(*args, **kwargs):
+            calls.append(args)
+            if args[0] != "logs": raise primary
+            self.assertIn("--tail=200", args)
+            self.assertIn("--limit-bytes=32768", args)
+            body = b'private raw log\n{"event":"owner_inspection_unavailable","reason":"resource_admission","secret":"hidden"}\n{"event":"owner_inspection_unavailable","reason":"private reason"}\n'
+            return subprocess.CompletedProcess([], 0, body, b"")
+        with self.assertRaisesRegex(RuntimeError, "original reload refusal") as caught:
+            reload_projected_identity(kube, "pod", lambda _timeout: b"old", b"new", b"administrator", timeout=2)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(getattr(primary, "__notes__", []), ["native owner inspection unavailable: resource_admission"])
+        self.assertEqual([args[0] for args in calls], ["exec", "logs"])
+
+    def test_reload_diagnostic_capture_failure_preserves_original_refusal(self):
+        calls = []
+        primary = RuntimeError("original reload refusal")
+        def kube(*args, **kwargs):
+            calls.append(args)
+            if args[0] == "logs": raise RuntimeError("private capture error")
+            raise primary
+        with self.assertRaisesRegex(RuntimeError, "original reload refusal") as caught:
+            reload_projected_identity(kube, "pod", lambda _timeout: b"old", b"new", b"administrator", timeout=2)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(getattr(primary, "__notes__", []), ["native owner diagnostic unavailable"])
+        self.assertEqual([args[0] for args in calls], ["exec", "logs"])
+
+    def test_reload_failure_observes_delayed_diagnostic_without_replaying_request(self):
+        calls = []
+        primary = RuntimeError("original reload refusal")
+        def kube(*args, **kwargs):
+            calls.append(args)
+            if args[0] == "exec": raise primary
+            self.assertLessEqual(kwargs["timeout"], 1)
+            body = b'' if len(calls) == 2 else b'{"event":"owner_inspection_unavailable","reason":"resource_admission"}\n'
+            return subprocess.CompletedProcess([], 0, body, b"")
+        with self.assertRaisesRegex(RuntimeError, "original reload refusal") as caught:
+            reload_projected_identity(kube, "pod", lambda _timeout: b"old", b"new", b"administrator", timeout=2)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(getattr(primary, "__notes__", []), ["native owner inspection unavailable: resource_admission"])
+        self.assertEqual([args[0] for args in calls], ["exec", "logs", "logs"])
+
     def test_retained_claims_allow_only_exact_fresh_target_names_and_preserve_every_original_uid(self):
         before = {"native-data": "source-data-id", "native-secrets": "source-key-id"}
         after = dict(before, **{"restored-data": "fresh-data-id", "restored-secrets": "fresh-key-id"})

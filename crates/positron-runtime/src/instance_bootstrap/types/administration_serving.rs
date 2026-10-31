@@ -154,10 +154,17 @@ impl InitializedInstance {
         credential: positron_governance::PresentedCredential,
         intent: positron_governance::RequestedIntent,
         hints: positron_governance::CompatibilityHints,
+        health: &crate::HealthState,
     ) -> Result<positron_governance::AuthorizedContext, crate::ServingDiagnosticsFailure> {
-        let identity = self
-            .durable_identity()
-            .map_err(|_| crate::ServingDiagnosticsFailure::Unavailable)?;
+        let identity = self.durable_identity().map_err(|failure| {
+            use crate::OwnerInspectionUnavailableReason as Reason;
+            health.owner_inspection_unavailable(match failure.code() {
+                BootstrapFailureCode::KeyCustodyUnavailable => Reason::KeyCustody,
+                BootstrapFailureCode::ResourceUnavailable => Reason::ResourceAdmission,
+                BootstrapFailureCode::CatalogUnavailable => Reason::Catalog,
+                _ => Reason::Identity,
+            })
+        })?;
         let mut time_unavailable = false;
         identity
             .attribute_with_expiry_time(&self.key, credential, intent, hints, || {
@@ -170,7 +177,9 @@ impl InitializedInstance {
             })
             .map_err(|_| {
                 if time_unavailable {
-                    crate::ServingDiagnosticsFailure::Unavailable
+                    health.owner_inspection_unavailable(
+                        crate::OwnerInspectionUnavailableReason::SecurityTime,
+                    )
                 } else {
                     crate::ServingDiagnosticsFailure::AuthenticationRejected
                 }

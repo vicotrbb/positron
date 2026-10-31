@@ -82,7 +82,8 @@ pub use native_host::{
 pub use native_host::{fuzz_connection_admission, fuzz_h2_observer};
 pub use operational::{
     IntegrityScrubFailureStage, MaintenanceWorkerOperation, OperationalDiagnostic,
-    OperationalReloadRejection, render_operational_diagnostic, write_operational_diagnostic,
+    OperationalReloadRejection, OwnerInspectionUnavailableReason, render_operational_diagnostic,
+    write_operational_diagnostic,
 };
 pub use process::{
     AcceptedUpgrade, ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole,
