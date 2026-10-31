@@ -13,6 +13,63 @@ from test_kubernetes import assert_retained_claims, owned_storage_class, inspect
 
 
 class NativeAdapter(unittest.TestCase):
+    def test_reload_owner_refusal_admits_a_fresh_attempt_with_only_remaining_time(self):
+        clock, calls = [0], []
+        message = b"positron: configuration reload request unavailable; application not confirmed; reason=owner_unavailable\ncommand terminated with exit code 2\n"
+        def kube(*args, **kwargs):
+            calls.append((args, kwargs))
+            result = subprocess.CompletedProcess([], 2, b"", message) if len(calls) == 1 else subprocess.CompletedProcess([], 0, b"status=reload_requested\n", b"")
+            if kwargs.get("check", True): result.check_returncode()
+            return result
+        with patch("time.monotonic", side_effect=lambda: clock[0]), patch("time.sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+            reload_projected_identity(kube, "pod", lambda _timeout: b"new", b"new", b"administrator", timeout=2)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(("-c", "positron") in list(zip(args, args[1:])) for args, _ in calls))
+        self.assertEqual([options["timeout"] for _, options in calls], [2, 1])
+        self.assertEqual(clock[0], 1)
+
+    def test_reload_repeated_owner_refusal_never_extends_the_original_deadline(self):
+        clock, calls = [0], []
+        def kube(*args, **kwargs):
+            calls.append((args, kwargs))
+            result = subprocess.CompletedProcess([], 2, b"", b"positron: configuration reload request unavailable; application not confirmed; reason=owner_unavailable\n")
+            if kwargs.get("check", True): result.check_returncode()
+            return result
+        with patch("time.monotonic", side_effect=lambda: clock[0]), patch("time.sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)), self.assertRaisesRegex(AssertionError, "expected public outcome"):
+            reload_projected_identity(kube, "pod", lambda _timeout: b"new", b"new", b"administrator", timeout=2.5)
+        self.assertEqual([options["timeout"] for _, options in calls], [2.5, 1.5, 0.5])
+        self.assertEqual(clock[0], 2.5)
+
+    def test_reload_ambiguous_and_contaminated_outcomes_never_admit_another_request(self):
+        prefix = b"positron: configuration reload request unavailable; application not confirmed; reason="
+        refused = prefix + b"owner_unavailable\n"
+        cases = [(2, b"", prefix + reason + b"\n") for reason in [b"timeout", b"endpoint_unavailable", b"peer_closed", b"incomplete_response", b"authentication_rejected", b"unexpected_status", b"invalid_response"]]
+        cases += [(1, b"", refused), (2, b"partial", refused), (2, b"", refused[:-2]),
+                  (2, b"", b"untrusted prefix " + refused), (2, b"", refused + b"unknown trailer\n")]
+        for code, output, error in cases:
+            calls = []
+            def kube(*args, **kwargs):
+                calls.append(args)
+                if args[0] == "logs": return subprocess.CompletedProcess([], 0, b'{"event":"owner_inspection_unavailable","reason":"resource_admission"}\n', b"")
+                result = subprocess.CompletedProcess([], code, output, error)
+                if kwargs.get("check", True): result.check_returncode()
+                return result
+            with self.subTest(code=code, error=error), self.assertRaises(subprocess.CalledProcessError):
+                reload_projected_identity(kube, "pod", lambda _timeout: b"new", b"new", b"administrator", timeout=2)
+            self.assertEqual(sum(args[0] == "exec" for args in calls), 1)
+
+    def test_reload_transport_failures_preserve_the_original_error_without_replay(self):
+        for failure in [subprocess.TimeoutExpired(["kubectl"], 1), TimeoutError("request timeout"), ConnectionResetError("peer closed")]:
+            calls = []
+            def kube(*args, **kwargs):
+                calls.append(args)
+                if args[0] == "logs": return subprocess.CompletedProcess([], 0, b'{"event":"owner_inspection_unavailable","reason":"resource_admission"}\n', b"")
+                raise failure
+            with self.subTest(kind=type(failure)), self.assertRaises(type(failure)) as caught:
+                reload_projected_identity(kube, "pod", lambda _timeout: b"new", b"new", b"administrator", timeout=2)
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(sum(args[0] == "exec" for args in calls), 1)
+
     def test_initial_ingest_failure_diagnostics_emit_only_closed_transport_fields(self):
         calls = []
         def kube(*args, **kwargs):

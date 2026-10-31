@@ -394,13 +394,18 @@ def listener_rejection_count(kube, pod, timeout=10):
 
 def reload_projected_identity(kube, pod, identity, expected, administrator, timeout=180, rejection_baseline=None):
     deadline = time.monotonic() + timeout
+    owner_refusal = b"positron: configuration reload request unavailable; application not confirmed; reason=owner_unavailable"
     def remaining():
         budget = deadline - time.monotonic()
         if budget <= 0: raise AssertionError("native TLS generation did not establish the expected public outcome")
         return budget
     while True:
         try:
-            result = kube("exec", "-i", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock", "--credential-stdin", data=administrator, timeout=min(10, remaining()))
+            result = kube("exec", "-i", "-c", "positron", pod, "--", "/usr/bin/positron", "config", "reload", "--control-path", "/run/positron/control/control.sock", "--credential-stdin", data=administrator, timeout=min(10, remaining()), check=False)
+            if result.returncode == 2 and result.stdout == b"" and result.stderr.splitlines() in [[owner_refusal], [owner_refusal, b"command terminated with exit code 2"]]:
+                time.sleep(min(1, remaining()))
+                continue
+            result.check_returncode()
         except Exception as failure:
             try:
                 observation_deadline = min(deadline, time.monotonic() + 1)
