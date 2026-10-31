@@ -52,6 +52,12 @@ pub(crate) fn prepare() -> Result<Candidate> {
     prepare_in(&workspace)
 }
 pub(super) fn prepare_in(workspace: &Path) -> Result<Candidate> {
+    prepare_in_at(
+        workspace,
+        &Path::new(env!("CARGO_TARGET_TMPDIR")).join("native-upgrade-fixture"),
+    )
+}
+pub(super) fn prepare_in_at(workspace: &Path, build_root: &Path) -> Result<Candidate> {
     let commit = String::from_utf8(
         checked(
             Command::new("git")
@@ -63,9 +69,7 @@ pub(super) fn prepare_in(workspace: &Path) -> Result<Candidate> {
     )?
     .trim()
     .to_owned();
-    let root = workspace
-        .join("target/native-upgrade-fixture/native-release-v1")
-        .join(&commit);
+    let root = build_root.join("native-release-v1").join(&commit);
     let binary = root.join("target/release/positron");
     let marker = root.join("candidate-commit");
     if binary.is_file() && marker.is_file() {

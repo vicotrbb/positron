@@ -14,6 +14,8 @@ const LOCAL_PROVIDER: u16 = 1;
 const AES_256_KWP_ALGORITHM: u16 = 1;
 const ARTIFACT_HEADER_BYTES: usize = 247;
 const FRAME_OVERHEAD_BYTES: usize = 68;
+pub(crate) const BACKUP_CAPTURE_OVERHEAD_BYTES: usize =
+    ARTIFACT_HEADER_BYTES + FRAME_OVERHEAD_BYTES;
 const WRAPPED_PAYLOAD_BYTES: usize = 136;
 const DATA_KEY_EPOCH: u64 = 1;
 const ENVELOPE_CONTEXT_DOMAIN: &[u8] = b"positron-catalog-key-envelope-context-v1";

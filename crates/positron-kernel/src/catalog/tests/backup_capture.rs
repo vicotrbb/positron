@@ -1,6 +1,11 @@
 use super::support::establish_catalog_authority_with_pool_units;
 use crate::*;
 
+#[path = "backup_verification_continuation.rs"]
+mod verification_continuation;
+#[path = "backup_verification_continuation_bounds.rs"]
+mod verification_continuation_bounds;
+
 #[test]
 fn backup_capture_is_encrypted_bound_to_one_generation_and_survives_reopen()
 -> Result<(), Box<dyn std::error::Error>> {

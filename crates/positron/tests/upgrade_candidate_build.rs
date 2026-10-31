@@ -9,6 +9,13 @@ use std::{fs, path::PathBuf, process::Command};
 mod candidate;
 use candidate::{checked, prepare_in};
 
+#[path = "support/native_binary.rs"]
+mod native_binary;
+// Canonical entrypoint is exercised by the installed archive lifecycle suite.
+#[allow(dead_code)]
+#[path = "support/archive_binary.rs"]
+mod archive;
+
 #[path = "support/upgrade_candidate_tests.rs"]
 mod tests;
 

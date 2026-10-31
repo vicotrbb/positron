@@ -1338,6 +1338,31 @@ than accepting an older cursor as authority. Successful exact Registry CAS
 advances the cursor only after authoritative reconciliation. Unknown outcomes
 retain the prior proof and require reconciliation.
 
+Independent snapshot verification retains native progress across cold bounded
+turns through the same Maintenance owner. Its optional `BKVREF01` checkpoint
+extension identifies one immutable encrypted continuation in the existing private
+Backup Capture directory. The continuation binds the instance, verification
+operation and intent, source capture and request, signed manifest and index,
+Registry proof, sequence, and predecessor. `POSBVN01` carries either the verified
+metadata prefix or its finished Catalog snapshot, plus bounded semantic cursors
+and tenant sets. It never contains plaintext keys, credentials, or provider
+capabilities. Existing remote-only checkpoints remain valid; a malformed new
+reference or missing, corrupt, or substituted continuation fails closed.
+
+The Kernel synchronizes a candidate before Maintenance publishes its exact
+reference. A failed checkpoint leaves its predecessor readable. Repeated warm
+steps can share a publication; a bounded turn publishes recoverable native
+progress before discarding volatile work. Cold resume reauthenticates the capture
+inventory through the Repository verifier as well as restoring native state.
+Reservations cover codec and encryption copies, inventory materialization, and
+both predecessor and candidate, and do not shrink before obsolete files are
+reclaimed. Cleanup clears the reference while the task is Running, removes local
+artifacts in bounded batches, and then completes or cancels the task. Retained
+artifacts and referenced terminal records continue to fence root-key retirement.
+Recovered-key progress is evidence bound to the encrypted continuation and exact
+manifest; final readiness still verifies current custody and the live provider
+route under ADR-0032 and ADR-0037.
+
 Repository control work requires the existing Maintenance resource grant before
 reading or decoding large objects. Control admission includes native provider
 resources, retained capture state, encoded controls, and decoded inventories.

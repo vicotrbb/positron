@@ -10,7 +10,10 @@ pub use preparation::{BackupCaptureCustody, BackupCapturePreparation};
 pub use resources::BackupCaptureResourceEstimate;
 use rustix::fs::{self as unix_fs, Mode, OFlags};
 use std::io::{Read, Seek, SeekFrom};
-pub use verification::BackupCaptureVerification;
+pub use verification::{
+    BackupCaptureVerification, BackupVerificationBinding, BackupVerificationNativeState,
+    BackupVerificationProgress, BackupVerificationReference,
+};
 const MAX_CAPTURE_FILES: usize = 65_536;
 const MAX_CAPTURE_INDEX_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -538,6 +541,7 @@ fn fail(code: CatalogFailureCode) -> CatalogFailure {
 
 #[cfg(fuzzing)]
 pub(super) fn fuzz_capture_verification(catalog: &Catalog<'_>, data: &[u8]) {
+    verification::fuzz::exercise(catalog, data);
     let operation = [0x91; 16];
     let request = [0x92; 32];
     let epoch = FormatEpoch::CATALOG_V2;

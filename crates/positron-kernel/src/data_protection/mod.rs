@@ -23,6 +23,7 @@ mod key_envelope;
 pub(crate) mod key_provider;
 mod local_key;
 pub(crate) use local_key::LocalSegmentKeySource;
+pub(crate) use local_key::has_private_directory_acl;
 mod service;
 
 #[cfg(test)]

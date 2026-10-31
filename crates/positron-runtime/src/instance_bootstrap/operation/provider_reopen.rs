@@ -42,7 +42,17 @@ pub(in crate::instance_bootstrap) fn reopen(
         positron_kernel::RootRewrapSession::admit_provider(&authority).map_err(key_failure)?;
     let key = session
         .open_provider_recovery(&access, configuration, paths.key_cache_lease)
-        .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::KeyEnvelopeMismatch))?;
+        .map_err(|failure| {
+            use positron_kernel::key_provider::ProviderFailureDisposition;
+            BootstrapFailure::new(match failure.disposition() {
+                ProviderFailureDisposition::Retryable => {
+                    BootstrapFailureCode::KeyCustodyUnavailable
+                },
+                ProviderFailureDisposition::Permanent | ProviderFailureDisposition::Ambiguous => {
+                    BootstrapFailureCode::KeyEnvelopeMismatch
+                },
+            })
+        })?;
     let encoded = storage::read(&access, BootstrapArtifact::Initialized)?;
     let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &encoded)?;
     require_key_identity(&record, key.bootstrap_identity())?;

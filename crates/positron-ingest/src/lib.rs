@@ -20,6 +20,8 @@ pub use ingest::{
 };
 pub use loki_push::{AuthenticatedLokiPushRequest, LokiPushReceiver, LokiPushRequestEncoding};
 pub use otlp::OtlpRequestEncoding;
+#[cfg(fuzzing)]
+pub use otlp_logs::fuzz_otlp_logs_json;
 pub use otlp_logs::{
     AuthenticatedOtlpLogsRequest, NativeLogAdmissionGroup, NativeLogAdmissionGroups,
     NativeLogBatch, OtlpLogsReceiver, OtlpLogsRequestEncoding, ReceiveFailure,

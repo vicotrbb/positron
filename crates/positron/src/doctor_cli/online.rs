@@ -92,28 +92,32 @@ fn operations_client(
                 .as_deref()
                 .ok_or(DoctorFailure::Arguments)?,
         )?;
-        builder = builder
-            .add_root_certificate(
-                reqwest::Certificate::from_pem(&pem).map_err(|_| DoctorFailure::Arguments)?,
-            )
-            .resolve(name, endpoint);
+        for certificate in trust_certificates(&pem)? {
+            builder = builder.add_root_certificate(certificate);
+        }
+        builder = builder.resolve(name, endpoint);
         format!("https://{name}:{}", endpoint.port())
     };
     Ok((builder, target))
 }
 
-pub(super) fn ready(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {
+pub(super) fn health(options: &Options) -> Result<(ExitCode, String), DoctorFailure> {
+    let state = if matches!(options.mode, Mode::Live) {
+        "live"
+    } else {
+        "ready"
+    };
     let (builder, target) = operations_client(options)?;
     let response = builder
         .build()
         .map_err(|_| DoctorFailure::EndpointUnavailable)?
-        .get(format!("{target}/health/ready"))
+        .get(format!("{target}/health/{state}"))
         .send()
         .map_err(|_| DoctorFailure::EndpointUnavailable)?;
     if response.status() != reqwest::StatusCode::OK {
         return Err(DoctorFailure::EndpointUnavailable);
     }
-    Ok((ExitCode::SUCCESS, "status=ready\n".to_owned()))
+    Ok((ExitCode::SUCCESS, format!("status={state}\n")))
 }
 
 fn read_trust_file(path: &std::path::Path) -> Result<Vec<u8>, DoctorFailure> {
@@ -150,63 +154,12 @@ fn read_trust_file(path: &std::path::Path) -> Result<Vec<u8>, DoctorFailure> {
 
 #[cfg(unix)]
 fn control_status(path: &Path, bearer: &str) -> Result<serde_json::Value, DoctorFailure> {
-    let deadline = std::time::Instant::now()
-        .checked_add(Duration::from_secs(5))
-        .ok_or(DoctorFailure::EndpointUnavailable)?;
-    let stream = crate::control_socket::connect_owner_control(path, Duration::from_secs(5))
-        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
-    stream
-        .set_nonblocking(true)
-        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
     let request = format!(
         "GET /control/doctor HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {bearer}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
-    let response = runtime
-        .block_on(async {
-            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-                let stream = tokio::net::UnixStream::from_std(stream)?;
-                let mut pending = request.as_bytes();
-                while !pending.is_empty() {
-                    stream.writable().await?;
-                    match stream.try_write(pending) {
-                        Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
-                        Ok(written) => {
-                            pending = pending.get(written..).ok_or_else(|| {
-                                std::io::Error::from(std::io::ErrorKind::InvalidData)
-                            })?;
-                        },
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
-                        Err(error) => return Err(error),
-                    }
-                }
-                let mut response = Vec::with_capacity(8_192);
-                let mut buffer = [0_u8; 1024];
-                loop {
-                    stream.readable().await?;
-                    match stream.try_read(&mut buffer) {
-                        Ok(0) => return Ok(response),
-                        Ok(read) => {
-                            response.extend_from_slice(buffer.get(..read).ok_or_else(|| {
-                                std::io::Error::from(std::io::ErrorKind::InvalidData)
-                            })?);
-                            if response.len() > 8_192 {
-                                return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
-                            }
-                        },
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
-                        Err(error) => return Err(error),
-                    }
-                }
-            })
-            .await
-        })
-        .map_err(|_| DoctorFailure::EndpointUnavailable)?
-        .map_err(|_| DoctorFailure::EndpointUnavailable)?;
+    let response =
+        crate::control_socket::owner_control_request(path, request.as_bytes(), 8192, |_| false)
+            .map_err(|_| DoctorFailure::EndpointUnavailable)?;
     let separator = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -224,4 +177,74 @@ fn control_status(path: &Path, bearer: &str) -> Result<serde_json::Value, Doctor
 #[cfg(not(unix))]
 fn control_status(_path: &Path, _bearer: &str) -> Result<serde_json::Value, DoctorFailure> {
     Err(DoctorFailure::EndpointUnavailable)
+}
+
+fn trust_certificates(pem: &[u8]) -> Result<Vec<reqwest::Certificate>, DoctorFailure> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    if pem.len() > MAX_TRUST_FILE_BYTES as usize {
+        return Err(DoctorFailure::Arguments);
+    }
+    let mut remaining = std::str::from_utf8(pem)
+        .map_err(|_| DoctorFailure::Arguments)?
+        .trim();
+    let mut certificates = Vec::new();
+    while !remaining.is_empty() {
+        if certificates.len() >= 64 || !remaining.starts_with(BEGIN) {
+            return Err(DoctorFailure::Arguments);
+        }
+        let end = remaining
+            .find(END)
+            .and_then(|offset| offset.checked_add(END.len()))
+            .ok_or(DoctorFailure::Arguments)?;
+        let certificate = remaining.get(..end).ok_or(DoctorFailure::Arguments)?;
+        let parsed = reqwest::Certificate::from_pem_bundle(certificate.as_bytes())
+            .map_err(|_| DoctorFailure::Arguments)?;
+        if parsed.len() != 1 {
+            return Err(DoctorFailure::Arguments);
+        }
+        certificates.extend(parsed);
+        remaining = remaining.get(end..).ok_or(DoctorFailure::Arguments)?.trim();
+    }
+    if certificates.is_empty() {
+        return Err(DoctorFailure::Arguments);
+    }
+    Ok(certificates)
+}
+
+#[cfg(fuzzing)]
+pub(super) fn fuzz_trust_certificates(bytes: &[u8]) {
+    let _parsed = trust_certificates(bytes);
+}
+
+#[cfg(test)]
+mod trust_bundle_tests {
+    use super::trust_certificates;
+    const CERT: &[u8] = include_bytes!(
+        "../../../positron-runtime/tests/native_transport/fixtures/api-test-cert.pem"
+    );
+    #[test]
+    fn trust_bundle_preserves_every_overlap_authority_and_rejects_partial_invalid_material() {
+        let overlap = [CERT, b"\n", CERT].concat();
+        assert_eq!(trust_certificates(&overlap).unwrap().len(), 2);
+        for invalid in [
+            Vec::new(),
+            [CERT, b"garbage"].concat(),
+            [
+                CERT,
+                b"-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n",
+            ]
+            .concat(),
+            CERT.repeat(65),
+        ] {
+            let accepted = trust_certificates(&invalid).is_ok_and(|certificates| {
+                let mut builder = reqwest::blocking::Client::builder();
+                for certificate in certificates {
+                    builder = builder.add_root_certificate(certificate);
+                }
+                builder.build().is_ok()
+            });
+            assert!(!accepted);
+        }
+    }
 }

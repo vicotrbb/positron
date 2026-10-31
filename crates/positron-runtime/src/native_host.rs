@@ -791,6 +791,9 @@ struct Admission {
     role: ListenerRole,
     listener: NativeListener,
     accepting: AtomicBool,
+    #[cfg(unix)]
+    // Serialize control dequeue and lease acquisition with generation retirement.
+    control_acceptance: Mutex<()>,
     accepted_connections: AtomicUsize,
     control_path: Option<Arc<ControlPathLease>>,
     transport: Option<TransportProfile>,
@@ -800,6 +803,8 @@ struct Admission {
     http2_profile: Option<Http2Profile>,
     cors_allowed_origins: Vec<String>,
     control_diagnostics: Option<Arc<dyn ControlDiagnosticsHandler>>,
+    #[cfg(all(test, unix))]
+    accept_barrier: Mutex<Option<admission_race_tests::AcceptBarrier>>,
 }
 
 type AdmissionRegistry = Arc<Mutex<Vec<(ListenerRole, Arc<Admission>)>>>;
@@ -824,7 +829,40 @@ impl Drop for ControlPathLease {
 }
 
 impl Admission {
+    #[cfg(all(test, unix))]
+    fn pause_accept_for_test(
+        &self,
+        point: admission_race_tests::AcceptPoint,
+    ) -> Result<(), TaskFailure> {
+        let barrier = {
+            let mut slot = self
+                .accept_barrier
+                .lock()
+                .map_err(|_| TaskFailure::JoinUnavailable)?;
+            if slot.as_ref().is_some_and(|barrier| barrier.point == point) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some(barrier) = barrier {
+            barrier
+                .entered
+                .send(())
+                .map_err(|_| TaskFailure::JoinUnavailable)?;
+            barrier
+                .release
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| TaskFailure::JoinUnavailable)?;
+        }
+        Ok(())
+    }
     fn stop(&self) {
+        #[cfg(unix)]
+        let _control_acceptance = match self.control_acceptance.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         self.accepting.store(false, Ordering::Release);
     }
 
@@ -1110,6 +1148,8 @@ impl ListenerFactory for NativeHost {
             role,
             listener,
             accepting: AtomicBool::new(self.staged_admissions.is_none()),
+            #[cfg(unix)]
+            control_acceptance: std::sync::Mutex::new(()),
             accepted_connections: AtomicUsize::new(0),
             control_path,
             transport: self.bindings.transport(role),
@@ -1119,6 +1159,8 @@ impl ListenerFactory for NativeHost {
             http2_profile: self.bindings.http2_profile(role),
             cors_allowed_origins: self.bindings.cors_allowed_origins(role),
             control_diagnostics: self.control_diagnostics.as_ref().map(Arc::clone),
+            #[cfg(all(test, unix))]
+            accept_barrier: Mutex::new(None),
         });
         self.admissions
             .lock()
@@ -1888,6 +1930,8 @@ mod listener_generation_tests {
             role: ListenerRole::OtlpGrpc,
             listener: NativeListener::Tcp(listener),
             accepting: AtomicBool::new(false),
+            #[cfg(unix)]
+            control_acceptance: std::sync::Mutex::new(()),
             accepted_connections: std::sync::atomic::AtomicUsize::new(0),
             control_path: None,
             transport: Some(TransportProfile::plaintext_opt_out()),
@@ -1897,6 +1941,8 @@ mod listener_generation_tests {
             http2_profile: None,
             cors_allowed_origins: Vec::new(),
             control_diagnostics: None,
+            #[cfg(unix)]
+            accept_barrier: std::sync::Mutex::new(None),
         });
         let gate = Arc::new(ActivationGate::new());
         let cancellation = crate::TaskCancellation::new();
@@ -1925,6 +1971,8 @@ mod listener_generation_tests {
             role: ListenerRole::Api,
             listener: NativeListener::Tcp(listener),
             accepting: AtomicBool::new(true),
+            #[cfg(unix)]
+            control_acceptance: std::sync::Mutex::new(()),
             accepted_connections: std::sync::atomic::AtomicUsize::new(0),
             control_path: None,
             transport: Some(TransportProfile::plaintext_opt_out()),
@@ -1934,6 +1982,8 @@ mod listener_generation_tests {
             http2_profile: None,
             cors_allowed_origins: Vec::new(),
             control_diagnostics: None,
+            #[cfg(unix)]
+            accept_barrier: std::sync::Mutex::new(None),
         };
         let cancellation = crate::TaskCancellation::new();
         admission.stop();
@@ -2088,47 +2138,69 @@ fn serve_http(
         let accepted = match &admission.listener {
             NativeListener::Tcp(listener) => listener.accept(),
             #[cfg(unix)]
-            NativeListener::Unix(listener) => match listener.accept() {
-                Ok((mut stream, _)) => {
-                    if stream.set_nonblocking(false).is_err() {
-                        continue;
-                    }
-                    if !can_serve_accepted_connection(&admission, &cancellation) {
-                        continue;
-                    }
-                    let Some(lease) = admission.accept_connection(IpAddr::V4(Ipv4Addr::LOCALHOST))
-                    else {
-                        continue;
-                    };
-                    let disposition =
-                        control_connection_disposition(native_http::serve_connection(
-                            &mut stream,
-                            ListenerRole::Control,
-                            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                            None,
-                            &health,
-                            native_http::RouteDependencies::new(
-                                services.as_ref(),
-                                admission.control_diagnostics.as_deref(),
-                            ),
-                            admission.connection_protection(),
-                        ));
-                    match disposition {
-                        ControlConnectionDisposition::Completed => drop(lease),
-                        // A client can close after the request is accepted and
-                        // before its response is written. That peer-local
-                        // outcome must release this generation's admission
-                        // lease and leave the listener available to its next
-                        // authenticated request.
-                        ControlConnectionDisposition::PeerUnavailable => drop(lease),
-                    }
+            NativeListener::Unix(listener) => {
+                #[cfg(test)]
+                admission.pause_accept_for_test(admission_race_tests::AcceptPoint::BeforeAccept)?;
+                let control_acceptance = admission
+                    .control_acceptance
+                    .lock()
+                    .map_err(|_| TaskFailure::JoinUnavailable)?;
+                if !can_serve_accepted_connection(&admission, &cancellation) {
                     continue;
-                },
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
-                },
-                Err(_) => break,
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        #[cfg(test)]
+                        admission.pause_accept_for_test(
+                            admission_race_tests::AcceptPoint::AfterAccept,
+                        )?;
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
+                        if !can_serve_accepted_connection(&admission, &cancellation) {
+                            continue;
+                        }
+                        let Some(lease) =
+                            admission.accept_connection(IpAddr::V4(Ipv4Addr::LOCALHOST))
+                        else {
+                            continue;
+                        };
+                        drop(control_acceptance);
+                        let disposition =
+                            control_connection_disposition(native_http::serve_connection(
+                                &mut stream,
+                                ListenerRole::Control,
+                                SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+                                None,
+                                &health,
+                                native_http::RouteDependencies::new(
+                                    services.as_ref(),
+                                    admission.control_diagnostics.as_deref(),
+                                ),
+                                admission.connection_protection(),
+                            ));
+                        match disposition {
+                            ControlConnectionDisposition::Completed => drop(lease),
+                            // A client can close after the request is accepted and
+                            // before its response is written. That peer-local
+                            // outcome must release this generation's admission
+                            // lease and leave the listener available to its next
+                            // authenticated request.
+                            ControlConnectionDisposition::PeerUnavailable => drop(lease),
+                        }
+                        continue;
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        drop(control_acceptance);
+                        #[cfg(test)]
+                        admission.pause_accept_for_test(
+                            admission_race_tests::AcceptPoint::BeforeIdleWait,
+                        )?;
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    },
+                    Err(_) => break,
+                }
             },
         };
         match accepted {
@@ -2204,6 +2276,13 @@ fn serve_http(
                                             &mut tls,
                                             connection_protection.tls_handshake_deadline(),
                                         )
+                                        .inspect_err(|_| {
+                                            connection_health.operational_telemetry().record(
+                                                crate::operational::OperationalEvent::Diagnostic(
+                                                    crate::OperationalDiagnostic::TlsHandshakeFailure(role),
+                                                ),
+                                            );
+                                        })
                                         .is_ok()
                                     };
                                     if handshaken {
@@ -2373,6 +2452,10 @@ fn wait_for_rate_window(admission: &Admission, cancellation: &TaskCancellation) 
         std::thread::sleep(remaining.min(Duration::from_millis(5)));
     }
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+mod admission_race_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2568,4 +2651,9 @@ mod tests {
         seed.extend_from_slice(&[0, 0, 1, 9, 4, 0, 0, 0, 1, b'b']);
         assert_eq!(super::fuzz_h2_observer(&seed), seed.len());
     }
+}
+
+#[cfg(fuzzing)]
+pub(crate) fn fuzz_bootstrap_control_request(bytes: &[u8]) {
+    native_http::fuzz_bootstrap_control_request(bytes);
 }

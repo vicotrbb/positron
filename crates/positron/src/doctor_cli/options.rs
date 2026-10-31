@@ -5,6 +5,7 @@ pub(super) enum Mode {
     Offline,
     Online,
     Ready,
+    Live,
 }
 pub(super) struct Options {
     pub(super) mode: Mode,
@@ -34,6 +35,7 @@ impl Options {
                 "--offline" if mode.is_none() => mode = Some(Mode::Offline),
                 "--online" if mode.is_none() => mode = Some(Mode::Online),
                 "--ready" if mode.is_none() => mode = Some(Mode::Ready),
+                "--live" if mode.is_none() => mode = Some(Mode::Live),
                 "--config" if config.is_none() => {
                     config = Some(PathBuf::from(
                         arguments.next().ok_or(DoctorFailure::Arguments)?,
@@ -93,7 +95,7 @@ impl Options {
             {
                 Err(DoctorFailure::Arguments)
             },
-            Mode::Ready
+            Mode::Ready | Mode::Live
                 if config.is_some()
                     || !overrides.is_empty()
                     || credential_stdin
@@ -102,7 +104,7 @@ impl Options {
             {
                 Err(DoctorFailure::Arguments)
             },
-            Mode::Offline | Mode::Online | Mode::Ready => Ok(Self {
+            Mode::Offline | Mode::Online | Mode::Ready | Mode::Live => Ok(Self {
                 mode,
                 config,
                 overrides,

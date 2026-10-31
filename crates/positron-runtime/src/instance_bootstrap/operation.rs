@@ -484,9 +484,41 @@ pub(super) fn claim(paths: &BootstrapPaths) -> Result<BootstrapClaim, BootstrapF
         ));
     }
     let key = access.open_key().map_err(key_failure)?;
-    let initialized = storage::read(&access, BootstrapArtifact::Initialized)?;
-    let record = decode_record(&key, BootstrapObjectPurpose::Initialized, &initialized)?;
-    let encrypted_claim = storage::read(&access, BootstrapArtifact::Claim)?;
+    claim_access(&access, &key)
+}
+
+impl InitializedInstance {
+    /// Consume the initial credentials through the live, already-held instance owner.
+    pub fn claim_bootstrap(&self) -> Result<BootstrapClaim, BootstrapFailure> {
+        let _gate = self
+            .bootstrap_claim_gate
+            .try_lock()
+            .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ClaimUnavailable))?;
+        let access = self
+            .bootstrap_storage
+            .inspect()
+            .map_err(storage::storage_failure)?;
+        let claim = claim_access(&access, &self.key)?;
+        self.claim_available
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(claim)
+    }
+}
+
+fn claim_access(
+    access: &positron_kernel::BootstrapArtifactAccess,
+    key: &BootstrapKeyCustody,
+) -> Result<BootstrapClaim, BootstrapFailure> {
+    if storage::classify_with(access)? != BootstrapState::Initialized
+        || !storage::exists(access, BootstrapArtifact::Claim)?
+    {
+        return Err(BootstrapFailure::new(
+            BootstrapFailureCode::ClaimUnavailable,
+        ));
+    }
+    let initialized = storage::read(access, BootstrapArtifact::Initialized)?;
+    let record = decode_record(key, BootstrapObjectPurpose::Initialized, &initialized)?;
+    let encrypted_claim = storage::read(access, BootstrapArtifact::Claim)?;
     let plaintext = key
         .open_object(
             record.instance,
@@ -513,7 +545,7 @@ pub(super) fn claim(paths: &BootstrapPaths) -> Result<BootstrapClaim, BootstrapF
     let query = decoded
         .query
         .map(|(principal, secret)| (principal, Zeroizing::new(format_secret(&secret))));
-    storage::remove(&access, BootstrapArtifact::Claim)
+    storage::remove(access, BootstrapArtifact::Claim)
         .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ClaimDestructionFailed))?;
     Ok(BootstrapClaim {
         principal,

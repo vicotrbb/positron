@@ -82,7 +82,8 @@ pub use native_host::{
 pub use native_host::{fuzz_connection_admission, fuzz_h2_observer};
 pub use operational::{
     IntegrityScrubFailureStage, MaintenanceWorkerOperation, OperationalDiagnostic,
-    OperationalReloadRejection, render_operational_diagnostic, write_operational_diagnostic,
+    OperationalReloadRejection, OwnerInspectionUnavailableReason, render_operational_diagnostic,
+    write_operational_diagnostic,
 };
 pub use process::{
     AcceptedUpgrade, ApplicationRuntime, CleanupFailure, CleanupPrimary, CleanupRole,
@@ -161,4 +162,11 @@ mod key_provider_migration_fuzz;
 #[doc(hidden)]
 pub fn fuzz_operational_output_frame(bytes: &[u8]) -> Option<usize> {
     native_output::fuzz_frame(bytes)
+}
+
+/// Exercise native Control framing and claim routing without an instance owner.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_bootstrap_control_request(bytes: &[u8]) {
+    native_host::fuzz_bootstrap_control_request(bytes);
 }

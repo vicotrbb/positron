@@ -13,6 +13,9 @@ use crate::{
 };
 
 mod io;
+mod prepare;
+#[cfg(test)]
+mod prepare_tests;
 mod restore;
 mod root_retirement;
 mod system_envelope;

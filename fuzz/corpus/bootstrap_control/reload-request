@@ -1,0 +1,5 @@
+POST /control/configuration/reload HTTP/1.1
+Host: localhost
+Content-Length: 0
+Connection: close
+

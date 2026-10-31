@@ -45,6 +45,81 @@ mod data;
 pub(crate) mod fixtures;
 use fixtures::*;
 use std::sync::Arc;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_provider_transport_outage_is_recoverable_during_reopen()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let roots = Roots::new()?;
+    let paths = roots
+        .paths()
+        .map_err(|failure| format!("paths: {failure:?}"))?;
+    let instance = InstanceBootstrap::initialize(&paths, InitializationPlan::non_interactive())?;
+    let credentials = roots
+        .data
+        .parent()
+        .ok_or("fixture parent")?
+        .join("credentials");
+    std::fs::create_dir(&credentials)?;
+    std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o700))?;
+    let (port, mut server) = transcript_transport(
+        |port| {
+            let mut replies = migration_replies(&instance, port, "immutable-id", 2);
+            replies.push(Vec::new()); // The cold provider closes after verified TLS admission.
+            replies
+        },
+        &[&rustls::version::TLS13],
+    )
+    .await?;
+    let configuration = || -> Result<_, Box<dyn std::error::Error>> {
+        Ok(NativeRootConfiguration::Kmip {
+            identity: ProviderKeyUri::new(
+                ProviderFamily::Kmip21,
+                &format!("kmip://localhost:{port}/objects/immutable-id"),
+                PIN,
+            )?,
+            credentials: model(&credentials)?,
+        })
+    };
+    instance.begin_key_provider_migration(configuration()?)?;
+    instance.activate_key_provider_migration(configuration()?)?;
+    drop(instance);
+    let reopened = InstanceBootstrap::reopen_with_provider(&paths, configuration()?);
+    let requests = match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await
+    {
+        Ok(Ok(requests)) => Ok(requests),
+        Ok(Err(_)) => Err("provider fixture task failed"),
+        Err(_) => {
+            server.abort();
+            match server.await {
+                Err(error) if error.is_cancelled() => Err("provider fixture timed out"),
+                _ => Err("provider fixture cancellation failed"),
+            }
+        },
+    };
+    let failure = reopened.expect_err("provider outage");
+    assert_eq!(
+        failure.code(),
+        crate::BootstrapFailureCode::KeyCustodyUnavailable
+    );
+    assert_eq!(requests?.len(), 15);
+    let wrong_identity = NativeRootConfiguration::Kmip {
+        identity: ProviderKeyUri::new(
+            ProviderFamily::Kmip21,
+            &format!("kmip://localhost:{port}/objects/wrong-key"),
+            PIN,
+        )?,
+        credentials: model(&credentials)?,
+    };
+    assert_eq!(
+        InstanceBootstrap::reopen_with_provider(&paths, wrong_identity)
+            .expect_err("wrong identity")
+            .code(),
+        crate::BootstrapFailureCode::KeyEnvelopeMismatch
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_revokes_native_admission_and_wakes_its_queued_caller()
 -> Result<(), Box<dyn std::error::Error>> {

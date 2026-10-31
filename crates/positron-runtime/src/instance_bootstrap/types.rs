@@ -437,5 +437,9 @@ pub use bootstrap_models::{
     BootstrapFailure, BootstrapFailureCode, BootstrapPaths, BootstrapState, InitializationPlan,
     InitializedInstance,
 };
+pub(crate) use bootstrap_models::{
+    BootstrapResourceContext, BootstrapResourceReason, BootstrapResourceSource,
+    BootstrapResourceStage,
+};
 pub(crate) use tenant_drain_gates::{IngestDrainPermit, QueryDrainPermit};
 pub(in crate::instance_bootstrap) use tenant_drain_registry::TenantDrainRegistry;
