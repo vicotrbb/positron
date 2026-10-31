@@ -286,6 +286,8 @@ def exercise_provider_outage(case, lifecycle, expected):
         live = lifecycle.kube("exec", lifecycle.pod, "--", "/usr/bin/positron", "doctor", "--live", "--endpoint", "127.0.0.1:13133",
                               "--server-name", "localhost", "--trust-file", "/etc/positron/tls/..data/ca.pem")
         case.assertEqual(live.stdout, b"status=live\n")
+        cold = json.loads(lifecycle.kube("get", "pod", lifecycle.pod, "-o", "json").stdout)
+        case.assertEqual({item["name"]: item["restartCount"] for item in cold["status"]["containerStatuses"]}, {"positron": 0})
     finally:
         failure = sys.exception()
         try:
@@ -293,7 +295,9 @@ def exercise_provider_outage(case, lifecycle, expected):
         except Exception:
             if failure is None: raise RuntimeError("owned OpenBao process resume unavailable") from None
             failure.add_note("owned OpenBao process resume unavailable")
-    wait_operand(lifecycle)
+    recovered = wait_operand(lifecycle)
+    case.assertEqual(recovered["metadata"]["uid"], cold["metadata"]["uid"])
+    case.assertEqual({item["name"]: item["restartCount"] for item in recovered["status"]["containerStatuses"]}, {"positron": 0})
     case.assertEqual(lifecycle.query(stage="openbao_recovered"), expected)
 
 

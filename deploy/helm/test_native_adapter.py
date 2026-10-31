@@ -98,6 +98,9 @@ class NativeAdapter(unittest.TestCase):
         calls = []
         process, process_state = b"7\n", b"Name:\tbao\nState:\tT (stopped)\n"
         resume_failure = False
+        cold_restarts = 0
+        def cold_state():
+            return {"metadata": {"uid": "cold-owner"}, "status": {"containerStatuses": [{"name": "positron", "restartCount": cold_restarts}]}}
         class Lifecycle:
             config, values, pod = "[security]\nlocal_key_file='/secrets/root'\n", {}, "operand"
             def install(self, files): pass
@@ -117,13 +120,14 @@ class NativeAdapter(unittest.TestCase):
                 body = b""
                 code = 0
                 if args[:2] == ("get", "pods"): body = b'{"items":[{"metadata":{"name":"owned-provider"}}]}'
+                if args[:3] == ("get", "pod", "operand"): body = json.dumps(cold_state()).encode()
                 if args[-2:] == ("pidof", "bao"): body = process
                 if args[-2:] == ("cat", "/proc/7/comm"): body = b"bao\n"
                 if args[-2:] == ("cat", "/proc/7/status"): body = process_state
                 if "--live" in args: body = b"status=live\n"
                 if "--ready" in args or "--for=condition=Ready" in args: code = 1
                 return subprocess.CompletedProcess([], code, body, b"")
-        with patch("test_kubernetes.OpenBaoFixture"), patch("test_kubernetes.time.sleep"), patch("test_kubernetes.wait_operand"):
+        with patch("test_kubernetes.OpenBaoFixture"), patch("test_kubernetes.time.sleep"), patch("test_kubernetes.wait_operand", return_value=cold_state()):
             exercise_provider_outage(self, Lifecycle(), "digest")
         refused = calls.index(("query", "openbao_unavailable"))
         stopped = calls.index(("scale", 0))
@@ -152,6 +156,13 @@ class NativeAdapter(unittest.TestCase):
         self.assertEqual(primary.exception.__notes__, ["owned OpenBao process resume unavailable"])
         process_state = b"Name:\tbao\nState:\tT (stopped)\n"
         with patch("test_kubernetes.OpenBaoFixture"), patch("test_kubernetes.time.sleep"), patch("test_kubernetes.wait_operand"), self.assertRaisesRegex(RuntimeError, "^owned OpenBao process resume unavailable$"):
+            exercise_provider_outage(self, Lifecycle(), "digest")
+        resume_failure = False
+        cold_restarts = 1
+        with patch("test_kubernetes.OpenBaoFixture"), patch("test_kubernetes.time.sleep"), patch("test_kubernetes.wait_operand", return_value=cold_state()), self.assertRaises(AssertionError):
+            exercise_provider_outage(self, Lifecycle(), "digest")
+        cold_restarts = 0
+        with patch("test_kubernetes.OpenBaoFixture"), patch("test_kubernetes.time.sleep"), patch("test_kubernetes.wait_operand", return_value={"metadata": {"uid": "replacement"}}), self.assertRaises(AssertionError):
             exercise_provider_outage(self, Lifecycle(), "digest")
 
     def test_openbao_migration_unknown_outcome_is_not_replayed_or_activated(self):
