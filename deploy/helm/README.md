@@ -193,12 +193,21 @@ explicit KUBECONFIG. Local kind evidence qualifies only that exact combination;
 it does not establish EKS, GKE, AKS, OpenShift, k3s, another architecture, or a
 release-wide Kubernetes Conformance Matrix.
 
-The isolated local development target observed for issue #120 is Kubernetes
-`v1.35.0`, kind `v0.31.0`, Linux `arm64`, Debian 12, node image
-`kindest/node@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f`.
+The isolated local tuple tested for issue #120 is Kubernetes `v1.37.0`, kind
+`v0.33.0`, Linux `arm64`, Debian `13.6`, node image
+`kindest/node@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5`.
 Its `standard` StorageClass uses `rancher.io/local-path`,
 `WaitForFirstConsumer`, and provisioner
-`kindest/local-path-provisioner:v20251212-v0.29.0-alpha-105-g20ccfc88`;
-there is no CSI driver in this tuple. This development target is not a published
-release support claim. Final native data/recovery/upgrade outcomes and release
-source identity must be verified separately before release acceptance.
+`kindest/local-path-provisioner:v20260820-69b56db7`; there is no CSI driver.
+Runtime and fixture source `ecdab8793234469d34ada5781fd466b1027336ac`, with
+independent `0.0.1` candidate `652ea802932098189137a32ffbcb145c55e1046e`, passed
+the native upgrade/TLS/drain, interruption/fencing/backup/restore, and OpenBao
+`2.7.1` integration cases. The provider case used verified TLS, a protected limited
+renewable token and public migration. It verified cache expiry and cold recovery
+by pausing and resuming the same provider process; the cold database process
+recovered on the same Pod UID with zero container restarts.
+
+These outcomes cover this local-path tuple and same-process provider outage.
+CSI detach/reattach and the managed-platform matrix remain unqualified; provider
+restart durability was not exercised. Release acceptance still requires the
+complete supported matrix and authenticated release artifacts.
