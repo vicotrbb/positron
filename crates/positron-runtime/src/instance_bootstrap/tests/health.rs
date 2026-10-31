@@ -27,13 +27,18 @@ fn process_health_tracks_system_lease_expiry_and_automatic_owner_refresh()
     state.transition(ProcessPhase::Serving);
     let health = state.health();
     services.attach_health(health.clone());
+    state.set_plaintext_listener_warnings(&[
+        crate::PublicPlaintextApiStartupIntent::configuration_file("127.0.0.1:8080".parse()?),
+    ]);
     assert_eq!(health.readiness(), Readiness::Ready);
+    let warnings = health.security_warnings();
     let in_flight_health = health.clone();
     let admission = positron_kernel::RootRewrapSession::admit_provider(&initialized._authority)?;
     drop(
         positron_kernel::RootRewrapSession::with_key_admission_action(
             move || {
                 assert_eq!(in_flight_health.readiness(), Readiness::NotReady);
+                assert_eq!(in_flight_health.security_warnings(), warnings);
                 assert!(in_flight_health.admits_data_or_mutation());
                 assert_eq!(in_flight_health.pending_integrity_fence_request(), None);
                 assert_eq!(in_flight_health.liveness(), Liveness::Live);
@@ -43,6 +48,9 @@ fn process_health_tracks_system_lease_expiry_and_automatic_owner_refresh()
         )?,
     );
     drop(admission);
+    assert_eq!(health.readiness(), Readiness::Ready);
+    assert!(!health.security_warnings().is_empty());
+    state.set_plaintext_listener_warnings(&[]);
     assert_eq!(health.readiness(), Readiness::Ready);
     let deadline = Instant::now() + Duration::from_secs(3);
     while initialized.data_protection_health()?.system_ready {

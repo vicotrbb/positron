@@ -239,6 +239,46 @@ fn operations_status_exposes_a_fenced_configuration_drift() -> Result<(), Box<dy
 fn operations_health_exposes_plaintext_transport_warning_without_degrading_readiness()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = live_test_guard();
+    let ready_health = |address| -> Result<String, Box<dyn std::error::Error>> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let remaining = || {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "native health did not become ready",
+                ))
+            } else {
+                Ok(remaining)
+            }
+        };
+        loop {
+            let mut stream = TcpStream::connect_timeout(&address, remaining()?)?;
+            stream.set_write_timeout(Some(remaining()?))?;
+            stream.write_all(
+                b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )?;
+            let mut response = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                stream.set_read_timeout(Some(remaining()?))?;
+                let read = stream.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                if response.len() + read > 8192 {
+                    return Err("native health response exceeds fixture bound".into());
+                }
+                response.extend_from_slice(&buffer[..read]);
+            }
+            let response = String::from_utf8(response)?;
+            if !response.starts_with("HTTP/1.1 503 ") {
+                return Ok(response);
+            }
+            assert!(response.contains("\"status\":\"not_ready\""), "{response}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
     let plaintext_roots = TestRoots::new("plaintext-health-warning")?;
     let plaintext_paths = plaintext_roots.paths()?;
     drop(InstanceBootstrap::initialize(
@@ -257,7 +297,7 @@ fn operations_health_exposes_plaintext_transport_warning_without_degrading_readi
         &plaintext.bound_endpoints(),
         positron_runtime::ListenerRole::Operations,
     )?;
-    let plaintext_health = http(plaintext_operations, "GET", "/health/ready", &[], &[])?;
+    let plaintext_health = ready_health(plaintext_operations)?;
     assert_status(plaintext_health.clone(), 200);
     assert!(plaintext_health.contains("\"status\":\"ready\""));
     assert!(plaintext_health.contains("\"warnings\":[\"public_plaintext_api\"]"));
@@ -292,7 +332,7 @@ fn operations_health_exposes_plaintext_transport_warning_without_degrading_readi
         &tls.bound_endpoints(),
         positron_runtime::ListenerRole::Operations,
     )?;
-    let tls_health = http(tls_operations, "GET", "/health/ready", &[], &[])?;
+    let tls_health = ready_health(tls_operations)?;
     assert_status(tls_health.clone(), 200);
     assert!(tls_health.contains("\"status\":\"ready\""));
     assert!(tls_health.contains("\"warnings\":[]"));
