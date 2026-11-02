@@ -583,11 +583,13 @@ fn complete_installed_maintenance(
         return Err(ServiceFailure::Cancelled);
     }
     if let InstalledMaintenanceExecution::BackupSnapshot { execution, work } = execution {
+        let mut native_resources = None;
         let result =
             super::backup_administration::complete(services, execution, work, cancellation)
                 .and_then(|completed| {
                     if !completed && let Some(work) = work {
                         work.persist_registry(services, execution)?;
+                        native_resources = work.checkpoint_native(services, execution, false)?;
                     }
                     Ok(completed)
                 });
@@ -609,7 +611,10 @@ fn complete_installed_maintenance(
             ),
             _ => None,
         };
-        if let Some(memory_bytes) = required_memory {
+        if let Some(memory_bytes) = required_memory.or_else(|| {
+            native_resources
+                .map(|resources| resources.get(positron_kernel::ResourceDimension::MemoryBytes))
+        }) {
             #[cfg(feature = "test-support")]
             if let Err(failure) = result {
                 super::backup_administration::report_verification_readmission(
@@ -631,11 +636,16 @@ fn complete_installed_maintenance(
             let previous = execution.task().reservations();
             let resources = positron_kernel::ResourceAmounts::new(
                 positron_kernel::ResourceDimension::ALL.map(|dimension| {
-                    if dimension == positron_kernel::ResourceDimension::MemoryBytes {
-                        previous.get(dimension).max(memory_bytes)
-                    } else {
-                        previous.get(dimension)
-                    }
+                    previous
+                        .get(dimension)
+                        .max(native_resources.map_or(0, |resources| resources.get(dimension)))
+                        .max(
+                            if dimension == positron_kernel::ResourceDimension::MemoryBytes {
+                                memory_bytes
+                            } else {
+                                0
+                            },
+                        )
                 }),
             );
             let _gate = services.catalog_operation()?;
@@ -2021,13 +2031,35 @@ pub(super) fn drive_upgrade_backup(
                 }
                 return inspect();
             }
-            if std::time::Instant::now() >= deadline {
+            let expired = std::time::Instant::now() >= deadline;
+            #[cfg(test)]
+            let expired = expired
+                || super::backup_administration::turn_expired(
+                    instance.instance.to_bytes(),
+                    id.to_bytes(),
+                )
+                .map_err(|_| UpgradeFailure::SnapshotUnavailable)?;
+            if expired {
                 #[cfg(feature = "test-support")]
                 diagnostic.report("deadline_discard", &status, work.as_ref());
+                let native_resources = if let Some(work) = work {
+                    work.checkpoint_native(services, owner, true)
+                        .map_err(|_| UpgradeFailure::SnapshotUnavailable)?
+                } else {
+                    None
+                };
                 *work = None;
                 let binding = positron_kernel::RepositoryOperationBinding::from_execution(owner)
                     .map_err(|_| UpgradeFailure::UnsafeState)?;
-                let resources = owner.task().reservations();
+                let previous = owner.task().reservations();
+                let resources = positron_kernel::ResourceAmounts::new(
+                    positron_kernel::ResourceDimension::ALL.map(|dimension| {
+                        previous
+                            .get(dimension)
+                            .max(native_resources.map_or(0, |required| required.get(dimension)))
+                    }),
+                );
+                readmission_progress |= resources != previous;
                 let _gate = services
                     .catalog_operation()
                     .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
@@ -2047,6 +2079,9 @@ pub(super) fn drive_upgrade_backup(
                     .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
                 drop(catalog);
                 drop(_gate);
+                let status = coordinator
+                    .status(owner.task().identity())
+                    .map_err(|_| UpgradeFailure::PersistenceUnavailable)?;
                 let current = inspect()?;
                 if !readmission_progress
                     && !current.status().is_terminal()

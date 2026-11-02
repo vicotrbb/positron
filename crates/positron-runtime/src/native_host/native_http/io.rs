@@ -669,6 +669,7 @@ pub(in crate::native_host) fn write_response<S: Write>(
 ) -> Result<(), std::io::Error> {
     let reason = match response.status {
         200 => "OK",
+        202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -701,7 +702,8 @@ pub(in crate::native_host) fn write_response<S: Write>(
         Ok(())
     } else {
         stream.write_all(&response.body)
-    };
+    }
+    .and_then(|()| stream.flush());
     drop(response.response_reservation.take());
     outcome
 }
@@ -768,6 +770,126 @@ mod tests {
                 panic!("bounded head");
             };
             assert_eq!(head.openmetrics, expected, "{accept}");
+        }
+    }
+
+    #[test]
+    fn native_http_response_completes_buffered_output_before_returning() -> std::io::Result<()> {
+        for response in [
+            super::Response::empty(204),
+            super::Response::json(200, "{}".into()),
+        ] {
+            let mut stream = std::io::BufWriter::new(Vec::new());
+            super::write_response(&mut stream, response)?;
+            let output = std::str::from_utf8(stream.get_ref()).expect("HTTP response");
+            assert!(
+                output.starts_with("HTTP/1.1 "),
+                "response must reach the writer"
+            );
+            assert!(output.ends_with("\r\n\r\n") || output.ends_with("\r\n\r\n{}"));
+            assert!(
+                stream.buffer().is_empty(),
+                "response must not remain buffered"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_http_response_reports_output_completion_failure() {
+        struct FailedCompletion;
+        impl Write for FailedCompletion {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+        }
+        let outcome = super::write_response(&mut FailedCompletion, super::Response::empty(401));
+        assert_eq!(
+            outcome.expect_err("completion failure").kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn native_http_completion_failure_never_writes_a_second_response() {
+        struct FailingFlush {
+            stream: MemoryStream,
+            flushes: usize,
+        }
+        impl Read for FailingFlush {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.stream.read(bytes)
+            }
+        }
+        impl Write for FailingFlush {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.stream.write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushes += 1;
+                if self.flushes == 1 {
+                    Err(std::io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        impl TimeoutStream for FailingFlush {
+            fn set_timeouts(&mut self, _: std::time::Duration) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for tls in [false, true] {
+            let health = crate::health::ProcessState::starting().health();
+            let mut stream = FailingFlush {
+                stream: MemoryStream {
+                    input: Cursor::new(
+                        b"GET /health/live HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
+                    ),
+                    output: Vec::new(),
+                },
+                flushes: 0,
+            };
+            let serve = if tls {
+                serve_tls_connection
+            } else {
+                super::super::serve_connection
+            };
+            let outcome = serve(
+                &mut stream,
+                crate::ListenerRole::Operations,
+                "127.0.0.1:1".parse().expect("loopback peer"),
+                None,
+                &health,
+                super::super::RouteDependencies::new(None, None),
+                crate::ConnectionProtection::new(
+                    std::num::NonZeroU16::MIN,
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                ),
+            );
+            let output = std::str::from_utf8(&stream.stream.output).expect("HTTP response");
+            assert_eq!(output.matches("HTTP/1.1 ").count(), 1, "{output}");
+            assert!(
+                outcome.is_err(),
+                "completion failure must reach the listener owner"
+            );
+            let records: Vec<serde_json::Value> = serde_json::from_str(
+                &health
+                    .operational_logs_json()
+                    .expect("bounded operational ring"),
+            )
+            .expect("closed diagnostic JSON");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["event"], "native_http_connection_failed");
+            assert_eq!(records[0]["stage"], "response_completion");
+            assert_eq!(records[0]["listener"], "operations");
         }
     }
 

@@ -11,6 +11,16 @@ pub struct Resources {
     process_busy: AtomicBool,
 }
 impl Resources {
+    /// Replans only through an exclusive owner; shared transports retain their grant.
+    pub fn try_resize_preserving_capacity(
+        &mut self,
+        governor: crate::ResourceGovernor<'_>,
+        amounts: crate::ResourceAmounts,
+    ) -> Result<crate::ResizeOutcome, crate::ResizeFailure> {
+        self._grant
+            .try_resize_preserving_capacity(governor, amounts)
+    }
+
     pub fn granted(&self) -> crate::ResourceAmounts {
         self._grant.granted()
     }

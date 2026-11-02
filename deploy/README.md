@@ -21,3 +21,8 @@ introduce their own database behavior.
 shells for all four native targets, configuration checks, and a NixOS module
 with a VM lifecycle check. Its runbook covers trust, initialization, service,
 upgrade and recovery.
+
+[Standalone Helm](helm/README.md) generates a deterministic same-image chart
+from the Release Inventory. It runs one restricted StatefulSet with separate
+retained data/key/repository PVCs, native configuration, strict TLS probes and
+explicit offline operation hooks; it does not require the Operator.

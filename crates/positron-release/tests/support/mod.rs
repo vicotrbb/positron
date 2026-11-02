@@ -266,6 +266,7 @@ impl Fixture {
         fixture.install_native(native);
         fixture.refresh_homebrew();
         fixture.refresh_compose();
+        fixture.refresh_helm();
         fixture
     }
     fn install_native(&mut self, native: Vec<native_registry::NativeArtifactFixture>) {
@@ -347,6 +348,16 @@ impl Fixture {
         });
         id
     }
+    fn refresh_helm(&mut self) {
+        let index = self
+            .inventory
+            .artifacts
+            .iter()
+            .position(|a| a.surface == Surface::Helm)
+            .unwrap();
+        let chart = helm_chart(&self.inventory).unwrap();
+        self.replace_artifact(index, &chart, &chart);
+    }
     fn refresh_compose(&mut self) {
         let index = self
             .inventory
@@ -415,6 +426,7 @@ impl Fixture {
             .immutable_identity = format!("sha256:{new}");
         if artifact.surface == Surface::OciIndex {
             self.refresh_compose();
+            self.refresh_helm();
         }
         if artifact.surface == Surface::NativeArchive {
             self.refresh_homebrew();

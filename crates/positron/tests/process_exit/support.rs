@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use std::time::Instant;
 
 #[cfg(unix)]
 pub(crate) struct ChildRoots {
@@ -115,36 +117,52 @@ pub(crate) fn wait_for_ready(port: u16) -> Result<(), Box<dyn std::error::Error>
     wait_for_readiness(port, "HTTP/1.1 200 ")
 }
 
+// The existing 100 × 25ms polling allowance is one absolute window. Callers
+// composing readiness and status share this deadline instead of resetting it.
+#[cfg(unix)]
+pub(crate) const STARTUP_PROBE_BUDGET: Duration = Duration::from_millis(2500);
+#[cfg(unix)]
+const PROBE_INTERVAL: Duration = Duration::from_millis(25);
+#[cfg(unix)]
+const PROBE_IO_LIMIT: Duration = Duration::from_millis(100);
+
 #[cfg(unix)]
 pub(crate) fn wait_for_configuration_status(
     port: u16,
     authorization: &str,
     expected_fragments: &[&str],
+    deadline: Instant,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut last_observation = None;
     for _ in 0..100 {
-        match configuration_status(port, authorization) {
-            Ok(response)
-                if response.starts_with("HTTP/1.1 200 ")
-                    && expected_fragments
-                        .iter()
-                        .all(|fragment| response.contains(fragment)) =>
-            {
-                return Ok(response);
-            },
-            Ok(response) => {
-                last_observation = Some(format!(
-                    "response={:?}",
-                    bounded_redacted_observation(&response, authorization)
-                ));
-            },
-            Err(error) => last_observation = Some(format!("request={error}")),
+        if Instant::now() >= deadline {
+            break;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        let response =
+            configuration_status_until(port, authorization, deadline).map_err(|error| {
+                format!("configuration status request failed: {error}; last={last_observation:?}")
+            })?;
+        let expected = response.starts_with("HTTP/1.1 200 ");
+        if expected
+            && expected_fragments
+                .iter()
+                .all(|fragment| response.contains(fragment))
+        {
+            return Ok(response);
+        }
+        let observation = bounded_redacted_observation(&response, authorization);
+        if !expected && !response.starts_with("HTTP/1.1 503 ") {
+            return Err(format!(
+                "configuration status refused an unexpected response: {observation}"
+            )
+            .into());
+        }
+        last_observation = Some(observation);
+        std::thread::sleep(PROBE_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
     }
     Err(format!(
-        "Positron configuration status did not reach expected state within its bounded probe: {}",
-        last_observation.unwrap_or_else(|| "no request completed".to_owned())
+        "configuration status deadline expired before expected state: {}",
+        last_observation.unwrap_or_else(|| "no request admitted within shared deadline".to_owned())
     )
     .into())
 }
@@ -154,24 +172,120 @@ pub(crate) fn configuration_status(
     port: u16,
     authorization: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(100))?;
-    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(100)))?;
+    configuration_status_until(port, authorization, Instant::now() + PROBE_IO_LIMIT * 3)
+}
+
+#[cfg(unix)]
+fn configuration_status_until(
+    port: u16,
+    authorization: &str,
+    deadline: Instant,
+) -> Result<String, Box<dyn std::error::Error>> {
     let request = format!(
         "GET /status HTTP/1.1\r\nHost: localhost\r\nAuthorization: {authorization}\r\nContent-Length: 0\r\n\r\n"
     );
-    stream.write_all(request.as_bytes())?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    Ok(response)
+    probe_response(port, request.as_bytes(), deadline)
+}
+
+#[cfg(unix)]
+fn probe_timeout(deadline: Instant) -> std::io::Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|value| !value.is_zero())
+        .map(|remaining| remaining.min(PROBE_IO_LIMIT))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "shared probe deadline expired",
+            )
+        })
+}
+
+#[cfg(unix)]
+pub(crate) fn probe_response(
+    port: u16,
+    mut request: &[u8],
+    deadline: Instant,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&address, probe_timeout(deadline)?)?;
+    while !request.is_empty() {
+        stream.set_write_timeout(Some(probe_timeout(deadline)?))?;
+        let written = match stream.write(request) {
+            Ok(written) => written,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            },
+            Err(error) => return Err(error.into()),
+        };
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "incomplete probe request",
+            )
+            .into());
+        }
+        request = request.get(written..).ok_or("invalid probe write length")?;
+    }
+    let mut response = Vec::new();
+    loop {
+        stream.set_read_timeout(Some(probe_timeout(deadline)?))?;
+        let mut buffer = [0; 4096];
+        let read = match stream.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            },
+            Err(error) => return Err(error.into()),
+        };
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "shared probe deadline expired",
+            )
+            .into());
+        }
+        if read == 0 {
+            break;
+        }
+        if response.len() + read > 64 * 1024 {
+            return Err("probe response exceeded its 64 KiB bound".into());
+        }
+        response.extend_from_slice(buffer.get(..read).ok_or("invalid probe read length")?);
+    }
+    Ok(String::from_utf8(response)?)
 }
 
 #[cfg(unix)]
 pub(crate) fn bounded_redacted_observation(observation: &str, authorization: &str) -> String {
     const MAX_STATUS_OBSERVATION_CHARS: usize = 512;
 
-    let redacted = observation.replace(authorization, "<redacted>");
+    let redacted = if authorization.is_empty() {
+        observation.to_owned()
+    } else {
+        observation.replace(authorization, "<redacted>")
+    };
+    let redacted = match authorization
+        .strip_prefix("Bearer ")
+        .filter(|secret| !secret.is_empty())
+    {
+        Some(secret) => redacted.replace(secret, "<redacted>"),
+        None => redacted,
+    };
     let mut bounded = redacted
         .chars()
         .take(MAX_STATUS_OBSERVATION_CHARS)
@@ -187,32 +301,145 @@ pub(crate) fn wait_for_readiness(
     port: u16,
     expected_status: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    wait_for_readiness_until(port, expected_status, Instant::now() + STARTUP_PROBE_BUDGET)
+}
+
+#[cfg(unix)]
+pub(crate) fn wait_for_readiness_until(
+    port: u16,
+    expected_status: &str,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_observation = None;
-    for _ in 0..100 {
-        match TcpStream::connect(("127.0.0.1", port)) {
-            Ok(mut stream) => {
-                stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-                stream.set_write_timeout(Some(Duration::from_millis(100)))?;
-                stream.write_all(
-                    b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
-                )?;
-                let mut response = String::new();
-                match stream.read_to_string(&mut response) {
-                    Ok(_) if response.starts_with(expected_status) => return Ok(()),
-                    Ok(_) => last_observation = Some(format!("response={response:?}")),
-                    Err(error) => last_observation = Some(format!("read={error}")),
-                }
-            },
-            Err(error) => last_observation = Some(format!("connect={error}")),
+    while Instant::now() < deadline {
+        if Instant::now() >= deadline {
+            break;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        match probe_response(
+            port,
+            b"GET /health/ready HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            deadline,
+        ) {
+            Ok(response) if response.starts_with(expected_status) => return Ok(()),
+            Ok(response) => last_observation = Some(bounded_redacted_observation(&response, "")),
+            Err(error) => last_observation = Some(format!("request={error}")),
+        }
+        std::thread::sleep(PROBE_INTERVAL.min(deadline.saturating_duration_since(Instant::now())));
     }
     Err(format!(
-        "Positron readiness listener did not return the expected response within its bounded probe: {}",
-        last_observation.unwrap_or_else(|| "no connection attempt completed".to_owned())
+        "readiness deadline expired before expected response: {}",
+        last_observation.unwrap_or_else(|| "no request admitted within shared deadline".to_owned())
     )
     .into())
 }
+#[cfg(unix)]
+pub(crate) fn wait_for_fenced_startup(
+    operations_port: u16,
+    control_path: &std::path::Path,
+    deadline: Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    wait_for_readiness_until(operations_port, "HTTP/1.1 503 ", deadline)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()?;
+    runtime.block_on(async {
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            loop {
+                probe_timeout(deadline)?;
+                let stream = match tokio::net::UnixStream::connect(control_path).await {
+                    Ok(stream) => stream,
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+                        tokio::time::sleep(PROBE_INTERVAL.min(deadline.saturating_duration_since(Instant::now()))).await;
+                        continue;
+                    },
+                    Err(error) => return Err(error.into()),
+                };
+                let mut request = b"GET /control/fenced/inspection HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice();
+                while !request.is_empty() {
+                    probe_timeout(deadline)?;
+                    stream.writable().await?;
+                    match stream.try_write(request) {
+                        Ok(0) => return Err("Fenced probe request was not delivered".into()),
+                        Ok(written) => request = request.get(written..).ok_or("invalid Fenced probe write")?,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                let mut response = Vec::new();
+                let mut buffer = [0; 1024];
+                let fenced = loop {
+                    probe_timeout(deadline)?;
+                    stream.readable().await?;
+                    let read = match stream.try_read(&mut buffer) {
+                        Ok(0) => return Err("truncated Fenced probe response".into()),
+                        Ok(read) => read,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    if read > 4096_usize.saturating_sub(response.len()) {
+                        return Err("Fenced probe response exceeded its bound".into());
+                    }
+                    response.extend_from_slice(buffer.get(..read).ok_or("invalid Fenced probe read")?);
+                    if let Some(fenced) = fenced_probe_response(&response)? {
+                        break fenced;
+                    }
+                };
+                probe_timeout(deadline)?;
+                if fenced { return Ok(()); }
+                tokio::time::sleep(PROBE_INTERVAL.min(deadline.saturating_duration_since(Instant::now()))).await;
+            }
+        }).await.map_err(|_| "Fenced startup deadline expired")?
+    })
+}
+
+// Missing authorization returns 401 only in Fenced; no inspection is executed.
+// Recovering returns 404. A complete native frame is required before either
+// status can be used, and protected response contents are never collected.
+#[cfg(unix)]
+fn fenced_probe_response(response: &[u8]) -> Result<Option<bool>, Box<dyn std::error::Error>> {
+    let Some(offset) = response.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+        return Ok(None);
+    };
+    let headers = std::str::from_utf8(
+        response
+            .get(..offset)
+            .ok_or("invalid Fenced probe headers")?,
+    )?;
+    let body = response
+        .get(offset + 4..)
+        .ok_or("invalid Fenced probe body")?;
+    let mut lengths = headers
+        .lines()
+        .filter_map(|line| line.strip_prefix("Content-Length: "));
+    let length = lengths
+        .next()
+        .ok_or("missing Fenced probe length")?
+        .parse::<usize>()?;
+    if lengths.next().is_some()
+        || length > 4096
+        || headers.lines().any(|line| {
+            line.split_once(':')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("Transfer-Encoding"))
+        })
+    {
+        return Err("ambiguous Fenced probe framing".into());
+    }
+    if body.len() < length {
+        return Ok(None);
+    }
+    if body.len() != length {
+        return Err("invalid Fenced probe response length".into());
+    }
+    if headers.starts_with("HTTP/1.1 401 ") {
+        Ok(Some(true))
+    } else if headers.starts_with("HTTP/1.1 404 ") {
+        Ok(Some(false))
+    } else {
+        Err("unexpected Fenced probe response status".into())
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn wait_for_file(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..100 {
@@ -259,6 +486,13 @@ pub(crate) fn available_ports() -> Result<[u16; 5], Box<dyn std::error::Error>> 
 }
 
 #[cfg(unix)]
+pub(crate) fn process_control_path(root: &std::path::Path) -> std::path::PathBuf {
+    std::path::Path::new("/tmp")
+        .join(root.file_name().unwrap_or_default())
+        .with_extension("sock")
+}
+
+#[cfg(unix)]
 pub(crate) fn process_configuration(
     root: &std::path::Path,
     data: &std::path::Path,
@@ -281,10 +515,7 @@ pub(crate) fn process_configuration(
     let private_key = runtime_directory.join("api-test-key.pem");
     format!(
         "schema_version = 1\n[runtime]\nshutdown_grace_seconds = 2\n[listener]\ncontrol_path = \"{}\"\noperations_bind_address = \"127.0.0.1:{operations_port}\"\noperations_transport = \"plaintext\"\napi_bind_address = \"127.0.0.1:{api_port}\"\napi_transport = \"tls\"\napi_tls_certificate_file = \"{}\"\napi_tls_private_key_file = \"{}\"\notlp_grpc_bind_address = \"127.0.0.1:{otlp_grpc_port}\"\notlp_grpc_tls_certificate_file = \"{}\"\notlp_grpc_tls_private_key_file = \"{}\"\notlp_http_bind_address = \"127.0.0.1:{otlp_http_port}\"\notlp_http_tls_certificate_file = \"{}\"\notlp_http_tls_private_key_file = \"{}\"\nloki_push_bind_address = \"127.0.0.1:{loki_push_port}\"\nloki_push_tls_certificate_file = \"{}\"\nloki_push_tls_private_key_file = \"{}\"\n[storage]\ndata_directory = \"{}\"\nsecrets_directory = \"{}\"\n[security]\nlocal_key_file = \"{}\"\n",
-        std::path::Path::new("/tmp")
-            .join(root.file_name().unwrap_or_default())
-            .with_extension("sock")
-            .display(),
+        process_control_path(root).display(),
         certificate.display(),
         private_key.display(),
         certificate.display(),

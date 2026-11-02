@@ -136,6 +136,38 @@ fn interruptible_growth_failure_cancels_old_grant_and_frees_capacity()
 }
 
 #[test]
+fn cancelled_reservation_stays_inactive_after_transfer_and_reclaim()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = tenant(63)?;
+    let kernel = establish(tenant, 100)?;
+    let mut grant = kernel.reserve(WorkClaim::tenant(
+        tenant,
+        WorkKind::InteractiveQueryTail,
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, 50)?,
+    )?)?;
+    let failure = grant
+        .try_resize(ResourceAmounts::only(ResourceDimension::MemoryBytes, 51)?)
+        .expect_err("refused interruptible growth cancels the reservation");
+    assert_eq!(
+        failure.existing_capacity(),
+        ExistingCapacityDisposition::CancelledBeforeLimit
+    );
+    assert!(!grant.is_active());
+    assert_eq!(grant.granted(), ResourceAmounts::zero());
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+
+    let transferred = grant.transfer();
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    let reclaimed = transferred.reclaim(kernel.governor())?;
+    assert!(!reclaimed.is_active());
+    assert_eq!(reclaimed.granted(), ResourceAmounts::zero());
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    drop(reclaimed);
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    Ok(())
+}
+
+#[test]
 fn durability_growth_failure_retains_exact_existing_capacity()
 -> Result<(), Box<dyn std::error::Error>> {
     let tenant = tenant(64)?;
@@ -413,3 +445,119 @@ fn ordinary_disk_growth_uses_the_latest_live_headroom() -> Result<(), Box<dyn st
 }
 use super::resource_governor_test_support as resource_governor_support;
 use resource_governor_support::TestKernel;
+
+#[test]
+fn transferred_system_repository_read_shrinks_without_overlapping_capacity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = tenant(83)?;
+    let kernel = establish(tenant, 100)?;
+    let initial = ResourceAmounts::only(ResourceDimension::MemoryBytes, 19)?;
+    let phase = ResourceAmounts::only(ResourceDimension::MemoryBytes, 10)?;
+    let transferred = kernel
+        .reserve(WorkClaim::backup_repository_read(initial)?)?
+        .transfer();
+    let mut grant = transferred.reclaim(kernel.governor())?;
+    let before = kernel.inspect()?;
+    assert_eq!(before.outstanding_reservations(), 1);
+    let resized = grant.try_resize_preserving_capacity(phase)?;
+    assert_eq!(resized.released().get(ResourceDimension::MemoryBytes), 9);
+    assert_eq!(grant.granted(), phase);
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 1);
+    drop(grant);
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    Ok(())
+}
+
+#[test]
+fn native_repository_owner_resize_retains_capacity_on_refusal_and_shared_ownership()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = tenant(84)?;
+    let kernel = establish(tenant, 100)?;
+    let foreign = establish(tenant, 100)?;
+    let initial = ResourceAmounts::only(ResourceDimension::MemoryBytes, 19)?;
+    let phase = ResourceAmounts::only(ResourceDimension::MemoryBytes, 10)?;
+    let grant = kernel.reserve(WorkClaim::backup_repository_read(initial)?)?;
+    let mut owner = positron_kernel::NativeAwsResources::new(grant.transfer());
+    let shared = owner.clone();
+    assert!(std::sync::Arc::get_mut(&mut owner).is_none());
+    drop(shared);
+    let exclusive = std::sync::Arc::get_mut(&mut owner).ok_or("exclusive owner")?;
+    assert!(
+        exclusive
+            .try_resize_preserving_capacity(foreign.governor(), phase)
+            .is_err()
+    );
+    assert_eq!(exclusive.granted(), initial);
+    assert!(
+        exclusive
+            .try_resize_preserving_capacity(kernel.governor(), ResourceAmounts::new([0; 11]))
+            .is_err()
+    );
+    assert!(
+        exclusive
+            .try_resize_preserving_capacity(
+                kernel.governor(),
+                ResourceAmounts::only(ResourceDimension::MemoryBytes, 20)?
+            )
+            .is_err()
+    );
+    assert_eq!(exclusive.granted(), initial);
+    assert!(
+        exclusive
+            .try_resize_preserving_capacity(
+                kernel.governor(),
+                ResourceAmounts::new([9, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            )
+            .is_err(),
+        "a decrease in one dimension cannot permit growth in another"
+    );
+    assert_eq!(exclusive.granted(), initial);
+    exclusive.try_resize_preserving_capacity(kernel.governor(), phase)?;
+    assert_eq!(exclusive.granted(), phase);
+    assert_eq!(
+        kernel
+            .inspect()?
+            .pool_usage(OrdinaryPool::Shared, ResourceDimension::MemoryBytes),
+        10
+    );
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 1);
+    drop(owner);
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    assert_eq!(
+        kernel
+            .inspect()?
+            .pool_usage(OrdinaryPool::Shared, ResourceDimension::MemoryBytes),
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn system_repository_shrink_preserves_independent_tenant_accounting()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = tenant(85)?;
+    let kernel = establish(tenant, 100)?;
+    let tenant_grant = kernel.reserve(WorkClaim::tenant(
+        tenant,
+        WorkKind::Ingest,
+        ResourceAmounts::only(ResourceDimension::MemoryBytes, 1)?,
+    )?)?;
+    let mut system = kernel.reserve(WorkClaim::backup_repository_read(ResourceAmounts::only(
+        ResourceDimension::MemoryBytes,
+        19,
+    )?)?)?;
+    system.try_resize_preserving_capacity(ResourceAmounts::only(
+        ResourceDimension::MemoryBytes,
+        10,
+    )?)?;
+    assert_eq!(
+        tenant_grant.granted().get(ResourceDimension::MemoryBytes),
+        1
+    );
+    assert_eq!(kernel.inspect()?.usage(ResourceDimension::MemoryBytes), 11);
+    drop(system);
+    assert_eq!(kernel.inspect()?.usage(ResourceDimension::MemoryBytes), 1);
+    drop(tenant_grant);
+    assert_eq!(kernel.inspect()?.outstanding_reservations(), 0);
+    Ok(())
+}

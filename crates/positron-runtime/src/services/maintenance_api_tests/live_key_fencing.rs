@@ -91,11 +91,16 @@ fn native_background_key_mismatch_retains_operator_cause() -> Result<(), Box<dyn
     drop(gate);
     services.notify_maintenance_worker();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while process.health().readiness() == crate::Readiness::Ready
+    while process.health().pending_integrity_fence_request()
+        != Some(crate::IntegrityFenceReason::KeyEnvelopeMismatch)
         && std::time::Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(5));
     }
+    assert_eq!(
+        process.health().pending_integrity_fence_request(),
+        Some(crate::IntegrityFenceReason::KeyEnvelopeMismatch)
+    );
     assert_eq!(process.health().readiness(), crate::Readiness::NotReady);
     assert_data_closed(&process)?;
     assert!(process.apply_pending_integrity_fence());

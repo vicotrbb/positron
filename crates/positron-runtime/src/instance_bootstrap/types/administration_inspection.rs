@@ -668,7 +668,8 @@ impl InitializedInstance {
     }
 
     #[must_use]
-    pub const fn claim_available(&self) -> bool {
+    pub fn claim_available(&self) -> bool {
         self.claim_available
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 }

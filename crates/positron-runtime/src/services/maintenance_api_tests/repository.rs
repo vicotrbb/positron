@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "repository/init_http.rs"]
+mod init_http;
 #[path = "repository/status_http.rs"]
 mod status_http;
 use crate::services::repository_administration::RepositoryAdmission;
@@ -447,9 +449,14 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         operation_id: None,
     };
     assert!(client.manage(&ingest, &status).is_err());
-    let admission_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let admission_started = std::time::Instant::now();
+    let admission_deadline = admission_started + Duration::from_secs(10);
     let current = status_http::inspect(&client, &administrator, &status, admission_deadline)
-        .map_err(|failure| format!("repository HTTP stage=initial-status: {failure:?}"))?;
+        .map_err(|_| {
+            eprintln!("repository_http_admission stage=initial_status elapsed_ms={} init_attempts=0 last_response=status_inspection_error", admission_started.elapsed().as_millis());
+            "repository HTTP stage=initial-status inspection failed".to_owned()
+        })?;
+    let initial_status_elapsed = admission_started.elapsed();
     let mut request = RepositoryRequest {
         action: "init".into(),
         expected_catalog_generation: Some(current.catalog_generation),
@@ -461,30 +468,92 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         repository_id: Some("62626262-6262-4262-8262-626262626262".into()),
         operation_id: None,
     };
+    let response_variant =
+        |response: &Result<positron_api::repository::RepositoryResponse, init_http::Failure>| {
+            match response {
+                Ok(_) => "ok",
+                Err(failure) => failure.label(),
+            }
+        };
+    let mut init_attempts = 0_u64;
+    let mut init_replays = 0_u64;
+    let mut refresh_count = 0_u64;
+    let mut refresh_elapsed = Duration::ZERO;
+    let mut last_refresh_elapsed = Duration::ZERO;
+    let mut refresh_budget_ms = 0_u128;
+    let mut last_response = "not_sent";
+    let mut last_call_elapsed = Duration::ZERO;
     let mut accepted = loop {
         let remaining = admission_deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
+            eprintln!(
+                "repository_http_admission stage=before_init elapsed_ms={} initial_status_ms={} init_attempts={init_attempts} init_replays={init_replays} last_response={last_response} last_call_ms={} refresh_count={refresh_count} refresh_ms={} last_refresh_ms={} refresh_budget_ms={refresh_budget_ms} remaining_ms=0",
+                admission_started.elapsed().as_millis(),
+                initial_status_elapsed.as_millis(),
+                last_call_elapsed.as_millis(),
+                refresh_elapsed.as_millis(),
+                last_refresh_elapsed.as_millis()
+            );
             return Err("repository HTTP admission deadline".into());
         }
-        let result = client.manage_with_timeout(&administrator, &request, remaining);
+        let call_started = std::time::Instant::now();
+        let result = init_http::admit_once(
+            &client,
+            &administrator,
+            &request,
+            admission_deadline,
+            &mut init_attempts,
+            &mut init_replays,
+        );
+        last_response = response_variant(&result);
+        last_call_elapsed = call_started.elapsed();
         if std::time::Instant::now() >= admission_deadline {
+            eprintln!(
+                "repository_http_admission stage=after_init elapsed_ms={} initial_status_ms={} init_attempts={init_attempts} init_replays={init_replays} last_response={last_response} last_call_ms={} refresh_count={refresh_count} refresh_ms={} last_refresh_ms={} refresh_budget_ms={refresh_budget_ms} remaining_ms=0",
+                admission_started.elapsed().as_millis(),
+                initial_status_elapsed.as_millis(),
+                last_call_elapsed.as_millis(),
+                refresh_elapsed.as_millis(),
+                last_refresh_elapsed.as_millis()
+            );
             return Err("repository HTTP admission deadline".into());
         }
         match result {
             Ok(accepted) => break accepted,
-            Err(positron_api::repository::RepositoryServiceClientFailure::StaleGeneration)
-                if std::time::Instant::now() < admission_deadline =>
-            {
+            Err(init_http::Failure::Refused(
+                positron_api::repository::RepositoryServiceClientFailure::StaleGeneration,
+            )) if std::time::Instant::now() < admission_deadline => {
+                refresh_count += 1;
+                let refresh_started = std::time::Instant::now();
+                refresh_budget_ms = admission_deadline
+                    .saturating_duration_since(refresh_started)
+                    .as_millis();
+                let refreshed =
+                    status_http::inspect(&client, &administrator, &status, admission_deadline);
+                last_refresh_elapsed = refresh_started.elapsed();
+                refresh_elapsed += last_refresh_elapsed;
                 request.expected_catalog_generation = Some(
-                    status_http::inspect(&client, &administrator, &status, admission_deadline)
-                        .map_err(|failure| {
-                            format!("repository HTTP stage=generation-refresh: {failure:?}")
-                        })?
-                        .catalog_generation,
+                    refreshed.map_err(|_| {
+                        eprintln!("repository_http_admission stage=generation_refresh elapsed_ms={} initial_status_ms={} init_attempts={init_attempts} init_replays={init_replays} last_response={last_response} refresh_response=status_inspection_error refresh_count={refresh_count} refresh_ms={} last_refresh_ms={} refresh_budget_ms={refresh_budget_ms} remaining_ms={}", admission_started.elapsed().as_millis(), initial_status_elapsed.as_millis(), refresh_elapsed.as_millis(), last_refresh_elapsed.as_millis(), admission_deadline.saturating_duration_since(std::time::Instant::now()).as_millis());
+                        "repository HTTP stage=generation-refresh inspection failed".to_owned()
+                    })?.catalog_generation,
                 );
             },
-            Err(error) => {
-                return Err(format!("repository HTTP stage=init-admission: {error:?}").into());
+            Err(_) => {
+                eprintln!(
+                    "repository_http_admission stage=init_admission elapsed_ms={} initial_status_ms={} init_attempts={init_attempts} init_replays={init_replays} last_response={last_response} last_call_ms={} refresh_count={refresh_count} refresh_ms={} remaining_ms={}",
+                    admission_started.elapsed().as_millis(),
+                    initial_status_elapsed.as_millis(),
+                    last_call_elapsed.as_millis(),
+                    refresh_elapsed.as_millis(),
+                    admission_deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_millis()
+                );
+                return Err(format!(
+                    "repository HTTP stage=init-admission response={last_response}"
+                )
+                .into());
             },
         }
     };

@@ -177,6 +177,11 @@ pub(crate) fn verify_payloads(
         {
             return Err(ReleaseError::IdentityMismatch);
         }
+        if artifact.surface == Surface::Helm
+            && bundle.read(&artifact.file, 1 << 20)? != crate::helm_chart(inventory)?
+        {
+            return Err(ReleaseError::IdentityMismatch);
+        }
         crate::archive_scan::scan_bundle_contents(bundle, &artifact.file, canaries)?;
         if let Some(payload) = &artifact.payload {
             crate::archive_scan::scan_bundle_contents(bundle, payload, canaries)?;

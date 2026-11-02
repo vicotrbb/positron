@@ -160,6 +160,60 @@ pub(super) fn clear_incomplete(directory: &File) -> Result<bool, CatalogFailure>
     directory.sync_all().map_err(error)?;
     Ok(true)
 }
+
+/// Reclaims at most 32 obsolete continuation generations, retaining the exact
+/// authoritative predecessor and an idempotent unpublished proposal.
+pub(super) fn retain_verification_generations(
+    directory: &File,
+    predecessor: Option<[u8; 32]>,
+    proposal: [u8; 32],
+) -> Result<bool, CatalogFailure> {
+    let predecessor = predecessor.map(file_name);
+    let proposal = file_name(proposal);
+    let mut entries = Dir::read_from(directory).map_err(errno)?;
+    let mut removed = 0usize;
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(errno)?;
+        let name = entry.file_name().to_bytes();
+        if matches!(name, b"." | b".." | b"index") {
+            continue;
+        }
+        if name.len() != 66
+            || !name.starts_with(b"f-")
+            || !name
+                .get(2..)
+                .is_some_and(|suffix| suffix.iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err(fail(CatalogFailureCode::IntegrityCorruption));
+        }
+        if name == proposal.as_bytes()
+            || predecessor
+                .as_ref()
+                .is_some_and(|value| name == value.as_bytes())
+        {
+            continue;
+        }
+        unix_fs::unlinkat(directory, name, AtFlags::empty()).map_err(errno)?;
+        removed += 1;
+        if removed == 32 {
+            directory.sync_all().map_err(error)?;
+            return Ok(false);
+        }
+    }
+    directory.sync_all().map_err(error)?;
+    Ok(true)
+}
+
+pub(super) fn discard_unpublished_verification_file(
+    directory: &File,
+    identity: [u8; 32],
+) -> Result<(), CatalogFailure> {
+    let name = file_name(identity);
+    // Unsafe ownership/modes or a link remain an integrity failure, never repair.
+    drop(open(directory, &name)?);
+    unix_fs::unlinkat(directory, name.as_str(), AtFlags::empty()).map_err(errno)?;
+    directory.sync_all().map_err(error)
+}
 pub(super) fn has_captures(root: &File) -> Result<bool, CatalogFailure> {
     match unix_fs::statat(root, "backup-captures", AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => return Ok(false),

@@ -1,3 +1,6 @@
+#[path = "empty_admission.rs"]
+mod empty_admission;
+
 use std::fs;
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
@@ -619,8 +622,18 @@ impl TestRoots {
             .duration_since(UNIX_EPOCH)
             .map_err(std::io::Error::other)?
             .as_nanos();
-        let parent =
-            PathBuf::from("/tmp").join(format!("p-http-traces-{}-{nonce}", std::process::id()));
+        static NEXT_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT_ROOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let parent = PathBuf::from("/tmp").join(format!(
+            "p-http-traces-{}-{nonce}-{sequence}",
+            std::process::id(),
+        ));
+        fs::create_dir(&parent).map_err(|failure| {
+            std::io::Error::new(
+                failure.kind(),
+                format!("exclusive fixture root {}: {failure}", parent.display()),
+            )
+        })?;
         let data = parent.join("data");
         let secrets = parent.join("secrets");
         fs::create_dir_all(&data)?;

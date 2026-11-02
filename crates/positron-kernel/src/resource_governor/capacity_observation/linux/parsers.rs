@@ -114,6 +114,10 @@ pub(super) fn mounts(bytes: &[u8]) -> Result<Mounts<'_>, CapacityObservationFail
             .ok_or(malformed(CapacityObservationSource::CgroupMounts))?;
         let before = fields::<6>(before)?;
         let after = fields::<3>(after)?;
+        // Other filesystems may expose opaque roots, such as nsfs net:[inode].
+        if !matches!(after[0], "cgroup" | "cgroup2") {
+            continue;
+        }
         let root = normalized_absolute(before[3], true, CapacityObservationSource::CgroupMounts)?;
         let _ = normalized_absolute(before[4], true, CapacityObservationSource::CgroupMounts)?;
         let mount = Mount {

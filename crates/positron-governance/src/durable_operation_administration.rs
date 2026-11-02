@@ -1214,3 +1214,36 @@ mod purge_request_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod repository_request_tests {
+    use super::*;
+    #[test]
+    fn repository_request_semantics_bind_the_principal() {
+        let parameters = RepositoryOperationParameters::local(
+            crate::RepositoryAction::Initialize,
+            "/owned/repository",
+            [0x31; 16],
+            [0x32; 32],
+            [0x33; 32],
+        )
+        .expect("parameters");
+        let key = AdministrativeIdempotencyKey::new([0x34; 16]).expect("key");
+        let request = |principal| {
+            DurableOperationRequest::repository(
+                PrincipalId::from_bytes([principal; 16]).expect("principal"),
+                key,
+                [0x35; 16],
+                7,
+                8,
+                parameters.intent_digest(),
+            )
+            .expect("request")
+        };
+        let first = request(0x36);
+        let second = request(0x37);
+        assert_ne!(first.canonical_digest(), second.canonical_digest());
+        assert!(!first.has_same_semantics(second));
+        assert!(!second.has_same_semantics(first));
+    }
+}

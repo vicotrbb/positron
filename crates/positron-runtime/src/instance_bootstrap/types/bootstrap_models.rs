@@ -69,16 +69,237 @@ pub enum BootstrapFailureCode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapResourceStage {
+    Observation,
+    Governor,
+    Catalog,
+    Ledger,
+    RestoreInitialGrant,
+    RestoreCarryGrant,
+    RestorePhaseGrant,
+}
+impl BootstrapResourceStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Observation => "observation",
+            Self::Governor => "governor",
+            Self::Catalog => "catalog",
+            Self::Ledger => "ledger",
+            Self::RestoreInitialGrant => "restore_initial_grant",
+            Self::RestoreCarryGrant => "restore_carry_grant",
+            Self::RestorePhaseGrant => "restore_phase_grant",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapResourceReason {
+    UnsupportedPlatform,
+    ObservationUnavailable,
+    MalformedLimit,
+    AmbiguousHierarchy,
+    Arithmetic,
+    AllocationUnavailable,
+    ZeroCapacity,
+    InvalidConfiguration,
+    PolicyCardinalityExceeded,
+    BootstrapInventoryUnavailable,
+    InsufficientOutstandingProgress,
+    TenantProgressUnavailable,
+    SystemRecoveryProgressUnavailable,
+    InvalidRecoveryScope,
+    GovernorContended,
+    PrimaryVolumeObservationUnavailable,
+    ObservedVolumeMismatch,
+    InternalFenced,
+    ResourceAdmissionRefused,
+    LimitExceeded,
+    StorageExhausted,
+    Cancelled,
+}
+impl BootstrapResourceReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UnsupportedPlatform => "unsupported_platform",
+            Self::ObservationUnavailable => "observation_unavailable",
+            Self::MalformedLimit => "malformed_limit",
+            Self::AmbiguousHierarchy => "ambiguous_hierarchy",
+            Self::Arithmetic => "arithmetic",
+            Self::AllocationUnavailable => "allocation_unavailable",
+            Self::ZeroCapacity => "zero_capacity",
+            Self::InvalidConfiguration => "invalid_configuration",
+            Self::PolicyCardinalityExceeded => "policy_cardinality_exceeded",
+            Self::BootstrapInventoryUnavailable => "bootstrap_inventory_unavailable",
+            Self::InsufficientOutstandingProgress => "insufficient_outstanding_progress",
+            Self::TenantProgressUnavailable => "tenant_progress_unavailable",
+            Self::SystemRecoveryProgressUnavailable => "system_recovery_progress_unavailable",
+            Self::InvalidRecoveryScope => "invalid_recovery_scope",
+            Self::GovernorContended => "governor_contended",
+            Self::PrimaryVolumeObservationUnavailable => "primary_volume_observation_unavailable",
+            Self::ObservedVolumeMismatch => "observed_volume_mismatch",
+            Self::InternalFenced => "internal_fenced",
+            Self::ResourceAdmissionRefused => "resource_admission_refused",
+            Self::LimitExceeded => "limit_exceeded",
+            Self::StorageExhausted => "storage_exhausted",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapResourceSource {
+    RegisteredBounds,
+    HostCpu,
+    HostMemory,
+    CgroupMembership,
+    CgroupMounts,
+    CgroupCpu,
+    CgroupMemory,
+    ProcessFileDescriptors,
+    PrimaryVolumeFilesystem,
+}
+impl BootstrapResourceSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::RegisteredBounds => "registered_bounds",
+            Self::HostCpu => "host_cpu",
+            Self::HostMemory => "host_memory",
+            Self::CgroupMembership => "cgroup_membership",
+            Self::CgroupMounts => "cgroup_mounts",
+            Self::CgroupCpu => "cgroup_cpu",
+            Self::CgroupMemory => "cgroup_memory",
+            Self::ProcessFileDescriptors => "process_file_descriptors",
+            Self::PrimaryVolumeFilesystem => "primary_volume_filesystem",
+        }
+    }
+}
+/// Closed bootstrap diagnostics; external error text and resource identities never enter here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BootstrapResourceContext {
+    stage: BootstrapResourceStage,
+    reason: BootstrapResourceReason,
+    source: Option<BootstrapResourceSource>,
+    dimension: Option<positron_kernel::ResourceDimension>,
+    admission_code: Option<positron_kernel::AdmissionFailureCode>,
+    admission_scope: positron_kernel::LimitingScope,
+    admission_class: positron_kernel::WorkClass,
+    admission_pressure: positron_kernel::DiskPressureState,
+    admission_amounts: [u64; 3],
+}
+impl BootstrapResourceContext {
+    pub(in crate::instance_bootstrap) const fn new(
+        stage: BootstrapResourceStage,
+        reason: BootstrapResourceReason,
+        source: Option<BootstrapResourceSource>,
+    ) -> Self {
+        Self {
+            stage,
+            reason,
+            source,
+            dimension: None,
+            admission_code: None,
+            admission_scope: positron_kernel::LimitingScope::Global,
+            admission_class: positron_kernel::WorkClass::OrdinaryMaintenanceBackup,
+            admission_pressure: positron_kernel::DiskPressureState::Healthy,
+            admission_amounts: [0; 3],
+        }
+    }
+    pub(in crate::instance_bootstrap) const fn with_admission(
+        mut self,
+        failure: positron_kernel::AdmissionFailure,
+    ) -> Self {
+        // Keep only the closed projection, not unused retry/completion evidence in every Copy failure.
+        self.admission_code = Some(failure.code());
+        self.admission_scope = failure.limiting_scope();
+        self.admission_class = failure.work_class();
+        self.admission_pressure = failure.pressure_state();
+        self.admission_amounts = [failure.allowed(), failure.in_use(), failure.requested()];
+        self
+    }
+    pub(in crate::instance_bootstrap) const fn with_dimension(
+        mut self,
+        dimension: Option<positron_kernel::ResourceDimension>,
+    ) -> Self {
+        self.dimension = dimension;
+        self
+    }
+    pub(crate) fn append_json(self, value: &mut serde_json::Value) {
+        if let Some(code) = self.admission_code {
+            // These getters return payload-free closed enums, never resource identities or external errors.
+            value["admission_code"] = format!("{code:?}").into();
+            value["admission_scope"] = format!("{:?}", self.admission_scope).into();
+            value["admission_class"] = format!("{:?}", self.admission_class).into();
+            value["admission_pressure"] = format!("{:?}", self.admission_pressure).into();
+            let [allowed, in_use, requested] = self.admission_amounts;
+            value["admission_allowed"] = allowed.into();
+            value["admission_in_use"] = in_use.into();
+            value["admission_requested"] = requested.into();
+        }
+        value["resource_stage"] = self.stage.label().into();
+        value["resource_reason"] = self.reason.label().into();
+        if let Some(source) = self.source {
+            value["resource_source"] = source.label().into();
+        }
+        if let Some(dimension) = self.dimension {
+            use positron_kernel::ResourceDimension::*;
+            value["resource_dimension"] = match dimension {
+                MemoryBytes => "memory_bytes",
+                QueueSlots => "queue_slots",
+                TaskSlots => "task_slots",
+                BufferCacheBytes => "buffer_cache_bytes",
+                BatchItems => "batch_items",
+                LeaseSlots => "lease_slots",
+                RetrySlots => "retry_slots",
+                IoPermits => "io_permits",
+                CpuWorkUnits => "cpu_work_units",
+                FileDescriptors => "file_descriptors",
+                DiskHeadroomBytes => "disk_headroom_bytes",
+            }
+            .into();
+        }
+    }
+}
+
+// The checkpoint task and resource refusal are distinct failure outcomes, never simultaneous.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BootstrapDiagnostic {
+    None,
+    MaintenanceTask(MaintenanceTaskId),
+    Resource(BootstrapResourceContext),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootstrapFailure {
     code: BootstrapFailureCode,
     lifecycle_generation_conflict: Option<positron_governance::TenantLifecycleGenerationConflict>,
     quota_generation_conflict: Option<positron_governance::TenantQuotaGenerationConflict>,
     display_generation_conflict: Option<TenantDisplayGenerationConflict>,
     retention_generation_conflict: Option<positron_governance::TenantRetentionGenerationConflict>,
-    maintenance_task: Option<MaintenanceTaskId>,
+    diagnostic: BootstrapDiagnostic,
 }
 
 impl BootstrapFailure {
+    /// Closed diagnostic fields only; omits unavailable context and every resource identity.
+    #[must_use]
+    pub fn resource_diagnostic(self) -> Option<serde_json::Value> {
+        if self.code != BootstrapFailureCode::ResourceUnavailable {
+            return None;
+        }
+        let mut value = serde_json::json!({});
+        self.resource_context()?.append_json(&mut value);
+        Some(value)
+    }
+    pub(in crate::instance_bootstrap) const fn with_resource_context(
+        mut self,
+        context: BootstrapResourceContext,
+    ) -> Self {
+        self.diagnostic = BootstrapDiagnostic::Resource(context);
+        self
+    }
+    pub(crate) const fn resource_context(self) -> Option<BootstrapResourceContext> {
+        match self.diagnostic {
+            BootstrapDiagnostic::Resource(context) => Some(context),
+            BootstrapDiagnostic::None | BootstrapDiagnostic::MaintenanceTask(_) => None,
+        }
+    }
     pub(crate) const fn new(code: BootstrapFailureCode) -> Self {
         Self {
             code,
@@ -86,7 +307,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: None,
             retention_generation_conflict: None,
-            maintenance_task: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -99,7 +320,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: None,
             retention_generation_conflict: None,
-            maintenance_task: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -112,7 +333,7 @@ impl BootstrapFailure {
             quota_generation_conflict: Some(conflict),
             display_generation_conflict: None,
             retention_generation_conflict: None,
-            maintenance_task: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -125,7 +346,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: Some(conflict),
             retention_generation_conflict: None,
-            maintenance_task: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -138,7 +359,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: None,
             retention_generation_conflict: Some(conflict),
-            maintenance_task: None,
+            diagnostic: BootstrapDiagnostic::None,
         }
     }
 
@@ -151,7 +372,7 @@ impl BootstrapFailure {
             quota_generation_conflict: None,
             display_generation_conflict: None,
             retention_generation_conflict: None,
-            maintenance_task: Some(maintenance_task),
+            diagnostic: BootstrapDiagnostic::MaintenanceTask(maintenance_task),
         }
     }
 
@@ -198,14 +419,17 @@ impl BootstrapFailure {
     /// governance audit checkpoint request.
     #[must_use]
     pub const fn maintenance_task(&self) -> Option<MaintenanceTaskId> {
-        self.maintenance_task
+        match self.diagnostic {
+            BootstrapDiagnostic::MaintenanceTask(task) => Some(task),
+            BootstrapDiagnostic::None | BootstrapDiagnostic::Resource(_) => None,
+        }
     }
 }
 
 impl Display for BootstrapFailure {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         if self.code == BootstrapFailureCode::GovernanceAuditCheckpointInProgress
-            && let Some(maintenance_task) = self.maintenance_task
+            && let Some(maintenance_task) = self.maintenance_task()
         {
             formatter.write_str(
                 "governance audit checkpoint is in progress; retry the same request with maintenance task ",
@@ -232,6 +456,28 @@ pub struct BootstrapPaths {
 }
 
 impl BootstrapPaths {
+    /// Explicit mount preparation creates only private data/secrets leaf directories.
+    pub fn prepare_storage(
+        configuration: &positron_config::EffectiveConfiguration,
+        qualification: MountQualification,
+    ) -> Result<Self, BootstrapFailure> {
+        let data = Path::new(configuration.data_directory());
+        let secrets = Path::new(configuration.secrets_directory());
+        if configuration.local_key_file().as_path() != secrets.join("local-root-key.v1") {
+            return Err(BootstrapFailure::new(BootstrapFailureCode::InvalidRoots));
+        }
+        let storage = InstanceBootstrapStorage::prepare(data, secrets, qualification)
+            .map_err(super::super::storage::storage_failure)?;
+        Ok(Self {
+            key_cache_lease: positron_kernel::key_provider::KeyCacheLease::default(),
+            storage,
+            #[cfg(test)]
+            data: data.to_owned(),
+            #[cfg(test)]
+            secrets: secrets.to_owned(),
+        })
+    }
+
     pub fn new(
         data: &Path,
         secrets: &Path,
@@ -378,7 +624,8 @@ pub struct InitializedInstance {
     pub(in crate::instance_bootstrap) integrity_key_fingerprint: [u8; 32],
     pub(in crate::instance_bootstrap) catalog_generation: std::sync::atomic::AtomicU64,
     pub(in crate::instance_bootstrap) governance_audit_frontier: u64,
-    pub(in crate::instance_bootstrap) claim_available: bool,
+    pub(in crate::instance_bootstrap) claim_available: std::sync::atomic::AtomicBool,
+    pub(in crate::instance_bootstrap) bootstrap_claim_gate: Mutex<()>,
 }
 
 impl std::fmt::Debug for InitializedInstance {
@@ -464,5 +711,37 @@ impl InitializedInstance {
     #[must_use]
     pub(crate) const fn administrator(&self) -> PrincipalId {
         self.administrator
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_diagnostic_preserves_checkpoint_task_and_closed_resource_outcomes() {
+        let task = MaintenanceTaskId::new([0x41; 16]).expect("task identity");
+        let checkpoint = BootstrapFailure::governance_audit_checkpoint_in_progress(task);
+        assert_eq!(checkpoint.maintenance_task(), Some(task));
+        assert!(checkpoint.resource_context().is_none());
+        assert!(checkpoint.resource_diagnostic().is_none());
+        assert!(checkpoint.to_string().ends_with(&"41".repeat(16)));
+        let resource = BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable)
+            .with_resource_context(BootstrapResourceContext::new(
+                BootstrapResourceStage::Governor,
+                BootstrapResourceReason::InvalidConfiguration,
+                None,
+            ));
+        assert!(resource.maintenance_task().is_none());
+        assert_eq!(
+            resource.resource_diagnostic(),
+            Some(serde_json::json!({
+                "resource_stage": "governor", "resource_reason": "invalid_configuration"
+            }))
+        );
+        assert_eq!(resource.to_string(), "instance bootstrap failed");
+        let unknown = BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable);
+        assert!(unknown.maintenance_task().is_none());
+        assert!(unknown.resource_diagnostic().is_none());
     }
 }

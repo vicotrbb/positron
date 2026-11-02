@@ -8,7 +8,8 @@ mod telemetry;
 pub(crate) use events::{BackupReadStage, OperationalEvent, RequestOutcome};
 pub use events::{
     IntegrityScrubFailureStage, MaintenanceWorkerOperation, OperationalDiagnostic,
-    OperationalReloadRejection, render_operational_diagnostic, write_operational_diagnostic,
+    OperationalReloadRejection, OwnerInspectionUnavailableReason, render_operational_diagnostic,
+    write_operational_diagnostic,
 };
 pub(crate) use metrics::{MAINTENANCE_CLASSES, metrics};
 pub(crate) use telemetry::OperationalTelemetry;

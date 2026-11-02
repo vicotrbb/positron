@@ -2,7 +2,8 @@
 use positron_governance::{AdministrativeIdempotencyKey, DurableOperation, DurableOperationStatus};
 use positron_kernel::{RecoveryPassphrase, RecoveryUnlock};
 use positron_runtime::{
-    BackupRestoreRequest, BackupRestoreSession, BootstrapPaths, InstanceBootstrap,
+    BackupRestoreRequest, BackupRestoreSession, BootstrapFailureCode, BootstrapPaths,
+    InstanceBootstrap,
 };
 use std::{
     io::Write,
@@ -171,7 +172,28 @@ fn begin(
             unlock(options, passphrase)?,
         ),
     };
-    result.map_err(|_| "restore unavailable; require a fresh target or the exact accepted restore identity and sufficient admitted resources")
+    result.map_err(|failure| {
+        let mut diagnostic = std::io::stderr();
+        let message = report_begin_failure(failure.code(), &mut diagnostic);
+        if let Some(context) = failure.resource_diagnostic()
+            && (write!(diagnostic, "positron: restore resource refusal; ").is_err()
+                || serde_json::to_writer(&mut diagnostic, &context).is_err()
+                || writeln!(diagnostic).is_err())
+        {
+            return "restore unavailable; begin failed and its diagnostic could not be written; inspect the same target before retrying";
+        }
+        message
+    })
+}
+fn report_begin_failure(code: BootstrapFailureCode, diagnostic: &mut impl Write) -> &'static str {
+    match writeln!(diagnostic, "positron: restore begin refused; code={code:?}") {
+        Ok(()) => {
+            "restore unavailable; require a fresh target or the exact accepted restore identity and sufficient admitted resources"
+        },
+        Err(_) => {
+            "restore unavailable; begin failed and its diagnostic could not be written; inspect the same target before retrying"
+        },
+    }
 }
 fn check_operation(options: &Options, operation: DurableOperation) -> Result<(), &'static str> {
     if options

@@ -5,7 +5,8 @@ mod backup_capture;
 pub use backup_capture::{
     BackupCapture, BackupCaptureCustody, BackupCaptureFile, BackupCaptureFileKind,
     BackupCapturePreparation, BackupCaptureResourceEstimate, BackupCaptureVerification,
-    BackupCatalogObject,
+    BackupCatalogObject, BackupVerificationBinding, BackupVerificationNativeState,
+    BackupVerificationProgress, BackupVerificationReference,
 };
 mod budget;
 mod codec;

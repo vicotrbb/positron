@@ -1,0 +1,13 @@
+{{- if .Values.maintenance.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "positron.name" . }}-{{ .Values.maintenance.name }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ .Values.maintenance.activeDeadlineSeconds }}
+  template:
+    spec:
+      restartPolicy: Never
+      {{- include "positron.pod" . | nindent 6 }}
+{{- end }}

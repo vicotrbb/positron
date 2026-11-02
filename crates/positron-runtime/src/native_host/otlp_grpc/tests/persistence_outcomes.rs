@@ -282,6 +282,8 @@ impl ReceiverHarness {
             role: ListenerRole::OtlpGrpc,
             listener: NativeListener::Tcp(listener),
             accepting: AtomicBool::new(true),
+            #[cfg(unix)]
+            control_acceptance: std::sync::Mutex::new(()),
             accepted_connections: AtomicUsize::new(0),
             control_path: None,
             transport: Some(TransportProfile::plaintext_opt_out()),
@@ -291,6 +293,8 @@ impl ReceiverHarness {
             http2_profile: compiled_http2_profile(NetworkListenerRole::OtlpGrpc)?,
             cors_allowed_origins: Vec::new(),
             control_diagnostics: None,
+            #[cfg(unix)]
+            accept_barrier: std::sync::Mutex::new(None),
         });
         let cancellation = TaskCancellation::new();
         let serve_cancellation = cancellation.clone();

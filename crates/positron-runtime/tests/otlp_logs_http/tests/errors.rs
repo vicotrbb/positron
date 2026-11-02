@@ -1,14 +1,4 @@
-use prost::Message;
-
-use super::support::{HttpEncoding, HttpResponse, LiveHttpHarness};
-
-#[derive(Clone, PartialEq, Message)]
-struct RpcStatus {
-    #[prost(int32, tag = "1")]
-    code: i32,
-    #[prost(string, tag = "2")]
-    message: String,
-}
+use super::support::{HttpEncoding, LiveHttpHarness, assert_rpc_status};
 
 #[test]
 fn malformed_and_unsupported_requests_have_stable_otlp_status_errors()
@@ -66,37 +56,6 @@ fn malformed_and_unsupported_requests_have_stable_otlp_status_errors()
         let duplicate = harness
             .request_authenticated(&[(name, value.to_owned()), (name, value.to_owned())], b"")?;
         assert_eq!(duplicate.status(), 400, "duplicate {name} was accepted");
-    }
-    Ok(())
-}
-
-fn assert_rpc_status(
-    response: HttpResponse,
-    encoding: HttpEncoding,
-    http_status: u16,
-    rpc_code: i32,
-    message: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(response.status(), http_status);
-    assert_eq!(
-        response.header("content-type"),
-        Some(encoding.content_type())
-    );
-    assert!(
-        !response.body().is_empty(),
-        "OTLP error body was empty for HTTP {http_status}"
-    );
-    match encoding {
-        HttpEncoding::Protobuf => {
-            let status = RpcStatus::decode(response.body())?;
-            assert_eq!((status.code, status.message.as_str()), (rpc_code, message));
-        },
-        HttpEncoding::Json => {
-            let status: serde_json::Value = serde_json::from_slice(response.body())?;
-            assert_eq!(status["code"], rpc_code);
-            assert_eq!(status["message"], message);
-            assert!(status.get("details").is_none());
-        },
     }
     Ok(())
 }

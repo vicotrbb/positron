@@ -321,10 +321,11 @@ impl ReleaseInventory {
         }
         for artifact in &self.artifacts {
             use Surface::*;
-            if (matches!(artifact.surface, Api | OciImage | Homebrew | Nix | Compose)
-                || (artifact.surface == NativeExecutable
-                    && (artifact.target.starts_with("linux-")
-                        || artifact.target.starts_with("nix-"))))
+            if (matches!(
+                artifact.surface,
+                Api | OciImage | Homebrew | Nix | Compose | Helm
+            ) || (artifact.surface == NativeExecutable
+                && (artifact.target.starts_with("linux-") || artifact.target.starts_with("nix-"))))
                 && artifact.payload.is_none()
             {
                 return Err(ReleaseError::Unreproducible);

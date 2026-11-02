@@ -1,0 +1,18 @@
+{{- range $name, $size := .Values.storage }}
+{{- if or (ne $name "backups") (not $.Values.backupClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "positron.name" $ }}-{{ $name }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  storageClassName: {{ $.Values.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ $size | quote }}
+{{- end }}
+{{- end }}

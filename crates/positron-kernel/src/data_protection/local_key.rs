@@ -4,6 +4,9 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 mod acl;
+pub(crate) fn has_private_directory_acl(directory: &std::fs::File) -> bool {
+    acl::verify_directory_acl(directory).is_ok()
+}
 mod bootstrap;
 mod codec;
 mod initialization_io;

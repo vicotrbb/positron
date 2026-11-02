@@ -13,6 +13,7 @@ use prost::Message;
 mod admission_groups;
 mod bounds;
 mod decoded;
+mod json;
 mod mapping;
 pub(crate) mod preflight;
 mod request;
@@ -88,6 +89,14 @@ pub fn preflight_otlp_logs_protobuf(protobuf: &[u8]) -> Result<(), ReceiveFailur
 /// Validates the Release 1 OTLP Logs ProtoJSON shape before materializing decode.
 pub fn preflight_otlp_logs_json(json: &[u8]) -> Result<(), ReceiveFailure> {
     validate_json(json, ValueLimitProfile::release_1_system_maximum())
+}
+
+/// Exercises bounded JSON preflight and generated-message decoding together.
+#[cfg(fuzzing)]
+pub fn fuzz_otlp_logs_json(json: &[u8]) {
+    if json.len() <= 1_048_576 && preflight_otlp_logs_json(json).is_ok() {
+        let _ = json::decode(json);
+    }
 }
 
 pub(crate) fn ingest_attribution(
@@ -320,7 +329,7 @@ impl OtlpLogsReceiver {
                 },
                 transport::BoundedOtlpPayload::Json(json) => {
                     validate_json(&json, self.value_limit_profile)?;
-                    serde_json::from_slice(&json).map_err(|_| ReceiveFailure::MalformedPayload)?
+                    json::decode(&json)?
                 },
             },
         };

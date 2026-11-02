@@ -181,7 +181,8 @@ pub(super) fn drain_source_case(
         drop(gate);
         drop(services);
         let logical_request = body.clone();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let admission_started = Instant::now();
+        let deadline = admission_started + Duration::from_secs(20);
         let mut attempts = 0;
         let response = if queued_lookup {
             super::admission_race::start_with_queued_lookup(
@@ -193,7 +194,10 @@ pub(super) fn drain_source_case(
         } else {
             loop {
                 attempts += 1;
-                match client.manage(&administrator, &body) {
+                let start_call = Instant::now();
+                let start_result = client.manage(&administrator, &body);
+                let start_call_ms = start_call.elapsed().as_millis();
+                match start_result {
                     Ok(response) => break response,
                     Err(positron_api::upgrade::UpgradeServiceClientFailure::StaleGeneration) => {
                         // An operator may resubmit the unchanged intent only after
@@ -244,6 +248,8 @@ pub(super) fn drain_source_case(
                     },
                     Err(positron_api::upgrade::UpgradeServiceClientFailure::Transport) => {
                         // Acceptance is ambiguous: inspect the same key, never send start again.
+                        let initial_transport_elapsed_ms = admission_started.elapsed().as_millis();
+                        let mut lookup_attempts = 0;
                         let lookup = positron_api::upgrade::UpgradeRequest {
                             action: "lookup".into(),
                             candidate_manifest: None,
@@ -254,7 +260,12 @@ pub(super) fn drain_source_case(
                             operation_id: None,
                         };
                         break loop {
-                            match client.manage(&administrator, &lookup) {
+                            lookup_attempts += 1;
+                            let deadline_expired_before_call = Instant::now() >= deadline;
+                            let lookup_call = Instant::now();
+                            let lookup_result = client.manage(&administrator, &lookup);
+                            let lookup_call_ms = lookup_call.elapsed().as_millis();
+                            match lookup_result {
                             Ok(response) => {
                                 let details = response.details.as_ref().ok_or("lookup details")?;
                                 assert_eq!(details.target_manifest, super::hex(target.digest()));
@@ -267,7 +278,11 @@ pub(super) fn drain_source_case(
                                 if Instant::now() < deadline => {
                                     std::thread::sleep(Duration::from_millis(100));
                                 },
-                            Err(error) => return Err(format!("ambiguous admission lookup: {error:?}").into()),
+                            // This is the closed, payload-free client failure enum, not a body or transport error.
+                            Err(error) => return Err(format!(
+                                "ambiguous admission lookup: action=lookup variant={error:?} start_attempts={attempts} lookup_attempts={lookup_attempts} initial_transport_elapsed_ms={initial_transport_elapsed_ms} initial_transport_call_ms={start_call_ms} last_lookup_call_ms={lookup_call_ms} total_elapsed_ms={} deadline_expired_before_call={deadline_expired_before_call}",
+                                admission_started.elapsed().as_millis()
+                            ).into()),
                         }
                         };
                     },

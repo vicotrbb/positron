@@ -61,6 +61,33 @@ fn fake_v2_observer_applies_memory_headroom_and_cpu_quota() {
 }
 
 #[test]
+fn linux_cgroup_observation_ignores_opaque_namespace_mount_roots() {
+    let reader = v2().with("/proc/self/mountinfo", b"41 29 0:33 net:[1] /run/docker/netns/fixture rw - nsfs nsfs rw\n36 29 0:32 / /control rw - cgroup2 cgroup rw\n42 29 0:34 mnt:[2] /run/mountns/fixture rw - nsfs nsfs rw\n");
+    assert_eq!(observe_memory_with(&reader), Ok(500_000));
+    assert_eq!(observe_cpu_with(&reader, 8_000), Ok(500));
+}
+
+#[test]
+fn linux_cgroup_observation_still_rejects_invalid_controller_roots() {
+    for root in ["net:[1]", "relative", "/../worker"] {
+        let mounts = format!("36 29 0:32 {root} /control rw - cgroup2 cgroup rw\n");
+        let reader = v2().with("/proc/self/mountinfo", mounts.as_bytes());
+        assert_eq!(
+            observe_memory_with(&reader),
+            Err(CapacityObservationFailure::MalformedLimit {
+                source: CapacityObservationSource::CgroupMounts
+            })
+        );
+        assert_eq!(
+            observe_cpu_with(&reader, 8_000),
+            Err(CapacityObservationFailure::MalformedLimit {
+                source: CapacityObservationSource::CgroupMounts
+            })
+        );
+    }
+}
+
+#[test]
 fn nested_v2_uses_minimum_finite_ancestor_limits() {
     let reader = FakeReader::default()
         .with("/proc/self/cgroup", b"0::/parent/leaf\n")

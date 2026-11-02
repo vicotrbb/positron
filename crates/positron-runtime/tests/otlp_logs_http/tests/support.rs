@@ -40,8 +40,8 @@ impl HttpEncoding {
 
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Json => "gzip-json",
-            Self::Protobuf => "gzip-protobuf",
+            Self::Json => "json",
+            Self::Protobuf => "protobuf",
         }
     }
 
@@ -144,6 +144,58 @@ impl LiveHttpHarness {
             ],
             &encoding.encode(request)?,
         )
+    }
+
+    /// Retry only the native protocol's explicit, precommit capacity refusal.
+    /// The same absolute allowance covers every exchange and Retry-After wait.
+    pub(super) fn export_admitted(
+        &self,
+        encoding: HttpEncoding,
+        request: ExportLogsServiceRequest,
+        deadline: Instant,
+    ) -> Result<HttpResponse, TestError> {
+        self.export_body_admitted(encoding, None, &encoding.encode(request)?, deadline)
+    }
+
+    pub(super) fn export_body_admitted(
+        &self,
+        encoding: HttpEncoding,
+        content_encoding: Option<&str>,
+        body: &[u8],
+        deadline: Instant,
+    ) -> Result<HttpResponse, TestError> {
+        let mut headers = vec![
+            ("Authorization", format!("Bearer {}", self.bearer)),
+            ("Content-Type", encoding.content_type().to_owned()),
+        ];
+        if let Some(content_encoding) = content_encoding {
+            headers.push(("Content-Encoding", content_encoding.to_owned()));
+        }
+        loop {
+            let response = self.request_before(&headers, body, Some(deadline))?;
+            if Instant::now() >= deadline {
+                return Err("OTLP admission exceeded its five-second budget".into());
+            }
+            if response.status() != 429 {
+                return Ok(response);
+            }
+            assert_eq!(response.header("retry-after"), Some("1"));
+            assert_rpc_status(
+                response,
+                encoding,
+                429,
+                14,
+                "OTLP Logs ingest capacity is unavailable",
+            )?;
+            assert!(
+                self.query_log_bodies("logs | range query_time 0 100 | limit 16")?
+                    .is_empty()
+            );
+            if Instant::now() + Duration::from_secs(1) >= deadline {
+                return Err("OTLP admission exceeded its five-second budget".into());
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
     }
 
     pub(super) const fn endpoint(&self) -> SocketAddr {
@@ -402,4 +454,43 @@ fn set_owner_only(path: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct RpcStatus {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+}
+
+pub(super) fn assert_rpc_status(
+    response: HttpResponse,
+    encoding: HttpEncoding,
+    http_status: u16,
+    rpc_code: i32,
+    message: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(response.status(), http_status);
+    assert_eq!(
+        response.header("content-type"),
+        Some(encoding.content_type())
+    );
+    assert!(
+        !response.body().is_empty(),
+        "OTLP error body was empty for HTTP {http_status}"
+    );
+    match encoding {
+        HttpEncoding::Protobuf => {
+            let status = RpcStatus::decode(response.body())?;
+            assert_eq!((status.code, status.message.as_str()), (rpc_code, message));
+        },
+        HttpEncoding::Json => {
+            let status: serde_json::Value = serde_json::from_slice(response.body())?;
+            assert_eq!(status["code"], rpc_code);
+            assert_eq!(status["message"], message);
+            assert!(status.get("details").is_none());
+        },
+    }
+    Ok(())
 }

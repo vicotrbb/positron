@@ -25,6 +25,10 @@ pub(super) static PROCESS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(())
 pub(super) mod support;
 use support::*;
 
+#[cfg(unix)]
+#[path = "diagnostics/fenced_probe.rs"]
+mod fenced_probe;
+
 #[path = "diagnostics/bundles.rs"]
 mod bundles;
 #[path = "diagnostics/cli.rs"]
@@ -39,6 +43,9 @@ mod offline;
 mod output_helper;
 #[path = "diagnostics/output_lifecycle.rs"]
 mod output_lifecycle;
+#[cfg(unix)]
+#[path = "diagnostics/status_probe.rs"]
+mod status_probe;
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]

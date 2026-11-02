@@ -173,6 +173,7 @@ class QueryDeadline(unittest.TestCase):
             self.commands.append((command, options))
             elapsed, result = responses.pop(0)
             self.clock += elapsed
+            if isinstance(result, BaseException): raise result
             return result
 
         def sleep(seconds):
@@ -207,6 +208,30 @@ class QueryDeadline(unittest.TestCase):
         self.assertEqual([options["timeout"] for _, options in self.commands], [30, 11.25])
         self.assertEqual(self.commands[0][0], self.commands[1][0])
         self.assertEqual(self.commands[0][1]["input"], self.commands[1][1]["input"])
+
+    def test_query_timeout_retains_last_closed_outcome_and_original_budget(self):
+        output = io.StringIO()
+        timeout = subprocess.TimeoutExpired(["protected-canary"], 1,
+            output=b"protected-canary", stderr=b"protected-canary")
+        with contextlib.redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "public query command timed out") as caught:
+            self.run_query([(20, self.wall_exhausted()), (7, self.refused()), (1, timeout)])
+        self.assertEqual(json.loads(output.getvalue()), {"event": "query_timeout",
+            "attempt": 3, "elapsed_ms": 30000, "remaining_ms": 0,
+            "last_terminal_state": "incomplete", "last_terminal_reason": "budget_exhausted",
+            "last_limiting_budget": "wall_seconds", "last_rejection": "capacity_unavailable"})
+        self.assertEqual([options["timeout"] for _, options in self.commands], [30, 9, 1])
+        self.assertNotIn("protected-canary", str(caught.exception) + output.getvalue())
+
+    def test_query_timeout_without_prior_terminal_has_no_raw_failure_data(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "public query command timed out"):
+            self.run_query([(30, subprocess.TimeoutExpired(["protected-canary"], 30,
+                output=b"protected-canary", stderr=b"protected-canary"))])
+        self.assertEqual(json.loads(output.getvalue()), {"event": "query_timeout",
+            "attempt": 1, "elapsed_ms": 30000, "remaining_ms": 0,
+            "last_terminal_state": "unavailable", "last_terminal_reason": "unavailable",
+            "last_limiting_budget": "unavailable", "last_rejection": "none"})
+        self.assertEqual(len(self.commands), 1)
 
     def test_wall_exhaustion_is_bounded_to_three_executions(self):
         with self.assertRaisesRegex(RuntimeError, "query wall allowance exhausted"):
@@ -545,9 +570,10 @@ class RestartReadinessObservation(unittest.TestCase):
                     "disk_pressure": "healthy", "usable_disk_bytes": 123456}}},
                 "unrelated": "protected-canary"}
 
-    def invoke(self, response=None, failure=True, collector_error=False, systemd_output=None, collector_result=None):
+    def invoke(self, response=None, failure=True, collector_error=False, systemd_output=None, collector_result=None, ingest_failure=False):
         import textwrap
         self.observations = []
+        self.commands = []
         self.http = []
         self.reads = []
         self.systemd = []
@@ -559,6 +585,9 @@ class RestartReadinessObservation(unittest.TestCase):
             restarted = False
 
             def succeed(self, command):
+                owner.commands.append(command)
+                if ingest_failure and command == "python /etc/positron-service-check.py ingest":
+                    raise original
                 if command == "systemctl restart positron":
                     self.restarted = True
                 return ""
@@ -650,6 +679,12 @@ class RestartReadinessObservation(unittest.TestCase):
         self.assertLessEqual(sum(count for _, count in self.reads), 65537)
         self.assertTrue(all(not options for _, options in self.waits),
                         "preserve the driver's original readiness timeout")
+
+    def test_ingest_failure_observes_once_without_replay_or_replacing_the_failure(self):
+        self.invoke(ingest_failure=True)
+        self.observed()
+        self.assertEqual(self.commands.count("python /etc/positron-service-check.py ingest"), 1)
+        self.assertNotIn("protected", self.output)
 
     def test_failure_observes_closed_clock_and_resource_facts_before_same_exception(self):
         output = self.invoke()

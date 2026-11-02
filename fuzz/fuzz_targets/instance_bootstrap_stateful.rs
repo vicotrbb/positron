@@ -17,7 +17,7 @@ use positron_governance::{
     GovernanceAuditEntry, PresentedCredential, RequestedIntent, ResourceGeneration,
     TenantCreateConfiguration,
 };
-use positron_kernel::MountQualification;
+use positron_kernel::{InstanceBootstrapStorage, MountQualification};
 use positron_runtime::{
     BootstrapFailureCode, BootstrapPaths, InitializationPlan, InstanceBootstrap,
 };
@@ -38,16 +38,14 @@ struct FuzzRoots {
 impl FuzzRoots {
     fn new() -> Option<Self> {
         let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
-        let parent = std::env::temp_dir().join(format!(
+        let parent = std::env::temp_dir().canonicalize().ok()?.join(format!(
             "positron-bootstrap-fuzz-{}-{sequence}",
             std::process::id()
         ));
         let data = parent.join("data");
         let secrets = parent.join("secrets");
         fs::create_dir(&parent).ok()?;
-        fs::create_dir(&data).ok()?;
-        fs::create_dir(&secrets).ok()?;
-        set_owner_only(&secrets).ok()?;
+        InstanceBootstrapStorage::prepare(&data, &secrets, MountQualification::LocalHost).ok()?;
         Some(Self {
             parent,
             data,
@@ -66,12 +64,6 @@ impl Drop for FuzzRoots {
     }
 }
 
-#[cfg(unix)]
-fn set_owner_only(path: &Path) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-}
 
 fn corrupt(path: &Path, selector: usize) {
     let Ok(mut bytes) = fs::read(path) else {
@@ -251,6 +243,9 @@ fuzz_target!(|data: &[u8]| {
     let Some(roots) = FuzzRoots::new() else {
         return;
     };
+    let leaf: String = data.iter().take(64).map(|byte| match byte % 4 { 0 => '.', 1 => '-', _ => 'a' }).collect();
+    let candidate = roots.parent.join(leaf);
+    let _prepared = InstanceBootstrapStorage::prepare(&candidate, &roots.secrets, MountQualification::LocalHost);
     let Some(paths) = roots.paths() else {
         return;
     };

@@ -68,6 +68,15 @@ in pkgs.testers.runNixOSTest {
     };
   };
   testScript = ''
+    def observe_service_failure():
+        try:
+            code, observation = machine.execute("timeout --kill-after=1s 14s python /etc/positron-service-check.py readiness-diagnostics")
+            if code == 0:
+                print(observation, end="")
+            else:
+                print('{"event":"readiness_observation","outcome":"unavailable"}')
+        except Exception:
+            print('{"event":"readiness_observation","outcome":"unavailable"}')
     start_all()
     machine.wait_for_unit("positron.service")
     machine.succeed("test -r /sys/fs/cgroup/system.slice/positron.service/cpu.max")
@@ -83,7 +92,11 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("systemctl start positron")
     machine.wait_until_succeeds("curl --fail http://127.0.0.1:4310/health/ready")
     machine.succeed("sha256sum /var/lib/positron-secrets/local-root-key.v1 > /root/key.sha256")
-    machine.succeed("python /etc/positron-service-check.py ingest")
+    try:
+        machine.succeed("python /etc/positron-service-check.py ingest")
+    except Exception:
+        observe_service_failure()
+        raise
     machine.succeed("python /etc/positron-service-check.py query")
     machine.succeed("systemctl stop positron")
     machine.succeed("umask 077; python /etc/positron-lifecycle-check.py recovery")
@@ -95,14 +108,7 @@ in pkgs.testers.runNixOSTest {
     try:
         machine.wait_until_succeeds("curl --fail http://127.0.0.1:4310/health/ready")
     except Exception:
-        try:
-            code, observation = machine.execute("timeout --kill-after=1s 14s python /etc/positron-service-check.py readiness-diagnostics")
-            if code == 0:
-                print(observation, end="")
-            else:
-                print('{"event":"readiness_observation","outcome":"unavailable"}')
-        except Exception:
-            print('{"event":"readiness_observation","outcome":"unavailable"}')
+        observe_service_failure()
         raise
     machine.succeed("sha256sum --check /root/key.sha256")
     machine.succeed("python /etc/positron-service-check.py query")

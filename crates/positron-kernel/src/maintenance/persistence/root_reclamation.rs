@@ -142,11 +142,10 @@ impl MaintenanceCoordinator {
                                 live.checkpoint.as_ref(),
                             )
                             .is_ok()
-                            || RepositoryOperationBinding::from_task(
+                            || RepositoryOperationBinding::reference_free_task(
                                 &live.task,
                                 live.checkpoint.as_ref(),
                             )
-                            .is_ok()
                             || !durable_task_retains_unproved_root_reference(bytes)?)
                     {
                         removed.push(identity);

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object", "additionalProperties": false,
+  "required": ["image", "replicas", "terminationGracePeriodSeconds", "storageClass", "storage", "tlsSecret", "identity", "resources", "configuration", "maintenance"],
+  "properties": {
+    "image": {"type": "string", "pattern": "^ghcr[.]io/vicotrbb/positron@sha256:[a-f0-9]{64}$"},
+    "replicas": {"type": "integer", "enum": [0, 1]},
+    "terminationGracePeriodSeconds": {"type": "integer", "minimum": @STOP_GRACE_SECONDS@, "maximum": 86400},
+    "storageClass": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"},
+    "operationInputsClaim": {"type": "string", "maxLength": 253, "pattern": "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?)?$"},
+    "backupClaim": {"type": "string", "maxLength": 253, "pattern": "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?)?$"},
+    "tlsSecret": {"type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"},
+    "configuration": {"type": "string", "minLength": 1, "maxLength": 1048576},
+    "storage": {"type": "object", "additionalProperties": false, "required": ["data", "secrets", "backups"], "properties": {
+      "data": {"type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"},
+      "secrets": {"type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"},
+      "backups": {"type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"}
+    }},
+    "identity": {"type": "object", "additionalProperties": false, "required": ["uid", "gid"], "properties": {
+      "uid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+      "gid": {"type": "integer", "minimum": 1, "maximum": 2147483647}
+    }},
+    "resources": {"type": "object", "additionalProperties": false, "required": ["requests", "limits"], "properties": {
+      "requests": {"$ref": "#/definitions/resources"}, "limits": {"$ref": "#/definitions/resources"}
+    }},
+    "maintenance": {"type": "object", "additionalProperties": false, "required": ["enabled", "name", "args", "activeDeadlineSeconds"], "properties": {
+      "enabled": {"type": "boolean"},
+      "name": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,8}[a-z0-9])?$"},
+      "args": {"type": "array", "maxItems": 128, "items": {"type": "string", "maxLength": 4096}},
+      "activeDeadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 86400}
+    }}
+  },
+  "definitions": {"resources": {"type": "object", "additionalProperties": false, "required": ["cpu", "memory"], "properties": {
+    "cpu": {"type": "string", "pattern": "^[1-9][0-9]*m?$"}, "memory": {"type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"}
+  }}}
+}

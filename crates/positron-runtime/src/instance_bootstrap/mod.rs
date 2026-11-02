@@ -18,6 +18,10 @@ mod storage;
 #[cfg(any(test, fuzzing, feature = "test-support"))]
 mod test_support;
 mod types;
+pub(crate) use types::{
+    BootstrapResourceContext, BootstrapResourceReason, BootstrapResourceSource,
+    BootstrapResourceStage,
+};
 
 // Direct bootstrap callers have no configuration authority; preserve the shipped
 // configuration default until the composition root supplies its resolved value.

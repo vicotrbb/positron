@@ -42,6 +42,89 @@ fn establish(tenant: TenantId) -> Result<TestKernel, Box<dyn std::error::Error>>
 }
 
 #[test]
+fn retained_operation_roots_refuse_ledger_exhaustion_without_fencing()
+-> Result<(), Box<dyn std::error::Error>> {
+    use positron_domain::identity::PrincipalId;
+    use positron_kernel::PrincipalQuota;
+
+    for admission in 0..3 {
+        let tenant = tenant(77)?;
+        let capacity = resource_governor_support::raw_capacity_for_governed_work(uniform(100), 6)?;
+        let kernel = TestKernel::establish(
+            ResourceInventory::new(
+                DetectedCapacity::new(capacity)?,
+                OperatorLimits::new(capacity)?,
+                RecoveryReserve::new(uniform(10))?,
+                InventoryCardinalityLimits::new(1, 6)?,
+                DiskPressureThresholds::new(20, 30, 40, 50)?,
+                DiskObservation::new(100),
+            )?,
+            GovernorPolicy::new(
+                [TenantQuota::new(tenant, 1, uniform(90))?],
+                OrdinaryPoolPolicy::new(uniform(20), uniform(15), uniform(10), uniform(5))?,
+            )?
+            .with_principal_quota(PrincipalQuota::new(1, uniform(10), uniform(20))?),
+        )?;
+        let memory = ResourceAmounts::only(ResourceDimension::MemoryBytes, 1)?;
+        let root = kernel.reserve(WorkClaim::authenticated(
+            tenant,
+            PrincipalId::from_bytes([77; 16])?,
+            WorkKind::SecurityLifecycle,
+            memory,
+        )?)?;
+        let token = root.operation_token().ok_or("authenticated root token")?;
+        let child = kernel.reserve(WorkClaim::authenticated_child(
+            &token,
+            WorkKind::SecurityLifecycle,
+            memory,
+        )?)?;
+        drop(root);
+        assert_eq!(kernel.inspect()?.outstanding_total(), 1);
+        let ordinary = [
+            WorkKind::Ingest,
+            WorkKind::InteractiveQueryTail,
+            WorkKind::OrdinaryMaintenanceBackup,
+        ]
+        .into_iter()
+        .map(|kind| Ok(kernel.reserve(WorkClaim::tenant(tenant, kind, memory)?)?))
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        let recovery = kernel.recovery();
+        let repair =
+            recovery.reserve(RecoveryWorkClaim::system(RecoveryWorkKind::Repair, memory)?)?;
+        let tenant_claim = WorkClaim::tenant(tenant, WorkKind::Ingest, memory)?;
+        let system_claim = WorkClaim::system_diagnostics(memory)?;
+        let recovery_claim = RecoveryWorkClaim::system(RecoveryWorkKind::Repair, memory)?;
+        let reserve = || match admission {
+            0 => kernel.reserve(tenant_claim.clone()),
+            1 => kernel.reserve(system_claim.clone()),
+            _ => recovery.reserve(recovery_claim),
+        };
+        let before = kernel.inspect()?;
+        assert_eq!(before.outstanding_total(), 5);
+        assert_eq!(before.usage(ResourceDimension::MemoryBytes), 5);
+        let refusal = reserve().expect_err("retained root occupies the sixth ledger slot");
+        assert_eq!(
+            refusal.code(),
+            AdmissionFailureCode::OutstandingReservationLimit
+        );
+        assert_eq!(refusal.retry(), AdmissionRetry::AfterCapacityRelease);
+        assert_eq!(refusal.allowed(), 6);
+        assert_eq!(refusal.in_use(), 6);
+        let after = kernel.inspect()?;
+        assert_eq!(after.lifecycle(), before.lifecycle());
+        assert_eq!(after.outstanding_total(), before.outstanding_total());
+        assert_eq!(after.usage(ResourceDimension::MemoryBytes), 5);
+        drop(child);
+        assert_eq!(kernel.inspect()?.outstanding_total(), 4);
+        let retried = reserve()?;
+        assert_eq!(kernel.inspect()?.outstanding_total(), 5);
+        drop((retried, ordinary, repair));
+        assert!(kernel.begin_shutdown()?.complete());
+    }
+    Ok(())
+}
+
+#[test]
 fn shutdown_closes_ordinary_and_checkpointable_recovery_but_allows_completion()
 -> Result<(), Box<dyn std::error::Error>> {
     let tenant = tenant(71)?;

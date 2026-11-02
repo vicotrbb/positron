@@ -32,32 +32,29 @@ fn live_control_support_bundle_is_signed_encrypted_and_reports_serving_facts()
     let control = std::path::Path::new("/tmp")
         .join(root.file_name().ok_or("live support root name")?)
         .with_extension("sock");
+    let startup_deadline = std::time::Instant::now() + STARTUP_PROBE_BUDGET;
     let server = Command::new(env!("CARGO_BIN_EXE_positron"))
         .args(["serve", "--config"])
         .arg(&config)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()?;
-    wait_for_ready(ports[0])?;
-
-    let mut status = TcpStream::connect(("127.0.0.1", ports[0]))?;
-    status.write_all(
-        format!(
-            "GET /status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
-            claim.secret(),
+    let status = (|| {
+        wait_for_readiness_until(ports[0], "HTTP/1.1 200 ", startup_deadline)?;
+        wait_for_configuration_status(
+            ports[0],
+            &format!("Bearer {}", claim.secret()),
+            &["\"phase\":\"serving\""],
+            startup_deadline,
         )
-        .as_bytes(),
-    )?;
-    let mut status_response = Vec::new();
-    status.read_to_end(&mut status_response)?;
-    if !status_response.starts_with(b"HTTP/1.1 200 ") {
+    })();
+    if let Err(failure) = status {
         let _termination = Command::new("/bin/kill")
             .args(["-TERM", &server.id().to_string()])
             .status()?;
         let failed_server = server.wait_with_output()?;
         panic!(
-            "serving status must accept the current system administrator: {}; server stderr={}",
-            String::from_utf8_lossy(&status_response),
+            "serving status must accept the current system administrator within startup budget: {failure}; server stderr={}",
             String::from_utf8_lossy(&failed_server.stderr),
         );
     }

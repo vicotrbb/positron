@@ -60,6 +60,38 @@ impl OperationalReloadRejection {
     }
 }
 
+/// Closed dependency origins; request data and native error text never enter here.
+#[derive(Clone, Copy, Debug)]
+pub enum OwnerInspectionUnavailableReason {
+    Phase,
+    CatalogOperation,
+    OwnerReference,
+    ConfigurationReference,
+    KeyCustody,
+    ResourceAdmission,
+    Catalog,
+    Identity,
+    SecurityTime,
+    Collector,
+}
+
+impl OwnerInspectionUnavailableReason {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Phase => "phase",
+            Self::CatalogOperation => "catalog_operation",
+            Self::OwnerReference => "owner_reference",
+            Self::ConfigurationReference => "configuration_reference",
+            Self::KeyCustody => "key_custody",
+            Self::ResourceAdmission => "resource_admission",
+            Self::Catalog => "catalog",
+            Self::Identity => "identity",
+            Self::SecurityTime => "security_time",
+            Self::Collector => "collector",
+        }
+    }
+}
+
 /// Closed process diagnostics shared by serving and terminal reporting.
 #[derive(Clone, Copy, Debug)]
 pub enum OperationalDiagnostic {
@@ -71,6 +103,9 @@ pub enum OperationalDiagnostic {
     SignalHandlingUnavailable,
     TransportSecurityWarning(positron_config::ConfigurationWarning),
     ConfigurationReloadRejected(OperationalReloadRejection),
+    OwnerInspectionUnavailable(OwnerInspectionUnavailableReason),
+    TlsHandshakeFailure(crate::ListenerRole),
+    HttpResponseCompletionFailure(crate::ListenerRole),
     ConfigurationReloadAuditUnavailable,
     RuntimeCrashRecordUnavailable,
     RuntimeCleanupFailure(crate::CleanupRole),
@@ -99,6 +134,10 @@ impl OperationalDiagnostic {
             Self::SignalHandlingUnavailable => "signal_handling_unavailable",
             Self::TransportSecurityWarning(_) => "transport_security_warning",
             Self::ConfigurationReloadRejected(_) => "configuration_reload_rejected",
+            Self::OwnerInspectionUnavailable(_) => "owner_inspection_unavailable",
+            Self::TlsHandshakeFailure(_) | Self::HttpResponseCompletionFailure(_) => {
+                "native_http_connection_failed"
+            },
             Self::ConfigurationReloadAuditUnavailable => "configuration_reload_audit_unavailable",
             Self::RuntimeCrashRecordUnavailable => "runtime_crash_record_unavailable",
             Self::RuntimeCleanupFailure(_) => "runtime_cleanup_failure",
@@ -182,7 +221,7 @@ pub(crate) enum OperationalEvent {
     ResourceObservationDeferred,
     DependencyStorageUnavailable,
     DependencyKeyUnavailable,
-    DependencyResourcesUnavailable,
+    DependencyResourcesUnavailable(Option<crate::instance_bootstrap::BootstrapResourceContext>),
     DependencyCatalogUnavailable,
     DependencyRecoveryUnavailable,
     DependencyRestored,
@@ -204,7 +243,7 @@ impl OperationalEvent {
             Self::ResourceObservationDeferred => "resource_observation_deferred",
             Self::DependencyStorageUnavailable => "dependency_storage_unavailable",
             Self::DependencyKeyUnavailable => "dependency_key_unavailable",
-            Self::DependencyResourcesUnavailable => "dependency_resources_unavailable",
+            Self::DependencyResourcesUnavailable(_) => "dependency_resources_unavailable",
             Self::DependencyCatalogUnavailable => "dependency_catalog_unavailable",
             Self::DependencyRecoveryUnavailable => "dependency_recovery_unavailable",
             Self::DependencyRestored => "dependency_restored",
@@ -229,7 +268,7 @@ impl OperationalEvent {
             Self::ResourceObservationDeferred
             | Self::DependencyStorageUnavailable
             | Self::DependencyKeyUnavailable
-            | Self::DependencyResourcesUnavailable
+            | Self::DependencyResourcesUnavailable(_)
             | Self::DependencyCatalogUnavailable
             | Self::DependencyRecoveryUnavailable => "warn",
             _ => "info",
@@ -237,6 +276,9 @@ impl OperationalEvent {
     }
     pub(crate) fn json(self) -> serde_json::Value {
         let mut value = serde_json::json!({"event": self.name(), "severity": self.severity(), "component": "runtime"});
+        if let Self::DependencyResourcesUnavailable(Some(context)) = self {
+            context.append_json(&mut value);
+        }
         if let Self::BackupReadFailure { stage, failure } = self {
             value["stage"] = stage.token().into();
             value["failure"] = format!("{failure:?}").into();
@@ -264,6 +306,17 @@ impl OperationalEvent {
                 },
                 OperationalDiagnostic::ConfigurationReloadRejected(category) => {
                     value["category"] = category.label().into();
+                },
+                OperationalDiagnostic::OwnerInspectionUnavailable(reason) => {
+                    value["reason"] = reason.label().into();
+                },
+                OperationalDiagnostic::TlsHandshakeFailure(role) => {
+                    value["stage"] = "tls_handshake".into();
+                    value["listener"] = listener_label(role).into();
+                },
+                OperationalDiagnostic::HttpResponseCompletionFailure(role) => {
+                    value["stage"] = "response_completion".into();
+                    value["listener"] = listener_label(role).into();
                 },
                 OperationalDiagnostic::TransportSecurityWarning(warning) => {
                     value["warning"] = warning.message().into();

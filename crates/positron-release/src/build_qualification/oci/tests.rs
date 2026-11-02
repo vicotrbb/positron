@@ -309,3 +309,31 @@ fn captured_native_executable_is_the_immutable_archive_payload_after_build_direc
     capture_oci_executable(&capture);
     assert_eq!(fs::read(capture.join("positron")).unwrap(), binary);
 }
+
+#[test]
+fn staged_multiarchitecture_helm_is_canonical_independently_measured_and_refuses_tamper() {
+    let (_base, qualification) = fixture();
+    let artifact = qualification
+        .inventory
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.surface == Surface::Helm)
+        .unwrap();
+    let expected = helm_chart(&qualification.inventory).unwrap();
+    assert_eq!(
+        fs::read(qualification.root.join(&artifact.file)).unwrap(),
+        expected
+    );
+    assert_eq!(
+        fs::read(
+            qualification
+                .rebuild
+                .join(artifact.payload.as_ref().unwrap())
+        )
+        .unwrap(),
+        expected
+    );
+    qualification.verify().unwrap();
+    fs::write(qualification.root.join(&artifact.file), b"changed chart").unwrap();
+    assert_eq!(qualification.verify(), Err(ReleaseError::IdentityMismatch));
+}

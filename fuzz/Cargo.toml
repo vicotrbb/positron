@@ -495,3 +495,10 @@ path = "fuzz_targets/operational_output_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bootstrap_control"
+path = "fuzz_targets/bootstrap_control.rs"
+test = false
+doc = false
+bench = false

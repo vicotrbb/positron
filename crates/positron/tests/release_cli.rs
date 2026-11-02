@@ -440,3 +440,41 @@ fn compose_cli_generates_the_canonical_unsigned_deployment_and_refuses_overwrite
         .success()
     );
 }
+
+#[test]
+fn helm_cli_generates_the_canonical_unsigned_chart_and_refuses_overwrite() {
+    let fixture = support::Fixture::new();
+    let input = fixture.root.join("helm-inventory.json");
+    let output = fixture.root.join("positron.tgz");
+    std::fs::write(&input, fixture.inventory.canonical_bytes().unwrap()).unwrap();
+    let arguments = ["helm", "--inventory", path(&input), "--out", path(&output)];
+    let generated = run(&arguments);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&output).unwrap(),
+        helm_chart(&fixture.inventory).unwrap()
+    );
+    assert!(
+        String::from_utf8(generated.stdout)
+            .unwrap()
+            .contains("unsigned-helm-chart")
+    );
+    assert!(!run(&arguments).status.success());
+    assert!(
+        !run(&[
+            "helm",
+            "--inventory",
+            path(&input),
+            "--out",
+            path(&output),
+            "--target",
+            "linux-x86_64"
+        ])
+        .status
+        .success()
+    );
+}

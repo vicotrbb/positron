@@ -304,6 +304,7 @@ pub struct HealthState {
     critical_worker_failed: Arc<AtomicBool>,
     dependency_unavailable: Arc<AtomicBool>,
     pending_integrity_fence: Arc<AtomicU8>,
+    pending_configuration_reload: Arc<AtomicBool>,
     integrity_fence_reason: Arc<AtomicU8>,
     integrity_degraded: Arc<AtomicBool>,
     plaintext_listener_roles: Arc<AtomicU8>,
@@ -329,6 +330,45 @@ impl std::fmt::Debug for HealthState {
 }
 
 impl HealthState {
+    pub(crate) fn owner_inspection_unavailable(
+        &self,
+        reason: crate::OwnerInspectionUnavailableReason,
+    ) -> ServingDiagnosticsFailure {
+        self.record_operational_event(OperationalEvent::Diagnostic(
+            crate::OperationalDiagnostic::OwnerInspectionUnavailable(reason),
+        ));
+        ServingDiagnosticsFailure::Unavailable
+    }
+
+    /// Coalesces owner-local requests; only the process owner applies configuration.
+    fn queue_configuration_reload(&self) -> Result<(), ()> {
+        if self.phase() != ProcessPhase::Serving {
+            return Err(());
+        }
+        self.pending_configuration_reload
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn take_configuration_reload_request(&self) -> bool {
+        self.pending_configuration_reload
+            .swap(false, Ordering::AcqRel)
+    }
+
+    /// The owner-local Control listener can outlive startup's service installation.
+    /// Delegate to the current retained instance without opening another volume.
+    pub(crate) fn claim_bootstrap(&self) -> Result<crate::BootstrapClaim, ()> {
+        if self.phase() != ProcessPhase::Serving {
+            return Err(());
+        }
+        let instance = self
+            .inspection_authority
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or(())?;
+        instance.claim_bootstrap().map_err(|_| ())
+    }
+
     /// Returns the bounded, allowlisted operational event snapshot owned by
     /// the process lifecycle. Event values are closed vocabulary only.
     pub fn operational_log_snapshot(&self) -> Result<String, OperationalLogFailure> {
@@ -448,6 +488,13 @@ impl HealthState {
         Ok(Some((destination, reservation)))
     }
 
+    pub(crate) fn request_configuration_reload(
+        &self,
+        bearer: &str,
+    ) -> Result<(), ServingDiagnosticsFailure> {
+        self.with_authenticated_serving_owner(bearer, |_, _, _| self.queue_configuration_reload())
+    }
+
     /// Runs one bounded diagnostic collection against the current serving
     /// owner.  Callers receive neither key material nor an authorization
     /// cache: the bearer is attributed against the live instance immediately
@@ -461,36 +508,62 @@ impl HealthState {
             Arc<RuntimeConfiguration>,
         ) -> Result<T, ()>,
     ) -> Result<T, ServingDiagnosticsFailure> {
+        self.with_authenticated_serving_owner(bearer, collect)
+    }
+
+    fn with_authenticated_serving_owner<T>(
+        &self,
+        bearer: &str,
+        collect: impl FnOnce(
+            &InitializedInstance,
+            positron_governance::AuthorizedContext,
+            Arc<RuntimeConfiguration>,
+        ) -> Result<T, ()>,
+    ) -> Result<T, ServingDiagnosticsFailure> {
         if self.phase() != ProcessPhase::Serving {
-            return Err(ServingDiagnosticsFailure::Unavailable);
+            return Err(
+                self.owner_inspection_unavailable(crate::OwnerInspectionUnavailableReason::Phase)
+            );
         }
         let catalog_operation = self
             .catalog_operation
             .get()
             .and_then(Weak::upgrade)
-            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
-        let _catalog_operation = catalog_operation
-            .lock()
-            .map_err(|_| ServingDiagnosticsFailure::Unavailable)?;
+            .ok_or_else(|| {
+                self.owner_inspection_unavailable(
+                    crate::OwnerInspectionUnavailableReason::CatalogOperation,
+                )
+            })?;
+        let _catalog_operation = catalog_operation.lock().map_err(|_| {
+            self.owner_inspection_unavailable(
+                crate::OwnerInspectionUnavailableReason::CatalogOperation,
+            )
+        })?;
         let authority = self
             .inspection_authority
             .get()
             .and_then(Weak::upgrade)
-            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
-        let configuration = self
-            .configuration
-            .get()
-            .cloned()
-            .ok_or(ServingDiagnosticsFailure::Unavailable)?;
+            .ok_or_else(|| {
+                self.owner_inspection_unavailable(
+                    crate::OwnerInspectionUnavailableReason::OwnerReference,
+                )
+            })?;
+        let configuration = self.configuration.get().cloned().ok_or_else(|| {
+            self.owner_inspection_unavailable(
+                crate::OwnerInspectionUnavailableReason::ConfigurationReference,
+            )
+        })?;
         let credential = PresentedCredential::parse(bearer)
             .map_err(|_| ServingDiagnosticsFailure::AuthenticationRejected)?;
         let actor = authority.attribute_read_only(
             credential,
             RequestedIntent::SystemAdministration,
             CompatibilityHints::none(),
+            self,
         )?;
-        collect(&authority, actor, configuration)
-            .map_err(|_| ServingDiagnosticsFailure::Unavailable)
+        collect(&authority, actor, configuration).map_err(|_| {
+            self.owner_inspection_unavailable(crate::OwnerInspectionUnavailableReason::Collector)
+        })
     }
 
     /// Runs a bounded diagnostic collection through the Fenced inspection
@@ -521,6 +594,7 @@ impl HealthState {
                     credential,
                     RequestedIntent::SystemAdministration,
                     CompatibilityHints::none(),
+                    self,
                 )
                 .map_err(|failure| match failure {
                     ServingDiagnosticsFailure::AuthenticationRejected => {
@@ -546,6 +620,7 @@ impl HealthState {
                 credential,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
+                self,
             )
             .map_err(|failure| match failure {
                 ServingDiagnosticsFailure::AuthenticationRejected => {
@@ -618,7 +693,7 @@ impl HealthState {
             && !self.dependency_unavailable.load(Ordering::Acquire)
     }
 
-    fn required_resources_ready(&self) -> bool {
+    fn required_dependencies_ready(&self) -> bool {
         let Some(inspection) = self.inspection_authority.get() else {
             // Serving is published only after runtime startup establishes all
             // authorities. Standalone phase views do not own an instance.
@@ -627,6 +702,12 @@ impl HealthState {
         let Some(authority) = inspection.upgrade() else {
             return false;
         };
+        if !authority
+            .data_protection_health()
+            .is_ok_and(|health| health.system_ready && !health.storage_unhealthy)
+        {
+            return false;
+        }
         if authority.retention_time.status().state() == LifecycleClockState::ClockUncertain {
             return false;
         }
@@ -654,6 +735,19 @@ impl HealthState {
         self.integrity_degraded.load(Ordering::Acquire)
     }
 
+    fn key_custody_degraded(&self) -> bool {
+        let Some(inspection) = self.inspection_authority.get() else {
+            return false;
+        };
+        let Some(authority) = inspection.upgrade() else {
+            return true;
+        };
+        match authority.data_protection_health() {
+            Ok(health) => health.provider_degraded || health.storage_unhealthy,
+            Err(_) => true,
+        }
+    }
+
     /// Closed diagnostic status derived from the current Health State.
     #[must_use]
     pub fn diagnostic_status(&self) -> &'static str {
@@ -662,6 +756,7 @@ impl HealthState {
         } else if self.readiness() == Readiness::NotReady
             || self.liveness() == Liveness::Dead
             || self.integrity_degraded()
+            || self.key_custody_degraded()
             || !self.security_warnings().is_empty()
         {
             "degraded"
@@ -672,7 +767,7 @@ impl HealthState {
 
     #[must_use]
     pub fn readiness(&self) -> Readiness {
-        if self.admits_data_or_mutation() && self.required_resources_ready() {
+        if self.admits_data_or_mutation() && self.required_dependencies_ready() {
             Readiness::Ready
         } else {
             Readiness::NotReady
@@ -782,6 +877,7 @@ impl HealthState {
                     .map_err(|_| ConfigurationStatusFailure::AuthenticationRejected)?,
                 RequestedIntent::SystemAdministration,
                 CompatibilityHints::none(),
+                self,
             )
             .map_err(|failure| match failure {
                 ServingDiagnosticsFailure::AuthenticationRejected => {
@@ -1061,6 +1157,7 @@ impl ProcessState {
                 critical_worker_failed: Arc::new(AtomicBool::new(false)),
                 dependency_unavailable: Arc::new(AtomicBool::new(false)),
                 pending_integrity_fence: Arc::new(AtomicU8::new(0)),
+                pending_configuration_reload: Arc::new(AtomicBool::new(false)),
                 integrity_fence_reason: Arc::new(AtomicU8::new(0)),
                 integrity_degraded: Arc::new(AtomicBool::new(false)),
                 plaintext_listener_roles: Arc::new(AtomicU8::new(0)),
@@ -1096,7 +1193,7 @@ impl ProcessState {
             .record_operational_event(OperationalEvent::ResourceObservationDeferred);
     }
 
-    pub(crate) fn record_dependency_status(&self, failure: Option<crate::BootstrapFailureCode>) {
+    pub(crate) fn record_dependency_status(&self, failure: Option<crate::BootstrapFailure>) {
         let previously_unavailable = self
             .health
             .dependency_unavailable
@@ -1104,22 +1201,24 @@ impl ProcessState {
         if failure.is_none() && !previously_unavailable {
             return;
         }
-        self.health.record_operational_event(match failure {
-            Some(crate::BootstrapFailureCode::StorageUnavailable) => {
-                OperationalEvent::DependencyStorageUnavailable
-            },
-            Some(crate::BootstrapFailureCode::KeyCustodyUnavailable) => {
-                OperationalEvent::DependencyKeyUnavailable
-            },
-            Some(crate::BootstrapFailureCode::ResourceUnavailable) => {
-                OperationalEvent::DependencyResourcesUnavailable
-            },
-            Some(crate::BootstrapFailureCode::CatalogUnavailable) => {
-                OperationalEvent::DependencyCatalogUnavailable
-            },
-            Some(_) => OperationalEvent::DependencyRecoveryUnavailable,
-            None => OperationalEvent::DependencyRestored,
-        });
+        let context = failure.and_then(crate::BootstrapFailure::resource_context);
+        self.health
+            .record_operational_event(match failure.map(crate::BootstrapFailure::code) {
+                Some(crate::BootstrapFailureCode::StorageUnavailable) => {
+                    OperationalEvent::DependencyStorageUnavailable
+                },
+                Some(crate::BootstrapFailureCode::KeyCustodyUnavailable) => {
+                    OperationalEvent::DependencyKeyUnavailable
+                },
+                Some(crate::BootstrapFailureCode::ResourceUnavailable) => {
+                    OperationalEvent::DependencyResourcesUnavailable(context)
+                },
+                Some(crate::BootstrapFailureCode::CatalogUnavailable) => {
+                    OperationalEvent::DependencyCatalogUnavailable
+                },
+                Some(_) => OperationalEvent::DependencyRecoveryUnavailable,
+                None => OperationalEvent::DependencyRestored,
+            });
     }
 
     pub(crate) fn fail_critical_worker(&self) {
@@ -1246,6 +1345,22 @@ mod tests {
     use super::{ProcessPhase, ProcessState, lower_class_queue_delay_breached};
 
     #[test]
+    fn configuration_reload_requests_are_phase_gated_and_coalesced() {
+        let state = ProcessState::starting();
+        assert!(state.health().queue_configuration_reload().is_err());
+        assert!(!state.health().take_configuration_reload_request());
+        state.transition(ProcessPhase::Serving);
+        for _ in 0..100 {
+            assert!(state.health().queue_configuration_reload().is_ok());
+        }
+        assert!(state.health().take_configuration_reload_request());
+        assert!(!state.health().take_configuration_reload_request());
+        state.transition(ProcessPhase::Draining);
+        assert!(state.health().queue_configuration_reload().is_err());
+        assert!(!state.health().take_configuration_reload_request());
+    }
+
+    #[test]
     fn operational_log_snapshot_excludes_records_before_a_monotonic_cutoff() {
         let state = ProcessState::starting();
         state.transition(ProcessPhase::Serving);
@@ -1290,7 +1405,9 @@ mod tests {
         assert_eq!(state.health().diagnostic_status(), "unavailable");
         state.transition(ProcessPhase::Serving);
         assert_eq!(state.health().diagnostic_status(), "healthy");
-        state.record_dependency_status(Some(crate::BootstrapFailureCode::ResourceUnavailable));
+        state.record_dependency_status(Some(crate::BootstrapFailure::new(
+            crate::BootstrapFailureCode::ResourceUnavailable,
+        )));
         assert_eq!(state.health().readiness(), super::Readiness::NotReady);
         assert_eq!(state.health().diagnostic_status(), "degraded");
         state.record_dependency_status(None);

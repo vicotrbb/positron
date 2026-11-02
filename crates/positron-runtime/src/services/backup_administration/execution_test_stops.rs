@@ -29,6 +29,8 @@ struct Stop {
     operation: [u8; 16],
     point: StopPoint,
     observed: Arc<AtomicBool>,
+    expire_turn: bool,
+    verified_file: Option<[u8; 32]>,
 }
 static STOP: Mutex<Option<Stop>> = Mutex::new(None);
 pub(super) fn armed(
@@ -66,6 +68,14 @@ impl StopGuard {
     pub(in crate::services) fn observed(&self) -> bool {
         self.observed.load(Ordering::Acquire)
     }
+    pub(in crate::services) fn verified_file(&self) -> Result<Option<[u8; 32]>, ServiceFailure> {
+        Ok(STOP
+            .lock()
+            .map_err(|_| ServiceFailure::Internal)?
+            .as_ref()
+            .filter(|stop| Arc::ptr_eq(&stop.observed, &self.observed))
+            .and_then(|stop| stop.verified_file))
+    }
 }
 impl Drop for StopGuard {
     fn drop(&mut self) {
@@ -83,6 +93,39 @@ pub(in crate::services) fn stop_after(
     operation: [u8; 16],
     point: StopPoint,
 ) -> Result<StopGuard, ServiceFailure> {
+    install_stop(instance, operation, point, false)
+}
+
+pub(in crate::services) fn expire_turn_after(
+    instance: [u8; 16],
+    operation: [u8; 16],
+    point: StopPoint,
+) -> Result<StopGuard, ServiceFailure> {
+    install_stop(instance, operation, point, true)
+}
+
+pub(in crate::services) fn turn_expired(
+    instance: [u8; 16],
+    operation: [u8; 16],
+) -> Result<bool, ServiceFailure> {
+    Ok(STOP
+        .lock()
+        .map_err(|_| ServiceFailure::Internal)?
+        .as_ref()
+        .is_some_and(|stop| {
+            stop.instance == instance
+                && stop.operation == operation
+                && stop.expire_turn
+                && stop.observed.load(Ordering::Acquire)
+        }))
+}
+
+fn install_stop(
+    instance: [u8; 16],
+    operation: [u8; 16],
+    point: StopPoint,
+    expire_turn: bool,
+) -> Result<StopGuard, ServiceFailure> {
     let mut stop = STOP.lock().map_err(|_| ServiceFailure::Internal)?;
     if stop.is_some() {
         return Err(ServiceFailure::Internal);
@@ -93,8 +136,32 @@ pub(in crate::services) fn stop_after(
         operation,
         point,
         observed: Arc::clone(&observed),
+        expire_turn,
+        verified_file: None,
     });
     Ok(StopGuard { observed })
+}
+pub(in crate::services) fn native_file_verified(
+    instance: [u8; 16],
+    operation: [u8; 16],
+    identity: [u8; 32],
+    cancellation: Option<&crate::TaskCancellation>,
+) -> Result<(), ServiceFailure> {
+    {
+        let mut stop = STOP.lock().map_err(|_| ServiceFailure::Internal)?;
+        if let Some(stop) = stop
+            .as_mut()
+            .filter(|stop| stop.instance == instance && stop.operation == operation)
+        {
+            stop.verified_file = Some(identity);
+        }
+    }
+    hit(
+        instance,
+        operation,
+        StopPoint::VerificationNativeFileVerified,
+        cancellation,
+    )
 }
 pub(in crate::services) fn hit(
     instance: [u8; 16],
@@ -106,6 +173,12 @@ pub(in crate::services) fn hit(
     if stop.as_ref().is_some_and(|stop| {
         stop.instance == instance && stop.operation == operation && stop.point == point
     }) {
+        if let Some(stop) = stop.as_ref()
+            && stop.expire_turn
+        {
+            stop.observed.store(true, Ordering::Release);
+            return Ok(());
+        }
         let stop = stop.take().ok_or(ServiceFailure::Internal)?;
         stop.observed.store(true, Ordering::Release);
         if point == StopPoint::TransferCheckpointPublication {
@@ -123,6 +196,12 @@ pub(in crate::services) fn hit(
 fn stop_is_owned_by_its_instance_and_operation() -> Result<(), ServiceFailure> {
     let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
     let owner = stop_after([1; 16], [3; 16], StopPoint::ResourcesRequeued)?;
+    native_file_verified([2; 16], [3; 16], [7; 32], None)?;
+    native_file_verified([1; 16], [4; 16], [7; 32], None)?;
+    assert_eq!(owner.verified_file()?, None);
+    native_file_verified([1; 16], [3; 16], [7; 32], None)?;
+    assert_eq!(owner.verified_file()?, Some([7; 32]));
+    assert!(!owner.observed());
     assert!(armed([1; 16], [3; 16], StopPoint::ResourcesRequeued)?);
     assert!(!armed([2; 16], [3; 16], StopPoint::ResourcesRequeued)?);
     assert!(!armed([1; 16], [4; 16], StopPoint::ResourcesRequeued)?);

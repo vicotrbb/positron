@@ -103,14 +103,25 @@ else:
         "wallSeconds": "5", "maximumTimeRangeNanoseconds": "100"}}))
     attempt = 0
     executions = 0
+    last_terminal = {"last_terminal_state": "unavailable", "last_terminal_reason": "unavailable",
+        "last_limiting_budget": "unavailable"}
+    last_rejection = "none"
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeError("query deadline elapsed")
         attempt += 1
-        result = subprocess.run(["positron", "query", "--endpoint", "127.0.0.1:4311",
-            "--credential-stdin", "--allow-plaintext", "--request", str(query)],
-            input=claim["query_secret"].encode(), capture_output=True, timeout=remaining)
+        try:
+            result = subprocess.run(["positron", "query", "--endpoint", "127.0.0.1:4311",
+                "--credential-stdin", "--allow-plaintext", "--request", str(query)],
+                input=claim["query_secret"].encode(), capture_output=True, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            now = time.monotonic()
+            print(json.dumps({"event": "query_timeout", "attempt": attempt,
+                "elapsed_ms": max(0, int((now - (deadline - 30)) * 1000)),
+                "remaining_ms": max(0, int((deadline - now) * 1000)),
+                **last_terminal, "last_rejection": last_rejection}))
+            raise RuntimeError("public query command timed out") from None
         if result.returncode == 0:
             executions += 1
             if time.monotonic() >= deadline:
@@ -141,6 +152,8 @@ else:
             except (ValueError, KeyError, TypeError, RecursionError):
                 pass
             if wall_exhausted:
+                last_terminal = {"last_terminal_state": "incomplete",
+                    "last_terminal_reason": "budget_exhausted", "last_limiting_budget": "wall_seconds"}
                 if executions >= 3:
                     raise RuntimeError("query wall allowance exhausted")
                 if time.monotonic() + 1 >= deadline:
@@ -206,15 +219,15 @@ else:
             if time.monotonic() >= deadline:
                 raise RuntimeError("query deadline elapsed")
             break
+        last_rejection = {
+            b"positron: invalid bounded query request": "invalid_request",
+            b"positron: query authentication rejected": "authentication_rejected",
+            b"positron: query capacity unavailable; retry after backoff": "capacity_unavailable",
+            b"positron: query unavailable; inspect instance readiness": "query_unavailable",
+            b"positron: query transport or response unavailable": "transport",
+        }.get(result.stderr.strip(), "other")
         if time.monotonic() + 1 >= deadline or b"capacity unavailable" not in result.stderr:
-            failure = {
-                b"positron: invalid bounded query request": "invalid_request",
-                b"positron: query authentication rejected": "authentication_rejected",
-                b"positron: query capacity unavailable; retry after backoff": "capacity_unavailable",
-                b"positron: query unavailable; inspect instance readiness": "query_unavailable",
-                b"positron: query transport or response unavailable": "transport",
-            }.get(result.stderr.strip(), "other")
             elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
-            raise RuntimeError(f"public query failed: code={failure} returncode={result.returncode} "
+            raise RuntimeError(f"public query failed: code={last_rejection} returncode={result.returncode} "
                 f"attempt={attempt} elapsed_ms={elapsed_ms}")
         time.sleep(1)

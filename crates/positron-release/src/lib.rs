@@ -1,6 +1,8 @@
 //! Offline release construction and verification, using the canonical kernel manifest.
 #![forbid(unsafe_code)]
 
+mod helm;
+pub use helm::helm_chart;
 mod compose;
 pub use compose::compose_deployment;
 mod homebrew;

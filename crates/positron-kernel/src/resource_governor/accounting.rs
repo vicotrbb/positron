@@ -569,8 +569,23 @@ impl GovernorInner {
                     .and_then(|tenants| classes.checked_add(tenants))
             })
             .ok_or_else(|| internal_failure_at_pressure(class, state.disk_pressure))?;
-        let progress_bound = candidate.checked_add(reserved_progress);
+        // Released operation roots retain ledger slots until their children drain.
+        let occupied = state
+            .grant_records
+            .len()
+            .checked_sub(state.free_slots.len())
+            .and_then(|count| u32::try_from(count).ok())
+            .ok_or_else(|| internal_failure_at_pressure(class, state.disk_pressure))?;
+        let progress_bound = occupied
+            .checked_add(1)
+            .and_then(|count| count.checked_add(reserved_progress));
         if progress_bound.is_none_or(|bound| bound > self.maximum_outstanding) {
+            // Validate exhaustion without scanning the ledger on successful admission.
+            if usize::try_from(occupied).ok() != Some(state.grant_records.iter().flatten().count())
+            {
+                state.lifecycle.set(GovernorLifecycle::Fenced);
+                return Err(internal_failure_at_pressure(class, state.disk_pressure));
+            }
             return Err(failure_at_pressure(
                 AdmissionFailureCode::OutstandingReservationLimit,
                 AdmissionRetry::AfterCapacityRelease,
@@ -580,7 +595,7 @@ impl GovernorInner {
                 DecisionLimit {
                     dimension: None,
                     allowed: u64::from(self.maximum_outstanding),
-                    in_use: u64::from(state.outstanding),
+                    in_use: u64::from(occupied),
                     requested: 1,
                 },
             ));

@@ -1,4 +1,6 @@
 use super::*;
+#[path = "backup_verification_reference.rs"]
+mod backup_verification_reference;
 #[test]
 fn repository_task_reopens_exact_owned_dispatch_binding() -> Result<(), Box<dyn std::error::Error>>
 {

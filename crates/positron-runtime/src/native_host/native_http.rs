@@ -16,6 +16,8 @@ mod dispatch;
 pub(super) use dispatch::query_failure_response;
 mod io;
 #[cfg(test)]
+mod tls_rejection_tests;
+#[cfg(test)]
 mod upgrade_deadline_tests;
 mod adapters {
     pub(in crate::native_host::native_http) mod policy;
@@ -100,10 +102,17 @@ pub(super) fn serve_connection<S: Read + Write + TimeoutStream>(
         dependencies,
         protection,
     );
-    if let Err(response) = result {
-        io::write_response(stream, response).map_err(|_| ConnectionFailure)?;
-    }
-    Ok(())
+    let response = match result {
+        Ok(response) | Err(response) => response,
+    };
+    io::write_response(stream, response).map_err(|_| {
+        health
+            .operational_telemetry()
+            .record(crate::operational::OperationalEvent::Diagnostic(
+                crate::OperationalDiagnostic::HttpResponseCompletionFailure(role),
+            ));
+        ConnectionFailure
+    })
 }
 
 pub(super) struct ConnectionFailure;
@@ -126,10 +135,17 @@ pub(super) fn serve_tls_connection<S: Read + Write + TimeoutStream>(
         dependencies,
         protection,
     );
-    if let Err(response) = result {
-        io::write_response(stream, response).map_err(|_| ConnectionFailure)?;
-    }
-    Ok(())
+    let response = match result {
+        Ok(response) | Err(response) => response,
+    };
+    io::write_response(stream, response).map_err(|_| {
+        health
+            .operational_telemetry()
+            .record(crate::operational::OperationalEvent::Diagnostic(
+                crate::OperationalDiagnostic::HttpResponseCompletionFailure(role),
+            ));
+        ConnectionFailure
+    })
 }
 
 fn serve_checked<S: Read + Write + TimeoutStream>(
@@ -140,7 +156,7 @@ fn serve_checked<S: Read + Write + TimeoutStream>(
     health: &HealthState,
     dependencies: RouteDependencies<'_>,
     protection: ConnectionProtection,
-) -> Result<(), Response> {
+) -> Result<Response, Response> {
     let started = Instant::now();
     let mut header = DeadlineStream::new(
         stream,
@@ -170,7 +186,7 @@ fn serve_checked<S: Read + Write + TimeoutStream>(
     if Instant::now() > request_deadline {
         return Err(Response::empty(408));
     }
-    io::write_response(stream, response).map_err(|_| Response::empty(500))
+    Ok(response)
 }
 
 pub(super) trait TimeoutStream {
@@ -268,4 +284,26 @@ impl<S: Write + TimeoutStream> Write for DeadlineStream<'_, S> {
         self.configure_next_io()?;
         self.stream.flush()
     }
+}
+
+#[cfg(fuzzing)]
+pub(super) fn fuzz_bootstrap_control_request(bytes: &[u8]) {
+    if bytes.len() > 8192 {
+        return;
+    }
+    let mut input = Cursor::new(bytes.to_vec());
+    let Ok(head) = io::read_head(&mut input) else {
+        return;
+    };
+    let state = crate::health::ProcessState::starting();
+    state.transition(crate::ProcessPhase::Serving);
+    let _response = dispatch::route(
+        &mut input,
+        ListenerRole::Control,
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 1)),
+        None,
+        head,
+        &state.health(),
+        RouteDependencies::new(None, None),
+    );
 }

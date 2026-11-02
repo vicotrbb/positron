@@ -3,6 +3,12 @@ use super::*;
 
 const MAGIC: &[u8; 8] = b"REPBND01";
 
+#[path = "repository_operation_verification.rs"]
+mod verification;
+#[cfg(fuzzing)]
+#[path = "repository_operation_verification_fuzz.rs"]
+pub(super) mod verification_fuzz;
+
 /// A reference-free association with one Administration operation. The Runtime
 /// verifies this digest against the accepted operation before dispatching work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,6 +25,20 @@ impl RepositoryOperationBinding {
         coordinator: &MaintenanceCoordinator,
         execution: &MaintenanceExecution<'_>,
     ) -> Result<(u64, Vec<u8>), MaintenanceFailure> {
+        let checkpoint = self.current_backup_checkpoint(coordinator, execution)?;
+        let bytes = checkpoint
+            .opaque_progress()
+            .get(56..)
+            .ok_or(MaintenanceFailure::PreconditionFailed)?;
+        let (_, progress) = verification::unpack(bytes)?;
+        Ok((checkpoint.sequence(), progress.to_vec()))
+    }
+
+    fn current_backup_checkpoint(
+        self,
+        coordinator: &MaintenanceCoordinator,
+        execution: &MaintenanceExecution<'_>,
+    ) -> Result<MaintenanceCheckpoint, MaintenanceFailure> {
         if Self::from_execution(execution)? != self
             || execution.dispatch.coordinator_id != coordinator.coordinator_id
         {
@@ -43,12 +63,7 @@ impl RepositoryOperationBinding {
             .checkpoint
             .as_ref()
             .ok_or(MaintenanceFailure::PreconditionFailed)?;
-        let progress = checkpoint
-            .opaque_progress()
-            .get(56..)
-            .filter(|bytes| bytes.len() <= MAX_CHECKPOINT_BYTES - 56)
-            .ok_or(MaintenanceFailure::PreconditionFailed)?;
-        Ok((checkpoint.sequence(), progress.to_vec()))
+        Ok(checkpoint.clone())
     }
 
     /// Whether this exact accepted intent still has a live Backup maintenance owner.
@@ -226,11 +241,12 @@ impl RepositoryOperationBinding {
         {
             return Err(MaintenanceFailure::PreconditionFailed);
         }
-        execution
+        let bytes = execution
             .checkpoint
             .as_ref()
             .and_then(|checkpoint| checkpoint.opaque_progress().get(56..))
-            .ok_or(MaintenanceFailure::PreconditionFailed)
+            .ok_or(MaintenanceFailure::PreconditionFailed)?;
+        verification::unpack(bytes).map(|(_, progress)| progress)
     }
     fn checkpoint(self) -> Result<MaintenanceCheckpoint, MaintenanceFailure> {
         let mut bytes = Vec::with_capacity(56);

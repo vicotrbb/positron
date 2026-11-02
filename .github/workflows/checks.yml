@@ -75,7 +75,7 @@ jobs:
           - runner: macos-15
             target: macos-aarch64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+    timeout-minutes: ${{ startsWith(matrix.target, 'linux-') && 360 || 180 }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '15.0'
     steps:
@@ -266,6 +266,7 @@ jobs:
           cp "$RUNNER_TEMP/homebrew-fixture/positron.rb" "$tap_root/Formula/positron.rb"
           formula=positronqualification/native/positron
           brew ruby -- -c "$tap_root/Formula/positron.rb"
+          brew trust --formula "$formula"
           cached=$(brew --cache --build-from-source "$formula")
           mkdir -p "$(dirname "$cached")"
           cp "$RUNNER_TEMP/first/native.tar.gz" "$cached"
@@ -286,7 +287,14 @@ jobs:
               -v "$RUNNER_TEMP/gnu-cargo:/cargo" -w "$GITHUB_WORKSPACE" positron-gnu-builder \
               cargo test --locked --release --target-dir "$RUNNER_TEMP/native-target" -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture
           else
-            cargo test --locked -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture
+            native_suite_status=0
+            cargo test --locked -p positron --test native_archive --test binary_ingestion --test restore_cli --test upgrade_native_cli --test release_cli --test compose_fixture -- --test-threads=1 || native_suite_status=$?
+            if [ "$native_suite_status" -ne 0 ] && [ '${{ matrix.target }}' = macos-x86_64 ]; then
+              isolated_native_status=0
+              cargo test --locked -p positron --test upgrade_native_cli offline_recovery::offline_restore_reference_survives_frontiers_that_refuse_continuation -- --exact --nocapture --test-threads=1 || isolated_native_status=$?
+              printf 'isolated_intel_upgrade_diagnostic_exit=%s original_suite_exit=%s\n' "$isolated_native_status" "$native_suite_status"
+            fi
+            exit "$native_suite_status"
           fi
       - name: Run installed offline integrity verification
         shell: bash
@@ -325,6 +333,7 @@ jobs:
           POSITRON_TEST_HOMEBREW_FORMULA: positronqualification/native/positron
         run: |
           cargo test --locked -p positron --test homebrew_cli homebrew_service_drains_restarts_and_retains_state_across_uninstall -- --test-threads=1
+          brew untrust --formula "$POSITRON_TEST_HOMEBREW_FORMULA"
           rm -r "$(brew --repository)/Library/Taps/positronqualification/homebrew-native"
       - name: Build Linux native packages twice
         if: runner.os == 'Linux'
@@ -476,7 +485,7 @@ jobs:
         run: |
           executable=$(jq -r 'select(.target.name == "binary_ingestion" and .executable != null and .profile.test == true) | .executable' "$RUNNER_TEMP/public-test-build.json")
           source_commit=$(git rev-parse HEAD)
-          candidate="$GITHUB_WORKSPACE/target/native-upgrade-fixture/native-release-v1/$source_commit"
+          candidate="$RUNNER_TEMP/native-target/tmp/native-upgrade-fixture/native-release-v1/$source_commit"
           test -f "$candidate/target/release/positron"
           docker create --name positron-oci-tools positron-gnu-builder
           docker cp positron-oci-tools:/bin/kill "$RUNNER_TEMP/oci-kill"
@@ -511,6 +520,191 @@ jobs:
           name: oci-${{ matrix.target }}
           path: ${{ runner.temp }}/oci/
           retention-days: 7
+      - name: Run maintained-minor isolated standalone Helm native lifecycles
+        if: runner.os == 'Linux'
+        timeout-minutes: 180
+        shell: bash
+        run: |
+          set -euo pipefail
+          case '${{ matrix.target }}' in
+            linux-x86_64) architecture=amd64; helm_sha=9adafecab4d406853bba163a70e9f104f47dbbf65ce24b7653bae7e36150bcb6; kind_sha=aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d; k3d_sha=06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0;;
+            linux-aarch64) architecture=arm64; helm_sha=78803142087a0069fa4b50d3f32a84d3ef25c14d1ee8a40fbccf86a6216d2f36; kind_sha=20022bee6cfcd5086cb7234d218e3454e6090022f2a8f55d1fa7fcf42c3867a2; k3d_sha=03cde5cf23e6e8e67de5a039ecf26e5b85aca82fba3e5d13dadf904cd218a250;;
+            *) exit 2;;
+          esac
+          mkdir -p "$RUNNER_TEMP/helm-tools" "$RUNNER_TEMP/helm-candidate"
+          curl --fail --location --silent --show-error "https://get.helm.sh/helm-v4.2.2-linux-$architecture.tar.gz" --output "$RUNNER_TEMP/helm-tools/helm.tar.gz"
+          echo "$helm_sha  $RUNNER_TEMP/helm-tools/helm.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/helm-tools/helm.tar.gz" -C "$RUNNER_TEMP/helm-tools"
+          curl --fail --location --silent --show-error "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-$architecture" --output "$RUNNER_TEMP/helm-tools/kind"
+          echo "$kind_sha  $RUNNER_TEMP/helm-tools/kind" | sha256sum --check
+          curl --fail --location --silent --show-error "https://github.com/k3d-io/k3d/releases/download/v5.9.0/k3d-linux-$architecture" --output "$RUNNER_TEMP/helm-tools/k3d"
+          echo "$k3d_sha  $RUNNER_TEMP/helm-tools/k3d" | sha256sum --check
+          chmod 0755 "$RUNNER_TEMP/helm-tools/kind" "$RUNNER_TEMP/helm-tools/k3d"
+          export PATH="$RUNNER_TEMP/helm-tools:$RUNNER_TEMP/helm-tools/linux-$architecture:$PATH"
+          POSITRON_TEST_SOURCE_COMMIT="$(git rev-parse HEAD)"
+          candidate="$RUNNER_TEMP/native-target/tmp/native-upgrade-fixture/native-release-v1/$POSITRON_TEST_SOURCE_COMMIT"
+          export POSITRON_TEST_UPGRADE_BINARY="$candidate/target/release/positron"
+          POSITRON_TEST_CANDIDATE_COMMIT="$(cat "$candidate/candidate-commit")"
+          export POSITRON_TEST_HELM_CURRENT_BINARY="$RUNNER_TEMP/first/positron"
+          POSITRON_TEST_HELM_FIXTURE_HELPER="$(jq -r 'select(.target.name == "compose_fixture" and .executable != null and .profile.test == true) | .executable' "$RUNNER_TEMP/public-test-build.json")"
+          export POSITRON_TEST_SOURCE_COMMIT POSITRON_TEST_CANDIDATE_COMMIT POSITRON_TEST_HELM_FIXTURE_HELPER
+          export POSITRON_TEST_HELM_FIXTURE_BUILDER=positron-gnu-builder
+          POSITRON_TEST_HELM_QUERY_IMAGE="$(docker image inspect --format '{{.Id}}' positron-118-test)"
+          export POSITRON_TEST_HELM_QUERY_IMAGE
+          export POSITRON_TEST_HELM_ARCHITECTURE="$architecture"
+          [[ "$POSITRON_TEST_HELM_QUERY_IMAGE" =~ ^sha256:[a-f0-9]{64}$ ]]
+          test -x "$POSITRON_TEST_HELM_CURRENT_BINARY"
+          test -x "$POSITRON_TEST_UPGRADE_BINARY"
+          test -x "$POSITRON_TEST_HELM_FIXTURE_HELPER"
+          "$POSITRON_TEST_HELM_CURRENT_BINARY" release archive --target '${{ matrix.target }}' --binary "$POSITRON_TEST_UPGRADE_BINARY" --out "$RUNNER_TEMP/helm-candidate/native.tar.gz"
+          cp deploy/oci/MPL-2.0.txt "$RUNNER_TEMP/helm-candidate/"
+          docker buildx build --load --provenance=false --sbom=false --build-arg SOURCE_DATE_EPOCH=0 --file deploy/oci/Dockerfile --tag positron-120-candidate "$RUNNER_TEMP/helm-candidate"
+          python3 -m pip install --break-system-packages 'PyYAML==6.0.3'
+          python3 deploy/helm/test_native_adapter.py
+          helm version --short
+          kind version
+          k3d version
+          sha256sum "$POSITRON_TEST_HELM_CURRENT_BINARY" "$POSITRON_TEST_UPGRADE_BINARY" "$POSITRON_TEST_HELM_FIXTURE_HELPER"
+          # Official tool checksums: kind v0.33.0 *.sha256sum; k3d v5.9.0 checksums.txt.
+          # Node indices: kind v0.33.0 release; rancher/k3s multi-platform registry indices.
+          cell=0
+          while read -r runtime version digest; do
+            cell=$((cell + 1))
+            cluster="positron-120-$(printf '%s' "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$architecture" | sha256sum | cut -c1-10)-$cell"
+            cell_dir="$RUNNER_TEMP/helm-$cell"
+            mkdir -m 700 "$cell_dir"
+            export POSITRON_TEST_KUBECONFIG="$cell_dir/kubeconfig"
+            export KUBECONFIG="$POSITRON_TEST_KUBECONFIG"
+            export POSITRON_TEST_HELM_CONTEXT="$runtime-$cluster"
+            export POSITRON_TEST_HELM_INDEX_FILE="$cell_dir/runtime-image-index.json"
+            export POSITRON_TEST_HELM_CHART_OUT="$cell_dir/positron-runtime.tgz"
+            export POSITRON_TEST_HELM_CHART="$POSITRON_TEST_HELM_CHART_OUT"
+            printf '%s %s %s\n' "$runtime" "$cluster" "$cell_dir" > "$RUNNER_TEMP/helm-active-cell"
+            port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+            volume="$cluster-storage"
+            if [ "$runtime" = kind ]; then
+              export POSITRON_TEST_HELM_STORAGE_CLASS=standard
+              node_image="kindest/node:$version@sha256:$digest"
+              cat > "$cell_dir/cluster.yaml" <<EOF
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          networking:
+            apiServerAddress: 127.0.0.1
+            apiServerPort: $port
+          nodes:
+            - role: control-plane
+              labels:
+                positron.io/test-owner: $cluster
+          EOF
+              if [ "$cell" = 1 ]; then
+                cat >> "$cell_dir/cluster.yaml" <<EOF
+            - role: worker
+              labels:
+                positron.io/test-owner: $cluster
+          EOF
+              fi
+              kind create cluster --name "$cluster" --kubeconfig "$KUBECONFIG" --config "$cell_dir/cluster.yaml" --image "$node_image" --wait 180s
+              kind load docker-image positron-118-test positron-120-candidate --name "$cluster"
+              mapfile -t nodes < <(kind get nodes --name "$cluster")
+              node="$cluster-control-plane"
+              ctr=(docker exec "$node" ctr --namespace k8s.io)
+            else
+              export POSITRON_TEST_HELM_STORAGE_CLASS=local-path
+              node_image="rancher/k3s:$version@sha256:$digest"
+              docker volume create --label "positron.io/test-owner=$cluster" "$volume"
+              k3d cluster create "$cluster" --image "$node_image" --servers 1 --agents 0 --api-port "127.0.0.1:$port" --volume "$volume:/var/lib/rancher/k3s/storage@server:0" --runtime-label "positron.io/test-owner=$cluster@server:0" --kubeconfig-update-default=false --kubeconfig-switch-context=false --wait --timeout 180s
+              k3d kubeconfig get "$cluster" > "$KUBECONFIG"
+              chmod 600 "$KUBECONFIG"
+              k3d image import positron-118-test positron-120-candidate --cluster "$cluster"
+              node="k3d-$cluster-server-0"
+              nodes=("$node")
+              ctr=(docker exec "$node" /bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io)
+              docker exec "$node" stat -f -c %T /var/lib/rancher/k3s/storage | grep -Ex 'ext2/ext3|xfs|btrfs|zfs'
+            fi
+            current_digest="$("${ctr[@]}" images list | awk '$1 == "docker.io/library/positron-118-test:latest" { print $3 }')"
+            candidate_digest="$("${ctr[@]}" images list | awk '$1 == "docker.io/library/positron-120-candidate:latest" { print $3 }')"
+            [[ "$current_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            [[ "$candidate_digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            export POSITRON_TEST_HELM_IMAGE="ghcr.io/vicotrbb/positron@$current_digest"
+            export POSITRON_TEST_HELM_CANDIDATE_IMAGE="ghcr.io/vicotrbb/positron@$candidate_digest"
+            for node in "${nodes[@]}"; do
+              if [ "$runtime" = kind ]; then
+                ctr=(docker exec "$node" ctr --namespace k8s.io)
+              else
+                ctr=(docker exec "$node" /bin/ctr --address /run/k3s/containerd/containerd.sock --namespace k8s.io)
+              fi
+              test "$("${ctr[@]}" images list | awk '$1 == "docker.io/library/positron-118-test:latest" { print $3 }')" = "$current_digest"
+              test "$("${ctr[@]}" images list | awk '$1 == "docker.io/library/positron-120-candidate:latest" { print $3 }')" = "$candidate_digest"
+              "${ctr[@]}" images tag --force docker.io/library/positron-118-test:latest "$POSITRON_TEST_HELM_IMAGE"
+              "${ctr[@]}" images tag --force docker.io/library/positron-120-candidate:latest "$POSITRON_TEST_HELM_CANDIDATE_IMAGE"
+              "${ctr[@]}" content get "$current_digest" | head -c 1048577 > "$POSITRON_TEST_HELM_INDEX_FILE"
+            done
+            manifest_digest="$(PYTHONPATH=deploy/helm python3 -c 'import os; from native_lifecycle import query_image_descriptor; print(query_image_descriptor(os.environ["POSITRON_TEST_HELM_IMAGE"], os.environ["POSITRON_TEST_HELM_INDEX_FILE"], os.environ["POSITRON_TEST_HELM_ARCHITECTURE"])[1]["digest"])')"
+            if [ "$manifest_digest" != "$current_digest" ]; then
+              "${ctr[@]}" content get "$manifest_digest" | head -c 1048577 > "$cell_dir/query-manifest-${manifest_digest#sha256:}.json"
+            fi
+            PYTHONPATH=deploy/helm python3 -c 'import json, os; from native_lifecycle import checked_query_image; print(json.dumps({"node_image": os.environ["POSITRON_TEST_HELM_IMAGE"], "host_image": checked_query_image(os.environ["POSITRON_TEST_HELM_IMAGE"], timeout=10), "architecture": os.environ["POSITRON_TEST_HELM_ARCHITECTURE"]}))' > "$cell_dir/query-image-binding.json"
+            cargo test --locked -p positron-release --test helm prepare_runtime_helm_fixture -- --ignored --exact
+            test -s "$POSITRON_TEST_HELM_CHART"
+            python3 deploy/helm/test_chart.py
+            test -s "$POSITRON_TEST_HELM_INDEX_FILE"
+            test -n "$POSITRON_TEST_HELM_CANDIDATE_IMAGE"
+            kubectl --kubeconfig "$KUBECONFIG" version --output=json
+            kubectl --kubeconfig "$KUBECONFIG" get nodes --output=json
+            kubectl --kubeconfig "$KUBECONFIG" get storageclass "$POSITRON_TEST_HELM_STORAGE_CLASS" --output=json
+            printf 'runtime=%s version=%s node_image=%s source=%s candidate=%s current_image=%s candidate_image=%s\n' "$runtime" "$version" "$node_image" "$POSITRON_TEST_SOURCE_COMMIT" "$POSITRON_TEST_CANDIDATE_COMMIT" "$current_digest" "$candidate_digest"
+            python3 deploy/helm/test_kubernetes.py KubernetesLifecycle.test_native_upgrade_preserves_verified_data_and_drain
+            if [ "$cell" = 1 ]; then
+              export POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE="$cluster-control-plane"
+              test -n "$POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE"
+              python3 deploy/helm/test_kubernetes.py KubernetesLifecycle.test_native_api_outage_eviction_and_local_path_drain
+              unset POSITRON_TEST_HELM_INTERRUPTION_CONTROL_PLANE
+              python3 deploy/helm/test_kubernetes.py KubernetesLifecycle.test_native_openbao_outage_and_cold_recovery
+            fi
+            if [ "$runtime" = kind ]; then
+              kind delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"
+            else
+              k3d cluster delete "$cluster"
+              docker volume rm "$volume"
+            fi
+            rm "$RUNNER_TEMP/helm-active-cell"
+          done <<'EOF'
+          kind v1.37.0 a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+          kind v1.36.4 099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+          kind v1.35.8 07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+          k3d v1.37.1-k3s1 ca7f37d993d82ef0dcdcfecb2e0e2618ea541dbaffc620c8cedebe01a82acd0d
+          k3d v1.36.5-k3s1 057cfd5a9d51b89f1f0ee139c28d5d5fdd5aa7ddeac2742a0ba90c6dbc0329bb
+          k3d v1.35.9-k3s1 ec9868c6a38d4e8c1869832fb5fd1eb8473c39794a0b44d2b952e7ba911951bc
+          EOF
+      - name: Preserve public runtime OCI descriptors
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: helm-runtime-descriptors-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/helm-*/runtime-image-index.json
+            ${{ runner.temp }}/helm-*/query-manifest-*.json
+            ${{ runner.temp }}/helm-*/query-image-binding.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Inspect and remove owned isolated Helm cell
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "$RUNNER_TEMP/helm-active-cell" ]; then
+            read -r runtime cluster cell_dir < "$RUNNER_TEMP/helm-active-cell"
+            export KUBECONFIG="$cell_dir/kubeconfig"
+            # Metadata only: no Secrets, mounted payloads, or application logs.
+            kubectl --kubeconfig "$KUBECONFIG" get nodes,storageclasses --output=wide || true
+            kubectl --kubeconfig "$KUBECONFIG" get pods,statefulsets,pvc,events --all-namespaces --output=wide || true
+            if [ "$runtime" = kind ]; then
+              "$RUNNER_TEMP/helm-tools/kind" delete cluster --name "$cluster" --kubeconfig "$KUBECONFIG"
+            else
+              "$RUNNER_TEMP/helm-tools/k3d" cluster delete "$cluster"
+              if docker volume inspect "$cluster-storage" >/dev/null 2>&1; then docker volume rm "$cluster-storage"; fi
+            fi
+          fi
       - name: Remove private GNU lifecycle volume
         if: always() && runner.os == 'Linux'
         run: |

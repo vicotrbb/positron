@@ -56,7 +56,9 @@ impl PreparedRestore {
             authority
                 .governor()
                 .reserve(claim)
-                .map_err(|_| BootstrapFailure::new(BootstrapFailureCode::ResourceUnavailable))?
+                .map_err(|failure| {
+                    grant_failure(BootstrapResourceStage::RestoreInitialGrant, failure)
+                })?
                 .transfer(),
         );
         let runtime = tokio::runtime::Builder::new_current_thread()

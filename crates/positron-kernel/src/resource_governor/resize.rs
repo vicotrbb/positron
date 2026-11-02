@@ -38,7 +38,7 @@ impl GovernorInner {
                 };
                 match tenant_index {
                     Some(tenant_index) => self.resize_ordinary(request, tenant_index, class),
-                    None => Err(retained_resize(class, self.pressure_for_failure())),
+                    None => self.shrink_system_ordinary(request, class),
                 }
             },
             ReservationIdentity::Recovery { scope, kind } => {
@@ -52,6 +52,61 @@ impl GovernorInner {
                 self.resize_recovery(request, tenant_index, kind)
             },
         }
+    }
+
+    fn shrink_system_ordinary(
+        &self,
+        request: ResizeRequest,
+        class: WorkClass,
+    ) -> Result<ResizeCommit, ResizeFailure> {
+        if !request.new.is_at_most(request.old) {
+            return Err(retained_resize(class, self.pressure_for_failure()));
+        }
+        let mut state = self.lock_for_admission(class).map_err(|failure| {
+            ResizeFailure::admission(failure, ExistingCapacityDisposition::CapacityRetained)
+        })?;
+        if state.lifecycle.get() == GovernorLifecycle::Fenced {
+            return Err(retained_resize(class, state.disk_pressure));
+        }
+        let Some(old_pools) = request.owner.pools else {
+            return Err(fence_resize(&mut state, class));
+        };
+        let Some(new_pools) = old_pools.shrink_to(request.new) else {
+            return Err(fence_resize(&mut state, class));
+        };
+        let Some(total) = state
+            .total_usage
+            .checked_sub(request.old)
+            .and_then(|usage| usage.checked_add(request.new))
+        else {
+            return Err(fence_resize(&mut state, class));
+        };
+        let Some(pools) = state
+            .pool_usage
+            .checked_sub(old_pools.capacities())
+            .and_then(|usage| usage.checked_add(new_pools.capacities()))
+        else {
+            return Err(fence_resize(&mut state, class));
+        };
+        let owner = ChargeOwner {
+            pools: Some(new_pools),
+            ..request.owner
+        };
+        if !self.replace_slot_record(
+            &mut state,
+            request.slot,
+            owner,
+            request.identity,
+            request.new,
+        ) {
+            return Err(fence_resize(&mut state, class));
+        }
+        state.total_usage = total;
+        state.pool_usage = pools;
+        Ok(ResizeCommit {
+            owner,
+            outcome: resize_outcome(request.old, request.new),
+        })
     }
 
     fn resize_ordinary(
@@ -123,8 +178,7 @@ impl GovernorInner {
         };
 
         let planned = if new.is_at_most(old) {
-            // This is the sole `shrink_to` call site, so the helper can focus
-            // on preserving the existing pool attribution exactly.
+            // Preserve the existing pool attribution exactly.
             old_pools.shrink_to(new).ok_or_else(|| {
                 ResizeFailure::admission(
                     internal_failure_at_pressure(class, state.disk_pressure),

@@ -4,6 +4,7 @@ mod codec;
 mod compatibility;
 mod faults;
 mod format_migration;
+mod health;
 mod identity;
 mod initialization;
 mod lifecycle_clock_acceptance;

@@ -150,3 +150,39 @@ fn integer(value: i64) -> AnyValue {
         value: Some(any_value::Value::IntValue(value)),
     }
 }
+
+#[test]
+fn empty_json_envelope_obeys_protojson_presence_and_null_semantics() {
+    for payload in [
+        b"{}".as_slice(),
+        br#"{"resourceLogs":null}"#,
+        br#"{"resourceLogs":[]}"#,
+        br#"{"resource\u004cogs":null,"future":{"nested":[1,null]}}"#,
+    ] {
+        let batch = OtlpLogsReceiver::new()
+            .decode(AuthenticatedOtlpLogsRequest::test_only_json(
+                attribution(),
+                payload.to_vec(),
+            ))
+            .expect("empty ProtoJSON export");
+        assert!(batch.records().is_empty());
+    }
+    for payload in [
+        br#"{"resourceLogs":false}"#.as_slice(),
+        br#"{"resourceLogs":[null]}"#,
+        br#"{"resourceLogs":null,"resourceLogs":[]}"#,
+        b"{} trailing",
+        b"null",
+    ] {
+        assert!(
+            matches!(
+                OtlpLogsReceiver::new().decode(AuthenticatedOtlpLogsRequest::test_only_json(
+                    attribution(),
+                    payload.to_vec(),
+                )),
+                Err(ReceiveFailure::MalformedPayload)
+            ),
+            "invalid envelope {payload:?}"
+        );
+    }
+}

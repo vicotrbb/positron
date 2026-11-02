@@ -2,7 +2,14 @@
 use super::execution::{BackupWork, owner::BackupOwner, provider_failure};
 use super::*;
 use positron_backup::BackupSnapshotVerification;
-use positron_kernel::{BackupCaptureFileKind, BackupCaptureVerification, MaintenanceExecution};
+use positron_kernel::{
+    BackupCaptureFileKind, BackupCaptureVerification, MaintenanceExecution, ResourceAmounts,
+};
+
+#[path = "verification_continuation.rs"]
+mod continuation;
+#[cfg(test)]
+pub(in crate::services) use continuation::publish_old_empty_native_reference;
 
 pub(in crate::services) struct VerificationWork {
     pub(super) owner: BackupOwner,
@@ -17,6 +24,11 @@ pub(in crate::services) struct VerificationWork {
     next_schema: usize,
     schema_tenants: Vec<positron_domain::identity::TenantId>,
     policy_tenants: Vec<positron_domain::identity::TenantId>,
+    native_index: Vec<u8>,
+    native_reference: Option<positron_kernel::BackupVerificationReference>,
+    native_steps: usize,
+    // Pre-admission estimate; Catalog independently enforces exact persistence charges.
+    continuation_bound: Option<ResourceAmounts>,
 }
 
 fn parameters(
@@ -81,11 +93,18 @@ pub(super) fn complete(
     let (parameters, binding) = parameters(services, execution, operation)?;
     if operation.status().is_terminal() {
         *work = None;
+        execution::checkpoint::set_native_reference(services, execution, binding, None)?;
         let _gate = services.catalog_operation()?;
         let catalog = services
             .open_maintenance_catalog()
             .map_err(|_| ServiceFailure::CatalogUnavailable)?;
         let coordinator = services.instance.maintenance_coordinator();
+        if !catalog
+            .release_backup_verification_continuation(coordinator, execution, binding)
+            .map_err(|_| ServiceFailure::CatalogUnavailable)?
+        {
+            return Ok(false);
+        }
         if operation.status() == positron_governance::DurableOperationStatus::Cancelled {
             coordinator
                 .cancel_and_persist(&catalog, execution.task().identity())
@@ -115,6 +134,15 @@ pub(super) fn complete(
             next_schema: 0,
             schema_tenants: Vec::new(),
             policy_tenants: Vec::new(),
+            native_index: Vec::new(),
+            native_reference: binding
+                .current_backup_verification_reference(
+                    services.instance.maintenance_coordinator(),
+                    execution,
+                )
+                .map_err(super::super::maintenance::map_failure)?,
+            native_steps: 0,
+            continuation_bound: None,
         })));
     }
     let Some(BackupWork::Verification(work)) = work.as_mut() else {
@@ -177,6 +205,28 @@ pub(super) fn complete(
             Some(initialization_started.elapsed().as_millis()),
             None,
         );
+        return Ok(false);
+    }
+    if work.native_reference.is_some()
+        && work.metadata.is_none()
+        && work.catalog.is_none()
+        && work
+            .remote
+            .as_ref()
+            .is_some_and(BackupSnapshotVerification::complete)
+    {
+        let remote = work.remote.as_ref().ok_or(ServiceFailure::CorruptState)?;
+        work.native_index = work
+            .owner
+            .runtime
+            .block_on(publisher.read_snapshot_file(
+                remote.manifest(),
+                remote.manifest().capture_index(),
+                8 * 1024 * 1024,
+            ))
+            .map_err(provider_failure)?;
+        drop(publisher);
+        continuation::restore(services, execution, work, binding)?;
         return Ok(false);
     }
     let remote = work.remote.as_mut().ok_or(ServiceFailure::Internal)?;
@@ -255,7 +305,9 @@ pub(super) fn complete(
         publisher
             .validate_snapshot_inventory(remote, metadata.files())
             .map_err(provider_failure)?;
+        work.native_index = bytes;
         work.metadata = Some(metadata);
+        work.native_steps += 1;
         return Ok(false);
     }
     if let Some(metadata) = work.metadata.as_mut() {
@@ -284,11 +336,12 @@ pub(super) fn complete(
                     .verify_protected_file(&secret, file.identity(), &bytes)
                     .map_err(|_| ServiceFailure::BackupRepositoryRejected)?;
                 work.next_file += 1;
+                work.native_steps += 1;
                 #[cfg(test)]
-                execution::test_stops::hit(
+                execution::test_stops::native_file_verified(
                     services.instance.instance.to_bytes(),
                     binding.operation_id(),
-                    execution::test_stops::StopPoint::VerificationNativeFileVerified,
+                    file.identity(),
                     cancellation,
                 )?;
                 return Ok(false);
@@ -322,6 +375,7 @@ pub(super) fn complete(
             return Err(ServiceFailure::BackupRepositoryRejected);
         }
         work.catalog = Some(snapshot);
+        work.native_steps += 1;
         #[cfg(test)]
         execution::test_stops::hit(
             services.instance.instance.to_bytes(),
@@ -338,6 +392,7 @@ pub(super) fn complete(
             .map_err(|_| ServiceFailure::BackupRepositoryRejected)?
             .ok_or(ServiceFailure::BackupRepositoryRejected)?;
         work.next_schema += 1;
+        work.native_steps += 1;
         if !bytes.starts_with(b"PSCHEMA1") && !bytes.starts_with(b"PIPACT01") {
             continue;
         }
@@ -397,6 +452,7 @@ pub(super) fn complete(
             return Err(ServiceFailure::BackupRepositoryRejected);
         }
         work.recovered_keys += 1;
+        work.native_steps += 1;
         #[cfg(test)]
         execution::test_stops::hit(
             services.instance.instance.to_bytes(),
@@ -745,6 +801,15 @@ impl DriverDiagnostic {
             ),
         );
     }
+}
+
+pub(super) fn checkpoint_native(
+    services: &ServiceHandle,
+    execution: &mut MaintenanceExecution<'_>,
+    work: &mut VerificationWork,
+    force: bool,
+) -> Result<Option<positron_kernel::ResourceAmounts>, ServiceFailure> {
+    continuation::checkpoint(services, execution, work, force)
 }
 
 #[cfg(test)]

@@ -1,0 +1,4 @@
+POST /control/bootstrap/claim HTTP/1.1
+Host: localhost
+Content-Length: 0
+

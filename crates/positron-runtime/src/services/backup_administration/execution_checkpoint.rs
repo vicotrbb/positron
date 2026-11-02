@@ -137,14 +137,17 @@ pub(in crate::services::backup_administration) fn persist(
         .checkpoint_and_persist_at(
             services.instance.maintenance_coordinator(),
             &catalog,
-            binding
-                .backup_checkpoint(
-                    sequence
-                        .checked_add(1)
-                        .ok_or(ServiceFailure::CorruptState)?,
-                    &payload,
-                )
-                .map_err(super::super::super::maintenance::map_failure)?,
+            checkpoint(
+                binding,
+                sequence,
+                &payload,
+                binding
+                    .current_backup_verification_reference(
+                        services.instance.maintenance_coordinator(),
+                        execution,
+                    )
+                    .map_err(super::super::super::maintenance::map_failure)?,
+            )?,
             now,
         )
         .map_err(super::super::super::maintenance::map_failure)?;
@@ -158,4 +161,53 @@ pub(in crate::services::backup_administration) fn persist(
         )?;
     }
     Ok(())
+}
+
+fn checkpoint(
+    binding: RepositoryOperationBinding,
+    sequence: u64,
+    payload: &[u8],
+    native: Option<positron_kernel::BackupVerificationReference>,
+) -> Result<positron_kernel::MaintenanceCheckpoint, ServiceFailure> {
+    let sequence = sequence
+        .checked_add(1)
+        .ok_or(ServiceFailure::CorruptState)?;
+    match native {
+        Some(reference) => binding.backup_verification_checkpoint(sequence, payload, reference),
+        None => binding.backup_checkpoint(sequence, payload),
+    }
+    .map_err(super::super::super::maintenance::map_failure)
+}
+
+/// Changes only the native artifact reference on the existing exact owner.
+pub(in crate::services::backup_administration) fn set_native_reference(
+    services: &ServiceHandle,
+    execution: &MaintenanceExecution<'_>,
+    binding: RepositoryOperationBinding,
+    native: Option<positron_kernel::BackupVerificationReference>,
+) -> Result<(), ServiceFailure> {
+    let _gate = services.catalog_operation()?;
+    let coordinator = services.instance.maintenance_coordinator();
+    if binding
+        .current_backup_verification_reference(coordinator, execution)
+        .map_err(super::super::super::maintenance::map_failure)?
+        == native
+    {
+        return Ok(());
+    }
+    let (sequence, payload) = current(services, execution, binding)?;
+    let catalog = services
+        .open_maintenance_catalog()
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+    let now = services
+        .maintenance_status_now()
+        .map_err(|_| ServiceFailure::StorageUnavailable)?;
+    execution
+        .checkpoint_and_persist_at(
+            coordinator,
+            &catalog,
+            checkpoint(binding, sequence, &payload, native)?,
+            now,
+        )
+        .map_err(super::super::super::maintenance::map_failure)
 }

@@ -146,6 +146,27 @@ pub(super) fn tls_http(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> Result<String, Box<dyn std::error::Error>> {
+    tls_http_for_role(
+        "unspecified",
+        address,
+        trust_file,
+        method,
+        path,
+        headers,
+        body,
+    )
+}
+
+pub(super) fn tls_http_for_role(
+    role: &'static str,
+    address: SocketAddr,
+    trust_file: &Path,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let started = std::time::Instant::now();
     let mut roots = RootCertStore::empty();
     for certificate in CertificateDer::pem_file_iter(trust_file)? {
         roots.add(certificate?)?;
@@ -157,9 +178,14 @@ pub(super) fn tls_http(
         Arc::new(configuration),
         ServerName::try_from("localhost".to_owned())?,
     )?;
-    let stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|_| tls_stage_failure(role, "connect", started, &[]))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| tls_stage_failure(role, "set-read", started, &[]))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| tls_stage_failure(role, "set-write", started, &[]))?;
     let mut stream = StreamOwned::new(connection, stream);
     let mut request = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n",
@@ -172,8 +198,10 @@ pub(super) fn tls_http(
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
-    write_tls_request(&mut stream, request.as_bytes())?;
-    write_tls_request(&mut stream, body)?;
+    write_tls_request(&mut stream, request.as_bytes())
+        .map_err(|_| tls_stage_failure(role, "write-headers", started, &[]))?;
+    write_tls_request(&mut stream, body)
+        .map_err(|_| tls_stage_failure(role, "write-body", started, &[]))?;
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {
@@ -188,10 +216,35 @@ pub(super) fn tls_http(
             {
                 break;
             },
-            Err(error) => return Err(error.into()),
+            Err(_) => return Err(tls_stage_failure(role, "read-response", started, &bytes)),
         }
     }
     Ok(String::from_utf8(bytes)?)
+}
+
+fn tls_stage_failure(
+    role: &'static str,
+    stage: &'static str,
+    started: std::time::Instant,
+    bytes: &[u8],
+) -> Box<dyn std::error::Error> {
+    let headers = bytes
+        .windows(4)
+        .take(8192)
+        .position(|window| window == b"\r\n\r\n");
+    let complete = headers
+        .and_then(|end| {
+            let header = std::str::from_utf8(bytes.get(..end)?).ok()?;
+            let length = header.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })?;
+            Some(bytes.len().saturating_sub(end + 4) >= length)
+        })
+        .unwrap_or(false);
+    format!("TLS fixture request failed: role={role} stage={stage} elapsed_ms={} received_bytes={} headers_present={} content_length_complete={complete}", started.elapsed().as_millis(), bytes.len(), headers.is_some()).into()
 }
 
 pub(super) fn assert_status(response: String, status: u16) {

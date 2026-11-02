@@ -1,0 +1,18 @@
+{{- include "positron.validate" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "positron.name" . }}
+spec:
+  serviceName: {{ include "positron.name" . }}
+  replicas: {{ .Values.replicas }}
+  updateStrategy: {type: OnDelete}
+  selector:
+    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: positron}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: positron}
+      annotations:
+        checksum/configuration: {{ .Values.configuration | sha256sum | quote }}
+    spec:
+      {{- include "positron.pod" . | nindent 6 }}

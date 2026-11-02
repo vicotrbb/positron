@@ -1,4 +1,5 @@
-//! Native one-time credential delivery uses the canonical bootstrap owner.
+//! Native storage preparation and one-time credentials use the bootstrap owner.
+pub(super) mod control;
 use positron_config::{ConfigurationInputs, resolve};
 use positron_runtime::{BootstrapPaths, InstanceBootstrap};
 use std::{io::Write, path::Path, process::ExitCode};
@@ -8,16 +9,34 @@ pub(super) fn run(
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> ExitCode {
     crate::administrative_cli::exit((|| {
-        if arguments.next().as_deref() != Some("claim") {
-            return Err("usage: positron bootstrap claim [--config FILE]");
+        let action = arguments.next().ok_or("missing bootstrap action")?;
+        if !matches!(action.as_str(), "claim" | "prepare-storage") {
+            return Err(
+                "usage: positron bootstrap claim [--config FILE | --control-path SOCKET] | prepare-storage --config FILE",
+            );
         }
-        let config = match arguments.next().as_deref() {
+        let option = arguments.next();
+        if action == "claim" && option.as_deref() == Some("--control-path") {
+            let path = arguments.next().ok_or("missing control path")?;
+            if arguments.next().is_some() {
+                return Err("unexpected live bootstrap claim argument");
+            }
+            return control::claim(Path::new(&path));
+        }
+        let config = match option.as_deref() {
             Some("--config") => Some(arguments.next().ok_or("missing configuration path")?),
             None => None,
-            _ => return Err("usage: positron bootstrap claim [--config FILE]"),
+            _ => {
+                return Err(
+                    "usage: positron bootstrap claim [--config FILE | --control-path SOCKET] | prepare-storage --config FILE",
+                );
+            },
         };
         if arguments.next().is_some() {
             return Err("unexpected bootstrap claim argument");
+        }
+        if action == "prepare-storage" && config.is_none() {
+            return Err("prepare-storage requires explicit configuration");
         }
         let inputs = ConfigurationInputs::try_from_sources(
             config.as_deref().map(Path::new),
@@ -26,6 +45,19 @@ pub(super) fn run(
         )
         .map_err(|_| "invalid bootstrap configuration")?;
         let config = resolve(inputs).map_err(|_| "invalid bootstrap configuration")?;
+        if action == "prepare-storage" {
+            drop(
+                BootstrapPaths::prepare_storage(
+                    &config,
+                    positron_kernel::MountQualification::LocalHost,
+                )
+                .map_err(
+                    |_| "storage preparation refused; roots must be private safe leaf directories",
+                )?,
+            );
+            return writeln!(std::io::stdout().lock(), "status=storage_prepared")
+                .map_err(|_| "preparation output unavailable");
+        }
         let paths = BootstrapPaths::with_local_key(
             Path::new(config.data_directory()),
             Path::new(config.secrets_directory()),
