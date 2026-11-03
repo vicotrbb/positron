@@ -159,14 +159,12 @@ fn public_tail_preserves_unacknowledged_delivery_and_can_cancel_its_cursor()
         cursor: Some(api::log_query_cancel_request::Cursor::Tail(cursor)),
     };
     assert!(
-        client
-            .cancel(bearer, &cancellation)
+        super::session::cancel_after_definite_capacity(&client, bearer, &cancellation)
             .map_err(|failure| format!("cancellation: {failure:?}"))?
             .cancelled
     );
     assert!(
-        client
-            .cancel(bearer, &cancellation)
+        super::session::cancel_after_definite_capacity(&client, bearer, &cancellation)
             .map_err(|failure| format!("repeated cancellation: {failure:?}"))?
             .cancelled
     );

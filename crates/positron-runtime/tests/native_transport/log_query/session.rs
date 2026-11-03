@@ -126,7 +126,8 @@ fn public_query_pages_resume_the_same_snapshot() -> Result<(), Box<dyn std::erro
             operation: Some(api::log_query_session_request::Operation::Execute(query)),
             batch_limit: 1,
         },
-    )?;
+    )
+    .map_err(|failure| format!("cancellable page: {failure:?}"))?;
     let Event::Terminal(terminal) = cancellable
         .events
         .last()
@@ -143,8 +144,16 @@ fn public_query_pages_resume_the_same_snapshot() -> Result<(), Box<dyn std::erro
                 .ok_or("cancel cursor")?,
         )),
     };
-    assert!(client.cancel(bearer, &request)?.cancelled);
-    assert!(client.cancel(bearer, &request)?.cancelled);
+    assert!(
+        cancel_after_definite_capacity(&client, bearer, &request)
+            .map_err(|failure| format!("first cancellation: {failure:?}"))?
+            .cancelled
+    );
+    assert!(
+        cancel_after_definite_capacity(&client, bearer, &request)
+            .map_err(|failure| format!("repeated cancellation: {failure:?}"))?
+            .cancelled
+    );
     if let Some(api::log_query_cancel_request::Cursor::Query(cursor)) = request.cursor.as_ref() {
         assert_eq!(
             client.session(
@@ -181,6 +190,35 @@ fn admitted_session(
                 std::thread::sleep(Duration::from_millis(100));
             },
             result => return result.map_err(Into::into),
+        }
+    }
+}
+
+// A live server can reject admission while its background control owner runs.
+// Reconcile only an explicit pre-effect capacity refusal, never uncertainty.
+pub(super) fn cancel_after_definite_capacity(
+    client: &api::LogQueryServiceClient,
+    bearer: &str,
+    request: &api::LogQueryCancelRequest,
+) -> Result<api::LogQueryCancelResponse, api::LogQueryServiceClientFailure> {
+    use positron_sdk::api_keys::protobuf::{CompletionState, RetryClass};
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match client.cancel(bearer, request) {
+            Err(failure @ api::LogQueryServiceClientFailure::CapacityUnavailable)
+                if failure.completion_state() == CompletionState::Rejected
+                    && failure.retry_class() == RetryClass::AfterBackoff =>
+            {
+                let backoff = Duration::from_secs(1);
+                if deadline.saturating_duration_since(std::time::Instant::now()) <= backoff {
+                    return Err(failure);
+                }
+                std::thread::sleep(backoff);
+                if std::time::Instant::now() >= deadline {
+                    return Err(failure);
+                }
+            },
+            result => return result,
         }
     }
 }

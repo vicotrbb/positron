@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-fn with_fixture(test: impl FnOnce(&ServiceHandle, &HealthState, &str) -> TestResult) -> TestResult {
+fn with_fixture(
+    test: impl FnOnce(&ServiceHandle, &HealthState, &str, &crate::InitializedInstance) -> TestResult,
+) -> TestResult {
     let roots = crate::process_lifecycle::TestRoots::new("query-cancellation")?;
     let paths = roots.bootstrap_paths()?;
     drop(crate::InstanceBootstrap::initialize(
@@ -17,9 +19,9 @@ fn with_fixture(test: impl FnOnce(&ServiceHandle, &HealthState, &str) -> TestRes
     let instance = Arc::new(crate::InstanceBootstrap::reopen(&paths)?);
     let services = ServiceHandle::new(Arc::clone(&instance))?;
     let state = crate::health::ProcessState::starting();
-    state.set_inspection_authority(instance)?;
+    state.set_inspection_authority(Arc::clone(&instance))?;
     state.transition(crate::ProcessPhase::Serving);
-    test(&services, &state.health(), bearer)
+    test(&services, &state.health(), bearer, &instance)
 }
 
 fn poll(
@@ -86,9 +88,35 @@ fn cancel(
 }
 
 #[test]
+fn contended_cancellation_is_rejected_before_mutation_and_can_be_explicitly_reconciled()
+-> TestResult {
+    with_fixture(|services, health, bearer, instance| {
+        let (initial, reservation) = poll(services, bearer, None)?;
+        let cursor = continuation(&initial)?;
+        drop(reservation);
+        let response = instance._authority.with_control_contention_for_test(|| {
+            cancel(services, health, bearer, cursor.clone())
+        })??;
+        use positron_api::api_keys::protobuf::{
+            CompletionState, PublicError, PublicErrorCode, RetryClass,
+        };
+        let error: PublicError = serde_json::from_slice(response.body())?;
+        assert_eq!(response.status(), 429);
+        assert_eq!(error.code, PublicErrorCode::CapacityUnavailable as i32);
+        assert_eq!(error.completion_state, CompletionState::Rejected as i32);
+        assert_eq!(error.retry_class, RetryClass::AfterBackoff as i32);
+        let (resumed, reservation) = poll(services, bearer, Some(cursor.clone()))?;
+        assert!(continuation(&resumed).is_ok());
+        drop(reservation);
+        assert_eq!(cancel(services, health, bearer, cursor)?.status(), 200);
+        Ok(())
+    })
+}
+
+#[test]
 fn rejected_cancellation_does_not_retry_through_drop_and_keeps_the_cursor_resumable() -> TestResult
 {
-    with_fixture(|services, health, bearer| {
+    with_fixture(|services, health, bearer, _| {
         let (initial, reservation) = poll(services, bearer, None)?;
         let cursor = continuation(&initial)?;
         drop(reservation);
@@ -112,7 +140,7 @@ fn rejected_cancellation_does_not_retry_through_drop_and_keeps_the_cursor_resuma
 
 #[test]
 fn uncertain_cancellation_publication_keeps_its_cause_and_never_claims_rejection() -> TestResult {
-    with_fixture(|services, health, bearer| {
+    with_fixture(|services, health, bearer, _| {
         let (initial, reservation) = poll(services, bearer, None)?;
         let cursor = continuation(&initial)?;
         drop(reservation);
@@ -138,7 +166,7 @@ fn uncertain_cancellation_publication_keeps_its_cause_and_never_claims_rejection
 
 #[test]
 fn bounded_cancellation_fits_while_three_query_responses_still_own_their_buffers() -> TestResult {
-    with_fixture(|services, health, bearer| {
+    with_fixture(|services, health, bearer, _| {
         let mut held = Vec::new();
         let mut cursor = None;
         for _ in 0..3 {
@@ -167,7 +195,7 @@ fn bounded_cancellation_fits_while_three_query_responses_still_own_their_buffers
 #[test]
 fn cancellation_authentication_and_cursor_refusals_are_definite_and_leave_original_lease()
 -> TestResult {
-    with_fixture(|services, health, bearer| {
+    with_fixture(|services, health, bearer, _| {
         let (initial, reservation) = poll(services, bearer, None)?;
         let cursor = continuation(&initial)?;
         drop(reservation);
