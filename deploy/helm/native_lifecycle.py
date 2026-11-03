@@ -22,6 +22,19 @@ BACKUPS = "/var/lib/positron-backups/private"
 CONFIG = "/etc/positron/config/positron.toml"
 REPOSITORY = "11111111-1111-4111-8111-111111111111"
 
+# Exact public CLI classes only: subprocess output may contain private data.
+REPOSITORY_FAILURE_MESSAGES = {
+    "invalid repository request",
+    "system administration authentication rejected",
+    "repository operation unavailable",
+    "stale resource generation; inspect current state before retrying",
+    "operation precondition failed; inspect current state before retrying",
+    "idempotency key conflicts with an accepted request",
+    "administration unavailable; inspect or retry the same operation",
+    "capacity unavailable; retry the same idempotent request",
+    "transport outcome unknown; inspect the same operation or idempotency key before retrying",
+}
+
 
 class RestoreStartRefused(AssertionError):
     """A failed terminal start Job, whose Pod must be removed before inspection."""
@@ -136,7 +149,12 @@ class NativeLifecycle(DataLifecycle):
         if result.returncode:
             # Strip only kubectl's exact process-exit footer; preserve native diagnostics.
             error = re.sub(br"command terminated with exit code [0-9]+\n$", b"", result.stderr)
-            raise subprocess.CalledProcessError(result.returncode, ["positron", family], output=result.stdout, stderr=error)
+            failure = subprocess.CalledProcessError(result.returncode, ["positron", family], output=result.stdout, stderr=error)
+            if family == "repository":
+                diagnostic = next(("positron: " + message for message in REPOSITORY_FAILURE_MESSAGES
+                                   if error == ("positron: " + message + "\n").encode()), "unavailable")
+                failure.add_note(f"native_repository_failure exit={result.returncode} stderr={diagnostic}")
+            raise failure
         return result.stdout
 
     def query_on_node(self, node, pod_ip, image, ca, *, stage):
