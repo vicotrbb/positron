@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from native_lifecycle import NativeLifecycle
+from test_repository_status import RepositoryStatus
 from test_kubernetes import assert_retained_claims, owned_storage_class, inspect_private_modes, reload_projected_identity
 
 
@@ -779,7 +780,7 @@ class NativeAdapter(unittest.TestCase):
                     return subprocess.CompletedProcess([], 2, b"private stdout test-query", error + b"command terminated with exit code 2\n")
                 lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=test-admin query_secret=test-query")
                 with self.assertRaises(subprocess.CalledProcessError) as caught:
-                    lifecycle.online("repository", "status", "--locator", "/private/path")
+                    lifecycle.online("repository", "init", "--locator", "/private/path")
                 failure = caught.exception
                 rendered = "".join(traceback.format_exception(failure))
                 self.assertEqual(failure.stderr, error)

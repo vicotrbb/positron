@@ -166,7 +166,33 @@ pub(super) fn tls_http_for_role(
     headers: &[(&str, &str)],
     body: &[u8],
 ) -> Result<String, Box<dyn std::error::Error>> {
+    tls_http_with_budget(
+        role,
+        Duration::from_secs(2),
+        address,
+        trust_file,
+        (method, path),
+        headers,
+        body,
+    )
+}
+
+pub(super) fn tls_http_with_budget(
+    role: &'static str,
+    timeout: Duration,
+    address: SocketAddr,
+    trust_file: &Path,
+    (method, path): (&str, &str),
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<String, Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
+    let remaining = |stage: &'static str, bytes: &[u8]| {
+        timeout
+            .checked_sub(started.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| tls_stage_failure(role, stage, started, bytes))
+    };
     let mut roots = RootCertStore::empty();
     for certificate in CertificateDer::pem_file_iter(trust_file)? {
         roots.add(certificate?)?;
@@ -178,13 +204,13 @@ pub(super) fn tls_http_for_role(
         Arc::new(configuration),
         ServerName::try_from("localhost".to_owned())?,
     )?;
-    let stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+    let stream = TcpStream::connect_timeout(&address, remaining("connect", &[])?)
         .map_err(|_| tls_stage_failure(role, "connect", started, &[]))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(remaining("set-read", &[])?))
         .map_err(|_| tls_stage_failure(role, "set-read", started, &[]))?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
+        .set_write_timeout(Some(remaining("set-write", &[])?))
         .map_err(|_| tls_stage_failure(role, "set-write", started, &[]))?;
     let mut stream = StreamOwned::new(connection, stream);
     let mut request = format!(
@@ -198,13 +224,26 @@ pub(super) fn tls_http_for_role(
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
-    write_tls_request(&mut stream, request.as_bytes())
-        .map_err(|_| tls_stage_failure(role, "write-headers", started, &[]))?;
-    write_tls_request(&mut stream, body)
-        .map_err(|_| tls_stage_failure(role, "write-body", started, &[]))?;
+    for (stage, payload) in [("write-headers", request.as_bytes()), ("write-body", body)] {
+        let budget = remaining(stage, &[])?;
+        stream
+            .sock
+            .set_read_timeout(Some(budget))
+            .map_err(|_| tls_stage_failure(role, stage, started, &[]))?;
+        stream
+            .sock
+            .set_write_timeout(Some(budget))
+            .map_err(|_| tls_stage_failure(role, stage, started, &[]))?;
+        write_tls_request(&mut stream, payload)
+            .map_err(|_| tls_stage_failure(role, stage, started, &[]))?;
+    }
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {
+        stream
+            .sock
+            .set_read_timeout(Some(remaining("read-response", &bytes)?))
+            .map_err(|_| tls_stage_failure(role, "read-response", started, &bytes))?;
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => bytes.extend_from_slice(&buffer[..read]),
