@@ -73,12 +73,7 @@ fn signed_inventory_cannot_hide_missing_rust_sdk_api_metadata() {
     );
 }
 
-fn cargo_package(fixture: &support::Fixture) -> Vec<u8> {
-    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+fn cargo_package(fixture: &support::Fixture, repository: &std::path::Path) -> Vec<u8> {
     let target = fixture.root.join("cargo-package");
     let output = std::process::Command::new(env!("CARGO"))
         .current_dir(repository)
@@ -141,8 +136,10 @@ fn bind_schema(fixture: &mut support::Fixture) {
 fn private_fixture_package(real: &[u8]) -> Vec<u8> {
     // Only fixture identities change. This package is never live registry or
     // project-release evidence. The actual installed package is tested separately.
-    rewrite_package(real, Some("positron-sdk-1.0.0"), |path, bytes| {
+    let mut has_vcs = false;
+    let package = rewrite_package(real, Some("positron-sdk-1.0.0"), |path, bytes| {
         if path.ends_with("/.cargo_vcs_info.json") {
+            has_vcs = true;
             serde_json::to_vec(&serde_json::json!({"git":{"sha1":support::keyless::SOURCE_COMMIT,"dirty":false},"path_in_vcs":"sdk/rust"})).unwrap()
         } else if path.ends_with("/Cargo.toml") || path.ends_with("/Cargo.lock") {
             String::from_utf8(bytes)
@@ -155,7 +152,35 @@ fn private_fixture_package(real: &[u8]) -> Vec<u8> {
         } else {
             bytes
         }
-    })
+    });
+    if has_vcs {
+        return package;
+    }
+    // Nix source snapshots have no checkout metadata. Supply only this
+    // explicitly private fixture identity, never production release evidence.
+    let mut source = tar::Archive::new(flate2::read::GzDecoder::new(package.as_slice()));
+    let mut output = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    for entry in source.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let header = entry.header().clone();
+        output.append(&header, &mut entry).unwrap();
+    }
+    let vcs = serde_json::to_vec(&serde_json::json!({"git":{"sha1":support::keyless::SOURCE_COMMIT,"dirty":false},"path_in_vcs":"sdk/rust"})).unwrap();
+    let mut header = tar::Header::new_gnu();
+    header.set_size(vcs.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    output
+        .append_data(
+            &mut header,
+            "positron-sdk-1.0.0/.cargo_vcs_info.json",
+            vcs.as_slice(),
+        )
+        .unwrap();
+    output.into_inner().unwrap().finish().unwrap()
 }
 fn publish(fixture: &support::Fixture, digest: &str) -> (Vec<u8>, ReleaseConstruction) {
     fixture.published_with_native(
@@ -188,7 +213,10 @@ fn verify(
 #[test]
 fn real_rust_sdk_payload_binds_to_full_signed_release_and_refuses_mutation() {
     let mut fixture = support::Fixture::new();
-    let real = cargo_package(&fixture);
+    let real = cargo_package(
+        &fixture,
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+    );
     let index = fixture
         .inventory
         .artifacts
@@ -312,4 +340,70 @@ fn real_rust_sdk_payload_binds_to_full_signed_release_and_refuses_mutation() {
         .err(),
         Some(ReleaseError::IdentityMismatch)
     );
+}
+
+#[test]
+fn gitless_sdk_source_needs_explicit_private_fixture_vcs_identity() {
+    let mut fixture = support::Fixture::new();
+    let real = cargo_package(
+        &fixture,
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+    );
+    let source = fixture.root.join("gitless-source");
+    tar::Archive::new(flate2::read::GzDecoder::new(real.as_slice()))
+        .unpack(&source)
+        .unwrap();
+    let source = source.join(format!("positron-sdk-{}", env!("CARGO_PKG_VERSION")));
+    let vcs = source.join(".cargo_vcs_info.json");
+    if vcs.exists() {
+        std::fs::remove_file(vcs).unwrap();
+    }
+    let gitless = cargo_package(&fixture, &source);
+    assert!(
+        tar::Archive::new(flate2::read::GzDecoder::new(gitless.as_slice()))
+            .entries()
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .path()
+                .unwrap()
+                .ends_with(".cargo_vcs_info.json"))
+    );
+    let index = fixture
+        .inventory
+        .artifacts
+        .iter()
+        .position(|artifact| artifact.surface == Surface::SdkRust)
+        .unwrap();
+    let unbound = rewrite_package(&gitless, Some("positron-sdk-1.0.0"), |path, bytes| {
+        if path.ends_with("/Cargo.toml") || path.ends_with("/Cargo.lock") {
+            String::from_utf8(bytes)
+                .unwrap()
+                .replace(
+                    &format!("version = \"{}\"", env!("CARGO_PKG_VERSION")),
+                    "version = \"1.0.0\"",
+                )
+                .into_bytes()
+        } else {
+            bytes
+        }
+    });
+    fixture.replace_artifact(index, &unbound, &unbound);
+    bind_schema(&mut fixture);
+    assert_eq!(
+        construct_release(
+            &fixture.inventory,
+            &fixture.root.join("bundle"),
+            &fixture.rebuild,
+            &[],
+            vec![]
+        )
+        .err(),
+        Some(ReleaseError::Invalid)
+    );
+    let package = private_fixture_package(&gitless);
+    fixture.replace_artifact(index, &package, &package);
+    let digest = support::hex(&FileIdentity::of(&package).sha256);
+    let (signed, construction) = publish(&fixture, &digest);
+    verify(&fixture, &signed, &construction).unwrap();
 }

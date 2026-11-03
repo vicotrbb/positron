@@ -28,6 +28,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      - name: Verify standalone Rust SDK package and prepare its registry dependencies
+        run: cargo package --locked -p positron-sdk
+
       - name: Run unit and integration tests
         run: cargo test --locked --workspace --lib --bins --tests
 

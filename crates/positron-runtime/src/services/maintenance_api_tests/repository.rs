@@ -449,6 +449,33 @@ fn native_admin_http_exposes_repository_lifecycle_and_redacted_receipts()
         operation_id: None,
     };
     assert!(client.manage(&ingest, &status).is_err());
+    // The empty default tenant starts one integrity pass for each signal.
+    // Their terminal publications change the generation. Observe completion
+    // before measuring this generation-specific repository admission.
+    let startup_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = services
+            .maintenance_status(&administrator, br"{}")
+            .map_err(|failure| format!("repository startup maintenance status: {failure:?}"))?;
+        let initial = status
+            .tasks
+            .iter()
+            .filter(|task| task.class == "integrity_scrub")
+            .collect::<Vec<_>>();
+        if initial
+            .iter()
+            .any(|task| matches!(task.phase.as_str(), "failed" | "cancelled"))
+        {
+            return Err("repository startup integrity pass failed".into());
+        }
+        if std::time::Instant::now() >= startup_deadline {
+            return Err(format!("repository startup integrity deadline: {status:?}").into());
+        }
+        if initial.len() == 2 && initial.iter().all(|task| task.phase == "succeeded") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let admission_started = std::time::Instant::now();
     let admission_deadline = admission_started + Duration::from_secs(10);
     let current = status_http::inspect(&client, &administrator, &status, admission_deadline)
