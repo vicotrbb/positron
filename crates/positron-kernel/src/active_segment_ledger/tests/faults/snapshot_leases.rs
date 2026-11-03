@@ -192,6 +192,13 @@ fn paired_snapshot_lease_resume_rejects_a_legacy_unpaired_lease() -> Result<(), 
         let identity = lease.identity();
         drop(lease);
         let basis = catalog.pin()?;
+        assert_eq!(
+            ledger
+                .resume_snapshot_lease_with_expiry_task(identity, 101)
+                .expect_err("unmarked validation also requires the paired descriptor")
+                .code(),
+            LedgerFailureCode::StaleGeneration
+        );
 
         let failure = ledger
             .resume_snapshot_lease_with_marker_at_catalog_with_expiry_task(
@@ -206,6 +213,62 @@ fn paired_snapshot_lease_resume_rejects_a_legacy_unpaired_lease() -> Result<(), 
         assert_eq!(failure.code(), LedgerFailureCode::StaleGeneration);
 
         drop(ledger.resume_snapshot_lease(identity, 101)?);
+        Ok(())
+    })
+}
+
+#[test]
+fn paired_lease_validation_preserves_catalog_and_records_only_one_marked_attempt()
+-> Result<(), Box<dyn Error>> {
+    with_fixture(|authority, catalog, scope| {
+        let ledger = ActiveSegmentLedger::open(
+            authority,
+            catalog,
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0x78; 32])),
+        )?;
+        let coordinator = MaintenanceCoordinator::new();
+        let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
+            &coordinator,
+            100,
+            std::num::NonZeroU64::new(100).ok_or("ttl")?,
+            catalog.pin()?.identity(),
+        )?;
+        let identity = lease.identity();
+        let snapshot_identity = lease.snapshot().catalog_identity();
+        let snapshot_generation = lease.snapshot().catalog_generation();
+        drop(lease);
+        let basis = catalog.pin()?;
+        for _ in 0..2 {
+            let validated = ledger.resume_snapshot_lease_with_expiry_task(identity, 101)?;
+            assert_eq!(validated.snapshot().catalog_identity(), snapshot_identity);
+            assert_eq!(
+                validated.snapshot().catalog_generation(),
+                snapshot_generation
+            );
+            assert_eq!(validated.resume_count(), 0);
+            assert_eq!(validated.repeated_batch_count(), 0);
+            drop(validated);
+            assert_eq!(catalog.pin()?.number(), basis.number());
+        }
+        let resumed = ledger.resume_snapshot_lease_with_marker_at_catalog_with_expiry_task(
+            identity,
+            101,
+            0,
+            [0; 32],
+            basis.identity(),
+            basis.number(),
+        )?;
+        assert_eq!(resumed.resume_count(), 1);
+        assert_eq!(resumed.repeated_batch_count(), 0);
+        drop(resumed);
+        assert_eq!(
+            ledger
+                .resume_snapshot_lease_with_expiry_task(identity, 200)
+                .expect_err("the original expiry is not renewed")
+                .code(),
+            LedgerFailureCode::SnapshotExpired
+        );
         Ok(())
     })
 }

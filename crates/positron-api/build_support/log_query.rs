@@ -19,6 +19,10 @@ pub(crate) fn configure(
     paths.extend(
         [
             "PublicError",
+            "CapabilityResponse",
+            "Capability",
+            "CapabilityAvailability",
+            "DeprecationState",
             "PublicErrorCode",
             "RetryClass",
             "CompletionState",

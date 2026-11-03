@@ -6,6 +6,8 @@ use super::support::KernelFixture;
 
 #[path = "correlation/admission.rs"]
 mod admission;
+#[path = "correlation/cancellation.rs"]
+mod cancellation;
 #[path = "correlation/composition.rs"]
 mod composition;
 #[path = "correlation/cursor_cleanup.rs"]

@@ -128,12 +128,7 @@ pub(super) fn validate_resume_leases(
                 .map_err(crate::execution_support::map_ledger_failure)?,
         );
         let grant = if require_expiry_descriptor {
-            authority.resume_snapshot_lease_with_marker_with_expiry_task(
-                binding.lease(),
-                lease_now,
-                state.sequence(),
-                state.prior_digest(),
-            )
+            authority.resume_snapshot_lease_with_expiry_task(binding.lease(), lease_now)
         } else {
             authority.resume_snapshot_lease(binding.lease(), lease_now)
         }

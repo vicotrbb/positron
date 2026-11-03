@@ -72,7 +72,7 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         {
             return Err(QueryFailure::new(QueryFailureCode::InvalidBudget));
         }
-        if let Some((state, _)) = resume.as_ref() {
+        let (catalog_identity, generation) = if let Some((state, _)) = resume.as_ref() {
             if state.source_bindings().is_none() {
                 return Err(QueryFailure::new(QueryFailureCode::InvalidCursor));
             }
@@ -83,7 +83,17 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 self.ledger.scope().shard_id(),
                 self.maintenance.is_some(),
             )?;
-        }
+            // Lease validation can reconcile expired records. Reauthenticate
+            // before the single marked primary admission against its Catalog.
+            let (current_tenant, identity, generation) =
+                self.current_query_catalog(query.context)?;
+            if current_tenant != tenant {
+                return Err(QueryFailure::new(QueryFailureCode::Unauthorized));
+            }
+            (identity, generation)
+        } else {
+            (catalog_identity, generation)
+        };
         let memory_budget = tail_memory_budget(&query)?;
         // `query` owns the already-admitted root. Its opaque token remains in
         // this session only and is never placed in the durable cursor. A

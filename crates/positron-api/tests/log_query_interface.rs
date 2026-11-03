@@ -153,6 +153,7 @@ fn empty_complete_response() -> positron_api::log_query::LogQueryResponse {
                         expiry_unix_seconds: 1,
                     }),
                     initial_cursor: None,
+                    tail_phase: None,
                 })),
             },
             LogQueryEvent {
@@ -457,4 +458,122 @@ fn emitted_nix_lifecycle_query_respects_the_public_wire_budget() {
             "public wall budget boundary {wall_seconds}"
         );
     }
+}
+
+#[test]
+fn resumed_incomplete_result_preserves_prior_progress_without_a_new_batch() {
+    use positron_api::log_query::{LogQueryResponse, log_query_event::Event};
+    let mut response = empty_complete_response();
+    if let Some(Event::Header(header)) = response
+        .events
+        .first_mut()
+        .and_then(|event| event.event.as_mut())
+    {
+        header.initial_cursor = Some(vec![7; 32]);
+    }
+    if let Some(Event::Terminal(terminal)) = response
+        .events
+        .last_mut()
+        .and_then(|event| event.event.as_mut())
+    {
+        terminal.state = "incomplete".into();
+        terminal.reason = "budget_exhausted".into();
+        let stats = terminal.stats.as_mut().unwrap();
+        stats.records = 1;
+        stats.last_sequence = Some(0);
+        stats.result_digest = vec![3; 32];
+        stats.cpu_work_units = 2;
+        stats.limiting_budget = Some("cpu_work_units".into());
+    }
+    let bytes = serde_json::to_vec(&response).unwrap();
+    assert_eq!(LogQueryResponse::decode_session(&bytes).unwrap(), response);
+    assert!(LogQueryResponse::decode(&bytes).is_err());
+}
+
+#[test]
+fn batch_tracker_discards_verified_repeats_and_refuses_changed_contents() {
+    use positron_api::log_query::*;
+    let mut response = empty_complete_response();
+    response.events.insert(
+        1,
+        LogQueryEvent {
+            event: Some(log_query_event::Event::Batch(LogQueryBatch {
+                sequence: 0,
+                prior_digest: vec![0; 32],
+                digest: vec![1; 32],
+                rows: vec![LogQueryRow {
+                    cells: vec![LogQueryCell {
+                        value: Some(log_query_cell::Value::NativeValue(LogQueryValue {
+                            value: Some(log_query_value::Value::TextValue("first".into())),
+                        })),
+                    }],
+                    replayed: false,
+                }],
+            })),
+        },
+    );
+    if let Some(log_query_event::Event::Terminal(terminal)) = response
+        .events
+        .last_mut()
+        .and_then(|event| event.event.as_mut())
+    {
+        let stats = terminal.stats.as_mut().unwrap();
+        stats.records = 1;
+        stats.last_sequence = Some(0);
+        stats.result_digest = vec![1; 32];
+    }
+    let mut tracker = BatchTracker::query();
+    assert_eq!(tracker.filter(&response).unwrap().len(), 1);
+    let mut repeat = response.clone();
+    if let Some(log_query_event::Event::Batch(batch)) = repeat
+        .events
+        .get_mut(1)
+        .and_then(|event| event.event.as_mut())
+    {
+        batch.rows.first_mut().unwrap().replayed = true;
+    }
+    assert!(tracker.filter(&repeat).unwrap().is_empty());
+    let mut changed = repeat.clone();
+    if let Some(log_query_event::Event::Batch(batch)) = changed
+        .events
+        .get_mut(1)
+        .and_then(|event| event.event.as_mut())
+    {
+        batch
+            .rows
+            .first_mut()
+            .unwrap()
+            .cells
+            .first_mut()
+            .unwrap()
+            .value = Some(log_query_cell::Value::NativeValue(LogQueryValue {
+            value: Some(log_query_value::Value::TextValue("changed".into())),
+        }));
+    }
+    assert!(tracker.filter(&changed).is_err());
+    assert!(tracker.filter(&repeat).unwrap().is_empty());
+}
+
+#[test]
+fn terminal_helpers_keep_incomplete_truth_and_cursors_opaque() {
+    use positron_api::log_query::*;
+    let response = empty_complete_response();
+    let Some(log_query_event::Event::Terminal(mut terminal)) =
+        response.events.last().and_then(|event| event.event.clone())
+    else {
+        panic!("terminal fixture")
+    };
+    assert_eq!(terminal.status().unwrap(), QueryTerminalStatus::Complete);
+    terminal.state = "incomplete".into();
+    terminal.reason = "cancelled".into();
+    assert_eq!(
+        terminal.status().unwrap(),
+        QueryTerminalStatus::Incomplete(LogQueryStopReason::Cancelled)
+    );
+    terminal.reason = "future_unknown_reason".into();
+    assert!(terminal.status().is_err());
+    let cursor = OpaqueCursor::from_bytes(&[5; 32]).unwrap();
+    assert_eq!(cursor.as_bytes(), &[5; 32]);
+    assert_eq!(format!("{cursor:?}"), "OpaqueCursor { <redacted> }");
+    assert!(OpaqueCursor::from_bytes(&vec![0; 8193]).is_err());
 }

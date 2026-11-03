@@ -1,5 +1,8 @@
 //! Bounded public projection of the existing Log Query event contract.
 mod result;
+mod session;
+mod tail;
+pub(in crate::services) use session::{cancel, execute as execute_session};
 mod value;
 use super::{ServiceFailure, ServiceHandle};
 use positron_api::log_query as api;
@@ -10,7 +13,13 @@ use positron_query::{QueryBudget, QueryEvent, QueryHeader, QueryTerminal};
 
 // Includes generated wire rows, recursive value containers and the fixed JSON
 // buffer. Logical output is capped at 16 KiB and 128 rows by the wire contract.
-const RESPONSE_WORKSPACE_BYTES: u64 = (api::MAX_RESPONSE_BYTES as u64) * 16;
+const WIRE_WORKSPACE_MULTIPLIER: u64 = 16;
+const RESPONSE_WORKSPACE_BYTES: u64 = (api::MAX_RESPONSE_BYTES as u64) * WIRE_WORKSPACE_MULTIPLIER;
+// Cancellation retains JSON decoding and authenticated-cursor working copies,
+// but has no row projection tree. Catalog/task staging has its native claims.
+const CANCELLATION_WORKSPACE_BYTES: u64 = (api::MAX_CANCEL_REQUEST_BYTES as u64
+    + api::MAX_CANCEL_RESPONSE_BYTES as u64)
+    * WIRE_WORKSPACE_MULTIPLIER;
 
 pub(in crate::services) fn execute(
     services: &ServiceHandle,
@@ -24,19 +33,7 @@ pub(in crate::services) fn execute(
         .budget
         .as_ref()
         .ok_or(ServiceFailure::InvalidRequest)?;
-    let budget = QueryBudget::new(
-        requested.scanned_bytes,
-        requested.decoded_records,
-        requested.output_rows,
-        requested.output_bytes,
-        requested.memory_bytes,
-        requested.wall_seconds,
-    )
-    .and_then(|budget| budget.with_cpu_work_units(requested.cpu_work_units))
-    .and_then(|budget| {
-        budget.with_maximum_time_range_nanoseconds(requested.maximum_time_range_nanoseconds)
-    })
-    .map_err(|_| ServiceFailure::InvalidRequest)?;
+    let budget = native_budget(requested)?;
     let tenant = crate::services::context_tenant(context)?;
     let claim = WorkClaim::authenticated(
         tenant,
@@ -59,11 +56,14 @@ pub(in crate::services) fn execute(
         services.instance.logs_shard,
         &request.pipeline,
         budget,
-        render,
+        |events| render(events, false),
     )?;
     Ok((bytes, reservation.transfer()))
 }
-fn render(events: &mut dyn Iterator<Item = QueryEvent>) -> Result<Vec<u8>, ServiceFailure> {
+fn render(
+    events: &mut dyn Iterator<Item = QueryEvent>,
+    session: bool,
+) -> Result<Vec<u8>, ServiceFailure> {
     let mut response = api::LogQueryResponse { events: Vec::new() };
     let mut header: Option<QueryHeader> = None;
     let mut terminal = false;
@@ -112,9 +112,12 @@ fn render(events: &mut dyn Iterator<Item = QueryEvent>) -> Result<Vec<u8>, Servi
     if !terminal {
         return Err(ServiceFailure::Internal);
     }
-    response
-        .encode()
-        .map_err(|_| ServiceFailure::CapacityUnavailable)
+    if session {
+        response.encode_session()
+    } else {
+        response.encode()
+    }
+    .map_err(|_| ServiceFailure::CapacityUnavailable)
 }
 fn terminal_result(terminal: QueryTerminal) -> api::LogQueryTerminal {
     match terminal {
@@ -179,4 +182,20 @@ const fn reason(code: positron_query::QueryFailureCode) -> &'static str {
         MalformedPersistentData => "malformed_persistent_data",
         Internal => "internal",
     }
+}
+
+fn native_budget(requested: &api::LogQueryBudget) -> Result<QueryBudget, ServiceFailure> {
+    QueryBudget::new(
+        requested.scanned_bytes,
+        requested.decoded_records,
+        requested.output_rows,
+        requested.output_bytes,
+        requested.memory_bytes,
+        requested.wall_seconds,
+    )
+    .and_then(|budget| budget.with_cpu_work_units(requested.cpu_work_units))
+    .and_then(|budget| {
+        budget.with_maximum_time_range_nanoseconds(requested.maximum_time_range_nanoseconds)
+    })
+    .map_err(|_| ServiceFailure::InvalidRequest)
 }

@@ -271,3 +271,9 @@ fn acknowledged_logs_have_typed_native_query_headers_rows_and_terminal_truth()
 
 #[path = "log_query/projections.rs"]
 mod projections;
+
+#[path = "log_query/session.rs"]
+mod session;
+
+#[path = "log_query/tail.rs"]
+mod tail;

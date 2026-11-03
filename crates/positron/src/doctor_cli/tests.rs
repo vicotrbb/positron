@@ -186,6 +186,7 @@ fn observe_control_request(
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false)?;
                     stream.set_read_timeout(Some(Duration::from_millis(250)))?;
                     let mut request = [0_u8; 256];
                     return match stream.read(&mut request) {

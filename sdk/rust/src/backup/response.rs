@@ -1,0 +1,283 @@
+use super::{
+    MAX_RESPONSE_BYTES, MaintenanceWireFailure, RepositoryIdentity, RepositoryOperation, hash,
+};
+use serde::{Deserialize, Serialize};
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupSnapshotReceipt {
+    pub registry_generation_checksum: String,
+    pub manifest_checksum: String,
+    pub catalog_generation: u64,
+    pub catalog_identity: String,
+    pub uploaded_bytes: u64,
+    pub reused_bytes: u64,
+    pub retain_until_unix_seconds: u64,
+}
+/// Historical publication observed through a verified restore; no transfer counters.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupRestoredPublication {
+    pub manifest_checksum: String,
+    pub current_registry_generation_checksum: String,
+    pub source_catalog_identity: String,
+    pub source_catalog_generation: u64,
+    pub retain_until_unix_seconds: u64,
+    pub restore_origin_transaction: String,
+    pub restore_intent_digest: String,
+    pub capture_operation_id: String,
+    pub capture_request_digest: String,
+    pub restore_idempotency_key: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_report: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_report_checksum: Option<String>,
+    pub operation_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_error_code: Option<String>,
+    pub kind: String,
+    pub cleanup_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_receipt: Option<BackupRetentionReceipt>,
+    pub operation: RepositoryOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<RepositoryIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<BackupSnapshotReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_publication: Option<BackupRestoredPublication>,
+}
+impl BackupResponse {
+    pub fn encode(&self) -> Result<Vec<u8>, MaintenanceWireFailure> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| MaintenanceWireFailure)?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        Ok(bytes)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, MaintenanceWireFailure> {
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(MaintenanceWireFailure);
+        }
+        let response: Self = serde_json::from_slice(bytes).map_err(|_| MaintenanceWireFailure)?;
+        response.validate()?;
+        Ok(response)
+    }
+    fn validate(&self) -> Result<(), MaintenanceWireFailure> {
+        let op = &self.operation;
+        let snapshot = self.kind == "snapshot";
+        let retention = self.kind == "retention";
+        let verification = self.kind == "verification";
+        let phase = op.phase.as_str();
+        let boundary = op.irreversible_boundary.as_str();
+        if (op.status == "failed") != self.terminal_error_code.is_some()
+            || self.terminal_error_code.as_deref().is_some_and(|code| {
+                !matches!(
+                    code,
+                    "handler_rejected" | "legacy_unknown" | "backup_retention_not_due"
+                )
+            })
+            || self.operation_revision == 0
+            || (!snapshot && !retention && !verification)
+            || !crate::provider_migration::operation_id(&op.id)
+            || op.progress_percent > 100
+            || !matches!(
+                op.status.as_str(),
+                "pending" | "running" | "succeeded" | "failed" | "cancelled"
+            )
+            || !(matches!(
+                phase,
+                "accepted" | "preflight" | "backup_cancellation" | "published" | "cancelled"
+            ) || snapshot
+                && matches!(
+                    phase,
+                    "backup_capture"
+                        | "backup_transfer"
+                        | "backup_verification"
+                        | "backup_publication"
+                )
+                || verification && matches!(phase, "backup_verification" | "backup_publication")
+                || retention
+                    && matches!(
+                        phase,
+                        "backup_retention_scan"
+                            | "backup_retention_publication"
+                            | "backup_retention_cleanup"
+                    ))
+            || !matches!(
+                op.retry.as_str(),
+                "inspect_by_operation_id" | "retry_after_recovery_capacity" | "never"
+            )
+            || !matches!(
+                op.cancellation.as_str(),
+                "allowed_before_publication"
+                    | "not_allowed_during_publication"
+                    | "cancel_requested_cleanup_pending"
+                    | "cancelled"
+            )
+            || !(boundary == "not_crossed"
+                || snapshot && boundary == "backup_registry_published"
+                || retention && boundary == "backup_registry_expired"
+                || verification && boundary == "verification_report_published")
+            || matches!(op.status.as_str(), "pending" | "running")
+                && op.lookup_expires_at_unix_seconds.is_some()
+            || phase == "backup_cancellation"
+                && (op.status != "running"
+                    || !self.cleanup_pending
+                    || op.cancellation != "cancel_requested_cleanup_pending"
+                    || boundary != "not_crossed")
+            || op.cancellation == "cancel_requested_cleanup_pending"
+                && phase != "backup_cancellation"
+            || op.status == "cancelled"
+                && (self.cleanup_pending
+                    || phase != "cancelled"
+                    || op.cancellation != "cancelled"
+                    || boundary != "not_crossed")
+            || phase == "backup_retention_cleanup"
+                && (!self.cleanup_pending
+                    || boundary != "backup_registry_expired"
+                    || op.cancellation != "not_allowed_during_publication")
+            || matches!(phase, "backup_publication" | "backup_retention_publication")
+                && op.cancellation != "not_allowed_during_publication"
+            || retention && op.status == "succeeded" && self.cleanup_pending
+        {
+            return Err(MaintenanceWireFailure);
+        }
+        if let Some(identity) = &self.repository {
+            crate::repository::RepositoryResponse {
+                catalog_generation: 1,
+                operation: None,
+                identity: Some(identity.clone()),
+                doctor: None,
+                policy: None,
+            }
+            .validate()?;
+        }
+        if let Some(receipt) = &self.receipt
+            && (!snapshot
+                || self.retention_receipt.is_some()
+                || op.status != "succeeded"
+                || phase != "published"
+                || boundary != "backup_registry_published"
+                || self.repository.is_none()
+                || receipt.catalog_generation == 0
+                || receipt.retain_until_unix_seconds == 0
+                || !hash(&receipt.manifest_checksum)
+                || !hash(&receipt.catalog_identity)
+                || !hash(&receipt.registry_generation_checksum))
+        {
+            return Err(MaintenanceWireFailure);
+        }
+        if let Some(evidence) = &self.restored_publication
+            && (!snapshot
+                || self.receipt.is_some()
+                || self.retention_receipt.is_some()
+                || self.cleanup_pending
+                || op.status != "succeeded"
+                || phase != "published"
+                || boundary != "backup_registry_published"
+                || self.repository.is_none()
+                || evidence.source_catalog_generation == 0
+                || evidence.retain_until_unix_seconds == 0
+                || !crate::provider_migration::operation_id(&evidence.restore_idempotency_key)
+                || evidence.capture_operation_id != op.id
+                || !crate::provider_migration::operation_id(&evidence.restore_origin_transaction)
+                || !hash(&evidence.manifest_checksum)
+                || !hash(&evidence.current_registry_generation_checksum)
+                || !hash(&evidence.source_catalog_identity)
+                || !hash(&evidence.restore_intent_digest)
+                || !hash(&evidence.capture_request_digest)
+                || evidence.manifest_checksum.get(..32)
+                    != Some(evidence.restore_origin_transaction.as_str()))
+        {
+            return Err(MaintenanceWireFailure);
+        }
+        if let Some(receipt) = &self.retention_receipt
+            && (!retention
+                || self.receipt.is_some()
+                || op.status != "succeeded"
+                || phase != "published"
+                || boundary != "backup_registry_expired"
+                || self.repository.is_none()
+                || !crate::provider_migration::operation_id(&receipt.snapshot_id)
+                || !hash(&receipt.manifest_checksum)
+                || !hash(&receipt.registry_generation_checksum))
+        {
+            return Err(MaintenanceWireFailure);
+        }
+        if verification {
+            if phase == "backup_cancellation"
+                || self.terminal_error_code.as_deref() == Some("backup_retention_not_due")
+                || self.cleanup_pending
+                || self.receipt.is_some()
+                || self.retention_receipt.is_some()
+                || (op.status == "succeeded") != self.verification_report.is_some()
+                || self.verification_report.is_some() != self.verification_report_checksum.is_some()
+                || self
+                    .verification_report_checksum
+                    .as_deref()
+                    .is_some_and(|value| !hash(value))
+                || self.verification_report.as_deref().is_some_and(|value| {
+                    value.len() > 2048
+                        || value.is_empty()
+                        || !value.len().is_multiple_of(2)
+                        || !value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+                || op.status == "succeeded"
+                    && (phase != "published" || boundary != "verification_report_published")
+            {
+                return Err(MaintenanceWireFailure);
+            }
+        } else if self.verification_report.is_some() || self.verification_report_checksum.is_some()
+        {
+            return Err(MaintenanceWireFailure);
+        }
+        if let (Some(report), Some(checksum)) = (
+            &self.verification_report,
+            &self.verification_report_checksum,
+        ) {
+            use sha2::{Digest, Sha256};
+            let bytes = report
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| {
+                    std::str::from_utf8(pair)
+                        .ok()
+                        .and_then(|text| u8::from_str_radix(text, 16).ok())
+                        .ok_or(MaintenanceWireFailure)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let actual = Sha256::digest(&bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            if &actual != checksum || self.repository.is_none() {
+                return Err(MaintenanceWireFailure);
+            }
+        }
+        if op.status == "succeeded"
+            && (snapshot && (self.receipt.is_none() && self.restored_publication.is_none())
+                || retention && self.retention_receipt.is_none())
+        {
+            return Err(MaintenanceWireFailure);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupRetentionReceipt {
+    pub snapshot_id: String,
+    pub manifest_checksum: String,
+    pub registry_generation_checksum: String,
+    pub deleted_objects: u32,
+    pub already_absent_objects: u32,
+    pub retained_shared_objects: u32,
+}

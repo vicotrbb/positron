@@ -39,6 +39,8 @@ pub(super) enum LedgerFileEvent {
     #[cfg(any(test, fuzzing, feature = "test-support"))]
     BeforeLeaseCreationReconciliation,
     #[cfg(any(test, fuzzing, feature = "test-support"))]
+    AfterLeaseCancellationPublication,
+    #[cfg(any(test, fuzzing, feature = "test-support"))]
     BeforeRetentionFrontierReconciliation,
     #[cfg(any(test, fuzzing, feature = "test-support"))]
     BeforeReclaimRetiredSegment,

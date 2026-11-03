@@ -65,6 +65,22 @@ fn client_failure(failure: positron_api::log_query::LogQueryServiceClientFailure
         F::AuthenticationRejected => "query authentication rejected",
         F::CapacityUnavailable => "query capacity unavailable; retry after backoff",
         F::QueryUnavailable => "query unavailable; inspect instance readiness",
+        F::SnapshotExpired => "query snapshot expired",
+        F::UnsupportedFeature => "query feature unsupported by server",
+        F::InvalidCursor => "invalid query cursor",
+        F::InvalidBudget => "invalid query budget",
+        F::BudgetExhausted => "query budget exhausted",
+        F::AuthorizationChanged => "query authorization changed",
+        F::Cancelled => "query cancelled",
+        F::UnsupportedQuery => "query unsupported",
+        F::IdempotencyConflict => "query idempotency conflict",
+        F::StoreUnavailable => "query store unavailable",
+        F::IncompleteData => "query data incomplete",
+        F::MalformedPersistentData => "query persistent data malformed",
+        F::Internal => "query internal failure",
+        F::AmbiguousCancellation(_) => {
+            "query cancellation completion unknown; reconcile original cursor"
+        },
         F::Transport => "query transport or response unavailable",
     }
 }

@@ -3874,6 +3874,7 @@ dependencies = [
  "positron-policy",
  "positron-query",
  "positron-release",
+ "positron-sdk",
  "positron-signals",
  "prost 0.14.3",
  "reqwest 0.12.28",
@@ -3890,6 +3891,24 @@ dependencies = [
  "tracing",
  "tracing-loki",
  "tracing-subscriber",
+ "zeroize",
+]
+
+[[package]]
+name = "positron-sdk"
+version = "0.0.0"
+dependencies = [
+ "pbjson",
+ "pbjson-build",
+ "prost 0.14.3",
+ "prost-build",
+ "prost-types 0.14.3",
+ "protoc-bin-vendored",
+ "reqwest 0.12.28",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
  "zeroize",
 ]
 

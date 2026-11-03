@@ -183,11 +183,23 @@ pub(crate) const SERVICES: &[ServiceSpec] = &[
     },
     ServiceSpec {
         name: "LogQueryService",
-        methods: &[MethodSpec {
-            name: "Execute",
-            input: ".positron.v1.LogQueryRequest",
-            output: ".positron.v1.LogQueryResponse",
-        }],
+        methods: &[
+            MethodSpec {
+                name: "Execute",
+                input: ".positron.v1.LogQueryRequest",
+                output: ".positron.v1.LogQueryResponse",
+            },
+            MethodSpec {
+                name: "Session",
+                input: ".positron.v1.LogQuerySessionRequest",
+                output: ".positron.v1.LogQueryResponse",
+            },
+            MethodSpec {
+                name: "Cancel",
+                input: ".positron.v1.LogQueryCancelRequest",
+                output: ".positron.v1.LogQueryCancelResponse",
+            },
+        ],
     },
     ServiceSpec {
         name: "ApiKeyService",

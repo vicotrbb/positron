@@ -216,6 +216,7 @@ fn operational_probe_bounds_a_held_response_by_the_original_deadline()
                 Err(error) => return Err(error),
             }
         };
+        stream.set_nonblocking(false)?;
         stream.set_write_timeout(Some(Duration::from_millis(100)))?;
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")?;
         let _ = held.recv_timeout(Duration::from_secs(1));

@@ -164,6 +164,7 @@ fn spawn_proxy_listener(
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false)?;
                     let request_deadline = Instant::now() + REQUEST_BOUND;
                     read_request(&mut stream, request_deadline)?;
                     stream.write_all(
@@ -212,7 +213,10 @@ fn accept_direct_request(
     let deadline = Instant::now() + LISTENER_WAIT;
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return Ok(stream),
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false)?;
+                return Ok(stream);
+            },
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 if done.load(Ordering::Acquire) {
                     return Err(io::Error::other(format!(

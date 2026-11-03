@@ -1,3 +1,5 @@
+mod cancel;
+pub(crate) use cancel::release_cancelled_lease;
 mod clock;
 mod contract;
 mod entry;

@@ -119,6 +119,8 @@ pub(crate) const fn maintenance_failure_category(failure: ServiceFailure) -> Opt
         ServiceFailure::CorruptState => Some("corrupt_state"),
         ServiceFailure::Internal => Some("internal"),
         ServiceFailure::Cancelled => None,
+        ServiceFailure::QueryRejected(_) => Some("query_rejected"),
+        ServiceFailure::QueryCancellationFailed(_) => Some("query_cancellation_failed"),
     }
 }
 
@@ -823,10 +825,64 @@ impl ServiceHandle {
         bearer: &str,
         body: &[u8],
     ) -> Result<(Vec<u8>, TransferredResourceReservation), (u16, &'static str)> {
+        self.execute_log_query_inner(bearer, body, false)
+    }
+
+    /// Executes one authenticated bounded page or resumes its bound snapshot.
+    pub fn execute_log_query_session(
+        &self,
+        bearer: &str,
+        body: &[u8],
+    ) -> Result<(Vec<u8>, TransferredResourceReservation), (u16, &'static str)> {
+        self.execute_log_query_inner(bearer, body, true)
+    }
+
+    /// Cancels authenticated cursor-owned leases without re-executing the query.
+    pub fn cancel_log_query(
+        &self,
+        bearer: &str,
+        body: &[u8],
+    ) -> Result<
+        (Vec<u8>, TransferredResourceReservation),
+        (u16, &'static str, positron_kernel::LedgerCompletionState),
+    > {
+        query::cancel(self, bearer, body).map_err(|failure| match failure {
+            ServiceFailure::QueryCancellationFailed(failure) => {
+                let (status, code) = failure::query_refusal(failure.code());
+                (status, code, failure.completion_state())
+            },
+            other => {
+                let (status, code) = match other {
+                    ServiceFailure::QueryRejected(code) => failure::query_refusal(code),
+                    ServiceFailure::Unauthorized => (401, "authentication_rejected"),
+                    ServiceFailure::InvalidRequest => (400, "invalid_request"),
+                    ServiceFailure::CapacityUnavailable => (429, "capacity_unavailable"),
+                    _ => (503, "query_unavailable"),
+                };
+                (
+                    status,
+                    code,
+                    positron_kernel::LedgerCompletionState::RejectedBeforeMutation,
+                )
+            },
+        })
+    }
+
+    fn execute_log_query_inner(
+        &self,
+        bearer: &str,
+        body: &[u8],
+        session: bool,
+    ) -> Result<(Vec<u8>, TransferredResourceReservation), (u16, &'static str)> {
         let started = std::time::Instant::now();
-        let execution = query::execute(self, bearer, body);
+        let execution = if session {
+            query::execute_session(self, bearer, body)
+        } else {
+            query::execute(self, bearer, body)
+        };
         let failure = execution.as_ref().err().copied();
         let result = execution.map_err(|failure| match failure {
+            ServiceFailure::QueryRejected(code) => failure::query_refusal(code),
             ServiceFailure::Unauthorized => (401, "authentication_rejected"),
             ServiceFailure::InvalidRequest
             | ServiceFailure::InvalidRequestWithLimit(_)

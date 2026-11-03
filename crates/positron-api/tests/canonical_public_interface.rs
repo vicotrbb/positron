@@ -519,12 +519,12 @@ fn unknown_capability_values_have_transport_parity_and_closed_sources() -> Resul
     for (transport, bytes, source) in [
         (
             Transport::GrpcProtobuf,
-            &[0x08, 0x01, 0x10, 0x04][..],
+            &[0x08, 0x01, 0x10, 0x06][..],
             ApiFailureSource::GrpcDecode,
         ),
         (
             Transport::HttpJson,
-            &br#"{"api_major":1,"capability":4}"#[..],
+            &br#"{"api_major":1,"capability":6}"#[..],
             ApiFailureSource::HttpDecode,
         ),
     ] {

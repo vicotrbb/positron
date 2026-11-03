@@ -54,6 +54,7 @@ fn missing_response() -> TestResult<api::LogQueryResponse> {
                         expiry_unix_seconds: 1,
                     }),
                     initial_cursor: None,
+                    tail_phase: None,
                 })),
             },
             LogQueryEvent {

@@ -27,7 +27,9 @@ impl HttpClient {
                 trust_file,
             } => {
                 let identity = server_name.parse::<IpAddr>();
-                if server_name.is_empty()
+                if !server_name.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':')
+                }) || server_name.is_empty()
                     || server_name.len() > 253
                     || identity.as_ref().is_ok_and(|ip| *ip != endpoint.ip())
                 {

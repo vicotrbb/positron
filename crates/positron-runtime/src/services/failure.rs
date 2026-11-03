@@ -33,6 +33,9 @@ pub enum ServiceFailure {
     KeyEnvelopeMismatch,
     Internal,
     Cancelled,
+    /// Stable Query-owner refusal retained at the public session boundary.
+    QueryRejected(QueryFailureCode),
+    QueryCancellationFailed(positron_query::QueryCancellationFailure),
 }
 
 pub(super) fn map_admission_group_plan_failure(
@@ -307,7 +310,9 @@ impl ServiceFailure {
                 crate::BootstrapFailureCode::CatalogUnavailable
             },
             Self::LedgerUnavailable => crate::BootstrapFailureCode::LedgerUnavailable,
-            Self::Cancelled => crate::BootstrapFailureCode::ResourceUnavailable,
+            Self::Cancelled | Self::QueryRejected(_) | Self::QueryCancellationFailed(_) => {
+                crate::BootstrapFailureCode::ResourceUnavailable
+            },
             Self::CapacityUnavailable
             | Self::BackupControlMemoryRequired { .. }
             | Self::BackupRepositoryRejected => crate::BootstrapFailureCode::ResourceUnavailable,
@@ -317,5 +322,27 @@ impl ServiceFailure {
             | Self::InvalidRequestWithLimit(_)
             | Self::Internal => crate::BootstrapFailureCode::ResourceUnavailable,
         }
+    }
+}
+
+/// Preserves the owning native Query failure at the canonical session boundary.
+pub(super) const fn query_refusal(code: QueryFailureCode) -> (u16, &'static str) {
+    match code {
+        QueryFailureCode::Unauthorized => (401, "authentication_rejected"),
+        QueryFailureCode::ResourceAdmissionRefused | QueryFailureCode::ResourceExhausted => {
+            (429, "capacity_unavailable")
+        },
+        QueryFailureCode::SnapshotExpired => (410, "snapshot_expired"),
+        QueryFailureCode::InvalidCursor => (400, "invalid_cursor"),
+        QueryFailureCode::InvalidBudget => (400, "invalid_budget"),
+        QueryFailureCode::BudgetExhausted => (422, "budget_exhausted"),
+        QueryFailureCode::AuthorizationChanged => (403, "authorization_changed"),
+        QueryFailureCode::Cancelled => (409, "cancelled"),
+        QueryFailureCode::UnsupportedQuery => (400, "unsupported_query"),
+        QueryFailureCode::IdempotencyConflict => (409, "idempotency_conflict"),
+        QueryFailureCode::StoreUnavailable => (503, "store_unavailable"),
+        QueryFailureCode::IncompleteData => (503, "incomplete_data"),
+        QueryFailureCode::MalformedPersistentData => (500, "malformed_persistent_data"),
+        QueryFailureCode::Internal => (500, "internal"),
     }
 }

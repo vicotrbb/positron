@@ -133,6 +133,7 @@ fn encoded_budget_incomplete() -> TestResult<serde_json::Value> {
                         expiry_unix_seconds: 1,
                     }),
                     initial_cursor: None,
+                    tail_phase: None,
                 })),
             },
             LogQueryEvent {

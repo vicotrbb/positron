@@ -253,6 +253,8 @@ impl OtlpSignal {
             | ServiceFailure::CorruptState
             | ServiceFailure::BackupRepositoryRejected
             | ServiceFailure::Internal
+            | ServiceFailure::QueryRejected(_)
+            | ServiceFailure::QueryCancellationFailed(_)
             | ServiceFailure::Cancelled => OtlpFailure {
                 http_status: 500,
                 grpc_code: 13,
