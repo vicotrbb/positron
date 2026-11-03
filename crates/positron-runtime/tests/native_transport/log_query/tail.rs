@@ -36,20 +36,20 @@ fn public_tail_preserves_unacknowledged_delivery_and_can_cancel_its_cursor()
             maximum_time_range_nanoseconds: 100,
         }),
     };
-    let response = client
-        .session(
-            bearer,
-            &api::LogQuerySessionRequest {
-                operation: Some(api::log_query_session_request::Operation::Tail(
-                    api::LogQueryTailRequest {
-                        query: Some(query.clone()),
-                        ..Default::default()
-                    },
-                )),
-                batch_limit: 1,
-            },
-        )
-        .map_err(|failure| format!("initial tail: {failure:?}"))?;
+    let response = super::session::admitted_session(
+        &client,
+        bearer,
+        &api::LogQuerySessionRequest {
+            operation: Some(api::log_query_session_request::Operation::Tail(
+                api::LogQueryTailRequest {
+                    query: Some(query.clone()),
+                    ..Default::default()
+                },
+            )),
+            batch_limit: 1,
+        },
+    )
+    .map_err(|failure| format!("initial tail: {failure:?}"))?;
     let mut tracker = api::BatchTracker::tail();
     assert!(tracker.filter(&response)?.is_empty());
     let Event::Terminal(terminal) = response
@@ -94,7 +94,8 @@ fn public_tail_preserves_unacknowledged_delivery_and_can_cancel_its_cursor()
         200,
     );
     let poll = |cursor: Vec<u8>, acknowledgement| {
-        client.session(
+        super::session::admitted_session(
+            &client,
             bearer,
             &api::LogQuerySessionRequest {
                 operation: Some(api::log_query_session_request::Operation::Tail(

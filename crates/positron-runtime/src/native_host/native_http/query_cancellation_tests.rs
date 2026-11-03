@@ -6,7 +6,13 @@ use std::sync::Arc;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn with_fixture(
-    test: impl FnOnce(&ServiceHandle, &HealthState, &str, &crate::InitializedInstance) -> TestResult,
+    test: impl FnOnce(
+        &ServiceHandle,
+        &HealthState,
+        &str,
+        &crate::InitializedInstance,
+        &str,
+    ) -> TestResult,
 ) -> TestResult {
     let roots = crate::process_lifecycle::TestRoots::new("query-cancellation")?;
     let paths = roots.bootstrap_paths()?;
@@ -21,7 +27,13 @@ fn with_fixture(
     let state = crate::health::ProcessState::starting();
     state.set_inspection_authority(Arc::clone(&instance))?;
     state.transition(crate::ProcessPhase::Serving);
-    test(&services, &state.health(), bearer, &instance)
+    test(
+        &services,
+        &state.health(),
+        bearer,
+        &instance,
+        claim.ingest_secret().ok_or("ingest credential")?,
+    )
 }
 
 fn poll(
@@ -90,7 +102,7 @@ fn cancel(
 #[test]
 fn contended_cancellation_is_rejected_before_mutation_and_can_be_explicitly_reconciled()
 -> TestResult {
-    with_fixture(|services, health, bearer, instance| {
+    with_fixture(|services, health, bearer, instance, _| {
         let (initial, reservation) = poll(services, bearer, None)?;
         let cursor = continuation(&initial)?;
         drop(reservation);
@@ -116,7 +128,7 @@ fn contended_cancellation_is_rejected_before_mutation_and_can_be_explicitly_reco
 #[test]
 fn rejected_cancellation_does_not_retry_through_drop_and_keeps_the_cursor_resumable() -> TestResult
 {
-    with_fixture(|services, health, bearer, _| {
+    with_fixture(|services, health, bearer, _, _| {
         let (initial, reservation) = poll(services, bearer, None)?;
         let cursor = continuation(&initial)?;
         drop(reservation);
@@ -140,7 +152,7 @@ fn rejected_cancellation_does_not_retry_through_drop_and_keeps_the_cursor_resuma
 
 #[test]
 fn uncertain_cancellation_publication_keeps_its_cause_and_never_claims_rejection() -> TestResult {
-    with_fixture(|services, health, bearer, _| {
+    with_fixture(|services, health, bearer, _, _| {
         let (initial, reservation) = poll(services, bearer, None)?;
         let cursor = continuation(&initial)?;
         drop(reservation);
@@ -166,7 +178,7 @@ fn uncertain_cancellation_publication_keeps_its_cause_and_never_claims_rejection
 
 #[test]
 fn bounded_cancellation_fits_while_three_query_responses_still_own_their_buffers() -> TestResult {
-    with_fixture(|services, health, bearer, _| {
+    with_fixture(|services, health, bearer, _, _| {
         let mut held = Vec::new();
         let mut cursor = None;
         for _ in 0..3 {
@@ -195,7 +207,7 @@ fn bounded_cancellation_fits_while_three_query_responses_still_own_their_buffers
 #[test]
 fn cancellation_authentication_and_cursor_refusals_are_definite_and_leave_original_lease()
 -> TestResult {
-    with_fixture(|services, health, bearer, _| {
+    with_fixture(|services, health, bearer, _, _| {
         let (initial, reservation) = poll(services, bearer, None)?;
         let cursor = continuation(&initial)?;
         drop(reservation);
@@ -214,6 +226,111 @@ fn cancellation_authentication_and_cursor_refusals_are_definite_and_leave_origin
         }
         let (resumed, _reservation) = poll(services, bearer, Some(cursor))?;
         assert!(continuation(&resumed).is_ok());
+        Ok(())
+    })
+}
+
+#[test]
+fn contended_session_resume_preserves_the_snapshot_and_unread_batch() -> TestResult {
+    with_fixture(|services, health, bearer, instance, ingest| {
+        use opentelemetry_proto::tonic::{
+            collector::logs::v1::ExportLogsServiceRequest,
+            logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+        };
+        use prost::Message;
+        let payload = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 42,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+        .encode_to_vec();
+        for _ in 0..2 {
+            services.ingest_otlp_logs(ingest, payload.clone())?;
+        }
+        let request = api::LogQuerySessionRequest {
+            operation: Some(api::log_query_session_request::Operation::Execute(api::LogQueryRequest {
+                pipeline: "pipeline:v1 logs | range query_time 0 100 | project commit_position | limit 2".into(),
+                budget: Some(api::LogQueryBudget { scanned_bytes: 1_048_576, decoded_records: 16, output_rows: 16, output_bytes: 16_384, memory_bytes: 1_048_576, cpu_work_units: 16, wall_seconds: 5, maximum_time_range_nanoseconds: 100 }),
+            })), batch_limit: 1,
+        };
+        let (bytes, reservation) = services
+            .execute_log_query_session(bearer, &request.encode()?)
+            .map_err(|failure| format!("first page: {failure:?}"))?;
+        let initial = api::LogQueryResponse::decode_session(&bytes)?;
+        drop(reservation);
+        use api::log_query_event::Event;
+        let snapshot = initial
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                Some(Event::Header(header)) => header.snapshot.clone(),
+                _ => None,
+            })
+            .ok_or("snapshot")?;
+        let first_batch = initial
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                Some(Event::Batch(batch)) => Some(batch),
+                _ => None,
+            })
+            .ok_or("first batch")?;
+        assert_eq!(first_batch.sequence, 0);
+        assert_eq!(first_batch.rows.len(), 1);
+        let cursor = continuation(&initial)?;
+        let request = api::LogQuerySessionRequest {
+            operation: Some(api::log_query_session_request::Operation::Resume(cursor)),
+            batch_limit: 1,
+        };
+        let body = request.encode()?;
+        let response = instance._authority.with_control_contention_for_test(|| -> TestResult<Response> {
+            let mut raw = Cursor::new(format!("POST {} HTTP/1.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", api::SESSION_HTTP_PATH, body.len()).into_bytes());
+            let head = io::read_head(&mut raw).map_err(|_| "session head")?;
+            Ok(route_buffered_api(head, body.clone(), "127.0.0.1:1".parse()?, None, health, Some(services), Instant::now() + Duration::from_secs(5)))
+        })??;
+        use positron_api::api_keys::protobuf::{
+            CompletionState, PublicError, PublicErrorCode, RetryClass,
+        };
+        let failure: PublicError = serde_json::from_slice(response.body())?;
+        assert_eq!(response.status(), 429);
+        assert_eq!(failure.code, PublicErrorCode::CapacityUnavailable as i32);
+        assert_eq!(failure.completion_state, CompletionState::Rejected as i32);
+        assert_eq!(failure.retry_class, RetryClass::AfterBackoff as i32);
+        assert_eq!(response.retry_after_seconds(), Some(1));
+        let (bytes, reservation) = services
+            .execute_log_query_session(bearer, &body)
+            .map_err(|failure| format!("resumed page: {failure:?}"))?;
+        let resumed = api::LogQueryResponse::decode_session(&bytes)?;
+        drop(reservation);
+        let actual_snapshot = resumed
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                Some(Event::Header(header)) => header.snapshot.as_ref(),
+                _ => None,
+            })
+            .ok_or("resumed snapshot")?;
+        assert_eq!(actual_snapshot, &snapshot);
+        let batch = resumed
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                Some(Event::Batch(batch)) => Some(batch),
+                _ => None,
+            })
+            .ok_or("unread batch")?;
+        assert_eq!(batch.sequence, 1);
+        assert_eq!(batch.rows.len(), 1);
+        assert_ne!(batch.rows, first_batch.rows);
+        assert_eq!(batch.prior_digest, first_batch.digest);
+        assert!(resumed.events.iter().any(|event| matches!(&event.event, Some(Event::Terminal(terminal)) if terminal.state == "complete")));
         Ok(())
     })
 }

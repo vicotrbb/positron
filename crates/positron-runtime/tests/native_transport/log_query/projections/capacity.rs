@@ -6,6 +6,9 @@ use std::sync::{
 };
 use std::time::Instant;
 
+#[path = "capacity/session.rs"]
+mod session;
+
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn request() -> api::LogQueryRequest {

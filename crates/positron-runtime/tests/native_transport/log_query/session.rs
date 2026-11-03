@@ -95,15 +95,15 @@ fn public_query_pages_resume_the_same_snapshot() -> Result<(), Box<dyn std::erro
     };
     assert_eq!(terminal.state, "continued");
     let cursor = terminal.continuation_cursor.clone().ok_or("continuation")?;
-    let second = client
-        .session(
-            bearer,
-            &api::LogQuerySessionRequest {
-                operation: Some(api::log_query_session_request::Operation::Resume(cursor)),
-                batch_limit: 1,
-            },
-        )
-        .map_err(|failure| format!("resume page: {failure:?}"))?;
+    let second = admitted_session(
+        &client,
+        bearer,
+        &api::LogQuerySessionRequest {
+            operation: Some(api::log_query_session_request::Operation::Resume(cursor)),
+            batch_limit: 1,
+        },
+    )
+    .map_err(|failure| format!("resume page: {failure:?}"))?;
     let Event::Header(header) = second
         .events
         .first()
@@ -156,7 +156,8 @@ fn public_query_pages_resume_the_same_snapshot() -> Result<(), Box<dyn std::erro
     );
     if let Some(api::log_query_cancel_request::Cursor::Query(cursor)) = request.cursor.as_ref() {
         assert_eq!(
-            client.session(
+            admitted_session(
+                &client,
                 bearer,
                 &api::LogQuerySessionRequest {
                     operation: Some(api::log_query_session_request::Operation::Resume(
@@ -176,35 +177,31 @@ fn public_query_pages_resume_the_same_snapshot() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-fn admitted_session(
+pub(super) fn admitted_session(
     client: &api::LogQueryServiceClient,
     bearer: &str,
     request: &api::LogQuerySessionRequest,
-) -> Result<api::LogQueryResponse, Box<dyn std::error::Error>> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match client.session(bearer, request) {
-            Err(api::LogQueryServiceClientFailure::CapacityUnavailable)
-                if std::time::Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(100));
-            },
-            result => return result.map_err(Into::into),
-        }
-    }
+) -> Result<api::LogQueryResponse, api::LogQueryServiceClientFailure> {
+    after_definite_capacity(|| client.session(bearer, request))
 }
 
-// A live server can reject admission while its background control owner runs.
-// Reconcile only an explicit pre-effect capacity refusal, never uncertainty.
 pub(super) fn cancel_after_definite_capacity(
     client: &api::LogQueryServiceClient,
     bearer: &str,
     request: &api::LogQueryCancelRequest,
 ) -> Result<api::LogQueryCancelResponse, api::LogQueryServiceClientFailure> {
+    after_definite_capacity(|| client.cancel(bearer, request))
+}
+
+// Only canonical pre-effect refusals admit another identical attempt. The five
+// seconds bound admission/backoff; each call retains the generated transport cap.
+fn after_definite_capacity<T>(
+    mut attempt: impl FnMut() -> Result<T, api::LogQueryServiceClientFailure>,
+) -> Result<T, api::LogQueryServiceClientFailure> {
     use positron_sdk::api_keys::protobuf::{CompletionState, RetryClass};
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        match client.cancel(bearer, request) {
+        match attempt() {
             Err(failure @ api::LogQueryServiceClientFailure::CapacityUnavailable)
                 if failure.completion_state() == CompletionState::Rejected
                     && failure.retry_class() == RetryClass::AfterBackoff =>
