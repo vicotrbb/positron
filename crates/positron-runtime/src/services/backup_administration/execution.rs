@@ -857,6 +857,8 @@ fn provider_failure_with(
     }
 }
 fn capture_failure(failure: RepositoryFailure) -> ServiceFailure {
+    #[cfg(test)]
+    eprintln!("backup_capture_test_failure stage=capture_failure failure={failure:?}");
     match failure {
         RepositoryFailure::ControlMemoryRequired { memory_bytes } => {
             ServiceFailure::BackupControlMemoryRequired { memory_bytes }

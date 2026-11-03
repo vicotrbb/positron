@@ -81,6 +81,11 @@ impl MaintenanceWorkerFailureContext {
         stage: Option<IntegrityScrubFailureStage>,
         report: impl FnOnce(OperationalDiagnostic) -> std::io::Result<()>,
     ) -> ServiceFailure {
+        #[cfg(test)]
+        eprintln!(
+            "maintenance_test_failure operation={:?} task={:?} failure={failure:?} stage={stage:?}",
+            self.operation, self.task_class
+        );
         if maintenance_failure_category(failure).is_none() {
             return failure;
         }
