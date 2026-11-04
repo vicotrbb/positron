@@ -2,7 +2,10 @@ use std::collections::BTreeSet;
 
 use super::capacity::lease_claim;
 use super::snapshot_lease::LeaseReservationTransaction;
-use super::snapshot_lease::{map_catalog_failure, publish_many, records};
+use super::snapshot_lease::snapshot_lease_support::{
+    prepare_lease_publication, publication_visible,
+};
+use super::snapshot_lease::{map_catalog_failure, records};
 use super::snapshot_lease_attempt::SnapshotLeaseAttempt;
 use super::snapshot_lease_codec::encode;
 use super::snapshot_lease_record::{
@@ -121,81 +124,110 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             }
         }
         self.retry_pending_releases(&mut state)?;
-        self.catalog
-            .refresh_state()
-            .map_err(|failure| LedgerFailure::new(map_catalog_failure(failure.code())))?;
-        let basis = self.catalog.pin()?;
-        let record = records(&basis)?
-            .into_iter()
-            .find(|record| record.identity == identity && record.scope == self.scope)
-            .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::SnapshotExpired))?;
-        let now = state.last_snapshot_lease_time;
-        if now >= record.expiry {
-            return Err(LedgerFailure::new(LedgerFailureCode::SnapshotExpired));
-        }
-        validate_active_lease(&record, now)?;
-        if !state.lease_reservations.contains_key(&identity) {
-            return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
-        }
-        let usage = if let Some((resume_count, previous)) = attempt {
-            if record.resume_count != resume_count {
-                return Err(LedgerFailure::new(LedgerFailureCode::ConcurrentWriter));
-            }
-            let expected = previous.merge(delta)?;
-            if record.usage == expected {
-                cache_marker(&mut state, &record);
-                if state.lease_reservation_baselines.contains_key(&identity) {
-                    LeaseReservationTransaction::begin(&mut state, identity)?.commit(&mut state);
+        let mut prepared = None;
+        let result = self
+            .catalog
+            .prepare_and_commit::<_, LedgerFailure>(|basis| {
+                let record = records(basis)?
+                    .into_iter()
+                    .find(|record| record.identity == identity && record.scope == self.scope)
+                    .ok_or_else(|| LedgerFailure::new(LedgerFailureCode::SnapshotExpired))?;
+                let now = state.last_snapshot_lease_time;
+                if now >= record.expiry {
+                    return Err(LedgerFailure::new(LedgerFailureCode::SnapshotExpired));
                 }
-                return Ok(expected);
-            }
-            if record.usage != previous {
-                return Err(LedgerFailure::new(LedgerFailureCode::ConcurrentWriter));
-            }
-            expected
-        } else {
-            record.usage.merge(delta)?
-        };
-        if usage == record.usage {
-            if state.lease_reservation_baselines.contains_key(&identity) {
-                LeaseReservationTransaction::begin(&mut state, identity)?.rollback(&mut state)?;
-            }
-            return Ok(usage);
-        }
+                validate_active_lease(&record, now)?;
+                if !state.lease_reservations.contains_key(&identity) {
+                    return Err(LedgerFailure::new(LedgerFailureCode::IntegrityCorruption));
+                }
+                let usage = if let Some((resume_count, previous)) = attempt {
+                    if record.resume_count != resume_count {
+                        return Err(LedgerFailure::new(LedgerFailureCode::ConcurrentWriter));
+                    }
+                    let expected = previous.merge(delta)?;
+                    if record.usage == expected {
+                        cache_marker(&mut state, &record);
+                        if state.lease_reservation_baselines.contains_key(&identity) {
+                            LeaseReservationTransaction::begin(&mut state, identity)?
+                                .commit(&mut state);
+                        }
+                        return Ok((expected, None));
+                    }
+                    if record.usage != previous {
+                        return Err(LedgerFailure::new(LedgerFailureCode::ConcurrentWriter));
+                    }
+                    expected
+                } else {
+                    record.usage.merge(delta)?
+                };
+                if usage == record.usage {
+                    if state.lease_reservation_baselines.contains_key(&identity) {
+                        LeaseReservationTransaction::begin(&mut state, identity)?
+                            .rollback(&mut state)?;
+                    }
+                    return Ok((usage, None));
+                }
 
-        let mut updated = record.clone();
-        updated.usage = usage;
-        let encoded = encode(&updated)?;
-        let expected_encoded = encoded.clone();
-        let amounts = lease_claim(encoded.len())?;
-        let transaction = LeaseReservationTransaction::begin(&mut state, identity)?;
-        if let Err(failure) = transaction.resize(&mut state, amounts) {
-            transaction.cancel(&mut state);
-            return Err(failure);
-        }
-        #[cfg(any(test, fuzzing, feature = "test-support"))]
-        let publication =
-            super::fault::emit_event(super::fault::LedgerFileEvent::BeforeLeaseUsagePublication)
-                .and_then(|()| {
-                    publish_many(
-                        self.catalog,
-                        &basis,
+                let mut updated = record.clone();
+                updated.usage = usage;
+                let encoded = encode(&updated)?;
+                let expected_encoded = encoded.clone();
+                let amounts = lease_claim(encoded.len())?;
+                let proposal = prepare_lease_publication(
+                    basis,
+                    &BTreeSet::from([identity]),
+                    &[encoded],
+                    Vec::new(),
+                )?;
+                let transaction = LeaseReservationTransaction::begin(&mut state, identity)?;
+                if let Err(failure) = transaction.resize(&mut state, amounts) {
+                    transaction.cancel(&mut state);
+                    return Err(failure);
+                }
+                prepared = Some((record, updated, expected_encoded, transaction));
+                #[cfg(test)]
+                super::fault::before_lease_usage_publication(self.authority);
+                #[cfg(any(test, fuzzing, feature = "test-support"))]
+                super::fault::emit_event(
+                    super::fault::LedgerFileEvent::BeforeLeaseUsagePublication,
+                )?;
+                Ok((usage, Some(proposal)))
+            });
+        let Some((record, updated, expected_encoded, transaction)) = prepared else {
+            return result.map(|(usage, _)| usage);
+        };
+        let usage = updated.usage;
+        // Publication visibility is reconciled only after all Catalog guards drop.
+        let publication = match result {
+            Ok(_) => Ok(()),
+            Err(failure)
+                if failure.code() != LedgerFailureCode::StaleGeneration
+                    && failure.completion_state()
+                        != super::LedgerCompletionState::CommitAmbiguous =>
+            {
+                match self
+                    .catalog
+                    .refresh_state()
+                    .and_then(|()| self.catalog.pin())
+                {
+                    Ok(current) => match publication_visible(
+                        &current,
                         &BTreeSet::from([identity]),
-                        vec![encoded],
-                    )
-                })
-                .and_then(|()| {
-                    super::fault::emit_event(
-                        super::fault::LedgerFileEvent::AfterLeaseUsagePublication,
-                    )
-                });
-        #[cfg(not(any(test, fuzzing, feature = "test-support")))]
-        let publication = publish_many(
-            self.catalog,
-            &basis,
-            &BTreeSet::from([identity]),
-            vec![encoded],
-        );
+                        std::slice::from_ref(&expected_encoded),
+                    ) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(failure),
+                        Err(failure) => Err(failure),
+                    },
+                    Err(_) => Err(LedgerFailure::ambiguous(failure.code())),
+                }
+            },
+            Err(failure) => Err(failure),
+        };
+        #[cfg(any(test, fuzzing, feature = "test-support"))]
+        let publication = publication.and_then(|()| {
+            super::fault::emit_event(super::fault::LedgerFileEvent::AfterLeaseUsagePublication)
+        });
         if let Err(failure) = publication {
             if failure.completion_state() == super::LedgerCompletionState::CommitAmbiguous {
                 let reconciled = self.reconcile_ambiguous_usage(

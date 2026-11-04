@@ -2679,3 +2679,160 @@ fn lease_clock(seconds: i64) -> crate::LifecycleClock<crate::FixedLifecycleClock
         positron_domain::time::UnixNanoseconds::new(seconds * 1_000_000_000),
     ))
 }
+
+#[test]
+fn usage_growth_after_recovery_uses_phase_capacity_and_charges_once() -> Result<(), Box<dyn Error>>
+{
+    with_fixture(|authority, catalog, scope| {
+        let ledger = ActiveSegmentLedger::open(
+            authority,
+            catalog,
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0x75; 32])),
+        )?;
+        let identity = ledger.create_snapshot_lease(100, 200)?.identity();
+        let before = authority.governor().inspect()?;
+        let delta = SnapshotLeaseUsage::new(1, 2, 3, 4, 5, 6, 7);
+        assert_eq!(ledger.record_snapshot_lease_usage(identity, delta)?, delta);
+        let charged = authority.governor().inspect()?;
+        assert!(
+            charged.usage(ResourceDimension::MemoryBytes)
+                > before.usage(ResourceDimension::MemoryBytes)
+        );
+        assert_eq!(
+            ledger.record_snapshot_lease_usage(identity, SnapshotLeaseUsage::default())?,
+            delta
+        );
+        let repeated = authority.governor().inspect()?;
+        for dimension in ResourceDimension::ALL {
+            assert_eq!(repeated.usage(dimension), charged.usage(dimension));
+        }
+        assert_eq!(ledger.snapshot_lease_usage(identity, 101)?, delta);
+        ledger.release_snapshot_lease(identity)?;
+        Ok(())
+    })
+}
+
+#[test]
+fn usage_recovery_occupancy_refusal_restores_retained_capacity() -> Result<(), Box<dyn Error>> {
+    with_fixture(|authority, catalog, scope| {
+        let ledger = ActiveSegmentLedger::open(
+            authority,
+            catalog,
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0x75; 32])),
+        )?;
+        let identity = ledger.create_snapshot_lease(100, 200)?.identity();
+        let snapshot = authority.governor().inspect()?;
+
+        let disk = ResourceDimension::DiskHeadroomBytes;
+        let available = snapshot
+            .recovery_shared_capacity(disk)
+            .checked_add(
+                snapshot.recovery_pool_capacity(RecoveryWorkKind::DurabilityCompletion, disk),
+            )
+            .and_then(|capacity| capacity.checked_sub(snapshot.usage(disk)))
+            .ok_or("durability capacity arithmetic")?;
+        let oversized = authority.recovery().reserve(RecoveryWorkClaim::system(
+            RecoveryWorkKind::DurabilityCompletion,
+            ResourceAmounts::only(disk, available)?,
+        )?);
+
+        let mut blocker = match oversized {
+            Ok(blocker) => blocker,
+            Err(failure) => {
+                let scoped_available = failure
+                    .allowed()
+                    .checked_sub(failure.in_use())
+                    .ok_or("system durability capacity arithmetic")?;
+                authority.recovery().reserve(RecoveryWorkClaim::system(
+                    RecoveryWorkKind::DurabilityCompletion,
+                    ResourceAmounts::only(disk, scoped_available)?,
+                )?)?
+            },
+        };
+        let before = authority.governor().inspect()?;
+
+        let generation = catalog.pin()?.identity();
+        let failure = ledger
+            .record_snapshot_lease_usage(identity, SnapshotLeaseUsage::new(1, 2, 3, 4, 5, 6, 7))
+            .expect_err("recovery occupancy must refuse retained lease growth safely");
+        assert_eq!(failure.code(), LedgerFailureCode::ResourceAdmissionRefused);
+        let after = authority.governor().inspect()?;
+        assert_eq!(after.lifecycle(), crate::GovernorLifecycle::Open);
+
+        for dimension in ResourceDimension::ALL {
+            assert_eq!(after.usage(dimension), before.usage(dimension));
+        }
+        assert_eq!(catalog.pin()?.identity(), generation);
+        assert_eq!(
+            ledger
+                .snapshot_lease_usage(identity, 101)
+                .map_err(|failure| format!("read after refusal: {failure:?}"))?,
+            SnapshotLeaseUsage::default()
+        );
+        let cancellation = blocker.cancel();
+        cancellation?;
+        drop(blocker);
+        let delta = SnapshotLeaseUsage::new(1, 2, 3, 4, 5, 6, 7);
+        assert_eq!(
+            ledger
+                .record_snapshot_lease_usage(identity, delta)
+                .map_err(|failure| format!("retry after blocker release: {failure:?}"))?,
+            delta
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn usage_exact_durability_refusal_restores_retained_capacity() -> Result<(), Box<dyn Error>> {
+    with_fixture(|authority, catalog, scope| {
+        let ledger = ActiveSegmentLedger::open(
+            authority,
+            catalog,
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0x75; 32])),
+        )?;
+        let identity = ledger.create_snapshot_lease(100, 200)?.identity();
+        let before = authority.governor().inspect()?;
+        let generation = catalog.pin()?.identity();
+        let delta = SnapshotLeaseUsage::new(1, 2, 3, 4, 5, 6, 7);
+        let failure = super::super::super::fault::with_before_lease_usage_publication(
+            |authority| {
+                assert_eq!(
+                    authority
+                        .governor()
+                        .inspect()
+                        .expect("snapshot")
+                        .lifecycle(),
+                    crate::GovernorLifecycle::Open
+                );
+                authority
+                    .observe_disk_for_test(crate::DiskObservation::new(0))
+                    .expect("validated disk observation");
+            },
+            || ledger.record_snapshot_lease_usage(identity, delta),
+        )
+        .expect_err("exact publication admission requires live disk headroom");
+        assert_eq!(failure.code(), LedgerFailureCode::ResourceAdmissionRefused);
+        let after = authority.governor().inspect()?;
+        assert_eq!(after.lifecycle(), crate::GovernorLifecycle::Open);
+        assert_eq!(
+            after.rejection_count_for(crate::AdmissionFailureCode::CapacityExhausted),
+            before.rejection_count_for(crate::AdmissionFailureCode::CapacityExhausted) + 1
+        );
+        for dimension in ResourceDimension::ALL {
+            assert_eq!(after.usage(dimension), before.usage(dimension));
+        }
+        assert_eq!(catalog.pin()?.identity(), generation);
+        authority.observe_disk_for_test(crate::DiskObservation::new(before.usable_disk_bytes()))?;
+        assert_eq!(
+            ledger.snapshot_lease_usage(identity, 101)?,
+            SnapshotLeaseUsage::default()
+        );
+        assert_eq!(ledger.record_snapshot_lease_usage(identity, delta)?, delta);
+        assert_eq!(ledger.snapshot_lease_usage(identity, 101)?, delta);
+        Ok(())
+    })
+}

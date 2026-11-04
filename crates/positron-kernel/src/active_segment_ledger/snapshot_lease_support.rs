@@ -22,9 +22,10 @@ mod publication;
 mod recovery;
 
 pub(crate) use publication::{
-    map_catalog_failure, publish_lease_and_task_removals,
-    publish_lease_release_with_task_replacement, publish_lease_replacement_with_task_replacements,
-    publish_many, publish_many_with_catalog_objects, publish_many_with_expected_catalog,
+    map_catalog_failure, prepare_lease_publication, publication_visible,
+    publish_lease_and_task_removals, publish_lease_release_with_task_replacement,
+    publish_lease_replacement_with_task_replacements, publish_many,
+    publish_many_with_catalog_objects, publish_many_with_expected_catalog,
     publish_many_with_expected_catalog_snapshot,
 };
 pub(crate) use recovery::snapshot_from_record;
