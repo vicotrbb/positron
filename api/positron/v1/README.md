@@ -480,3 +480,26 @@ Exact retries preserve that receipt and audit while checking current trust,
 membership, purge and revocation rules and the recorded antirollback floor.
 Other active source operations retain their normal recovery guards. The target
 remains offline until normal restore publication and bootstrap completion.
+
+## Shared SDK golden corpus
+
+`query-golden-fixtures.json` is language-neutral input and expected-output data
+for every generated SDK. `schema_version` versions the fixture layout.
+`representations` contains a public Protobuf message type, raw ProtoJSON `input`
+(to preserve duplicate fields), `accepted`, and the canonical JSON for accepted
+inputs. Session requests use the public semantic decoder. `responses` contains
+complete Execute envelopes and their expected acceptance, including batch
+sequence, row width, digest-chain, terminal-digest, and opaque-cursor failures.
+Digest bytes are fixed protocol identities for consistency validation, not
+cryptographic digest algorithm test vectors. SDKs preserve opaque cursor bytes;
+only the server authenticates cursor contents.
+
+`errors` binds HTTP status and complete canonical public errors to the client
+failure, retry class, and completion state, including cancellation ambiguity and
+forged-metadata refusal. `rejection` names cases also checked against the public
+server error encoder. `compatibility` checks old v1 defaults, current session
+and tail capabilities, unavailable and unsupported capabilities, unknown
+capabilities, and newer API-major refusal through capability negotiation.
+The existing `validation-fixtures.json` adds Protobuf/JSON transport fixtures.
+The Public Interface integration tests execute these vectors and are copied,
+along with the canonical corpus, by `generate_rust_sdk` into the Rust package.
