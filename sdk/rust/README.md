@@ -47,9 +47,9 @@ restarts, renews a budget, or weakens a terminal failure automatically.
 
 ## Bounds
 
-Finite Execute keeps its existing five-second query ceiling. Session and Tail
-leases have the canonical hard maximum of 3,600 seconds. Each HTTP request has
-its own bounded connection deadline. Cursors are at most 8,192 bytes. A query
+Finite Execute bounds its complete HTTP exchange to five seconds. Session and
+Tail HTTP exchanges allow 30 seconds, with a five-second connection timeout.
+Their leases have the canonical hard maximum of 3,600 seconds. Cursors are at most 8,192 bytes. A query
 response is at most 262,144 bytes, with at most 128 rows and 128 columns.
 Query budgets remain cumulative and server and tenant limits remain authoritative.
 Tail polling returns on one delivery or idle observation without holding an

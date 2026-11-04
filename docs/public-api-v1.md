@@ -74,12 +74,11 @@ or serialization and retains the reservation until the final response byte
 owner is dropped. Query statistics retain the Query owner's original values;
 transport workspace is governed separately.
 
-The generated Log Query client and CLI allow 30 seconds for the complete HTTP
-exchange, with a five-second connection timeout. This bounded client policy
-matches the API listener's default request deadline and includes setup and
-response transfer in addition to the query's requested execution budget (at most
-five seconds for this route).
-It does not promise completion under a custom server deadline. Other generated
+The generated finite Execute client and `positron query` CLI bound the complete
+HTTP exchange to five seconds, including connection setup and response transfer.
+Session and Tail HTTP exchanges allow 30 seconds, with a
+five-second connection timeout. These client bounds do not negotiate the server's
+configured deadline or promise completion under a custom deadline. Other generated
 clients retain their five-second default transport bound. Repository, Backup and Upgrade
 clients also provide an explicit `manage_with_default_listener_timeout` opt-in,
 which bounds request encoding, HTTP exchange, and canonical response decoding
