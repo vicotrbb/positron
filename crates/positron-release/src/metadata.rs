@@ -63,6 +63,22 @@ pub(crate) fn verify_identities(
                 &inventory.compatibility.schema,
             )?;
         }
+        if artifact.surface == Surface::SdkPython {
+            if artifact.publication.registry != "https://pypi.org"
+                || artifact.publication.native_subject
+                    != format!("positron_sdk-{version}-py3-none-any.whl")
+                || artifact.file != artifact.publication.native_subject
+            {
+                return Err(ReleaseError::IdentityMismatch);
+            }
+            crate::native_python::inspect_sdk(
+                &bundle.read(&artifact.file, crate::native_python::MAX_INPUT)?,
+                &version,
+                &inventory.source_commit,
+                &inventory.api_version,
+                &inventory.compatibility.schema,
+            )?;
+        }
         let digest = hex(&inventory.file(&artifact.file)?.identity.sha256);
         let spdx = document(bundle, &artifact.spdx)?;
         let packages = spdx

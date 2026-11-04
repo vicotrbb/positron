@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "positron-sdk"
+version = "0.0.0"
+description = "Generated typed client for the Positron v1 public API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = []
+
+[tool.setuptools]
+packages = ["positron_sdk"]
+
+[tool.setuptools.package-data]
+positron_sdk = ["py.typed", "*.json", "api/*"]

@@ -22,6 +22,7 @@ mod native_nix;
 mod native_npm;
 mod native_nuget;
 mod native_packages;
+mod native_python;
 mod native_rpm;
 pub use native_rpm::rpm_functional_payload;
 mod native_publication;

@@ -210,15 +210,23 @@ fn mutate_package(fixture: &mut support::Fixture, index: usize, data: &[u8]) -> 
                 .unwrap(),
             );
         },
-        Surface::SdkGo => {
+        Surface::SdkGo | Surface::SdkPython => {
             let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
-            let member = archive.by_index(0).unwrap();
+            let selected = if artifact.surface == Surface::SdkPython {
+                usize::from(data.get(1).copied().unwrap_or(0)) % archive.len()
+            } else {
+                0
+            };
+            let member = archive.by_index(selected).unwrap();
             let start = member.data_start().unwrap() as usize;
             let end = start + member.size() as usize;
             let local = member.header_start() as usize;
             let central = member.central_header_start() as usize;
             drop(member);
             drop(archive);
+            if start == end {
+                return false;
+            }
             mutate(&mut bytes[start..end], data);
             let crc = crc32fast::hash(&bytes[start..end]).to_le_bytes();
             bytes[local + 14..local + 18].copy_from_slice(&crc);

@@ -135,12 +135,24 @@ pub fn fixtures(version: &str, source_commit: &str, api: &[u8]) -> Vec<NativeArt
         source_commit,
         None,
     );
-    let metadata = format!("Metadata-Version: 2.4\nName: positron-sdk\nVersion: {version}\n");
+    let metadata = format!(
+        "Metadata-Version: 2.4\nName: positron-sdk\nVersion: {version}\nRequires-Python: >=3.11\n"
+    );
     let dist_info = format!("positron_sdk-{version}.dist-info");
-    let wheel=b"Wheel-Version: 1.0\nGenerator: positron-fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n";
+    let wheel=b"Wheel-Version: 1.0\nGenerator: setuptools (80.9.0)\nRoot-Is-Purelib: true\nTag: py3-none-any\n";
     let init = b"class Client:\n    pass\n";
     let mut wheel_files = vec![
         ("positron_sdk/__init__.py".into(), init.to_vec()),
+        ("positron_sdk/client.py".into(), init.to_vec()),
+        ("positron_sdk/types.py".into(), init.to_vec()),
+        ("positron_sdk/codec.py".into(), init.to_vec()),
+        ("positron_sdk/query.py".into(), init.to_vec()),
+        ("positron_sdk/errors.py".into(), init.to_vec()),
+        ("positron_sdk/py.typed".into(), vec![]),
+        ("positron_sdk/api/positron.proto".into(), api.to_vec()),
+        ("positron_sdk/api/schema.sha256".into(), format!("{schema}\n").into_bytes()),
+        ("positron_sdk/contract.json".into(), serde_json::to_vec(&json!({"api_version":"positron.v1","schema_digest":schema})).unwrap()),
+        ("positron_sdk/release.json".into(), serde_json::to_vec(&json!({"name":"positron-sdk","version":version,"source_commit":source_commit,"api_version":"positron.v1","schema_digest":schema,"release_manifest_surface":"SdkPython","registry":"https://pypi.org","generator":"positron-api=1,python=3.11,protoc-bin-vendored=3.2.0"})).unwrap()),
         (format!("{dist_info}/METADATA"), metadata.into_bytes()),
         (format!("{dist_info}/WHEEL"), wheel.to_vec()),
     ];
@@ -154,20 +166,13 @@ pub fn fixtures(version: &str, source_commit: &str, api: &[u8]) -> Vec<NativeArt
     }
     record.push_str(&format!("{dist_info}/RECORD,,\n"));
     wheel_files.push((format!("{dist_info}/RECORD"), record.into_bytes()));
-    let python_filename = format!("positron_sdk-{version}-py3-none-any.whl");
-    let python = keyless_artifact(
-        Surface::SdkPython,
-        python_filename.clone(),
+    let python = python_wheel(
+        version,
+        source_commit,
         zip(&wheel_files
             .iter()
             .map(|(path, data)| (path.as_str(), data.as_slice()))
             .collect::<Vec<_>>()),
-        "https://pypi.org",
-        python_filename,
-        NativePublicationKind::PyPi,
-        keyless::REPOSITORY,
-        source_commit,
-        None,
     );
     vec![
         rust,
@@ -176,6 +181,25 @@ pub fn fixtures(version: &str, source_commit: &str, api: &[u8]) -> Vec<NativeArt
         python,
         homebrew(b"unmeasured local formula fixture".to_vec()),
     ]
+}
+
+pub(super) fn python_wheel(
+    version: &str,
+    source_commit: &str,
+    contents: Vec<u8>,
+) -> NativeArtifactFixture {
+    let filename = format!("positron_sdk-{version}-py3-none-any.whl");
+    keyless_artifact(
+        Surface::SdkPython,
+        filename.clone(),
+        contents,
+        "https://pypi.org",
+        filename,
+        NativePublicationKind::PyPi,
+        keyless::REPOSITORY,
+        source_commit,
+        None,
+    )
 }
 
 pub(super) fn homebrew(contents: Vec<u8>) -> NativeArtifactFixture {

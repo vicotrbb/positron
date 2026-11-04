@@ -24,3 +24,15 @@ commit, exports, version, generator and registry identity under the same Release
 Trust path. The npm Sigstore provenance profile, SBOMs, independent rebuild,
 signatures, revocation and Release Manifest remain the existing authorities.
 Private fixture identities and local package tests do not establish publication.
+
+The Python publication workspace is `sdk/python`. The same Rust Public Interface
+metadata owner emits typed Python requests/results, canonical wire validation,
+bounded HTTPS and query delivery helpers. The package requires Python 3.11 or
+later and has no runtime dependencies. Pinned setuptools tooling creates the
+pure Python wheel; native PyPI inspection authenticates its package/version,
+source commit, API/schema, generator, complete RECORD hashes and installation
+paths under the existing Release Trust owner. Native PyPI attestations, SBOMs,
+independent payload bytes, signature, provenance and revocation stay in that
+same signed Release Manifest path. Clean generation, installed-wheel examples,
+shared golden fixtures and a live candidate server exercise the package.
+Private signing fixtures and local builds do not establish registry publication.
