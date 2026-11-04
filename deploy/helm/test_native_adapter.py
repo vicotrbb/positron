@@ -71,6 +71,53 @@ class NativeAdapter(unittest.TestCase):
             self.assertIs(caught.exception, failure)
             self.assertEqual(sum(args[0] == "exec" for args in calls), 1)
 
+    def test_command_default_capture_and_diagnostic_stderr_discard(self):
+        from test_kubernetes import command
+        failed = subprocess.CompletedProcess([], 1, b"", b"default-error-canary")
+        with patch("subprocess.run", return_value=failed) as run, self.assertRaisesRegex(RuntimeError, "default-error-canary"):
+            command(["kubectl"])
+        self.assertEqual(run.call_args.kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.PIPE)
+        discarded = subprocess.CompletedProcess([], 1, b"", None)
+        with patch("subprocess.run", return_value=discarded) as run:
+            self.assertIs(command(["kubectl"], check=False, stderr=subprocess.DEVNULL), discarded)
+        self.assertEqual(run.call_args.kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertNotIn("capture_output", run.call_args.kwargs)
+
+    def test_pod_receipt_has_native_source_limits_and_rejects_unexpected_output(self):
+        from data_lifecycle import DataLifecycle
+        uid = "11111111-1111-4111-8111-111111111111"
+        for receipt, expected in [(uid.encode() + b" 0", uid), (uid.encode() + b"x 0", "unavailable"),
+                (uid.encode() + b" 4294967296", "unavailable"), (uid.encode() + b" 0\ncredential-canary", "unavailable"),
+                (b"x" * 50, "unavailable"), (b"\xff", "unavailable")]:
+            with self.subTest(size=len(receipt)), tempfile.TemporaryDirectory() as directory:
+                original = ConnectionRefusedError("original")
+                def kube(*args, **kwargs):
+                    self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+                    self.assertFalse(kwargs["check"])
+                    if args[0] == "get":
+                        self.assertIn("go-template", args)
+                        template = next(argument for argument in args if argument.startswith("--template="))
+                        self.assertIn('%.37s', template)
+                        self.assertIn('%.11s', template)
+                        self.assertIn('"positron"', template)
+                        return subprocess.CompletedProcess([], 0, receipt, None)
+                    self.assertIn("--limit-bytes=8192", args)
+                    self.assertIn("--tail=64", args)
+                    return subprocess.CompletedProcess([], 1, b"", None)
+                lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
+                output = io.StringIO()
+                with patch.object(DataLifecycle, "ingest", side_effect=original), contextlib.redirect_stdout(output), self.assertRaises(ConnectionRefusedError) as caught:
+                    lifecycle.ingest()
+                self.assertIs(caught.exception, original)
+                fact = json.loads(original.__notes__[0])
+                self.assertEqual(fact["baseline_pod_uid"], expected)
+                self.assertEqual(fact["pod_uid"], expected)
+                self.assertEqual(fact["http_failures"], [])
+                self.assertNotIn("credential-canary", original.__notes__[0])
+                self.assertEqual(output.getvalue(), "")
+
     def test_ingest_attributes_only_new_forward_and_keeps_closed_server_reason(self):
         from unittest.mock import Mock
         from data_lifecycle import DataLifecycle
@@ -93,7 +140,7 @@ class NativeAdapter(unittest.TestCase):
                 if pod_reads:
                     pod["metadata"]["uid"] = changed_uid
                 pod_reads.append(True)
-                value = json.dumps(pod).encode()
+                value = (pod["metadata"]["uid"] + " 0").encode()
             return subprocess.CompletedProcess([], 0, value, b"credential-canary")
         original = ConnectionRefusedError("original")
         with tempfile.TemporaryDirectory() as directory:
@@ -182,9 +229,8 @@ class NativeAdapter(unittest.TestCase):
         forward.stderr = Mock()
         forward.stderr.fileno.return_value = 3
         uid = "11111111-1111-4111-8111-111111111111"
-        pod = {"metadata": {"uid": uid}, "status": {"containerStatuses": [{"restartCount": 0}]}}
         with tempfile.TemporaryDirectory() as directory:
-            kube = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps(pod).encode(), b"private-canary"))
+            kube = Mock(return_value=subprocess.CompletedProcess([], 0, (uid + " 0").encode(), None))
             lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
             output = io.StringIO()
             def fail(_self):

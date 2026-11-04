@@ -21,10 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "compose"))
 from tls_fixture import material
 
 
-def command(arguments, *, data=None, timeout=60, check=True):
-    result = subprocess.run(arguments, input=data, capture_output=True, timeout=timeout)
+def command(arguments, *, data=None, timeout=60, check=True, stderr=subprocess.PIPE):
+    result = subprocess.run(arguments, input=data, stdout=subprocess.PIPE, stderr=stderr, timeout=timeout)
     if check and result.returncode:
-        raise RuntimeError(f"{arguments[0]} failed ({result.returncode}): {result.stderr.decode(errors='replace')[:2048]}")
+        raise RuntimeError(f"{arguments[0]} failed ({result.returncode}): {(result.stderr or b'').decode(errors='replace')[:2048]}")
     return result
 
 

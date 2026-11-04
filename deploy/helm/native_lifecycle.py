@@ -133,15 +133,19 @@ class NativeLifecycle(DataLifecycle):
         # TEMPORARY SDK127 experiment. Closed notes are reported after cleanup.
         def pod_identity():
             try:
-                result = self.kube("get", "pod", self.pod, "-o", "json", "--request-timeout=1s", timeout=1, check=False)
-                if result.returncode or len(result.stdout) > 65536:
+                # Native producer limits, under the pinned kubectl/owned Pod
+                # contract. This is not a capture cap for a malicious executable.
+                template = ('{{if eq (len .status.containerStatuses) 1}}'
+                    '{{with index .status.containerStatuses 0}}{{if eq .name "positron"}}'
+                    '{{printf "%.37s" $.metadata.uid}} {{printf "%.11s" (printf "%v" .restartCount)}}'
+                    '{{end}}{{end}}{{end}}')
+                result = self.kube("get", "pod", self.pod, "-o", "go-template", "--template=" + template,
+                                   "--request-timeout=1s", timeout=1, check=False, stderr=subprocess.DEVNULL)
+                if result.returncode or len(result.stdout) > 49:
                     return None
-                pod = json.loads(result.stdout)
-                uid, statuses = pod["metadata"]["uid"], pod["status"]["containerStatuses"]
-                if (isinstance(uid, str) and re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", uid)
-                        and isinstance(statuses, list) and 1 <= len(statuses) <= 8
-                        and all(type(item.get("restartCount")) is int and 0 <= item["restartCount"] <= 4294967295 for item in statuses)):
-                    return uid, sum(item["restartCount"] for item in statuses)
+                receipt = re.fullmatch(rb"([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}) ([0-9]{1,10})", result.stdout)
+                if receipt and int(receipt[2]) <= 4294967295:
+                    return receipt[1].decode("ascii"), int(receipt[2])
             except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError):
                 pass
             return None
@@ -186,7 +190,7 @@ class NativeLifecycle(DataLifecycle):
                 if before:
                     fact["pod_identity"] = "same" if before[0] == after[0] else "changed"
             try:
-                result = self.kube("logs", self.pod, "-c", "positron", "--tail=64", "--limit-bytes=8192", "--request-timeout=1s", timeout=1, check=False)
+                result = self.kube("logs", self.pod, "-c", "positron", "--tail=64", "--limit-bytes=8192", "--request-timeout=1s", timeout=1, check=False, stderr=subprocess.DEVNULL)
                 if not result.returncode and len(result.stdout) <= 8192:
                     for line in result.stdout.splitlines():
                         try:
