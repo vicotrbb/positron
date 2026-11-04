@@ -231,3 +231,46 @@ class TransportTests(unittest.TestCase):
                 server.shutdown()
                 thread.join()
         self.assertEqual(set(threading.enumerate()), before)
+
+    def test_http_framing_must_complete_before_capability_or_cancel_success(self):
+        for operation in ('capability', 'cancel'):
+            for framing in ('truncated', 'normal', 'chunked'):
+                with self.subTest(operation=operation, framing=framing):
+                    requests = []
+                    capability = dict(api_major=1, schema_digest='a' * 64, capability=4 if operation == 'cancel' else 1, availability=1, refusal=None)
+                    expected = {'cancelled': True} if operation == 'cancel' else capability
+                    class Handler(http.server.BaseHTTPRequestHandler):
+                        def do_POST(self):
+                            self.rfile.read(int(self.headers['Content-Length']))
+                            requests.append(self.path)
+                            negotiation = operation == 'cancel' and len(requests) == 1
+                            body = json.dumps(capability if negotiation else expected).encode()
+                            mode = 'normal' if negotiation else framing
+                            if mode == 'chunked':
+                                raw = b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n' + f'{len(body):x}\r\n'.encode() + body + b'\r\n0\r\n\r\n'
+                            else:
+                                size = len(body) + (5 if mode == 'truncated' else 0)
+                                raw = b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(size).encode() + b'\r\nConnection: close\r\n\r\n' + body
+                            self.wfile.write(raw)
+                            self.close_connection = True
+                        def log_message(self, *_):
+                            pass
+                    with Server(('127.0.0.1', 0), Handler) as server:
+                        thread = threading.Thread(target=server.serve_forever)
+                        thread.start()
+                        try:
+                            client = PositronClient(f'http://127.0.0.1:{server.server_address[1]}', allow_plaintext=True)
+                            def call():
+                                return client.log_query_cancel({'query': 'YQ=='}) if operation == 'cancel' else client.capability_negotiate({'api_major': 1})
+                            if framing == 'truncated':
+                                with self.assertRaises(ClientError) as caught:
+                                    call()
+                                self.assertEqual(caught.exception.kind, 'transport')
+                                self.assertEqual(caught.exception.completion_state, 'COMPLETION_STATE_AMBIGUOUS')
+                                self.assertEqual(caught.exception.retry_class, 'RETRY_CLASS_NEVER')
+                            else:
+                                self.assertEqual(call(), expected)
+                            self.assertEqual(len(requests), 2 if operation == 'cancel' else 1)
+                        finally:
+                            server.shutdown()
+                            thread.join()

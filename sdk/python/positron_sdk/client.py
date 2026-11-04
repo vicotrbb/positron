@@ -131,6 +131,7 @@ class PositronClient:
                     connection.sock.settimeout(remaining)
                 chunk = response.read1(min(8192, limit + 1 - length))
                 if not chunk:
+                    require(response.length in (None, 0))
                     break
                 parts.append(chunk)
                 length += len(chunk)
