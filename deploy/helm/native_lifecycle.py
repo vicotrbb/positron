@@ -132,8 +132,9 @@ class NativeLifecycle(DataLifecycle):
     def ingest(self):
         try:
             return super().ingest()
-        except Exception:
+        except Exception as original:
             # TEMPORARY SDK127 experiment: inspect before close(), never retry.
+            # Attach closed facts for the existing harness after its cleanup.
             fact = {"event": "helm_ingest_forward_failure", "forward_status": "unavailable",
                     "stderr_class": "unavailable", "pod_uid": "unavailable", "restarts": "unavailable"}
             try:
@@ -149,8 +150,8 @@ class NativeLifecycle(DataLifecycle):
                                 fact["stderr_class"] = "lost_pod_connection"
                             elif b"connection refused" in error:
                                 fact["stderr_class"] = "connection_refused"
-                result = self.kube("get", "pod", self.pod, "-o", "json", "--request-timeout=1s", timeout=1)
-                if len(result.stdout) <= 65536:
+                result = self.kube("get", "pod", self.pod, "-o", "json", "--request-timeout=1s", timeout=1, check=False)
+                if not result.returncode and len(result.stdout) <= 65536:
                     pod = json.loads(result.stdout)
                     uid = pod["metadata"]["uid"]
                     statuses = pod["status"]["containerStatuses"]
@@ -158,12 +159,9 @@ class NativeLifecycle(DataLifecycle):
                             and isinstance(statuses, list) and 1 <= len(statuses) <= 8
                             and all(type(item.get("restartCount")) is int and 0 <= item["restartCount"] <= 4294967295 for item in statuses)):
                         fact.update(pod_uid=uid, restarts=sum(item["restartCount"] for item in statuses))
-            except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError):
                 pass
-            try:
-                print(json.dumps(fact))
-            except OSError:
-                pass  # Failed observation output cannot replace the ingest failure.
+            BaseException.add_note(original, json.dumps(fact))
             raise
 
     def close(self):

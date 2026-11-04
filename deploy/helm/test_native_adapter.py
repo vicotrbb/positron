@@ -93,7 +93,8 @@ class NativeAdapter(unittest.TestCase):
                 lifecycle.ingest()
             self.assertIs(caught.exception, original)
             ingest.assert_called_once()
-            self.assertEqual(json.loads(output.getvalue()), {"event": "helm_ingest_forward_failure", "forward_status": 1,
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(json.loads(original.__notes__[0]), {"event": "helm_ingest_forward_failure", "forward_status": 1,
                 "stderr_class": "lost_pod_connection", "pod_uid": uid, "restarts": 0})
             self.assertLessEqual(kube.call_args.kwargs["timeout"], 1)
             self.assertNotIn("private-canary", output.getvalue())
@@ -110,7 +111,28 @@ class NativeAdapter(unittest.TestCase):
                     self.assertRaises(ConnectionRefusedError) as caught:
                 lifecycle.ingest()
             self.assertIs(caught.exception, original)
-            self.assertEqual(json.loads(output.getvalue()), {"event": "helm_ingest_forward_failure", "forward_status": "unavailable", "stderr_class": "unavailable", "pod_uid": "unavailable", "restarts": "unavailable"})
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(json.loads(original.__notes__[0]), {"event": "helm_ingest_forward_failure", "forward_status": "unavailable", "stderr_class": "unavailable", "pod_uid": "unavailable", "restarts": "unavailable"})
+
+    def test_actual_adapter_runtime_error_is_contained_without_exposing_credential(self):
+        import traceback
+        from data_lifecycle import DataLifecycle
+        from test_kubernetes import command
+        original = ConnectionRefusedError("original ingest failure")
+        credential = "credential-canary-must-not-escape"
+        def kube(*args, **kwargs):
+            return command(["kubectl"], timeout=1)
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
+            output = io.StringIO()
+            with patch.object(DataLifecycle, "ingest", side_effect=original), \
+                    patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, b"", credential.encode())), \
+                    contextlib.redirect_stdout(output), self.assertRaises(ConnectionRefusedError) as caught:
+                lifecycle.ingest()
+            self.assertIs(caught.exception, original)
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(json.loads(original.__notes__[0])["pod_uid"], "unavailable")
+            self.assertNotIn(credential, "".join(traceback.format_exception(original)))
 
     def test_successful_ingest_has_no_temporary_observation(self):
         from unittest.mock import Mock
