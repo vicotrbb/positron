@@ -287,45 +287,15 @@ class QueryDeadline(unittest.TestCase):
             self.run_query([(29.5, self.refused()), (0, self.complete())])
         self.assertEqual(len(self.commands), 1)
 
-    def test_temporary_probe_preserves_transport_class_without_replay(self):
-        output = io.StringIO()
-        error = b"POSITRON_SDK127_PROBE send_timeout\npositron: query transport or response unavailable\n"
-        with contextlib.redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "code=transport"):
-            self.run_query([(1, self.refused(error))])
-        self.assertEqual(len(self.commands), 1)
-        self.assertEqual(json.loads(output.getvalue()), {"event": "query_transport_probe", "phase": "send_timeout"})
-
-    def test_temporary_decode_probe_emits_only_bounded_numeric_facts(self):
-        for phase in ["response_decode", "rejection_decode"]:
+    def test_unknown_probe_lines_cannot_change_failure_class_or_enable_retry(self):
+        for error in [b"POSITRON_SDK127_PROBE send_timeout\npositron: query transport or response unavailable\n",
+                      b"unknown capacity unavailable\n", b"POSITRON_SDK127_PROBE response_bound\n"]:
             output = io.StringIO()
-            error = (f"POSITRON_SDK127_PROBE {phase} status=503 bytes=262145\n"
-                "positron: query transport or response unavailable\n").encode()
-            with self.subTest(phase=phase), contextlib.redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "code=transport"):
-                self.run_query([(1, self.refused(error))])
-            self.assertEqual(json.loads(output.getvalue()), {"event": "query_transport_probe",
-                "phase": phase, "status": 503, "bytes": 262145})
-            self.assertEqual(len(self.commands), 1)
-
-    def test_temporary_probe_rejects_injected_unknown_and_unbounded_text(self):
-        for error in [
-            b"POSITRON_SDK127_PROBE send_timeout private-canary capacity unavailable\npositron: query transport or response unavailable",
-            b"POSITRON_SDK127_PROBE future_private_canary\npositron: query transport or response unavailable",
-            b"x" * 4097 + b"capacity unavailable",
-            b"POSITRON_SDK127_PROBE response_decode status=503 bytes=262146\npositron: query transport or response unavailable",
-            b"POSITRON_SDK127_PROBE rejection_decode status=9999 bytes=1\npositron: query transport or response unavailable",
-            b"POSITRON_SDK127_PROBE response_decode status=200 bytes=1 private-canary\npositron: query transport or response unavailable",
-        ]:
-            output = io.StringIO()
-            with self.subTest(size=len(error)), contextlib.redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "code=other") as caught:
-                self.run_query([(1, self.refused(error))])
+            with self.subTest(error=error), contextlib.redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "code=other"):
+                self.run_query([(0, self.refused(error))])
             self.assertEqual(len(self.commands), 1)
             self.assertEqual(output.getvalue(), "")
-            self.assertNotIn("private-canary", str(caught.exception))
 
-    def test_transport_failure_never_retries(self):
-        with self.assertRaisesRegex(RuntimeError, "code=transport"):
-            self.run_query([(1, self.refused(b"positron: query transport or response unavailable"))])
-        self.assertEqual(len(self.commands), 1)
 
 
 class QueryServerObservation(unittest.TestCase):
@@ -353,6 +323,12 @@ class QueryServerObservation(unittest.TestCase):
         payload = b"\n".join(json.dumps({"MESSAGE": json.dumps(event), "extra": "private-canary"}).encode() for event in events)
         self.assertEqual(self.collect(payload), [{"event": "process_serving"},
             {"event": "request_completed", "listener": "api", "outcome": "success", "request_id": 7, "duration_micros": 9000000}])
+
+    def test_control_traffic_cannot_displace_query_completion(self):
+        events = [{"event": "request_completed", "listener": "control", "outcome": "success", "request_id": n, "duration_micros": 1} for n in range(8)]
+        query = {"event": "request_completed", "listener": "api", "outcome": "success", "request_id": 9, "duration_micros": 6000000}
+        payload = b"\n".join(json.dumps({"MESSAGE": json.dumps(event)}).encode() for event in events + [query])
+        self.assertEqual(self.collect(payload), [query])
 
     def test_failure_collector_refuses_unknown_types_and_oversized_records(self):
         invalid = [{"event": "private-canary"}, {"event": "request_completed", "listener": "private-canary"},

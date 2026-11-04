@@ -50,20 +50,8 @@ impl LogQueryServiceClient {{
     pub fn execute(&self, bearer: &str, request: &super::LogQueryRequest) -> Result<super::LogQueryResponse, super::LogQueryServiceClientFailure> {{
         let body = request.encode().map_err(|_| super::LogQueryServiceClientFailure::InvalidRequest)?;
         let (status, bytes) = self.http.post(bearer, HTTP_PATH, body, MAX_RESPONSE_BYTES).map_err(|_| super::LogQueryServiceClientFailure::Transport)?;
-        if status != 200 {{
-            let failure = super::client_failure(status, &bytes);
-            if failure == super::LogQueryServiceClientFailure::Transport {{
-                crate::http_client::execute_failure_probe(HTTP_PATH, "rejection_decode", Some((status, bytes.len()))).map_err(|_| failure)?;
-            }}
-            return Err(failure);
-        }}
-        match super::LogQueryResponse::decode(&bytes) {{
-            Ok(response) => Ok(response),
-            Err(_) => {{
-                crate::http_client::execute_failure_probe(HTTP_PATH, "response_decode", Some((status, bytes.len()))).map_err(|_| super::LogQueryServiceClientFailure::Transport)?;
-                Err(super::LogQueryServiceClientFailure::Transport)
-            }},
-        }}
+        if status != 200 {{ return Err(super::client_failure(status, &bytes)); }}
+        super::LogQueryResponse::decode(&bytes).map_err(|_| super::LogQueryServiceClientFailure::Transport)
     }}
 }}
 "#,

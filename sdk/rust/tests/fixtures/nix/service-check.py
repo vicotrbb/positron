@@ -1,7 +1,6 @@
 """Public telemetry outcomes for the NixOS VM. Credentials never enter argv or logs."""
 import json
 import pathlib
-import re
 import subprocess
 import sys
 import time
@@ -88,7 +87,7 @@ elif sys.argv[1] == "query-failure-facts":
                 if event == "process_serving":
                     fact = {"event": event}
                 elif (event == "request_completed"
-                        and value.get("listener") in {"control", "operations", "api", "otlp_grpc", "otlp_http", "loki_push"}
+                        and value.get("listener") == "api"
                         and value.get("outcome") in {"success", "authentication_rejected", "capacity_rejected", "request_rejected", "unavailable"}
                         and all(type(value.get(key)) is int and 0 <= value[key] <= 18446744073709551615
                                 for key in ["request_id", "duration_micros"])):
@@ -255,32 +254,13 @@ else:
             if time.monotonic() >= deadline:
                 raise RuntimeError("query deadline elapsed")
             break
-        # TEMPORARY SDK127 diagnostic capture; retain the original CLI class.
-        stderr = result.stderr
-        if len(stderr) <= 4096:
-            canonical = []
-            phases = {b"send_timeout", b"send_other", b"read_timeout", b"read_other", b"response_bound"}
-            for line in stderr.splitlines():
-                prefix = b"POSITRON_SDK127_PROBE "
-                if line.startswith(prefix) and line[len(prefix):] in phases:
-                    print(json.dumps({"event": "query_transport_probe", "phase": line[len(prefix):].decode("ascii")}))
-                else:
-                    numeric = re.fullmatch(rb"POSITRON_SDK127_PROBE (response_decode|rejection_decode) status=([1-5][0-9]{2}) bytes=([0-9]{1,6})", line)
-                    if numeric and int(numeric[3]) <= 262145:
-                        print(json.dumps({"event": "query_transport_probe", "phase": numeric[1].decode("ascii"),
-                            "status": int(numeric[2]), "bytes": int(numeric[3])}))
-                    else:
-                        canonical.append(line)
-            stderr = b"\n".join(canonical)
-        else:
-            stderr = b"unrecognized"
         last_rejection = {
             b"positron: invalid bounded query request": "invalid_request",
             b"positron: query authentication rejected": "authentication_rejected",
             b"positron: query capacity unavailable; retry after backoff": "capacity_unavailable",
             b"positron: query unavailable; inspect instance readiness": "query_unavailable",
             b"positron: query transport or response unavailable": "transport",
-        }.get(stderr.strip(), "other")
+        }.get(result.stderr.strip(), "other")
         if time.monotonic() + 1 >= deadline or last_rejection != "capacity_unavailable":
             elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
             raise RuntimeError(f"public query failed: code={last_rejection} returncode={result.returncode} "
