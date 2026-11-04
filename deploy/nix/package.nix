@@ -36,6 +36,7 @@ rustPlatform.buildRustPackage {
     runHook postCheck
   '';
   nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
+  nativeCheckInputs = [ pkgs.git ];
   env = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
     MACOSX_DEPLOYMENT_TARGET = "15.0";
   };
