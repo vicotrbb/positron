@@ -23,6 +23,39 @@ fn upgrade_verification_finishes_after_metadata_turn_expires_and_reopens()
     )
 }
 
+#[test]
+fn verification_completion_at_turn_expiry_finishes_the_maintenance_owner()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::services::backup_administration::{StopPoint, expire_turn_after};
+    let _serial = crate::services::tests::schema_maintenance::live_native_maintenance_test_guard();
+    let (fixture, operation) = verification_fixture()?;
+    let (instance, services) = ready_cold_services(&fixture, operation.updated_at_unix_seconds())?;
+    let boundary = expire_turn_after(
+        instance.instance.to_bytes(),
+        operation.operation_id().to_bytes(),
+        StopPoint::VerificationReportPublished,
+    )?;
+    let completed = services.drive_upgrade_backup_operation(
+        operation.operation_id(),
+        Instant::now() + Duration::from_secs(30),
+    )?;
+    assert!(boundary.observed(), "terminal publication boundary reached");
+    assert_eq!(completed.status(), DurableOperationStatus::Succeeded);
+    assert!(completed.backup_verification_report().is_some());
+    let task = positron_kernel::MaintenanceTaskId::new(operation.operation_id().to_bytes())
+        .map_err(|failure| format!("task identity: {failure:?}"))?;
+    let status = instance
+        .maintenance_coordinator()
+        .status(task)
+        .map_err(|failure| format!("task status: {failure:?}"))?;
+    assert_eq!(
+        status.phase(),
+        positron_kernel::MaintenanceTaskPhase::Succeeded,
+        "expiry after durable completion cannot requeue its maintenance owner"
+    );
+    Ok(())
+}
+
 fn verification_fixture() -> Result<
     (
         crate::services::tests::schema_maintenance::Fixture,
