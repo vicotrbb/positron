@@ -153,6 +153,7 @@ fn empty_complete_response() -> positron_api::log_query::LogQueryResponse {
                         expiry_unix_seconds: 1,
                     }),
                     initial_cursor: None,
+                    tail_phase: None,
                 })),
             },
             LogQueryEvent {
@@ -333,37 +334,81 @@ fn envelope_keeps_continued_distinct_and_refuses_digest_or_terminal_corruption()
 }
 
 #[test]
-fn bounded_response_serialization_rejects_escape_expansion_before_exceeding_buffer() {
+fn bounded_response_serialization_rejects_oversized_values_in_every_mode() {
     use positron_api::log_query::*;
-    let mut response = empty_complete_response();
-    response.events.insert(
-        1,
-        LogQueryEvent {
-            event: Some(log_query_event::Event::Batch(LogQueryBatch {
-                sequence: 0,
-                rows: vec![LogQueryRow {
-                    cells: vec![LogQueryCell {
-                        value: Some(log_query_cell::Value::NativeValue(LogQueryValue {
-                            value: Some(log_query_value::Value::TextValue(
-                                "\0".repeat(MAX_RESPONSE_BYTES / 5),
-                            )),
-                        })),
+    for (value, structurally_valid) in [
+        (
+            log_query_value::Value::TextValue("\0".repeat(MAX_RESPONSE_BYTES / 5)),
+            true,
+        ),
+        (
+            log_query_value::Value::BytesValue(vec![0; MAX_RESPONSE_BYTES]),
+            true,
+        ),
+        (
+            log_query_value::Value::BytesValue(vec![0; MAX_RESPONSE_BYTES + 1]),
+            false,
+        ),
+        (
+            log_query_value::Value::ObjectValue(LogQueryObject {
+                entries: vec![
+                    LogQueryKeyValue {
+                        key: "k".repeat(1024),
+                        value: Some(LogQueryValue {
+                            value: Some(log_query_value::Value::BooleanValue(true)),
+                        }),
+                    };
+                    MAX_RESPONSE_BYTES / 1024
+                ],
+            }),
+            true,
+        ),
+    ] {
+        let mut response = empty_complete_response();
+        response.events.insert(
+            1,
+            LogQueryEvent {
+                event: Some(log_query_event::Event::Batch(LogQueryBatch {
+                    sequence: 0,
+                    rows: vec![LogQueryRow {
+                        cells: vec![LogQueryCell {
+                            value: Some(log_query_cell::Value::NativeValue(LogQueryValue {
+                                value: Some(value),
+                            })),
+                        }],
+                        replayed: false,
                     }],
-                    replayed: false,
-                }],
-                prior_digest: vec![0; 32],
-                digest: vec![1; 32],
-            })),
-        },
-    );
-    if let Some(log_query_event::Event::Terminal(terminal)) = response.events[2].event.as_mut() {
-        let stats = terminal.stats.as_mut().unwrap();
-        stats.records = 1;
-        stats.last_sequence = Some(0);
-        stats.result_digest = vec![1; 32];
+                    prior_digest: vec![0; 32],
+                    digest: vec![1; 32],
+                })),
+            },
+        );
+        if let Some(log_query_event::Event::Terminal(terminal)) = response.events[2].event.as_mut()
+        {
+            let stats = terminal.stats.as_mut().unwrap();
+            stats.records = 1;
+            stats.last_sequence = Some(0);
+            stats.result_digest = vec![1; 32];
+        }
+        assert_eq!(response.validate().is_ok(), structurally_valid);
+        assert!(response.encode().is_err());
+        assert_eq!(response.validate_session().is_ok(), structurally_valid);
+        assert!(response.encode_session().is_err());
+        if let Some(log_query_event::Event::Header(header)) = response.events[0].event.as_mut() {
+            header.tail_phase = Some("live_commit_vector".into());
+        }
+        if let Some(log_query_event::Event::Terminal(terminal)) = response.events[2].event.as_mut()
+        {
+            terminal.state = "incomplete".into();
+            terminal.reason = "disconnected".into();
+            let stats = terminal.stats.as_mut().unwrap();
+            stats.records = 0;
+            stats.last_sequence = None;
+            stats.result_digest = vec![0; 32];
+        }
+        assert_eq!(response.validate_tail().is_ok(), structurally_valid);
+        assert!(response.encode_tail().is_err());
     }
-    assert!(response.validate().is_ok());
-    assert!(response.encode().is_err());
     assert!(LogQueryResponse::decode(&vec![b' '; MAX_RESPONSE_BYTES + 1]).is_err());
 }
 
@@ -457,4 +502,122 @@ fn emitted_nix_lifecycle_query_respects_the_public_wire_budget() {
             "public wall budget boundary {wall_seconds}"
         );
     }
+}
+
+#[test]
+fn resumed_incomplete_result_preserves_prior_progress_without_a_new_batch() {
+    use positron_api::log_query::{LogQueryResponse, log_query_event::Event};
+    let mut response = empty_complete_response();
+    if let Some(Event::Header(header)) = response
+        .events
+        .first_mut()
+        .and_then(|event| event.event.as_mut())
+    {
+        header.initial_cursor = Some(vec![7; 32]);
+    }
+    if let Some(Event::Terminal(terminal)) = response
+        .events
+        .last_mut()
+        .and_then(|event| event.event.as_mut())
+    {
+        terminal.state = "incomplete".into();
+        terminal.reason = "budget_exhausted".into();
+        let stats = terminal.stats.as_mut().unwrap();
+        stats.records = 1;
+        stats.last_sequence = Some(0);
+        stats.result_digest = vec![3; 32];
+        stats.cpu_work_units = 2;
+        stats.limiting_budget = Some("cpu_work_units".into());
+    }
+    let bytes = serde_json::to_vec(&response).unwrap();
+    assert_eq!(LogQueryResponse::decode_session(&bytes).unwrap(), response);
+    assert!(LogQueryResponse::decode(&bytes).is_err());
+}
+
+#[test]
+fn batch_tracker_discards_verified_repeats_and_refuses_changed_contents() {
+    use positron_api::log_query::*;
+    let mut response = empty_complete_response();
+    response.events.insert(
+        1,
+        LogQueryEvent {
+            event: Some(log_query_event::Event::Batch(LogQueryBatch {
+                sequence: 0,
+                prior_digest: vec![0; 32],
+                digest: vec![1; 32],
+                rows: vec![LogQueryRow {
+                    cells: vec![LogQueryCell {
+                        value: Some(log_query_cell::Value::NativeValue(LogQueryValue {
+                            value: Some(log_query_value::Value::TextValue("first".into())),
+                        })),
+                    }],
+                    replayed: false,
+                }],
+            })),
+        },
+    );
+    if let Some(log_query_event::Event::Terminal(terminal)) = response
+        .events
+        .last_mut()
+        .and_then(|event| event.event.as_mut())
+    {
+        let stats = terminal.stats.as_mut().unwrap();
+        stats.records = 1;
+        stats.last_sequence = Some(0);
+        stats.result_digest = vec![1; 32];
+    }
+    let mut tracker = BatchTracker::query();
+    assert_eq!(tracker.filter(&response).unwrap().len(), 1);
+    let mut repeat = response.clone();
+    if let Some(log_query_event::Event::Batch(batch)) = repeat
+        .events
+        .get_mut(1)
+        .and_then(|event| event.event.as_mut())
+    {
+        batch.rows.first_mut().unwrap().replayed = true;
+    }
+    assert!(tracker.filter(&repeat).unwrap().is_empty());
+    let mut changed = repeat.clone();
+    if let Some(log_query_event::Event::Batch(batch)) = changed
+        .events
+        .get_mut(1)
+        .and_then(|event| event.event.as_mut())
+    {
+        batch
+            .rows
+            .first_mut()
+            .unwrap()
+            .cells
+            .first_mut()
+            .unwrap()
+            .value = Some(log_query_cell::Value::NativeValue(LogQueryValue {
+            value: Some(log_query_value::Value::TextValue("changed".into())),
+        }));
+    }
+    assert!(tracker.filter(&changed).is_err());
+    assert!(tracker.filter(&repeat).unwrap().is_empty());
+}
+
+#[test]
+fn terminal_helpers_keep_incomplete_truth_and_cursors_opaque() {
+    use positron_api::log_query::*;
+    let response = empty_complete_response();
+    let Some(log_query_event::Event::Terminal(mut terminal)) =
+        response.events.last().and_then(|event| event.event.clone())
+    else {
+        panic!("terminal fixture")
+    };
+    assert_eq!(terminal.status().unwrap(), QueryTerminalStatus::Complete);
+    terminal.state = "incomplete".into();
+    terminal.reason = "cancelled".into();
+    assert_eq!(
+        terminal.status().unwrap(),
+        QueryTerminalStatus::Incomplete(LogQueryStopReason::Cancelled)
+    );
+    terminal.reason = "future_unknown_reason".into();
+    assert!(terminal.status().is_err());
+    let cursor = OpaqueCursor::from_bytes(&[5; 32]).unwrap();
+    assert_eq!(cursor.as_bytes(), &[5; 32]);
+    assert_eq!(format!("{cursor:?}"), "OpaqueCursor { <redacted> }");
+    assert!(OpaqueCursor::from_bytes(&vec![0; 8193]).is_err());
 }

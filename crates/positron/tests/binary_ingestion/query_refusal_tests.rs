@@ -133,6 +133,7 @@ fn encoded_budget_incomplete() -> TestResult<serde_json::Value> {
                         expiry_unix_seconds: 1,
                     }),
                     initial_cursor: None,
+                    tail_phase: None,
                 })),
             },
             LogQueryEvent {
@@ -247,7 +248,7 @@ fn budget_query_capacity_does_not_extend_the_original_five_second_budget() -> Te
 }
 
 #[test]
-fn actual_query_cli_accepts_canonical_complete_after_five_seconds() -> TestResult {
+fn actual_query_cli_refuses_a_response_after_its_five_second_transport_deadline() -> TestResult {
     use positron_api::log_query::*;
     let root = std::env::temp_dir().join(format!(
         "positron-query-cli-deadline-{}-{}",
@@ -275,6 +276,8 @@ fn actual_query_cli_accepts_canonical_complete_after_five_seconds() -> TestResul
         .ok_or("canonical stats")?
         .limiting_budget = None;
     let response = response.encode()?;
+    let (connected, received) = std::sync::mpsc::channel();
+    let mut transport_elapsed = None;
     let (result, requests, delivery_error) = scripted_requests_with_writer(
         &[(200, serde_json::from_slice(&response)?)],
         |endpoint| {
@@ -285,11 +288,16 @@ fn actual_query_cli_accepts_canonical_complete_after_five_seconds() -> TestResul
                 "query-cli-credential-canary",
                 &request,
                 None,
-            )?;
-            assert_eq!(actual.encode()?, response);
-            Ok("complete".into())
+            );
+            let returned = Instant::now();
+            let started = received.recv_timeout(Duration::from_secs(1))?;
+            transport_elapsed = Some(returned.saturating_duration_since(started));
+            actual.map(|_| "complete".into())
         },
-        |stream, bytes, _| {
+        move |stream, bytes, _| {
+            connected
+                .send(Instant::now())
+                .map_err(std::io::Error::other)?;
             std::thread::sleep(Duration::from_secs(6));
             stream.write_all(bytes)
         },
@@ -306,7 +314,17 @@ fn actual_query_cli_accepts_canonical_complete_after_five_seconds() -> TestResul
             std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
         ));
     }
-    assert_eq!(result?, "complete");
+    assert_eq!(
+        result
+            .expect_err("late Complete cannot establish query completion")
+            .to_string(),
+        "public query refused outside its capacity launch policy"
+    );
+    let elapsed = transport_elapsed.ok_or("query transport was not observed")?;
+    assert!(
+        elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(7),
+        "finite Execute exceeded its five-second transport ceiling: {elapsed:?}"
+    );
     Ok(())
 }
 

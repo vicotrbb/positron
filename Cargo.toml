@@ -15,6 +15,7 @@ members = [
     "crates/positron-release",
     "crates/positron-runtime",
     "crates/positron-signals",
+    "sdk/rust",
 ]
 resolver = "3"
 exclude = ["vendor/sigstore-tsa-0.15.0", "vendor/typespec-1.1.0", "vendor/azure_identity-1.0.0", "vendor/azure_core-1.0.0", "vendor/aws-types-1.6.0", "vendor/aws-config-1.12.0", "vendor/google-cloud-auth-1.17.0", "vendor/reqwest-0.12.28", "vendor/ring-0.17.14"]

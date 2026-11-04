@@ -33,6 +33,21 @@ pub(crate) fn verify_identities(
         inventory.version.major, inventory.version.minor, inventory.version.patch
     );
     for artifact in &inventory.artifacts {
+        if artifact.surface == Surface::SdkRust {
+            if artifact.publication.registry != "https://crates.io"
+                || artifact.publication.native_subject
+                    != format!("pkg:cargo/positron-sdk@{version}")
+            {
+                return Err(ReleaseError::IdentityMismatch);
+            }
+            crate::native_crates::inspect_sdk(
+                &bundle.read(&artifact.file, crate::native_crates::MAX_INPUT)?,
+                &version,
+                &inventory.source_commit,
+                &inventory.api_version,
+                &inventory.compatibility.schema,
+            )?;
+        }
         let digest = hex(&inventory.file(&artifact.file)?.identity.sha256);
         let spdx = document(bundle, &artifact.spdx)?;
         let packages = spdx

@@ -85,43 +85,18 @@ pub(super) fn prepare(
 pub(super) fn complete(
     services: &ServiceHandle,
     execution: &mut MaintenanceExecution<'_>,
-    work: &mut Option<BackupWork>,
+    work_slot: &mut Option<BackupWork>,
     operation: DurableOperation,
     cancellation: Option<&crate::TaskCancellation>,
     actor: Option<positron_governance::AuthorizedContext>,
 ) -> Result<bool, ServiceFailure> {
     let (parameters, binding) = parameters(services, execution, operation)?;
     if operation.status().is_terminal() {
-        *work = None;
-        execution::checkpoint::set_native_reference(services, execution, binding, None)?;
-        let _gate = services.catalog_operation()?;
-        let catalog = services
-            .open_maintenance_catalog()
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-        let coordinator = services.instance.maintenance_coordinator();
-        if !catalog
-            .release_backup_verification_continuation(coordinator, execution, binding)
-            .map_err(|_| ServiceFailure::CatalogUnavailable)?
-        {
-            return Ok(false);
-        }
-        if operation.status() == positron_governance::DurableOperationStatus::Cancelled {
-            coordinator
-                .cancel_and_persist(&catalog, execution.task().identity())
-                .map_err(super::super::maintenance::map_failure)?;
-        }
-        execution
-            .complete_and_persist(
-                coordinator,
-                &catalog,
-                operation.status() == positron_governance::DurableOperationStatus::Succeeded,
-            )
-            .map_err(super::super::maintenance::map_failure)?;
-        return Ok(true);
+        return finish_terminal(services, execution, work_slot, operation, binding);
     }
     let actor = actor.ok_or(ServiceFailure::CorruptState)?;
-    if !matches!(work, Some(BackupWork::Verification(_))) {
-        *work = Some(BackupWork::Verification(Box::new(VerificationWork {
+    if !matches!(work_slot, Some(BackupWork::Verification(_))) {
+        *work_slot = Some(BackupWork::Verification(Box::new(VerificationWork {
             owner: BackupOwner::open(services, execution, operation)?,
             remote: None,
             remote_steps_since_checkpoint: 0,
@@ -145,7 +120,7 @@ pub(super) fn complete(
             continuation_bound: None,
         })));
     }
-    let Some(BackupWork::Verification(work)) = work.as_mut() else {
+    let Some(BackupWork::Verification(work)) = work_slot.as_mut() else {
         return Err(ServiceFailure::CorruptState);
     };
     let external = work
@@ -472,6 +447,7 @@ pub(super) fn complete(
         .map_err(provider_failure)?;
     let report = positron_kernel::CatalogObject::new(report.bytes().to_vec())
         .map_err(|_| ServiceFailure::CorruptState)?;
+    drop(publisher);
     let _gate = services.catalog_operation()?;
     let catalog = services
         .open_maintenance_catalog()
@@ -487,7 +463,7 @@ pub(super) fn complete(
         now,
     )
     .map_err(|_| ServiceFailure::CatalogUnavailable)?;
-    DurableOperationAdministration::succeed_backup_verification(
+    let completed = DurableOperationAdministration::succeed_backup_verification(
         &catalog,
         actor,
         operation.operation_id(),
@@ -502,7 +478,46 @@ pub(super) fn complete(
         execution::test_stops::StopPoint::VerificationReportPublished,
         cancellation,
     )?;
-    Ok(false)
+    // Finish the admitted terminal step before the driver can checkpoint an expired turn.
+    // Cleanup remains one bounded owner call; false and errors retain their existing meaning.
+    drop(catalog);
+    drop(_gate);
+    finish_terminal(services, execution, work_slot, completed, binding)
+}
+
+fn finish_terminal(
+    services: &ServiceHandle,
+    execution: &mut MaintenanceExecution<'_>,
+    work: &mut Option<BackupWork>,
+    operation: DurableOperation,
+    binding: positron_kernel::RepositoryOperationBinding,
+) -> Result<bool, ServiceFailure> {
+    *work = None;
+    execution::checkpoint::set_native_reference(services, execution, binding, None)?;
+    let _gate = services.catalog_operation()?;
+    let catalog = services
+        .open_maintenance_catalog()
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?;
+    let coordinator = services.instance.maintenance_coordinator();
+    if !catalog
+        .release_backup_verification_continuation(coordinator, execution, binding)
+        .map_err(|_| ServiceFailure::CatalogUnavailable)?
+    {
+        return Ok(false);
+    }
+    if operation.status() == positron_governance::DurableOperationStatus::Cancelled {
+        coordinator
+            .cancel_and_persist(&catalog, execution.task().identity())
+            .map_err(super::super::maintenance::map_failure)?;
+    }
+    execution
+        .complete_and_persist(
+            coordinator,
+            &catalog,
+            operation.status() == positron_governance::DurableOperationStatus::Succeeded,
+        )
+        .map_err(super::super::maintenance::map_failure)?;
+    Ok(true)
 }
 
 fn verify_policy_object(

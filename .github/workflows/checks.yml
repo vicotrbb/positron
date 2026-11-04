@@ -14,6 +14,10 @@ jobs:
   checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: '0'
 
     steps:
       - name: Check out source
@@ -27,6 +31,28 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Verify clean Rust SDK generation
+        run: |
+          generated="$(mktemp -d)"
+          reference="$(mktemp -d)"
+          trap 'rm -rf "$generated" "$reference"' EXIT
+          cargo run --locked -p positron-api --example generate_rust_sdk -- "$generated"
+          git archive HEAD sdk/rust | tar -x --strip-components=2 -C "$reference"
+          diff -r "$reference" "$generated"
+
+      - name: Verify standalone Rust SDK package and prepare its registry dependencies
+        run: cargo package --locked -p positron-sdk
+
+      - name: Check packaged Rust SDK documentation and examples
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          manifest="$(find target/package -maxdepth 2 -path '*/positron-sdk-*/Cargo.toml' -print -quit)"
+          test -n "$manifest"
+          cargo doc --locked --manifest-path "$manifest" --no-deps --target-dir target
+          cargo test --locked --manifest-path "$manifest" --doc --target-dir target
+          cargo check --locked --manifest-path "$manifest" --examples --target-dir target
 
       - name: Run unit and integration tests
         run: cargo test --locked --workspace --lib --bins --tests

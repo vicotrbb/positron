@@ -204,8 +204,8 @@ class QueryDeadline(unittest.TestCase):
                 "stats": {"wallSeconds": "5", "limitingBudget": limiter}}}]}).encode())
 
     def test_wall_exhaustion_discards_partial_output_and_repeats_identical_query(self):
-        self.run_query([(17.75, self.wall_exhausted()), (1, self.complete())])
-        self.assertEqual([options["timeout"] for _, options in self.commands], [30, 11.25])
+        self.run_query([(3.75, self.wall_exhausted()), (1, self.complete())])
+        self.assertEqual([options["timeout"] for _, options in self.commands], [30, 25.25])
         self.assertEqual(self.commands[0][0], self.commands[1][0])
         self.assertEqual(self.commands[0][1]["input"], self.commands[1][1]["input"])
 
@@ -291,6 +291,13 @@ class QueryDeadline(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "code=transport"):
             self.run_query([(1, self.refused(b"positron: query transport or response unavailable"))])
         self.assertEqual(len(self.commands), 1)
+
+    def test_noncanonical_capacity_text_never_retries(self):
+        for error in [b"unknown capacity unavailable\n",
+                      b"positron: query capacity unavailable; retry after backoff\ninjected\n"]:
+            with self.subTest(error=error), self.assertRaisesRegex(RuntimeError, "code=other"):
+                self.run_query([(0, self.refused(error)), (0, self.complete())])
+            self.assertEqual(len(self.commands), 1)
 
 
 class BackupOutcomeKnowledge(unittest.TestCase):

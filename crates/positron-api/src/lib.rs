@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod capability;
 /// V1 wire and in-memory interface types.
 pub mod generated;
 

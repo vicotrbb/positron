@@ -22,6 +22,19 @@ BACKUPS = "/var/lib/positron-backups/private"
 CONFIG = "/etc/positron/config/positron.toml"
 REPOSITORY = "11111111-1111-4111-8111-111111111111"
 
+# Exact public CLI classes only: subprocess output may contain private data.
+REPOSITORY_FAILURE_MESSAGES = {
+    "invalid repository request",
+    "system administration authentication rejected",
+    "repository operation unavailable",
+    "stale resource generation; inspect current state before retrying",
+    "operation precondition failed; inspect current state before retrying",
+    "idempotency key conflicts with an accepted request",
+    "administration unavailable; inspect or retry the same operation",
+    "capacity unavailable; retry the same idempotent request",
+    "transport outcome unknown; inspect the same operation or idempotency key before retrying",
+}
+
 
 class RestoreStartRefused(AssertionError):
     """A failed terminal start Job, whose Pod must be removed before inspection."""
@@ -129,15 +142,31 @@ class NativeLifecycle(DataLifecycle):
         arguments = [family] + ([action] if action else [])
         if action == "wait" and "--operation-id" in args:
             self.last_operation = (family, args[args.index("--operation-id") + 1])
-        result = self.kube("exec", "-i", "-c", "positron", compose or self.pod, "--", "/usr/bin/positron", *arguments, *args,
-                           "--endpoint", "127.0.0.1:8080", "--server-name", "localhost",
-                           "--trust-file", "/etc/positron/tls/..data/ca.pem", "--credential-stdin",
-                           data=(credential or self.admin).encode(), timeout=timeout, check=False)
-        if result.returncode:
+        deadline = time.monotonic() + timeout
+        while True:
+            result = self.kube("exec", "-i", "-c", "positron", compose or self.pod, "--", "/usr/bin/positron", *arguments, *args,
+                               "--endpoint", "127.0.0.1:8080", "--server-name", "localhost",
+                               "--trust-file", "/etc/positron/tls/..data/ca.pem", "--credential-stdin",
+                               data=(credential or self.admin).encode(), timeout=timeout, check=False)
+            if not result.returncode:
+                return result.stdout
             # Strip only kubectl's exact process-exit footer; preserve native diagnostics.
             error = re.sub(br"command terminated with exit code [0-9]+\n$", b"", result.stderr)
-            raise subprocess.CalledProcessError(result.returncode, ["positron", family], output=result.stdout, stderr=error)
-        return result.stdout
+            failure = subprocess.CalledProcessError(result.returncode, ["positron", family], output=result.stdout, stderr=error)
+            if family == "repository":
+                diagnostic = next(("positron: " + message for message in REPOSITORY_FAILURE_MESSAGES
+                                   if error == ("positron: " + message + "\n").encode()), "unavailable")
+                failure.add_note(f"native_repository_failure exit={result.returncode} stderr={diagnostic}")
+            # This inspection cannot mutate an operation. Reconcile only the
+            # CLI's exact capacity class, with its canonical one-second backoff.
+            if (family == "repository" and action == "status" and result.returncode == 2
+                    and not result.stdout and error == b"positron: capacity unavailable; retry the same idempotent request\n"
+                    and time.monotonic() + 1 < deadline):
+                time.sleep(1)
+                timeout = deadline - time.monotonic()
+                if timeout > 0:
+                    continue
+            raise failure
 
     def query_on_node(self, node, pod_ip, image, ca, *, stage):
         import ipaddress

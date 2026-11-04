@@ -61,6 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     config.file_descriptor_set_path(&descriptor);
     let messages = config.load_fds(&[schema], &["../../api"])?;
     build_support::configure_log_query(&mut config, &messages)?;
+    build_support::generate_enum_metadata(&messages)?;
     config.compile_fds(messages)?;
     build_support::generate_clients(&descriptor, mapping)?;
     Ok(())

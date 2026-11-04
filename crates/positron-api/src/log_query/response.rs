@@ -9,7 +9,40 @@ impl LogQueryResponse {
         value.validate()?;
         Ok(value)
     }
+    pub fn encode_session(&self) -> Result<Vec<u8>, LogQueryWireFailure> {
+        self.validate_inner(true, false)?;
+        self.encode_bounded()
+    }
+    pub fn decode_session(bytes: &[u8]) -> Result<Self, LogQueryWireFailure> {
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(LogQueryWireFailure);
+        }
+        let response: Self = serde_json::from_slice(bytes).map_err(|_| LogQueryWireFailure)?;
+        response.validate_inner(true, false)?;
+        Ok(response)
+    }
+    pub fn encode_tail(&self) -> Result<Vec<u8>, LogQueryWireFailure> {
+        self.validate_inner(true, true)?;
+        self.encode_bounded()
+    }
+    pub fn decode_tail(bytes: &[u8]) -> Result<Self, LogQueryWireFailure> {
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err(LogQueryWireFailure);
+        }
+        let response: Self = serde_json::from_slice(bytes).map_err(|_| LogQueryWireFailure)?;
+        response.validate_inner(true, true)?;
+        Ok(response)
+    }
+    pub fn validate_session(&self) -> Result<(), LogQueryWireFailure> {
+        self.validate_inner(true, false)
+    }
+    pub fn validate_tail(&self) -> Result<(), LogQueryWireFailure> {
+        self.validate_inner(true, true)
+    }
     pub fn validate(&self) -> Result<(), LogQueryWireFailure> {
+        self.validate_inner(false, false)
+    }
+    fn validate_inner(&self, session: bool, tail: bool) -> Result<(), LogQueryWireFailure> {
         use log_query_event::Event;
         let Some(Event::Header(header)) =
             self.events.first().and_then(|value| value.event.as_ref())
@@ -18,6 +51,15 @@ impl LogQueryResponse {
         };
         if self.events.len() < 2
             || self.events.len() > 130
+            || (tail && self.events.len() > 3)
+            || (tail
+                && header.tail_phase.as_deref().is_none_or(|phase| {
+                    !matches!(
+                        phase,
+                        "live_commit_vector" | "historical_temporal_then_live_commit_vector"
+                    )
+                }))
+            || (!tail && header.tail_phase.is_some())
             || header.columns.is_empty()
             || header.columns.len() > 128
             || header.ordering.is_empty()
@@ -44,7 +86,7 @@ impl LogQueryResponse {
             || header
                 .effective_budget
                 .as_ref()
-                .is_none_or(|budget| !valid_budget(budget))
+                .is_none_or(|budget| !valid_budget(budget, session))
             || header
                 .initial_cursor
                 .as_ref()
@@ -52,8 +94,26 @@ impl LogQueryResponse {
         {
             return Err(LogQueryWireFailure);
         }
-        let mut sequence = 0_u64;
-        let mut digest = vec![0; 32];
+        let first_batch = self
+            .events
+            .get(1)
+            .and_then(|event| match event.event.as_ref() {
+                Some(Event::Batch(batch)) => Some(batch),
+                _ => None,
+            });
+        let mut sequence = if session {
+            first_batch.map_or(0, |batch| batch.sequence)
+        } else {
+            0
+        };
+        let mut digest = if session {
+            first_batch.map_or_else(|| vec![0; 32], |batch| batch.prior_digest.clone())
+        } else {
+            vec![0; 32]
+        };
+        if digest.len() != 32 {
+            return Err(LogQueryWireFailure);
+        }
         let mut row_count = 0_u64;
         for event in self.events.iter().skip(1).take(self.events.len() - 2) {
             let Some(Event::Batch(batch)) = event.event.as_ref() else {
@@ -93,13 +153,37 @@ impl LogQueryResponse {
         match terminal.state.as_str() {
             "complete" | "incomplete" => {
                 let stats = terminal.stats.as_ref().ok_or(LogQueryWireFailure)?;
-                if stats.records != row_count
-                    || stats.result_digest != digest
-                    || stats.last_sequence != sequence.checked_sub(1)
+                let prior_only =
+                    session && first_batch.is_none() && header.initial_cursor.is_some();
+                if prior_only
+                    && (stats.result_digest.len() != 32
+                        || ((stats.records == 0) != stats.last_sequence.is_none()))
+                {
+                    return Err(LogQueryWireFailure);
+                }
+                let pending_tail = tail && first_batch.is_some();
+                if pending_tail
+                    && first_batch.is_some_and(|batch| {
+                        stats.result_digest != batch.prior_digest
+                            || stats.last_sequence != batch.sequence.checked_sub(1)
+                    })
+                {
+                    return Err(LogQueryWireFailure);
+                }
+                if (!tail
+                    && (if session {
+                        stats.records < row_count
+                    } else {
+                        stats.records != row_count
+                    }))
+                    || (!pending_tail && !prior_only && stats.result_digest != digest)
+                    || (!pending_tail
+                        && !prior_only
+                        && stats.last_sequence != sequence.checked_sub(1))
                     || stats
                         .cumulative_budget
                         .as_ref()
-                        .is_none_or(|budget| !valid_budget(budget))
+                        .is_none_or(|budget| !valid_budget(budget, session))
                     || stats
                         .limiting_budget
                         .as_ref()
@@ -115,16 +199,29 @@ impl LogQueryResponse {
                             _ => true,
                         }
                     })
-                    || terminal.continuation_cursor.is_some()
+                    || (terminal.continuation_cursor.is_some() && !tail)
+                    || (tail
+                        && terminal
+                            .continuation_cursor
+                            .as_ref()
+                            .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 8192))
+                    || (tail && terminal.state == "complete")
                     || (terminal.state == "complete"
                         && (!terminal.reason.is_empty() || !terminal.affected_ranges.is_empty()))
-                    || (terminal.state == "incomplete" && !reason(&terminal.reason))
+                    || (terminal.state == "incomplete"
+                        && !reason(&terminal.reason)
+                        && !(tail
+                            && matches!(
+                                terminal.reason.as_str(),
+                                "disconnected" | "consumer_lagged"
+                            )))
                 {
                     return Err(LogQueryWireFailure);
                 }
             },
             "continued"
-                if terminal.stats.is_none()
+                if !tail
+                    && terminal.stats.is_none()
                     && terminal.reason.is_empty()
                     && terminal
                         .continuation_cursor
@@ -135,12 +232,16 @@ impl LogQueryResponse {
         Ok(())
     }
 }
-fn valid_budget(budget: &LogQueryBudget) -> bool {
-    LogQueryRequest {
+fn valid_budget(budget: &LogQueryBudget, session: bool) -> bool {
+    let query = LogQueryRequest {
         pipeline: "logs".into(),
         budget: Some(*budget),
+    };
+    if session {
+        query.validate_session()
+    } else {
+        query.validate()
     }
-    .validate()
     .is_ok()
 }
 fn value_type(value: &str) -> bool {
@@ -259,6 +360,10 @@ fn validate_value(value: &LogQueryValue, depth: u8) -> Result<(), LogQueryWireFa
         return Err(LogQueryWireFailure);
     }
     match value.value.as_ref().ok_or(LogQueryWireFailure)? {
+        // ProtoJSON builds a base64 temporary before passing bytes to the writer.
+        log_query_value::Value::BytesValue(bytes) if bytes.len() > MAX_RESPONSE_BYTES => {
+            return Err(LogQueryWireFailure);
+        },
         log_query_value::Value::ArrayValue(array) => {
             for value in &array.values {
                 validate_value(value, depth + 1)?;
@@ -308,6 +413,9 @@ impl LogQueryResponse {
     /// governed capacity before invoking this encoder.
     pub fn encode(&self) -> Result<Vec<u8>, LogQueryWireFailure> {
         self.validate()?;
+        self.encode_bounded()
+    }
+    fn encode_bounded(&self) -> Result<Vec<u8>, LogQueryWireFailure> {
         let mut output = BoundedOutput(Vec::new());
         output
             .0

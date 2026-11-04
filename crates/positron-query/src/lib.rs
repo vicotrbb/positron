@@ -44,7 +44,7 @@ pub use export::{
     DurableExportReceipt, ExportBatch, ExportDestination, ExportManifest, ExportSink,
     ExportTerminal,
 };
-pub use failure::{QueryFailure, QueryFailureCode};
+pub use failure::{QueryCancellationFailure, QueryFailure, QueryFailureCode};
 pub use plan::{LogicalPlan, OrderDirection, PlannedQuery, TemporalAxis, TemporalRange};
 pub use query_service::{ExportDestinationResolver, QueryService};
 pub use runtime::{

@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from native_lifecycle import NativeLifecycle
+from test_repository_status import RepositoryStatus
 from test_kubernetes import assert_retained_claims, owned_storage_class, inspect_private_modes, reload_projected_identity
 
 
@@ -764,6 +765,32 @@ class NativeAdapter(unittest.TestCase):
                         dict(after, **{"restored-data": "source-data-id"})]:
             with self.assertRaises(AssertionError):
                 assert_retained_claims(self, before, changed, ["restored-data", "restored-secrets"])
+
+    def test_repository_failure_traceback_retains_only_closed_native_diagnostics(self):
+        import traceback
+        messages = [b"capacity unavailable; retry the same idempotent request",
+                    b"transport outcome unknown; inspect the same operation or idempotency key before retrying",
+                    b"system administration authentication rejected"]
+        for message in messages + [b"capacity unavailable; retry the same idempotent request test-admin /private/path", b"test-admin" * 1000]:
+            with self.subTest(message=message[:100]), tempfile.TemporaryDirectory() as directory:
+                error = b"positron: " + message + b"\n"
+                calls = []
+                def kube(*args, **kwargs):
+                    calls.append((args, kwargs))
+                    return subprocess.CompletedProcess([], 2, b"private stdout test-query", error + b"command terminated with exit code 2\n")
+                lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=test-admin query_secret=test-query")
+                with self.assertRaises(subprocess.CalledProcessError) as caught:
+                    lifecycle.online("repository", "init", "--locator", "/private/path")
+                failure = caught.exception
+                rendered = "".join(traceback.format_exception(failure))
+                self.assertEqual(failure.stderr, error)
+                self.assertEqual(failure.stdout, b"private stdout test-query")
+                expected = error.decode().strip() if message in messages else "unavailable"
+                self.assertIn("native_repository_failure exit=2 stderr=" + expected, rendered)
+                for private in ["test-admin", "test-query", "/private/path", "private stdout"]:
+                    self.assertNotIn(private, rendered)
+                self.assertLess(len(rendered), 1024)
+                self.assertEqual(len(calls), 1)
 
     def test_native_exit_two_remains_resumable_without_reflecting_stdin_credentials(self):
         with tempfile.TemporaryDirectory() as directory:

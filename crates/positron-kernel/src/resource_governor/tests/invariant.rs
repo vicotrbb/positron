@@ -493,8 +493,11 @@ fn closed_internal_helpers_cover_invalid_inputs_without_fabricating_authority() 
             pressure: DiskPressureState::Healthy,
         },
     )
-    .expect_err("recovery occupancy above ordinary capacity is corrupt");
-    assert_eq!(over_occupied.code(), AdmissionFailureCode::InternalFenced);
+    .expect_err("shared recovery occupancy temporarily exhausts ordinary capacity");
+    assert_eq!(
+        over_occupied.code(),
+        AdmissionFailureCode::CapacityOccupiedByRecovery
+    );
 
     let pool_failure = super::pool_admission::plan_pool_charge(
         WorkClass::DurabilityRecovery,

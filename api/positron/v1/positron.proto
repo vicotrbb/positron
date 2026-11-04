@@ -582,6 +582,8 @@ enum Capability {
   CAPABILITY_CANONICAL_PUBLIC_INTERFACE = 1;
   CAPABILITY_RELEASE_ONE_QUERY = 2;
   CAPABILITY_METRICS = 3;
+  CAPABILITY_QUERY_SESSIONS = 4;
+  CAPABILITY_QUERY_TAIL = 5;
 }
 
 enum CapabilityAvailability {
@@ -602,6 +604,10 @@ enum RetryClass {
 enum CompletionState {
   COMPLETION_STATE_UNSPECIFIED = 0;
   COMPLETION_STATE_REJECTED = 1;
+  // Transport loss or unresolved cancellation leaves the outcome unknown.
+  // Pending cleanup or partial effects can still progress. Reconcile explicitly;
+  // this state never authorizes a blind retry.
+  COMPLETION_STATE_AMBIGUOUS = 2;
 }
 
 enum DeprecationState {
@@ -629,6 +635,19 @@ enum PublicErrorCode {
   PUBLIC_ERROR_CODE_AUTHENTICATION_REJECTED = 7;
   PUBLIC_ERROR_CODE_CAPACITY_UNAVAILABLE = 8;
   PUBLIC_ERROR_CODE_QUERY_UNAVAILABLE = 9;
+  PUBLIC_ERROR_CODE_SNAPSHOT_EXPIRED = 10;
+  PUBLIC_ERROR_CODE_INVALID_CURSOR = 11;
+  PUBLIC_ERROR_CODE_INVALID_BUDGET = 12;
+  PUBLIC_ERROR_CODE_BUDGET_EXHAUSTED = 13;
+  PUBLIC_ERROR_CODE_AUTHORIZATION_CHANGED = 14;
+  PUBLIC_ERROR_CODE_CANCELLED = 15;
+  PUBLIC_ERROR_CODE_UNSUPPORTED_QUERY = 16;
+  PUBLIC_ERROR_CODE_IDEMPOTENCY_CONFLICT = 17;
+  PUBLIC_ERROR_CODE_STORE_UNAVAILABLE = 18;
+  PUBLIC_ERROR_CODE_INCOMPLETE_DATA = 19;
+  PUBLIC_ERROR_CODE_MALFORMED_PERSISTENT_DATA = 20;
+  PUBLIC_ERROR_CODE_INTERNAL = 21;
+  PUBLIC_ERROR_CODE_UNSUPPORTED_FEATURE = 22;
 }
 
 enum FailureSource {
@@ -650,6 +669,19 @@ enum SafeDetail {
   SAFE_DETAIL_AUTHENTICATION_REJECTED = 7;
   SAFE_DETAIL_CAPACITY_UNAVAILABLE = 8;
   SAFE_DETAIL_QUERY_UNAVAILABLE = 9;
+  SAFE_DETAIL_SNAPSHOT_EXPIRED = 10;
+  SAFE_DETAIL_INVALID_CURSOR = 11;
+  SAFE_DETAIL_INVALID_BUDGET = 12;
+  SAFE_DETAIL_BUDGET_EXHAUSTED = 13;
+  SAFE_DETAIL_AUTHORIZATION_CHANGED = 14;
+  SAFE_DETAIL_CANCELLED = 15;
+  SAFE_DETAIL_UNSUPPORTED_QUERY = 16;
+  SAFE_DETAIL_IDEMPOTENCY_CONFLICT = 17;
+  SAFE_DETAIL_STORE_UNAVAILABLE = 18;
+  SAFE_DETAIL_INCOMPLETE_DATA = 19;
+  SAFE_DETAIL_MALFORMED_PERSISTENT_DATA = 20;
+  SAFE_DETAIL_INTERNAL = 21;
+  SAFE_DETAIL_UNSUPPORTED_FEATURE = 22;
 }
 
 // Preview is read-only. Confirmation requires the exact generation-bound loss
@@ -1009,6 +1041,8 @@ message LogQueryRequest {
 // SQL, resume, tail, export and Trace transports remain separate incomplete work.
 service LogQueryService {
   rpc Execute(LogQueryRequest) returns (LogQueryResponse);
+  rpc Session(LogQuerySessionRequest) returns (LogQueryResponse);
+  rpc Cancel(LogQueryCancelRequest) returns (LogQueryCancelResponse);
 }
 message LogQueryResponse { repeated LogQueryEvent events = 1; }
 message LogQueryEvent {
@@ -1029,6 +1063,7 @@ message LogQueryHeader {
   LogQueryBudget effective_budget = 4;
   LogQueryLease lease = 5;
   optional bytes initial_cursor = 6;
+  optional string tail_phase = 7;
 }
 message LogQueryBatch {
   uint64 sequence = 1;
@@ -1103,4 +1138,56 @@ message LogQueryStats {
   uint64 repeated_batch_count = 12;
   optional string limiting_budget = 13;
   bool reduced_pruning = 14;
+}
+
+// A bounded historical page or an authenticated continuation of its exact snapshot.
+// The server reauthenticates every continuation; a cursor is never a credential.
+message LogQuerySessionRequest {
+  oneof operation {
+    LogQueryRequest execute = 1;
+    bytes resume = 2;
+    LogQueryTailRequest tail = 4;
+  }
+  uint32 batch_limit = 3;
+}
+
+// Idempotently releases only the authenticated cursor's bound leases.
+message LogQueryCancelRequest {
+  oneof cursor { bytes query = 1; bytes tail = 2; }
+}
+// True only after the owning Kernel has durably released all bound leases.
+message LogQueryCancelResponse { bool cancelled = 1; }
+
+// Session and Tail budgets retain the canonical hard 3600-second Snapshot Lease ceiling.
+// Each HTTP poll has an independent bounded connection lifetime.
+// One bounded native Tail poll. A receipt acknowledges only a batch already
+// delivered to the caller; absent receipts preserve at-least-once replay.
+message LogQueryTailRequest {
+  LogQueryRequest query = 1;
+  optional bytes cursor = 2;
+  optional uint32 historical_rows = 3;
+  LogQueryAcknowledgement acknowledgement = 4;
+}
+message LogQueryAcknowledgement { uint64 sequence = 1; bytes digest = 2; }
+
+// Stable terminal reason vocabulary for generated client status helpers.
+enum LogQueryStopReason {
+  LOG_QUERY_STOP_REASON_UNSPECIFIED = 0;
+  LOG_QUERY_STOP_REASON_UNAUTHORIZED = 1;
+  LOG_QUERY_STOP_REASON_IDEMPOTENCY_CONFLICT = 2;
+  LOG_QUERY_STOP_REASON_INVALID_BUDGET = 3;
+  LOG_QUERY_STOP_REASON_BUDGET_EXHAUSTED = 4;
+  LOG_QUERY_STOP_REASON_INVALID_CURSOR = 5;
+  LOG_QUERY_STOP_REASON_SNAPSHOT_EXPIRED = 6;
+  LOG_QUERY_STOP_REASON_AUTHORIZATION_CHANGED = 7;
+  LOG_QUERY_STOP_REASON_CANCELLED = 8;
+  LOG_QUERY_STOP_REASON_RESOURCE_ADMISSION_REFUSED = 9;
+  LOG_QUERY_STOP_REASON_RESOURCE_EXHAUSTED = 10;
+  LOG_QUERY_STOP_REASON_UNSUPPORTED_QUERY = 11;
+  LOG_QUERY_STOP_REASON_STORE_UNAVAILABLE = 12;
+  LOG_QUERY_STOP_REASON_INCOMPLETE_DATA = 13;
+  LOG_QUERY_STOP_REASON_MALFORMED_PERSISTENT_DATA = 14;
+  LOG_QUERY_STOP_REASON_INTERNAL = 15;
+  LOG_QUERY_STOP_REASON_DISCONNECTED = 16;
+  LOG_QUERY_STOP_REASON_CONSUMER_LAGGED = 17;
 }

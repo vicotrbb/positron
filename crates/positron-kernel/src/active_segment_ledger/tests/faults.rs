@@ -19,6 +19,7 @@ mod admission_faults;
 mod coupled_lease_capacity;
 mod coupled_lease_lifecycle;
 mod expiry_execution;
+mod lease_cancellation;
 mod sealing_faults;
 mod snapshot_lease_capacity;
 mod snapshot_leases;

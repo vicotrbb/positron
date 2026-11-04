@@ -631,7 +631,13 @@ fn restart_at(
         .and_then(|endpoint| endpoint.socket_address())
         .ok_or("API endpoint")?;
     let client = BackupServiceClient::new(BackupTransport::PlaintextOptOut { endpoint })?;
-    let completed = finish(&client, &services, &administrator, &accepted.operation.id)?;
+    let completed =
+        finish(&client, &services, &administrator, &accepted.operation.id).map_err(|failure| {
+            format!(
+                "cold verification finish: {failure}; health={:?}",
+                process.health().phase()
+            )
+        })?;
     assert_eq!(
         completed.operation.status,
         if cancel {
@@ -661,16 +667,23 @@ fn restart_at(
                 before_restart.verification_report_checksum
             );
         }
-        assert_eq!(client.manage(&administrator, &request)?, completed);
+        assert_eq!(
+            client
+                .manage(&administrator, &request)
+                .map_err(|failure| format!("cold verify replay: {failure:?}"))?,
+            completed
+        );
     }
-    let inventory = client.list(
-        &administrator,
-        &positron_api::backup::BackupListRequest {
-            repository_id: "5b5b5b5b-5b5b-5b5b-5b5b-5b5b5b5b5b5b".into(),
-            limit: 128,
-            cursor: None,
-        },
-    )?;
+    let inventory = client
+        .list(
+            &administrator,
+            &positron_api::backup::BackupListRequest {
+                repository_id: "5b5b5b5b-5b5b-5b5b-5b5b-5b5b5b5b5b5b".into(),
+                limit: 128,
+                cursor: None,
+            },
+        )
+        .map_err(|failure| format!("cold inventory: {failure:?}"))?;
     assert_eq!(inventory.entries.len(), 1);
     assert_eq!(
         inventory

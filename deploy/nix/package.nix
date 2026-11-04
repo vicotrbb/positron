@@ -3,6 +3,7 @@
   lockFile ? src + /Cargo.lock
 }:
 let
+  rustPlatform = pkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; };
   target = {
     x86_64-linux = "linux-x86_64";
     aarch64-linux = "linux-aarch64";
@@ -10,10 +11,19 @@ let
     aarch64-darwin = "macos-aarch64";
   }.${pkgs.stdenv.hostPlatform.system};
 in
-(pkgs.makeRustPlatform { cargo = toolchain; rustc = toolchain; }).buildRustPackage {
+rustPlatform.buildRustPackage {
   pname = "positron";
   inherit src version;
   cargoLock.lockFile = lockFile;
+  # Cargo package normalizes workspace patches back to registry dependencies.
+  # Keep those genuine registry sources available to the offline SDK test too.
+  cargoDeps = pkgs.symlinkJoin {
+    name = "cargo-vendor-dir";
+    paths = [
+      (rustPlatform.importCargoLock { inherit lockFile; })
+      (rustPlatform.importCargoLock { lockFile = ./sdk-registry.lock; })
+    ];
+  };
   cargoBuildFlags = [ "--package" "positron" ];
   preBuild = ''
     export CFLAGS="''${CFLAGS:-} -ffile-prefix-map=$NIX_BUILD_TOP=/positron-build"
@@ -26,6 +36,7 @@ in
     runHook postCheck
   '';
   nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config ];
+  nativeCheckInputs = [ pkgs.git ];
   env = pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
     MACOSX_DEPLOYMENT_TARGET = "15.0";
   };

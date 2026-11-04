@@ -70,12 +70,26 @@ fn bootstrap_claim_response(
 const MAX_CONTROL_SUPPORT_BUNDLE_REQUEST_BYTES: usize = 8 * 1024;
 
 pub(in crate::native_host) fn query_failure_response(status: u16, code: &str) -> Response {
-    match positron_api::log_query::query_rejection(status, code) {
+    query_failure_with_completion(
+        status,
+        code,
+        positron_api::api_keys::protobuf::CompletionState::Rejected,
+    )
+}
+
+fn query_failure_with_completion(
+    status: u16,
+    code: &str,
+    completion: positron_api::api_keys::protobuf::CompletionState,
+) -> Response {
+    match positron_api::log_query::cancellation_rejection(status, code, completion) {
         Ok(body) => Response {
             status,
             content_type: "application/json",
             body,
-            retry_after_seconds: (status == 429).then_some(1),
+            retry_after_seconds: (status == 429
+                && completion == positron_api::api_keys::protobuf::CompletionState::Rejected)
+                .then_some(1),
             response_reservation: None,
         },
         Err(_) => Response::empty(503),
@@ -103,6 +117,12 @@ pub(super) fn api_body_limit(method: &str, path: &str) -> usize {
     }
     match path {
         positron_api::log_query::HTTP_PATH => positron_api::log_query::MAX_REQUEST_BYTES,
+        positron_api::log_query::SESSION_HTTP_PATH => {
+            positron_api::log_query::MAX_SESSION_REQUEST_BYTES
+        },
+        positron_api::log_query::CANCEL_HTTP_PATH => {
+            positron_api::log_query::MAX_CANCEL_REQUEST_BYTES
+        },
         positron_api::upgrade::HTTP_PATH => positron_api::upgrade::MAX_REQUEST_BYTES,
         positron_api::backup::HTTP_PATH | positron_api::backup::LIST_HTTP_PATH => {
             positron_api::backup::MAX_REQUEST_BYTES
@@ -242,7 +262,7 @@ fn route_inner<S: Read + Write>(
     ) && !health.admits_data_or_mutation()
     {
         return Ok(
-            if role == ListenerRole::Api && head.path == positron_api::log_query::HTTP_PATH {
+            if role == ListenerRole::Api && positron_api::log_query::is_query_path(&head.path) {
                 query_failure_response(503, "query_unavailable")
             } else {
                 Response::empty(503)
@@ -250,7 +270,13 @@ fn route_inner<S: Read + Write>(
         );
     }
     match (role, head.method.as_str(), head.path.as_str()) {
-        (ListenerRole::Api, "POST", positron_api::log_query::HTTP_PATH) => {
+        (
+            ListenerRole::Api,
+            "POST",
+            positron_api::log_query::HTTP_PATH
+            | positron_api::log_query::SESSION_HTTP_PATH
+            | positron_api::log_query::CANCEL_HTTP_PATH,
+        ) => {
             let services =
                 services.ok_or_else(|| query_failure_response(503, "query_unavailable"))?;
             if head.tenant_hint.is_some() || head.forwarded_actor.is_some() {
@@ -264,10 +290,38 @@ fn route_inner<S: Read + Write>(
             let body = read_body(
                 stream,
                 head.content_length,
-                positron_api::log_query::MAX_REQUEST_BYTES,
+                match head.path.as_str() {
+                    positron_api::log_query::SESSION_HTTP_PATH => {
+                        positron_api::log_query::MAX_SESSION_REQUEST_BYTES
+                    },
+                    positron_api::log_query::CANCEL_HTTP_PATH => {
+                        positron_api::log_query::MAX_CANCEL_REQUEST_BYTES
+                    },
+                    _ => positron_api::log_query::MAX_REQUEST_BYTES,
+                },
             )
             .map_err(|_| query_failure_response(400, "invalid_request"))?;
-            match services.execute_log_query(&bearer, &body) {
+            let execution = if head.path == positron_api::log_query::CANCEL_HTTP_PATH {
+                services
+                    .cancel_log_query(&bearer, &body)
+                    .map_err(|(status, code, completion)| {
+                        use positron_api::api_keys::protobuf::CompletionState as Wire;
+                        use positron_kernel::LedgerCompletionState as Native;
+                        let completion = match completion {
+                            Native::RejectedBeforeMutation => Wire::Rejected,
+                            Native::RecoveryRequired | Native::CommitAmbiguous => Wire::Ambiguous,
+                        };
+                        query_failure_with_completion(status, code, completion)
+                    })
+            } else {
+                let result = if head.path == positron_api::log_query::SESSION_HTTP_PATH {
+                    services.execute_log_query_session(&bearer, &body)
+                } else {
+                    services.execute_log_query(&bearer, &body)
+                };
+                result.map_err(|(status, code)| query_failure_response(status, code))
+            };
+            match execution {
                 Ok((body, reservation)) => Ok(Response {
                     status: 200,
                     content_type: "application/json",
@@ -275,7 +329,7 @@ fn route_inner<S: Read + Write>(
                     retry_after_seconds: None,
                     response_reservation: Some(Box::new(reservation)),
                 }),
-                Err((status, code)) => Ok(query_failure_response(status, code)),
+                Err(response) => Ok(response),
             }
         },
         (ListenerRole::Api, "POST", positron_api::api_keys::HTTP_PATH) => {

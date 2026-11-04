@@ -216,9 +216,20 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         context: AuthorizedContext,
         cursor: &QueryCursor,
     ) -> Result<QueryStream<'ledger>, QueryFailure> {
+        self.resume_with_cancellation(context, cursor, crate::QueryCancellation::new())
+    }
+
+    /// Resumes the bound snapshot under the caller's registered lifecycle cancellation.
+    pub fn resume_with_cancellation(
+        &self,
+        context: AuthorizedContext,
+        cursor: &QueryCursor,
+        cancellation: crate::QueryCancellation,
+    ) -> Result<QueryStream<'ledger>, QueryFailure> {
         let (tenant, mut catalog_identity, mut catalog_generation) =
             self.current_query_catalog(context)?;
         let mut state = cursor::decode_for_admission(&self.ledger.control_tokens(), cursor)?;
+        state.cancellation = cancellation;
         validate_authorization(
             state.principal,
             state.tenant,

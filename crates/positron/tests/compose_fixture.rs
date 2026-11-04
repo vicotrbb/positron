@@ -118,6 +118,7 @@ fn compose_query_consumer_uses_canonical_protojson() -> Result<(), Box<dyn std::
                         expiry_unix_seconds: 1,
                     }),
                     initial_cursor: None,
+                    tail_phase: None,
                 })),
             },
             LogQueryEvent {

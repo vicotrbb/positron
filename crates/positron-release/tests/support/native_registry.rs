@@ -22,8 +22,9 @@ pub struct NativeArtifactFixture {
 
 pub fn fixtures(version: &str, source_commit: &str) -> Vec<NativeArtifactFixture> {
     let crate_name = "positron-sdk";
+    let schema = hex(&Sha256::digest(b"canonical api definition"));
     let cargo = format!(
-        "[package]\nname = \"{crate_name}\"\nversion = \"{version}\"\nedition = \"2024\"\n"
+        "[package]\nname = \"{crate_name}\"\nversion = \"{version}\"\nedition = \"2024\"\n[package.metadata.positron]\napi_version = \"positron.v1\"\nschema_digest = \"{schema}\"\nrelease_manifest_surface = \"SdkRust\"\nregistry = \"https://crates.io\"\ngenerator = \"prost=0.14.3,pbjson=0.9.0,protoc-bin-vendored=3.2.0\"\n[build-dependencies]\nprost-build = \"=0.14.3\"\npbjson-build = \"=0.9.0\"\nprotoc-bin-vendored = \"=3.2.0\"\n"
     );
     let vcs = serde_json::to_vec(
         &json!({"git":{"sha1":source_commit,"dirty":false},"path_in_vcs":"sdk/rust"}),
@@ -33,6 +34,14 @@ pub fn fixtures(version: &str, source_commit: &str) -> Vec<NativeArtifactFixture
         &format!("{crate_name}-{version}"),
         &[
             ("Cargo.toml", cargo.as_bytes()),
+            (
+                "api/positron/v1/positron.proto",
+                b"canonical api definition",
+            ),
+            (
+                "api/positron/v1/schema.sha256",
+                format!("{schema}\n").as_bytes(),
+            ),
             (".cargo_vcs_info.json", &vcs),
             ("src/lib.rs", b"pub struct Client;\n"),
         ],

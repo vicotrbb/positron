@@ -143,6 +143,8 @@ fn service_response(service_failure: ServiceFailure) -> Response {
         | ServiceFailure::CorruptState
         | ServiceFailure::BackupRepositoryRejected
         | ServiceFailure::Internal
+        | ServiceFailure::QueryRejected(_)
+        | ServiceFailure::QueryCancellationFailed(_)
         | ServiceFailure::Cancelled => failure(500, "Loki Push ingest failed"),
     }
 }

@@ -15,7 +15,7 @@ pub(super) fn budget(value: positron_query::QueryBudget) -> api::LogQueryBudget 
     }
 }
 pub(super) fn header(header: &QueryHeader) -> Result<api::LogQueryHeader, ServiceFailure> {
-    if header.tail_phase().is_some() || header.correlation_snapshot().is_some() {
+    if header.correlation_snapshot().is_some() {
         return Err(ServiceFailure::InvalidRequest);
     }
     let names = header.schema().columns();
@@ -69,6 +69,12 @@ pub(super) fn header(header: &QueryHeader) -> Result<api::LogQueryHeader, Servic
         lease: Some(api::LogQueryLease {
             identity: lease.identity().to_vec(),
             expiry_unix_seconds: lease.expiry(),
+        }),
+        tail_phase: header.tail_phase().map(|phase| match phase {
+            positron_query::TailPhase::LiveCommitVector => "live_commit_vector".into(),
+            positron_query::TailPhase::HistoricalTemporalThenLiveCommitVector => {
+                "historical_temporal_then_live_commit_vector".into()
+            },
         }),
         initial_cursor: header
             .initial_cursor()

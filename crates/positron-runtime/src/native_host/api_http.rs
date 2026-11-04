@@ -405,7 +405,7 @@ async fn route_request(
         },
     };
     let response =
-        if parts.uri.path() == positron_api::log_query::HTTP_PATH && response.body.is_empty() {
+        if positron_api::log_query::is_query_path(parts.uri.path()) && response.body.is_empty() {
             match response.status() {
                 400 => native_http::query_failure_response(400, "invalid_request"),
                 413 => native_http::query_failure_response(413, "request_too_large"),

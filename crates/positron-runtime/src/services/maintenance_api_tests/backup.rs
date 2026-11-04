@@ -641,6 +641,7 @@ fn finish(
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     let mut last_response = String::new();
     loop {
+        let read_started = std::time::Instant::now();
         match client.manage(bearer, &request) {
             Ok(response) => {
                 last_response = format!(
@@ -686,7 +687,13 @@ fn finish(
                 }
             },
             Err(BackupServiceClientFailure::CapacityUnavailable) => {},
-            Err(failure) => return Err(failure.into()),
+            Err(failure) => {
+                return Err(format!(
+                    "status read: {failure:?}, elapsed_ms={}, last={last_response}",
+                    read_started.elapsed().as_millis()
+                )
+                .into());
+            },
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(

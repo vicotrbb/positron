@@ -26,6 +26,13 @@ nix develop --no-update-lock-file
 ```
 
 The package runs the configuration and release contract tests in its sandbox.
+Its vendor closure also includes `sdk-registry.lock`: genuine registry sources
+needed when Cargo normalizes the standalone Rust SDK's workspace patches.
+Regenerate it after changing patched dependencies by running
+`cargo package --locked -p positron-sdk`, then copying the unmodified registry
+`[[package]]` records from `target/package/positron-sdk-0.0.0/Cargo.lock` whose
+`(name, version, source)` is absent from the workspace `Cargo.lock`. Keep the
+registry checksums; local patched source is not a registry-package substitute.
 It uses `positron release archive` to obtain the Rust-generated example TOML,
 JSON Schema, configuration reference and lifecycle runbooks. They are installed
 under `share/positron` and `share/doc/positron`. The package preserves the linked

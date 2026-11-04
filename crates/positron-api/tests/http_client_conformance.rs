@@ -198,3 +198,26 @@ fn api_key_client_preserves_its_stricter_server_name_character_check() {
     assert!(TenantServiceClient::new(transport.clone()).is_ok());
     assert!(ApiKeyServiceClient::new(transport).is_err());
 }
+
+#[test]
+fn sdk_tls_identity_cannot_rewrite_the_url_authority() {
+    use positron_api::log_query::{LogQueryServiceClient, LogQueryTransport};
+    let trust_file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../positron-runtime/tests/native_transport/fixtures/api-test-cert.pem");
+    for server_name in [
+        "user@localhost",
+        "localhost/path",
+        "localhost?query",
+        "localhost#fragment",
+        "localhost\\host",
+    ] {
+        assert!(
+            LogQueryServiceClient::new(LogQueryTransport::Tls {
+                endpoint: "127.0.0.1:443".parse().unwrap(),
+                server_name: server_name.into(),
+                trust_file: trust_file.clone(),
+            })
+            .is_err()
+        );
+    }
+}

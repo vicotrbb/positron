@@ -16,6 +16,8 @@ mod dispatch;
 pub(super) use dispatch::query_failure_response;
 mod io;
 #[cfg(test)]
+mod query_cancellation_tests;
+#[cfg(test)]
 mod tls_rejection_tests;
 #[cfg(test)]
 mod upgrade_deadline_tests;

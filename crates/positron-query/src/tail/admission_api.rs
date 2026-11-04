@@ -61,3 +61,43 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         )
     }
 }
+
+impl QueryService<'_, '_, '_> {
+    /// Releases the authenticated standalone tail cursor's original source lease.
+    pub fn cancel_tail_cursor(
+        &self,
+        context: positron_governance::AuthorizedContext,
+        cursor: &TailCursor,
+    ) -> Result<(), crate::QueryCancellationFailure> {
+        let (tenant, _, _) = self.current_query_catalog(context)?;
+        let state = TailCursor::decode(&self.ledger.control_tokens(), cursor)?;
+        crate::execution_state::validate_authorization(
+            state.principal(),
+            state.tenant(),
+            state.authorization_generation(),
+            context.principal_id(),
+            tenant,
+            context.authorization_generation(),
+        )?;
+        let bindings = state
+            .source_bindings()
+            .ok_or_else(|| QueryFailure::new(crate::QueryFailureCode::InvalidCursor))?;
+        if bindings.len() != 1
+            || bindings
+                .first()
+                .is_none_or(|binding| binding.shard() != self.ledger.scope().shard_id())
+        {
+            return Err(QueryFailure::new(crate::QueryFailureCode::StoreUnavailable).into());
+        }
+        for binding in bindings {
+            // An explicit command reports this attempt's outcome. A temporary
+            // session owner would retry release from Drop after an error.
+            crate::execution::release_cancelled_lease(
+                self.ledger,
+                self.maintenance,
+                binding.lease(),
+            )?;
+        }
+        Ok(())
+    }
+}

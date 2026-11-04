@@ -158,13 +158,12 @@ pub(super) fn refuse_ordinary_capacity(
             ));
         }
         let shared_recovery = capacity.recovery_shared_usage.get(dimension);
-        let Some(ordinary_available) = capacity
+        // Shared recovery can legally borrow more than the ordinary ceiling
+        // when the configured reserve exceeds its protected pool sum.
+        let ordinary_available = capacity
             .ordinary_ceiling
             .get(dimension)
-            .checked_sub(shared_recovery)
-        else {
-            return Err(internal_failure_at_pressure(class, capacity.pressure));
-        };
+            .saturating_sub(shared_recovery);
         if ordinary_candidate.is_none_or(|value| value > ordinary_available) {
             let recovery_occupied = shared_recovery > 0;
             return Err(capacity_failure(

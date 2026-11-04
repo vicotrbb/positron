@@ -2,7 +2,7 @@ mod wire;
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
-pub(super) use wire::execute;
+pub(super) use wire::{cancel, execute, execute_session};
 
 use positron_domain::routing::SignalKind;
 use positron_kernel::{ActiveSegmentLedger, Catalog, SegmentScope};
@@ -191,6 +191,124 @@ fn with_log_query_events<T>(
         &mut dyn Iterator<Item = positron_query::QueryEvent>,
     ) -> Result<T, ServiceFailure>,
 ) -> Result<T, ServiceFailure> {
+    with_log_query_events_mode(
+        services,
+        bearer,
+        shard,
+        QueryMode::Finite { source, budget },
+        consume,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum QueryMode<'a> {
+    Finite {
+        source: &'a str,
+        budget: QueryBudget,
+    },
+    Page {
+        source: &'a str,
+        budget: QueryBudget,
+        batch_limit: u16,
+    },
+    Resume {
+        cursor: &'a positron_query::QueryCursor,
+        batch_limit: u16,
+    },
+}
+
+fn with_log_query_events_mode<T>(
+    services: &ServiceHandle,
+    bearer: &str,
+    shard: positron_domain::routing::VirtualShardId,
+    mode: QueryMode<'_>,
+    consume: impl FnOnce(
+        &mut dyn Iterator<Item = positron_query::QueryEvent>,
+    ) -> Result<T, ServiceFailure>,
+) -> Result<T, ServiceFailure> {
+    let classify = |failure: &positron_query::QueryFailure| {
+        if matches!(mode, QueryMode::Finite { .. }) {
+            map_query_failure(failure)
+        } else {
+            ServiceFailure::QueryRejected(failure.code())
+        }
+    };
+    let batch_limit = match mode {
+        QueryMode::Finite { .. } => 100,
+        QueryMode::Page { batch_limit, .. } | QueryMode::Resume { batch_limit, .. } => batch_limit,
+    };
+    with_native_query_service(services, bearer, shard, batch_limit, |service, context| {
+        let instance = &services.instance;
+        let tenant = super::context_tenant(context)?;
+        let _drain;
+        let events = match mode {
+            QueryMode::Resume { cursor, .. } => {
+                let cancellation = positron_query::QueryCancellation::new();
+                _drain = instance
+                    .enter_query_execution_for(tenant, cancellation.clone())
+                    .map_err(|_| ServiceFailure::Unauthorized)?;
+                service
+                    .resume_with_cancellation(context, cursor, cancellation)
+                    .map_err(|failure| classify(&failure))?
+            },
+            QueryMode::Finite { source, budget } | QueryMode::Page { source, budget, .. } => {
+                let query = service
+                    .plan_pipeline(context, source, budget)
+                    .map_err(|failure| {
+                        services.record_query_budget(failure.limiting_budget());
+                        classify(&failure)
+                    })?;
+                _drain = instance
+                    .enter_query_execution_for(tenant, query.cancellation())
+                    .map_err(|_| ServiceFailure::Unauthorized)?;
+                #[cfg(test)]
+                services.await_query_execution_test_hook()?;
+                if matches!(mode, QueryMode::Page { .. }) {
+                    service
+                        .execute_page(query)
+                        .map_err(|failure| classify(&failure))?
+                } else {
+                    let schema = services
+                        .schema_sessions
+                        .session(tenant, instance.resource_governor())
+                        .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+                    schema
+                        .with_catalog_view(tenant, |catalog| {
+                            service.execute_with_schema(query, catalog)
+                        })
+                        .map_err(schema_bootstrap::classify_replay_failure)?
+                        .map_err(|failure| {
+                            services.record_query_budget(failure.limiting_budget());
+                            classify(&failure)
+                        })?
+                }
+            },
+        };
+        // QueryService publishes the source lease and its expiry task atomically
+        // before yielding this stream. Wake only after that durable transition so
+        // the registered worker cannot consume a pre-publication signal.
+        services.notify_maintenance_worker();
+        consume(&mut events.inspect(|event| {
+            if let positron_query::QueryEvent::Terminal(
+                positron_query::QueryTerminal::Incomplete(incomplete),
+            ) = event
+            {
+                services.record_query_budget(incomplete.stats().limiting_budget());
+            }
+        }))
+    })
+}
+
+fn with_native_query_service<T>(
+    services: &ServiceHandle,
+    bearer: &str,
+    shard: positron_domain::routing::VirtualShardId,
+    batch_limit: u16,
+    consume: impl FnOnce(
+        &QueryService<'_, '_, '_>,
+        positron_governance::AuthorizedContext,
+    ) -> Result<T, ServiceFailure>,
+) -> Result<T, ServiceFailure> {
     let _catalog_operation = services.catalog_operation()?;
     let instance = &services.instance;
     let context = authorize(services, bearer)?;
@@ -223,46 +341,11 @@ fn with_log_query_events<T>(
         protection,
     )
     .map_err(|failure| classify_ledger_failure_code(failure.code()))?;
-    let service = QueryService::new(instance._authority.governor(), &ledger, 100)
+    let service = QueryService::new(instance._authority.governor(), &ledger, batch_limit)
         .with_maintenance_coordinator(instance.maintenance_coordinator());
     let service = match &services.export_destination_resolver {
         Some(resolver) => service.with_export_destination_resolver(Arc::clone(resolver)),
         None => service,
     };
-    let query = service
-        .plan_pipeline(context, source, budget)
-        .map_err(|failure| {
-            services.record_query_budget(failure.limiting_budget());
-            map_query_failure(&failure)
-        })?;
-    let _drain = instance
-        .enter_query_execution_for(tenant, query.cancellation())
-        .map_err(|_| ServiceFailure::Unauthorized)?;
-    #[cfg(test)]
-    services.await_query_execution_test_hook()?;
-    let schema = services
-        .schema_sessions
-        .session(tenant, instance.resource_governor())
-        .map_err(|_| ServiceFailure::CapacityUnavailable)?;
-    let events = schema
-        .with_catalog_view(tenant, |catalog| {
-            service.execute_with_schema(query, catalog)
-        })
-        .map_err(schema_bootstrap::classify_replay_failure)?
-        .map_err(|failure| {
-            services.record_query_budget(failure.limiting_budget());
-            map_query_failure(&failure)
-        })?;
-    // QueryService publishes the source lease and its expiry task atomically
-    // before yielding this stream. Wake only after that durable transition so
-    // the registered worker cannot consume a pre-publication signal.
-    services.notify_maintenance_worker();
-    consume(&mut events.inspect(|event| {
-        if let positron_query::QueryEvent::Terminal(positron_query::QueryTerminal::Incomplete(
-            incomplete,
-        )) = event
-        {
-            services.record_query_budget(incomplete.stats().limiting_budget());
-        }
-    }))
+    consume(&service, context)
 }

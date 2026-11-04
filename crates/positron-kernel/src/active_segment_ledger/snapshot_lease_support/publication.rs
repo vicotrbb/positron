@@ -340,15 +340,12 @@ pub(crate) fn publish_many_with_expected_catalog_snapshot(
     )
 }
 
-fn publish_many_with_expected_catalog_inner(
-    catalog: &crate::Catalog<'_>,
+pub(crate) fn prepare_lease_publication(
     basis: &crate::CatalogSnapshot,
-    expected_catalog: crate::CatalogGenerationId,
     remove: &BTreeSet<SnapshotLeaseId>,
-    add: Vec<Vec<u8>>,
+    add: &[Vec<u8>],
     additional: Vec<CatalogObject>,
-    reconcile_visible: bool,
-) -> Result<crate::CatalogSnapshot, LedgerFailure> {
+) -> Result<CatalogProposal, LedgerFailure> {
     let capacity = basis
         .plaintext_objects()
         .count()
@@ -364,22 +361,32 @@ fn publish_many_with_expected_catalog_inner(
             objects.push(CatalogObject::new(bytes.to_vec())?);
         }
     }
-    for encoded in &add {
+    for encoded in add {
         objects.push(CatalogObject::new(encoded.clone())?);
     }
     objects.extend(additional);
     let transaction = TransactionId::new(fresh_identity()?.to_bytes())?;
-    match catalog.commit(
-        expected_catalog,
-        CatalogProposal::new(
-            transaction,
-            basis
-                .format_epoch()
-                .unwrap_or(FormatEpoch::new(FORMAT_EPOCH)?),
-            objects,
-        )?,
-        None,
-    ) {
+    CatalogProposal::new(
+        transaction,
+        basis
+            .format_epoch()
+            .unwrap_or(FormatEpoch::new(FORMAT_EPOCH)?),
+        objects,
+    )
+    .map_err(Into::into)
+}
+
+fn publish_many_with_expected_catalog_inner(
+    catalog: &crate::Catalog<'_>,
+    basis: &crate::CatalogSnapshot,
+    expected_catalog: crate::CatalogGenerationId,
+    remove: &BTreeSet<SnapshotLeaseId>,
+    add: Vec<Vec<u8>>,
+    additional: Vec<CatalogObject>,
+    reconcile_visible: bool,
+) -> Result<crate::CatalogSnapshot, LedgerFailure> {
+    let proposal = prepare_lease_publication(basis, remove, &add, additional)?;
+    match catalog.commit(expected_catalog, proposal, None) {
         Ok(commit) => Ok(commit.snapshot().clone()),
         Err(failure) => {
             let code = map_catalog_failure(failure.code());

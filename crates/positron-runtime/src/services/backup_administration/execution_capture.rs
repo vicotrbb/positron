@@ -29,7 +29,14 @@ pub(super) fn prepare(
             operation.operation_id().to_bytes(),
             parameters.intent_digest(),
         )
-        .map_err(|_| ServiceFailure::CorruptState)?
+        .map_err(|_failure| {
+            #[cfg(test)]
+            eprintln!(
+                "backup_capture_test_failure stage=resume failure={:?}",
+                _failure.code()
+            );
+            ServiceFailure::CorruptState
+        })?
     {
         let bytes = catalog
             .backup_capture_registry_checkpoint(&capture)
@@ -105,9 +112,23 @@ pub(super) fn prepare(
                 scope,
                 super::super::super::tenant_segment_key(instance, &identity, scope)?,
             )
-            .map_err(|_| ServiceFailure::CorruptState)?
+            .map_err(|_failure| {
+                #[cfg(test)]
+                eprintln!(
+                    "backup_capture_test_failure stage=open_ledger failure={:?}",
+                    _failure.code()
+                );
+                ServiceFailure::CorruptState
+            })?
             .seal()
-            .map_err(|_| ServiceFailure::CorruptState)?;
+            .map_err(|_failure| {
+                #[cfg(test)]
+                eprintln!(
+                    "backup_capture_test_failure stage=seal_ledger failure={:?}",
+                    _failure.code()
+                );
+                ServiceFailure::CorruptState
+            })?;
         }
         segment_keys.push((
             scope,

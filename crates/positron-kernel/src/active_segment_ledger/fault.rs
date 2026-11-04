@@ -39,6 +39,8 @@ pub(super) enum LedgerFileEvent {
     #[cfg(any(test, fuzzing, feature = "test-support"))]
     BeforeLeaseCreationReconciliation,
     #[cfg(any(test, fuzzing, feature = "test-support"))]
+    AfterLeaseCancellationPublication,
+    #[cfg(any(test, fuzzing, feature = "test-support"))]
     BeforeRetentionFrontierReconciliation,
     #[cfg(any(test, fuzzing, feature = "test-support"))]
     BeforeReclaimRetiredSegment,
@@ -214,4 +216,29 @@ mod tests {
         });
         assert_eq!(length, Some(3));
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_USAGE_ACTION: std::cell::Cell<Option<fn(&crate::StorageKernelResourceAuthority)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn before_lease_usage_publication(authority: &crate::StorageKernelResourceAuthority) {
+    if let Some(action) = BEFORE_USAGE_ACTION.with(|slot| slot.take()) {
+        action(authority);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_before_lease_usage_publication<T>(
+    action: fn(&crate::StorageKernelResourceAuthority),
+    test: impl FnOnce() -> T,
+) -> T {
+    BEFORE_USAGE_ACTION.with(|slot| {
+        let previous = slot.replace(Some(action));
+        let result = test();
+        slot.set(previous);
+        result
+    })
 }

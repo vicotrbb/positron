@@ -16,6 +16,7 @@ mod governance_object;
 mod inspection;
 mod lifecycle_clock;
 mod preparation;
+mod prepared_mutation;
 mod provider_integrity;
 mod recovery;
 mod restore_origin;
@@ -1208,6 +1209,31 @@ impl<'authority> Catalog<'authority> {
             .secret
             .lock()
             .map_err(|_| CatalogFailure::new(CatalogFailureCode::ConcurrentWriter))?;
+        // Resolve earlier acknowledgement-ambiguous publication while excluded.
+        let recovered = recover(&self.storage, &secret, self.instance)?;
+        if recovered.current.number() > state.current.number() {
+            *state = recovered;
+        }
+        self.commit_recovered_interruptibly(
+            (&mut state, &secret),
+            expected,
+            proposal,
+            audit,
+            prepared_request,
+            cancelled,
+        )
+    }
+
+    fn commit_recovered_interruptibly(
+        &self,
+        recovered: (&mut CatalogState, &CatalogSecret),
+        expected: CatalogGenerationId,
+        proposal: CatalogProposal,
+        audit: Option<AuditIntent>,
+        prepared_request: Option<[u8; 32]>,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<CatalogCommit, CatalogFailure> {
+        let (state, secret) = recovered;
         let mut object_ids = Vec::new();
         object_ids
             .try_reserve_exact(proposal.objects.len())
@@ -1217,26 +1243,19 @@ impl<'authority> Catalog<'authority> {
         }
         let audit_intent = audit.as_ref().map(|intent| intent.0.as_slice());
         let digest = transaction_digest(proposal.format_epoch, &object_ids, audit_intent)?;
-        // Resolve an earlier acknowledgement-ambiguous marker publication before
-        // evaluating idempotency or the expected-generation precondition.
-        let recovered = recover(&self.storage, &secret, self.instance)?;
-        if recovered.current.number() > state.current.number() {
-            *state = recovered;
-        }
-
         if let Some(outcome) = state.transactions.get(&proposal.transaction) {
             if outcome.digest != digest {
                 return Err(CatalogFailure::new(CatalogFailureCode::IdempotencyConflict));
             }
             self.storage.confirm_publication(
-                &secret,
+                secret,
                 self.instance,
                 &outcome.record,
                 outcome.audit.as_ref(),
             )?;
             return Ok(CatalogCommit {
                 predecessor: outcome.record.predecessor,
-                snapshot: load_snapshot(&self.storage, &secret, self.instance, &outcome.record)?,
+                snapshot: load_snapshot(&self.storage, secret, self.instance, &outcome.record)?,
                 audit: outcome.audit.clone(),
             });
         }
@@ -1309,7 +1328,7 @@ impl<'authority> Catalog<'authority> {
                     encoded_audit.clone(),
                 )?;
                 self.storage
-                    .prepare_transaction(&secret, self.instance, &prepared)?
+                    .prepare_transaction(secret, self.instance, &prepared)?
             },
             None => self
                 .storage
@@ -1325,7 +1344,7 @@ impl<'authority> Catalog<'authority> {
             }
             self.storage.publish_object(
                 &transaction,
-                &secret,
+                secret,
                 self.instance,
                 object.identity,
                 proposal.format_epoch,
@@ -1340,7 +1359,7 @@ impl<'authority> Catalog<'authority> {
         }
         if let Some((record, encoded)) = &prepared_audit {
             self.storage
-                .publish_audit(&transaction, &secret, self.instance, record, encoded)?;
+                .publish_audit(&transaction, secret, self.instance, record, encoded)?;
         }
 
         if cancelled() {
@@ -1350,7 +1369,7 @@ impl<'authority> Catalog<'authority> {
         }
         self.storage.publish_commit(
             &transaction,
-            &secret,
+            secret,
             self.instance,
             record.generation,
             &encoded_commit,
@@ -1362,7 +1381,7 @@ impl<'authority> Catalog<'authority> {
         }
         self.storage.publish_marker_interruptibly(
             &transaction,
-            &secret,
+            secret,
             number,
             record.generation,
             cancelled,

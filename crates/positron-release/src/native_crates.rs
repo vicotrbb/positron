@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::{collections::BTreeSet, io::Read};
 
 const PROFILE: &str = "crates-io-oidc-upload-no-offline-receipt-v1";
-const MAX_INPUT: usize = 64 << 20;
+pub(crate) const MAX_INPUT: usize = 64 << 20;
 const MAX_DECODED: u64 = 512 << 20;
 const MAX_MEMBER: u64 = 64 << 20;
 
@@ -146,6 +146,35 @@ pub(crate) fn verify(
     if proof.index.cksum != crate::inventory::hex(&crate::construction::sha256(contents)) {
         return Err(ReleaseError::Authentication);
     }
+    inspect_contents(contents, name, version, source_commit, None)
+}
+
+pub(crate) fn inspect_sdk(
+    contents: &[u8],
+    version: &str,
+    source_commit: &str,
+    api: &str,
+    schema: &[u8; 32],
+) -> Result<(), ReleaseError> {
+    if contents.len() > MAX_INPUT {
+        return Err(ReleaseError::LimitExceeded);
+    }
+    inspect_contents(
+        contents,
+        "positron-sdk",
+        version,
+        source_commit,
+        Some((api, schema)),
+    )
+}
+
+fn inspect_contents(
+    contents: &[u8],
+    name: &str,
+    version: &str,
+    source_commit: &str,
+    sdk: Option<(&str, &[u8; 32])>,
+) -> Result<(), ReleaseError> {
     let mut decoded = flate2::bufread::GzDecoder::new(contents).take(MAX_DECODED + 1);
     let inspected = inspect(
         &mut decoded,
@@ -153,6 +182,7 @@ pub(crate) fn verify(
         name,
         version,
         source_commit,
+        sdk,
     );
     if decoded.limit() == 0 {
         return Err(ReleaseError::LimitExceeded);
@@ -196,12 +226,15 @@ fn inspect(
     name: &str,
     version: &str,
     source_commit: &str,
+    sdk: Option<(&str, &[u8; 32])>,
 ) -> Result<(), ReleaseError> {
     let mut archive = tar::Archive::new(reader);
     let mut files = BTreeSet::<String>::new();
     let mut path_budget = 8_388_608_usize;
     let mut manifest = false;
     let mut source_vcs = false;
+    let mut definition = false;
+    let mut digest_file = false;
     for (index, entry) in archive
         .entries()
         .map_err(|_| ReleaseError::Invalid)?
@@ -250,7 +283,35 @@ fn inspect(
             return Err(ReleaseError::Invalid);
         }
         let expected = entry.size();
-        if relative == "Cargo.toml" || relative == ".cargo_vcs_info.json" {
+        if sdk.is_some()
+            && matches!(
+                relative,
+                "api/positron/v1/positron.proto" | "api/positron/v1/schema.sha256"
+            )
+        {
+            if expected > 1 << 20 {
+                return Err(ReleaseError::LimitExceeded);
+            }
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|_| ReleaseError::Invalid)?;
+            if bytes.len() as u64 != expected {
+                return Err(ReleaseError::Invalid);
+            }
+            let (_, schema) = sdk.ok_or(ReleaseError::Invalid)?;
+            if relative.ends_with("positron.proto") {
+                if crate::construction::sha256(&bytes) != *schema {
+                    return Err(ReleaseError::IdentityMismatch);
+                }
+                definition = true;
+            } else {
+                if bytes != format!("{}\n", crate::inventory::hex(schema)).as_bytes() {
+                    return Err(ReleaseError::IdentityMismatch);
+                }
+                digest_file = true;
+            }
+        } else if relative == "Cargo.toml" || relative == ".cargo_vcs_info.json" {
             let maximum = if relative == "Cargo.toml" {
                 1 << 20
             } else {
@@ -279,6 +340,9 @@ fn inspect(
                 {
                     return Err(ReleaseError::IdentityMismatch);
                 }
+                if let Some((api, schema)) = sdk {
+                    sdk_metadata(&parsed, package, api, schema)?;
+                }
                 manifest = true;
             } else {
                 let vcs: Vcs<'_> =
@@ -297,6 +361,9 @@ fn inspect(
         {
             return Err(ReleaseError::Invalid);
         }
+    }
+    if sdk.is_some() && (!definition || !digest_file) {
+        return Err(ReleaseError::IdentityMismatch);
     }
     if !manifest || !source_vcs {
         return Err(ReleaseError::Invalid);
@@ -326,3 +393,50 @@ fn portable_path(path: &str) -> Result<(), ReleaseError> {
 
 #[cfg(test)]
 mod tests;
+
+fn sdk_metadata(
+    manifest: &toml::Value,
+    package: &toml::Table,
+    api: &str,
+    schema: &[u8; 32],
+) -> Result<(), ReleaseError> {
+    let metadata = package
+        .get("metadata")
+        .and_then(|value| value.get("positron"))
+        .ok_or(ReleaseError::IdentityMismatch)?;
+    for (field, expected) in [
+        ("api_version", api),
+        ("schema_digest", crate::inventory::hex(schema).as_str()),
+        ("release_manifest_surface", "SdkRust"),
+        ("registry", "https://crates.io"),
+    ] {
+        if metadata.get(field).and_then(toml::Value::as_str) != Some(expected) {
+            return Err(ReleaseError::IdentityMismatch);
+        }
+    }
+    let mut versions = Vec::new();
+    for dependency in ["prost-build", "pbjson-build", "protoc-bin-vendored"] {
+        let value = manifest
+            .get("build-dependencies")
+            .and_then(|dependencies| dependencies.get(dependency))
+            .ok_or(ReleaseError::IdentityMismatch)?;
+        let version = value
+            .as_str()
+            .or_else(|| value.get("version").and_then(toml::Value::as_str))
+            .and_then(|value| value.strip_prefix('='))
+            .ok_or(ReleaseError::IdentityMismatch)?;
+        if version.len() > 32 {
+            return Err(ReleaseError::LimitExceeded);
+        }
+        versions.push(version);
+    }
+    let [prost, pbjson, protoc] = versions.as_slice() else {
+        return Err(ReleaseError::Invalid);
+    };
+    if metadata.get("generator").and_then(toml::Value::as_str)
+        != Some(format!("prost={prost},pbjson={pbjson},protoc-bin-vendored={protoc}").as_str())
+    {
+        return Err(ReleaseError::IdentityMismatch);
+    }
+    Ok(())
+}

@@ -478,7 +478,8 @@ fn configured_tls_api_listener_reaches_alias_explain_and_activate_before_decodin
     }
 
     let system_authorization = format!("Bearer {}", claim.secret());
-    let alias = tls_http(
+    let alias = administrative_tls_http(
+        "tenant-alias-update",
         api,
         &certificate,
         "POST",
@@ -498,7 +499,8 @@ fn configured_tls_api_listener_reaches_alias_explain_and_activate_before_decodin
     assert!(!alias.contains("tls-route-alias"));
 
     let tenant_authorization = format!("Bearer {tenant_administrator_secret}");
-    let explanation = tls_http(
+    let explanation = administrative_tls_http(
+        "policy-explain",
         api,
         &certificate,
         "POST",
@@ -512,7 +514,8 @@ fn configured_tls_api_listener_reaches_alias_explain_and_activate_before_decodin
     assert_status(explanation.clone(), 200);
     assert!(explanation.contains("\"outcome\":\"accepted\""));
 
-    let activation = tls_http(
+    let activation = administrative_tls_http(
+        "policy-activate",
         api,
         &certificate,
         "POST",
@@ -613,7 +616,8 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
         positron_api::tenant_retention::UPDATE_HTTP_PATH,
     ] {
         assert_status(
-            tls_http(
+            tls_http_for_role(
+                "retention-malformed-auth",
                 api,
                 &certificate,
                 "POST",
@@ -633,7 +637,8 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
         tenant.to_canonical_text()
     );
     assert_status(
-        tls_http(
+        tls_http_for_role(
+            "retention-system-auth",
             api,
             &certificate,
             "POST",
@@ -647,7 +652,8 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
         401,
     );
     assert_status(
-        tls_http(
+        tls_http_for_role(
+            "retention-cross-tenant-auth",
             api,
             &certificate,
             "POST",
@@ -689,7 +695,8 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
         "ebebebeb-ebeb-ebeb-ebeb-ebebebebebeb".to_owned(),
     )
     .with_confirmation_evaluated_at_unix_nanos(evaluation);
-    let renamed = tls_http(
+    let renamed = administrative_tls_http(
+            "retention-display-rename",
         api,
         &certificate,
         "POST",
@@ -754,7 +761,8 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
     };
     assert_eq!(updated.retention_generation, 2);
     assert_eq!(client.update(&administrator_secret, &reduction)?, updated);
-    let stale_confirmation = tls_http(
+    let stale_confirmation = tls_http_for_role(
+            "retention-stale-confirmation",
         api,
         &certificate,
         "POST",
@@ -771,7 +779,8 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
     )?;
     assert_status(stale_confirmation.clone(), 409);
     assert!(stale_confirmation.contains("\"code\":\"invalid_confirmation\""));
-    let stale_generation = tls_http(
+    let stale_generation = tls_http_for_role(
+            "retention-stale-generation",
         api,
         &certificate,
         "POST",
@@ -839,7 +848,8 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
         positron_runtime::ListenerRole::Api,
     )?;
     assert_status(
-        tls_http(
+        tls_http_for_role(
+            "retention-suspended-auth",
             suspended_api,
             &certificate,
             "POST",
@@ -858,3 +868,28 @@ fn configured_tls_api_listener_serves_tenant_retention_preview_and_confirmed_upd
     );
     Ok(())
 }
+
+fn administrative_tls_http(
+    role: &'static str,
+    address: SocketAddr,
+    trust_file: &Path,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<String, Box<dyn std::error::Error>> {
+    // These administrative flows use the existing generated client's five-second
+    // cap; raw two-second socket probes retain their separate strict contract.
+    tls_http_with_budget(
+        role,
+        Duration::from_secs(5),
+        address,
+        trust_file,
+        (method, path),
+        headers,
+        body,
+    )
+}
+
+#[path = "policy_routes/tls_budget.rs"]
+mod tls_budget;

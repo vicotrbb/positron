@@ -871,6 +871,18 @@ fn failed_listener_staging_reports_audit_publication_failure_without_advancing_c
 #[test]
 fn same_endpoint_proxy_policy_reload_keeps_the_serving_endpoints_stable()
 -> Result<(), Box<dyn std::error::Error>> {
+    proxy_policy_reload_readiness(false)
+}
+
+#[test]
+fn same_endpoint_proxy_policy_reload_recovers_readiness_after_key_admission()
+-> Result<(), Box<dyn std::error::Error>> {
+    proxy_policy_reload_readiness(true)
+}
+
+fn proxy_policy_reload_readiness(
+    overlap_key_admission: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let roots = TestRoots::new("configuration-listener-policy-generation")?;
     let operations_port = available_loopback_port()?;
     let control_path = std::env::temp_dir().join(format!(
@@ -882,13 +894,21 @@ fn same_endpoint_proxy_policy_reload_keeps_the_serving_endpoints_stable()
         operations_port,
     )))?;
     let host = NativeHost::new(NativeBindings::from_effective(&initial)?);
+    // The forced overlap owns the only key admission; normal coverage keeps
+    // the native maintenance worker and all listener tasks.
+    let observed_tasks = ObservingTasks::default();
+    let tasks: &dyn positron_runtime::TaskRegistrar = if overlap_key_admission {
+        &observed_tasks
+    } else {
+        &host
+    };
     let process = ApplicationRuntime::start(
         ServeConfiguration::new(
             roots.bootstrap_paths()?,
             InitializationMode::InitializeIfEmpty,
         )
         .with_effective_configuration(Arc::clone(&initial)),
-        HostInputs::new(&host, &host),
+        HostInputs::new(&host, tasks),
     )?;
     let endpoints = process.bound_endpoints();
     let candidate = configuration(Some(&format!(
@@ -896,7 +916,7 @@ fn same_endpoint_proxy_policy_reload_keeps_the_serving_endpoints_stable()
         listener_configuration(control_path, operations_port)
     )))?;
 
-    let outcome = process.reload_configuration(candidate)?;
+    let outcome = process.reload_configuration(Arc::clone(&candidate))?;
 
     assert!(matches!(
         outcome,
@@ -904,7 +924,63 @@ fn same_endpoint_proxy_policy_reload_keeps_the_serving_endpoints_stable()
     ));
     assert_eq!(process.bound_endpoints(), endpoints);
     assert_eq!(process.health().phase(), ProcessPhase::Serving);
-    assert_eq!(process.health().readiness(), Readiness::Ready);
+    let (release, worker) = if overlap_key_admission {
+        let services = process.services().ok_or("native services unavailable")?;
+        let (entered, entered_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            positron_kernel::RootRewrapSession::with_key_admission_action(
+                move || {
+                    assert!(entered.send(()).is_ok());
+                    assert!(release_rx.recv_timeout(Duration::from_secs(2)).is_ok());
+                },
+                || services.execute_log_query("invalid", b"{}").map(|_| ()),
+            )
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2))?;
+        assert_eq!(process.health().readiness(), Readiness::NotReady);
+        assert_eq!(process.health().phase(), ProcessPhase::Serving);
+        assert_eq!(process.bound_endpoints(), endpoints);
+        (Some(release), Some(worker))
+    } else {
+        (None, None)
+    };
+    let configuration = process.configuration().ok_or("configuration unavailable")?;
+    let published = configuration.observed()?;
+    assert_eq!(
+        published.effective().semantic_diff(&candidate).plan(),
+        positron_config::ConfigurationDiffPlan::NoChange
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut readiness = process.health().readiness();
+    if let Some(release) = release {
+        release.send(())?;
+    }
+    // Key admission temporarily owns the SYSTEM cache, so readiness can
+    // truthfully fail closed while the committed listener generation serves.
+    while readiness != Readiness::Ready {
+        assert_eq!(process.health().phase(), ProcessPhase::Serving);
+        assert_eq!(
+            process.health().liveness(),
+            positron_runtime::Liveness::Live
+        );
+        assert_eq!(process.bound_endpoints(), endpoints);
+        assert_eq!(
+            configuration.observed()?.generation(),
+            published.generation()
+        );
+        assert!(
+            Instant::now() < deadline,
+            "serving readiness did not recover"
+        );
+        thread::sleep(Duration::from_millis(5));
+        readiness = process.health().readiness();
+    }
+    assert_eq!(readiness, Readiness::Ready);
+    if let Some(worker) = worker {
+        let outcome = worker.join().map_err(|_| "key admission worker panicked")?;
+        assert!(matches!(outcome, Err((401, _))));
+    }
     assert!(matches!(
         process.shutdown(ShutdownTrigger::FirstSignal),
         positron_runtime::ExitOutcome::Graceful

@@ -226,7 +226,7 @@ else:
             b"positron: query unavailable; inspect instance readiness": "query_unavailable",
             b"positron: query transport or response unavailable": "transport",
         }.get(result.stderr.strip(), "other")
-        if time.monotonic() + 1 >= deadline or b"capacity unavailable" not in result.stderr:
+        if time.monotonic() + 1 >= deadline or last_rejection != "capacity_unavailable":
             elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
             raise RuntimeError(f"public query failed: code={last_rejection} returncode={result.returncode} "
                 f"attempt={attempt} elapsed_ms={elapsed_ms}")

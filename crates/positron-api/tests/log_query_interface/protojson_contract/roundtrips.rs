@@ -74,6 +74,7 @@ fn request_budget_and_header_components_preserve_canonical_json_identity() {
             expiry_unix_seconds: 3,
         }),
         initial_cursor: Some(vec![3]),
+        tail_phase: None,
     };
     representation(
         header.clone(),

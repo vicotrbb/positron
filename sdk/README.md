@@ -1,5 +1,6 @@
-# Generated SDK scaffold
+# Generated Positron SDKs
 
-This directory is reserved for the reproducibly generated Rust, TypeScript,
-Python, Go, Java/JVM, and .NET SDK publication workspaces. Generated source is
-never hand edited, and no SDK can define database-domain behavior.
+The [Rust SDK reference](rust.md) describes the implemented Rust package,
+its canonical source, bounded clients, delivery receipts, and release binding.
+`rust/` is generated with the native Cargo examples in `positron-api`.
+Package publication and complete SDK Release Set acceptance remain Release Trust operations.

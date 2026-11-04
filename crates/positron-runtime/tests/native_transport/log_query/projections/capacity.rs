@@ -6,6 +6,9 @@ use std::sync::{
 };
 use std::time::Instant;
 
+#[path = "capacity/session.rs"]
+mod session;
+
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 fn request() -> api::LogQueryRequest {
@@ -54,6 +57,7 @@ fn missing_response() -> TestResult<api::LogQueryResponse> {
                         expiry_unix_seconds: 1,
                     }),
                     initial_cursor: None,
+                    tail_phase: None,
                 })),
             },
             LogQueryEvent {
@@ -434,4 +438,99 @@ fn generated_repeated_capacity_expires_admission_without_a_late_attempt() -> Tes
 #[test]
 fn generated_repeated_capacity_counts_every_rejected_attempt() -> TestResult<()> {
     generated_capacity_then_terminal(false, 2)
+}
+
+fn cancellation_fixture(
+    replies: &[(u16, Vec<u8>)],
+) -> TestResult<(
+    positron_sdk::log_query::LogQueryServiceClientFailure,
+    Vec<Vec<u8>>,
+)> {
+    use positron_sdk::{api_keys::protobuf::CapabilityResponse, log_query as sdk};
+    let capability = serde_json::to_vec(&CapabilityResponse {
+        api_major: 1,
+        schema_digest: positron_sdk::generated::SchemaDigest::canonical()
+            .as_str()
+            .into(),
+        capability: positron_sdk::generated::Capability::QuerySessions as i32,
+        availability: positron_sdk::generated::CapabilityAvailability::Implemented as i32,
+        ..Default::default()
+    })?;
+    let exchanges = replies
+        .iter()
+        .flat_map(|(status, body)| {
+            [
+                (reply(200, &capability, false), false),
+                (reply(*status, body, *status == 429), false),
+            ]
+        })
+        .collect();
+    let (result, bodies) = scripted(exchanges, |endpoint| {
+        let client =
+            sdk::LogQueryServiceClient::new(sdk::LogQueryTransport::PlaintextOptOut { endpoint })?;
+        Ok(crate::log_query::session::cancel_after_definite_capacity(
+            &client,
+            "fixture-cancellation-key",
+            &sdk::LogQueryCancelRequest {
+                cursor: Some(sdk::log_query_cancel_request::Cursor::Query(vec![1])),
+            },
+        )
+        .err()
+        .ok_or("fixture cancellation unexpectedly succeeded")?)
+    })?;
+    Ok((result?, bodies))
+}
+
+#[test]
+fn explicit_cancellation_never_repeats_ambiguous_or_forged_refusals() -> TestResult<()> {
+    use positron_sdk::{
+        api_keys::protobuf::{CompletionState, PublicErrorCode},
+        log_query as sdk,
+    };
+    let ambiguous =
+        sdk::cancellation_rejection(503, "store_unavailable", CompletionState::Ambiguous)?;
+    let (failure, bodies) = cancellation_fixture(&[(503, ambiguous)])?;
+    assert_eq!(
+        failure,
+        sdk::LogQueryServiceClientFailure::AmbiguousCancellation(PublicErrorCode::StoreUnavailable)
+    );
+    assert_eq!(
+        bodies.len(),
+        2,
+        "one capability check and one cancellation, with no replay"
+    );
+    let mut forged: serde_json::Value =
+        serde_json::from_slice(&sdk::query_rejection(429, "capacity_unavailable")?)?;
+    forged["completionState"] = serde_json::json!("COMPLETION_STATE_AMBIGUOUS");
+    let (failure, bodies) = cancellation_fixture(&[(429, serde_json::to_vec(&forged)?)])?;
+    assert_eq!(failure, sdk::LogQueryServiceClientFailure::Transport);
+    assert_eq!(
+        bodies.len(),
+        2,
+        "inconsistent wire metadata cannot enable a retry"
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_cancellation_capacity_uses_one_original_five_second_window() -> TestResult<()> {
+    use positron_sdk::log_query as sdk;
+    let refusal = sdk::query_rejection(429, "capacity_unavailable")?;
+    let started = Instant::now();
+    let (failure, bodies) = cancellation_fixture(&vec![(429, refusal); 10])?;
+    assert_eq!(
+        failure,
+        sdk::LogQueryServiceClientFailure::CapacityUnavailable
+    );
+    assert!(started.elapsed() < Duration::from_secs(6));
+    assert!(
+        (2..=10).contains(&bodies.len()),
+        "backoff cannot reset the original deadline"
+    );
+    let cancellations: Vec<_> = bodies.iter().skip(1).step_by(2).collect();
+    assert!(
+        cancellations.windows(2).all(|pair| pair[0] == pair[1]),
+        "only the same authenticated cursor can be reconciled"
+    );
+    Ok(())
 }

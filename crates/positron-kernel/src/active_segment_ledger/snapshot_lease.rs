@@ -443,6 +443,17 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         self.resume_snapshot_lease_marked(identity, now, None, None, false)
     }
 
+    /// Validates and reconstructs a paired durable lease without recording a
+    /// cursor attempt. Admission can inspect its original snapshot bindings
+    /// before publishing the one marked resume.
+    pub fn resume_snapshot_lease_with_expiry_task(
+        &self,
+        identity: SnapshotLeaseId,
+        now: u64,
+    ) -> Result<SnapshotLeaseGrant<'kernel>, LedgerFailure> {
+        self.resume_snapshot_lease_marked(identity, now, None, None, true)
+    }
+
     /// Resumes a lease while recording the immutable cursor boundary being
     /// attempted. Reusing the same boundary is an at-least-once batch retry;
     /// advancing to a different boundary is a normal page transition.
@@ -722,8 +733,25 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .lock()
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::ConcurrentWriter))?;
         state.require_healthy()?;
+        self.release_registered_snapshot_lease(&mut state, identity)
+    }
+
+    fn release_registered_snapshot_lease(
+        &self,
+        state: &mut super::state::LedgerState<'kernel>,
+        identity: SnapshotLeaseId,
+    ) -> Result<(), LedgerFailure> {
         state.pending_lease_releases.register(identity)?;
-        self.retry_pending_releases(&mut state)
+        self.retry_pending_releases(state).map_err(|failure| {
+            // Once registered, existing cleanup can act on a later call or
+            // ledger drop even if this publication was rejected.
+            match failure.completion_state() {
+                LedgerCompletionState::RejectedBeforeMutation => {
+                    LedgerFailure::post_mutation(failure.code())
+                },
+                _ => failure,
+            }
+        })
     }
 
     /// Releases a coupled query lease and terminalizes exactly its durable
@@ -744,8 +772,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             .into_iter()
             .find(|record| record.identity == identity && record.scope == self.scope);
         let Some(record) = record else {
-            state.pending_lease_releases.register(identity)?;
-            return self.retry_pending_releases(&mut state);
+            return self.release_registered_snapshot_lease(&mut state, identity);
         };
         let task = MaintenanceTaskId::new(identity.to_bytes())
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::IntegrityCorruption))?;
@@ -777,8 +804,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             )
             .map_err(|_| LedgerFailure::new(LedgerFailureCode::StaleGeneration))?;
         let Some(cancellation) = cancellation else {
-            state.pending_lease_releases.register(identity)?;
-            return self.retry_pending_releases(&mut state);
+            return self.release_registered_snapshot_lease(&mut state, identity);
         };
         let cancellation_object = match cancellation.catalog_object() {
             Ok(object) => object,
@@ -802,9 +828,12 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
                 .map_err(|_| LedgerFailure::new(LedgerFailureCode::ConcurrentWriter))?;
             return Err(failure);
         }
+        #[cfg(any(test, fuzzing, feature = "test-support"))]
+        super::fault::emit_event(super::fault::LedgerFileEvent::AfterLeaseCancellationPublication)
+            .map_err(|_| LedgerFailure::post_mutation(LedgerFailureCode::RecoveryRequired))?;
         cancellation
             .install(coordinator)
-            .map_err(|_| LedgerFailure::new(LedgerFailureCode::RecoveryRequired))?;
+            .map_err(|_| LedgerFailure::post_mutation(LedgerFailureCode::RecoveryRequired))?;
         state.lease_reservations.remove(&identity);
         state.lease_reservation_baselines.remove(&identity);
         state.lease_resume_markers.remove(&identity);

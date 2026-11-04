@@ -1,0 +1,236 @@
+pub(crate) struct MethodSpec {
+    pub(crate) name: &'static str,
+    pub(crate) input: &'static str,
+    pub(crate) output: &'static str,
+}
+
+pub(crate) struct ServiceSpec {
+    pub(crate) name: &'static str,
+    pub(crate) methods: &'static [MethodSpec],
+}
+
+const API_KEY_METHODS: &[MethodSpec] = &[MethodSpec {
+    name: "Manage",
+    input: ".positron.v1.ApiKeyRequest",
+    output: ".positron.v1.ApiKeyResponse",
+}];
+const TENANT_QUOTA_METHODS: &[MethodSpec] = &[MethodSpec {
+    name: "Update",
+    input: ".positron.v1.TenantQuotaUpdateRequest",
+    output: ".positron.v1.TenantQuotaUpdateResponse",
+}];
+const TENANT_LIFECYCLE_METHODS: &[MethodSpec] = &[MethodSpec {
+    name: "Transition",
+    input: ".positron.v1.TenantLifecycleTransitionRequest",
+    output: ".positron.v1.TenantLifecycleTransitionResponse",
+}];
+const TENANT_RETENTION_METHODS: &[MethodSpec] = &[
+    MethodSpec {
+        name: "Preview",
+        input: ".positron.v1.TenantRetentionPreviewRequest",
+        output: ".positron.v1.TenantRetentionPreviewResponse",
+    },
+    MethodSpec {
+        name: "Update",
+        input: ".positron.v1.TenantRetentionUpdateRequest",
+        output: ".positron.v1.TenantRetentionUpdateResponse",
+    },
+];
+const TENANT_METHODS: &[MethodSpec] = &[
+    MethodSpec {
+        name: "Create",
+        input: ".positron.v1.TenantCreateRequest",
+        output: ".positron.v1.TenantCreateResponse",
+    },
+    MethodSpec {
+        name: "Inspect",
+        input: ".positron.v1.TenantInspectRequest",
+        output: ".positron.v1.TenantInspectResponse",
+    },
+    MethodSpec {
+        name: "List",
+        input: ".positron.v1.TenantListRequest",
+        output: ".positron.v1.TenantListResponse",
+    },
+    MethodSpec {
+        name: "UpdateDisplayName",
+        input: ".positron.v1.TenantDisplayNameUpdateRequest",
+        output: ".positron.v1.TenantDisplayNameUpdateResponse",
+    },
+];
+const TENANT_ALIAS_METHODS: &[MethodSpec] = &[MethodSpec {
+    name: "Bind",
+    input: ".positron.v1.TenantAliasBindRequest",
+    output: ".positron.v1.TenantAliasBindResponse",
+}];
+const MAINTENANCE_METHODS: &[MethodSpec] = &[
+    MethodSpec {
+        name: "AbandonSegment",
+        input: ".positron.v1.SegmentAbandonmentRequest",
+        output: ".positron.v1.SegmentAbandonmentResponse",
+    },
+    MethodSpec {
+        name: "Status",
+        input: ".positron.v1.MaintenanceStatusRequest",
+        output: ".positron.v1.MaintenanceStatusResponse",
+    },
+    MethodSpec {
+        name: "Explain",
+        input: ".positron.v1.MaintenanceExplainRequest",
+        output: ".positron.v1.MaintenanceExplainResponse",
+    },
+    MethodSpec {
+        name: "Run",
+        input: ".positron.v1.MaintenanceRunRequest",
+        output: ".positron.v1.MaintenanceRunResponse",
+    },
+    MethodSpec {
+        name: "Pause",
+        input: ".positron.v1.MaintenancePauseRequest",
+        output: ".positron.v1.MaintenanceControlResponse",
+    },
+    MethodSpec {
+        name: "Resume",
+        input: ".positron.v1.MaintenanceResumeRequest",
+        output: ".positron.v1.MaintenanceControlResponse",
+    },
+    MethodSpec {
+        name: "Window",
+        input: ".positron.v1.MaintenanceWindowRequest",
+        output: ".positron.v1.MaintenanceWindowResponse",
+    },
+    MethodSpec {
+        name: "Verify",
+        input: ".positron.v1.OnlineVerificationRequest",
+        output: ".positron.v1.OnlineVerificationReport",
+    },
+];
+const POLICY_METHODS: &[MethodSpec] = &[
+    MethodSpec {
+        name: "Validate",
+        input: ".positron.v1.PolicyPreviewRequest",
+        output: ".positron.v1.PolicyValidateResponse",
+    },
+    MethodSpec {
+        name: "Test",
+        input: ".positron.v1.PolicyTestRequest",
+        output: ".positron.v1.PolicyTestResponse",
+    },
+    MethodSpec {
+        name: "Diff",
+        input: ".positron.v1.PolicyDiffRequest",
+        output: ".positron.v1.PolicyDiffResponse",
+    },
+    MethodSpec {
+        name: "Explain",
+        input: ".positron.v1.PolicyExplainRequest",
+        output: ".positron.v1.PolicyExplainResponse",
+    },
+    MethodSpec {
+        name: "Activate",
+        input: ".positron.v1.PolicyActivateRequest",
+        output: ".positron.v1.PolicyActivateResponse",
+    },
+];
+
+pub(crate) const SERVICES: &[ServiceSpec] = &[
+    ServiceSpec {
+        name: "BackupService",
+        methods: &[
+            MethodSpec {
+                name: "List",
+                input: ".positron.v1.BackupListRequest",
+                output: ".positron.v1.BackupListResponse",
+            },
+            MethodSpec {
+                name: "Manage",
+                input: ".positron.v1.BackupRequest",
+                output: ".positron.v1.BackupResponse",
+            },
+        ],
+    },
+    ServiceSpec {
+        name: "RepositoryService",
+        methods: &[MethodSpec {
+            name: "Manage",
+            input: ".positron.v1.RepositoryRequest",
+            output: ".positron.v1.RepositoryResponse",
+        }],
+    },
+    ServiceSpec {
+        name: "ProviderMigrationService",
+        methods: &[MethodSpec {
+            name: "Manage",
+            input: ".positron.v1.ProviderMigrationRequest",
+            output: ".positron.v1.ProviderMigrationResponse",
+        }],
+    },
+    ServiceSpec {
+        name: "TenantPurgeService",
+        methods: &[MethodSpec {
+            name: "Manage",
+            input: ".positron.v1.TenantPurgeRequest",
+            output: ".positron.v1.TenantPurgeResponse",
+        }],
+    },
+    ServiceSpec {
+        name: "UpgradeService",
+        methods: &[MethodSpec {
+            name: "Manage",
+            input: ".positron.v1.UpgradeRequest",
+            output: ".positron.v1.UpgradeResponse",
+        }],
+    },
+    ServiceSpec {
+        name: "LogQueryService",
+        methods: &[
+            MethodSpec {
+                name: "Execute",
+                input: ".positron.v1.LogQueryRequest",
+                output: ".positron.v1.LogQueryResponse",
+            },
+            MethodSpec {
+                name: "Session",
+                input: ".positron.v1.LogQuerySessionRequest",
+                output: ".positron.v1.LogQueryResponse",
+            },
+            MethodSpec {
+                name: "Cancel",
+                input: ".positron.v1.LogQueryCancelRequest",
+                output: ".positron.v1.LogQueryCancelResponse",
+            },
+        ],
+    },
+    ServiceSpec {
+        name: "ApiKeyService",
+        methods: API_KEY_METHODS,
+    },
+    ServiceSpec {
+        name: "TenantQuotaService",
+        methods: TENANT_QUOTA_METHODS,
+    },
+    ServiceSpec {
+        name: "TenantLifecycleService",
+        methods: TENANT_LIFECYCLE_METHODS,
+    },
+    ServiceSpec {
+        name: "TenantRetentionService",
+        methods: TENANT_RETENTION_METHODS,
+    },
+    ServiceSpec {
+        name: "TenantService",
+        methods: TENANT_METHODS,
+    },
+    ServiceSpec {
+        name: "TenantAliasService",
+        methods: TENANT_ALIAS_METHODS,
+    },
+    ServiceSpec {
+        name: "MaintenanceService",
+        methods: MAINTENANCE_METHODS,
+    },
+    ServiceSpec {
+        name: "PolicyService",
+        methods: POLICY_METHODS,
+    },
+];

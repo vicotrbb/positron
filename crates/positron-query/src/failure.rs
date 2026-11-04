@@ -72,6 +72,50 @@ impl Display for QueryFailure {
 
 impl std::error::Error for QueryFailure {}
 
+/// The original cancellation cause and the lease owner's effect disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueryCancellationFailure {
+    code: QueryFailureCode,
+    completion: positron_kernel::LedgerCompletionState,
+}
+
+impl QueryCancellationFailure {
+    pub(crate) const fn new(
+        code: QueryFailureCode,
+        completion: positron_kernel::LedgerCompletionState,
+    ) -> Self {
+        Self { code, completion }
+    }
+    #[must_use]
+    pub const fn code(self) -> QueryFailureCode {
+        self.code
+    }
+    #[must_use]
+    pub const fn completion_state(self) -> positron_kernel::LedgerCompletionState {
+        self.completion
+    }
+    pub(crate) fn after_partial_effect(mut self) -> Self {
+        if self.completion == positron_kernel::LedgerCompletionState::RejectedBeforeMutation {
+            self.completion = positron_kernel::LedgerCompletionState::RecoveryRequired;
+        }
+        self
+    }
+}
+impl From<QueryFailure> for QueryCancellationFailure {
+    fn from(failure: QueryFailure) -> Self {
+        Self::new(
+            failure.code(),
+            positron_kernel::LedgerCompletionState::RejectedBeforeMutation,
+        )
+    }
+}
+impl Display for QueryCancellationFailure {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("query cancellation failed")
+    }
+}
+impl std::error::Error for QueryCancellationFailure {}
+
 pub(crate) fn stronger_failure(left: QueryFailure, right: QueryFailure) -> QueryFailure {
     if failure_rank(right.code) > failure_rank(left.code) {
         right
