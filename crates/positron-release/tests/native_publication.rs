@@ -101,7 +101,7 @@ fn npm_native_provenance_requires_the_registry_sha512_subject_profile() {
     for artifact in &mut fixture.inventory.artifacts {
         if artifact.surface == Surface::SdkTypeScript {
             artifact.publication.registry = "https://registry.npmjs.org".into();
-            artifact.publication.native_subject = "pkg:npm/positron-sdk@1.0.0".into();
+            artifact.publication.native_subject = "pkg:npm/%40positron/sdk@1.0.0".into();
         }
     }
     let (signed, prepared) = fixture.published_with_native(
@@ -234,7 +234,7 @@ fn npm_native_sha512_provenance_binds_the_shared_release_version() {
             .find(|artifact| artifact.surface == Surface::SdkTypeScript)
             .unwrap();
         artifact.publication.registry = "https://registry.npmjs.org".into();
-        artifact.publication.native_subject = "pkg:npm/positron-sdk@1.0.0".into();
+        artifact.publication.native_subject = "pkg:npm/%40positron/sdk@1.0.0".into();
         let digest = support::hex(&Sha512::digest(
             std::fs::read(fixture.root.join("bundle").join(&artifact.file)).unwrap(),
         ));
@@ -245,7 +245,7 @@ fn npm_native_sha512_provenance_binds_the_shared_release_version() {
                 if artifact.surface == Surface::SdkTypeScript {
                     statement["subject"][0]["digest"] = serde_json::json!({"sha512":digest});
                     statement["subject"][0]["name"] =
-                        serde_json::json!(format!("pkg:npm/positron-sdk@{version}"));
+                        serde_json::json!(format!("pkg:npm/%40positron/sdk@{version}"));
                     statement["predicate"]["buildDefinition"]["buildType"] = serde_json::json!(
                         "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
                     );
