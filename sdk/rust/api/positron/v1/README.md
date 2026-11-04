@@ -488,8 +488,11 @@ for every generated SDK. `schema_version` versions the fixture layout.
 `representations` contains a public Protobuf message type, raw ProtoJSON `input`
 (to preserve duplicate fields), `accepted`, and the canonical JSON for accepted
 inputs. Session requests use the public semantic decoder. `responses` contains
-complete Execute envelopes and their expected acceptance, including batch
-sequence, row width, digest-chain, terminal-digest, and opaque-cursor failures.
+complete response envelopes and their expected acceptance. `mode` selects
+`session` or `tail`, and defaults to finite `execute`. Cases include batch
+sequence, row width, digest-chain, terminal-digest, opaque-cursor, and Tail poll
+shape failures. Tail polls permit at most one batch and require an Incomplete
+terminal; historical Session continuation remains accepted.
 Digest bytes are fixed protocol identities for consistency validation, not
 cryptographic digest algorithm test vectors. SDKs preserve opaque cursor bytes;
 only the server authenticates cursor contents.

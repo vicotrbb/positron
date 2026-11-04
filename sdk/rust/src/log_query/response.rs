@@ -51,6 +51,7 @@ impl LogQueryResponse {
         };
         if self.events.len() < 2
             || self.events.len() > 130
+            || (tail && self.events.len() > 3)
             || (tail
                 && header.tail_phase.as_deref().is_none_or(|phase| {
                     !matches!(
@@ -219,7 +220,8 @@ impl LogQueryResponse {
                 }
             },
             "continued"
-                if terminal.stats.is_none()
+                if !tail
+                    && terminal.stats.is_none()
                     && terminal.reason.is_empty()
                     && terminal
                         .continuation_cursor
