@@ -371,7 +371,7 @@ fn inspect(
     Ok(())
 }
 
-fn portable_path(path: &str) -> Result<(), ReleaseError> {
+pub(crate) fn portable_path(path: &str) -> Result<(), ReleaseError> {
     if !path.is_ascii() {
         return Err(ReleaseError::Unsupported);
     }

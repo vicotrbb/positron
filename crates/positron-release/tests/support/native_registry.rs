@@ -20,9 +20,9 @@ pub struct NativeArtifactFixture {
     pub proof: Value,
 }
 
-pub fn fixtures(version: &str, source_commit: &str) -> Vec<NativeArtifactFixture> {
+pub fn fixtures(version: &str, source_commit: &str, api: &[u8]) -> Vec<NativeArtifactFixture> {
     let crate_name = "positron-sdk";
-    let schema = hex(&Sha256::digest(b"canonical api definition"));
+    let schema = hex(&Sha256::digest(api));
     let cargo = format!(
         "[package]\nname = \"{crate_name}\"\nversion = \"{version}\"\nedition = \"2024\"\n[package.metadata.positron]\napi_version = \"positron.v1\"\nschema_digest = \"{schema}\"\nrelease_manifest_surface = \"SdkRust\"\nregistry = \"https://crates.io\"\ngenerator = \"prost=0.14.3,pbjson=0.9.0,protoc-bin-vendored=3.2.0\"\n[build-dependencies]\nprost-build = \"=0.14.3\"\npbjson-build = \"=0.9.0\"\nprotoc-bin-vendored = \"=3.2.0\"\n"
     );
@@ -34,10 +34,7 @@ pub fn fixtures(version: &str, source_commit: &str) -> Vec<NativeArtifactFixture
         &format!("{crate_name}-{version}"),
         &[
             ("Cargo.toml", cargo.as_bytes()),
-            (
-                "api/positron/v1/positron.proto",
-                b"canonical api definition",
-            ),
+            ("api/positron/v1/positron.proto", api),
             (
                 "api/positron/v1/schema.sha256",
                 format!("{schema}\n").as_bytes(),
@@ -114,14 +111,17 @@ pub fn fixtures(version: &str, source_commit: &str) -> Vec<NativeArtifactFixture
     );
 
     let package_json = serde_json::to_vec(
-        &json!({"name":"@positron/sdk","version":version,"type":"module","exports":"./index.js"}),
+        &json!({"name":"@positron/sdk","version":version,"type":"module","gitHead":source_commit,"exports":{".":{"import":"./dist/index.js","types":"./dist/index.d.ts"}},"publishConfig":{"registry":"https://registry.npmjs.org"},"positron":{"api_version":"positron.v1","schema_digest":schema,"release_manifest_surface":"SdkTypeScript","registry":"https://registry.npmjs.org","generator":"positron-api=1,typescript=5.9.3,protoc-bin-vendored=3.2.0"}}),
     )
     .unwrap();
     let npm_bytes = tar_gzip(
         "package",
         &[
             ("package.json", &package_json),
-            ("index.js", b"export class Client {}\n"),
+            ("dist/index.js", b"export class Client {}\n"),
+            ("dist/index.d.ts", b"export declare class Client {}\n"),
+            ("api/positron.proto", api),
+            ("api/schema.sha256", format!("{schema}\n").as_bytes()),
         ],
     );
     let npm = keyless_artifact(

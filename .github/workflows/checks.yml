@@ -54,6 +54,24 @@ jobs:
           cargo test --locked --manifest-path "$manifest" --doc --target-dir target
           cargo check --locked --manifest-path "$manifest" --examples --target-dir target
 
+      - name: Install TypeScript SDK Node toolchain
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.18.0'
+
+      - name: Verify clean TypeScript SDK generation and locked build
+        run: |
+          generated="$(mktemp -d)"
+          trap 'rm -rf "$generated"' EXIT
+          cargo run --locked -p positron-api --example generate_typescript_sdk -- "$generated"
+          (cd "$generated" && npm ci --ignore-scripts && npm run build)
+          diff -r --exclude=node_modules sdk/typescript "$generated"
+
+      - name: Verify TypeScript SDK wire, delivery, transport, package and install
+        run: |
+          (cd sdk/typescript && npm ci --ignore-scripts && npm run build)
+          POSITRON_TYPESCRIPT_SDK="$PWD/sdk/typescript" node --test sdk/tests/typescript/*.test.mjs
+
       - name: Run unit and integration tests
         run: cargo test --locked --workspace --lib --bins --tests
 

@@ -1,0 +1,1193 @@
+// Canonical Positron public API definition. The committed Rust, HTTP/JSON,
+// OpenAPI, schema, reference, and fixture artifacts change with this contract.
+syntax = "proto3";
+
+package positron.v1;
+
+// Capability negotiation is the public foundation used before any later
+// versioned service sends a request whose semantics the peer cannot support.
+service CapabilityService {
+  rpc Negotiate(CapabilityRequest) returns (CapabilityResponse);
+}
+
+// Authenticated System Administration API. Bearer credentials are transport
+// metadata and are never included in request bodies. Tenant authority is
+// selected only by the server's durable identity, never by a caller hint.
+service ApiKeyService {
+  rpc Manage(ApiKeyRequest) returns (ApiKeyResponse);
+}
+
+// Authenticated tenant-scoped quota administration. The bearer determines
+// authority and must be bound to the named control-plane tenant.
+service TenantQuotaService {
+  rpc Update(TenantQuotaUpdateRequest) returns (TenantQuotaUpdateResponse);
+}
+
+// Authenticated system-administration lifecycle transitions for one explicit
+// tenant. The target is never inferred from a bearer or a request hint.
+service TenantLifecycleService {
+  rpc Transition(TenantLifecycleTransitionRequest) returns (TenantLifecycleTransitionResponse);
+}
+
+// One immutable, protocol-specific compatibility binding for an explicit
+// tenant. It validates a hint after credential attribution; it never routes
+// traffic or selects tenant authority.
+service TenantAliasService {
+  rpc Bind(TenantAliasBindRequest) returns (TenantAliasBindResponse);
+}
+
+// Authenticated tenant retention inspection and confirmed publication. The
+// preview is read-only evidence; a reduction submits only its opaque digest,
+// which the server recomputes from current canonical state before mutation.
+service TenantRetentionService {
+  rpc Preview(TenantRetentionPreviewRequest) returns (TenantRetentionPreviewResponse);
+  rpc Update(TenantRetentionUpdateRequest) returns (TenantRetentionUpdateResponse);
+}
+
+// Authenticated system-administration inspection of the one Storage Kernel
+// Maintenance Coordinator. Task control remains in the coordinator.
+service MaintenanceService {
+  rpc Status(MaintenanceStatusRequest) returns (MaintenanceStatusResponse);
+  rpc Explain(MaintenanceExplainRequest) returns (MaintenanceExplainResponse);
+  rpc Run(MaintenanceRunRequest) returns (MaintenanceRunResponse);
+  rpc Pause(MaintenancePauseRequest) returns (MaintenanceControlResponse);
+  rpc Resume(MaintenanceResumeRequest) returns (MaintenanceControlResponse);
+  rpc Window(MaintenanceWindowRequest) returns (MaintenanceWindowResponse);
+  rpc Verify(OnlineVerificationRequest) returns (OnlineVerificationReport);
+  rpc AbandonSegment(SegmentAbandonmentRequest) returns (SegmentAbandonmentResponse);
+}
+
+// Authenticated system administration for explicit tenant registry entries.
+// Tenant identity is always explicit and is never inferred from a bearer.
+service TenantService {
+  rpc Create(TenantCreateRequest) returns (TenantCreateResponse);
+  rpc Inspect(TenantInspectRequest) returns (TenantInspectResponse);
+  rpc List(TenantListRequest) returns (TenantListResponse);
+  rpc UpdateDisplayName(TenantDisplayNameUpdateRequest) returns (TenantDisplayNameUpdateResponse);
+}
+
+// Authenticated tenant policy preview. This operation compiles a bounded
+// prospective policy and never activates or mutates it.
+service PolicyService {
+  rpc Validate(PolicyPreviewRequest) returns (PolicyValidateResponse);
+  rpc Test(PolicyTestRequest) returns (PolicyTestResponse);
+  rpc Diff(PolicyDiffRequest) returns (PolicyDiffResponse);
+  rpc Explain(PolicyExplainRequest) returns (PolicyExplainResponse);
+  rpc Activate(PolicyActivateRequest) returns (PolicyActivateResponse);
+}
+
+message PolicyPreviewRequest {
+  string policy_json = 1;
+}
+
+message PolicyValidateResponse {
+  uint64 policy_generation = 1;
+  string policy_digest = 2;
+  uint32 rule_count = 3;
+}
+
+message PolicyTestRequest {
+  string policy_json = 1;
+  string candidate_json = 2;
+}
+
+message PolicyTestResponse {
+  uint64 policy_generation = 1;
+  string policy_digest = 2;
+  bool accepted = 3;
+  uint32 applied_rule_count = 4;
+}
+
+message PolicyDiffRequest {
+  string before_policy_json = 1;
+  string after_policy_json = 2;
+}
+
+message PolicyDiffResponse {
+  uint64 before_policy_generation = 1;
+  string before_policy_digest = 2;
+  uint64 after_policy_generation = 3;
+  string after_policy_digest = 4;
+  repeated string semantic_changes = 5;
+}
+
+message PolicyExplainRequest {
+  string policy_json = 1;
+  string candidate_json = 2;
+}
+
+message PolicyExplainResponse {
+  uint64 policy_generation = 1;
+  string policy_digest = 2;
+  string outcome = 3;
+  string explanation = 4;
+}
+
+message PolicyActivateRequest {
+  string policy_json = 1;
+  uint64 expected_generation = 2;
+  string idempotency_key = 3;
+}
+
+message PolicyActivateResponse {
+  uint64 resource_generation = 1;
+  string policy_digest = 2;
+  uint64 audit_position = 3;
+}
+
+
+enum TenantLifecycleTarget {
+  TENANT_LIFECYCLE_TARGET_UNSPECIFIED = 0;
+  TENANT_LIFECYCLE_TARGET_ACTIVE = 1;
+  TENANT_LIFECYCLE_TARGET_READ_ONLY = 2;
+  TENANT_LIFECYCLE_TARGET_SUSPENDED = 3;
+  TENANT_LIFECYCLE_TARGET_PURGING = 4;
+  TENANT_LIFECYCLE_TARGET_PURGED = 5;
+}
+
+message TenantLifecycleTransitionRequest {
+  string tenant = 1;
+  TenantLifecycleTarget target = 2;
+  uint64 expected_generation = 3;
+  string idempotency_key = 4;
+}
+
+message TenantLifecycleTransitionResponse {
+  string tenant = 1;
+  TenantLifecycleTarget from = 2;
+  TenantLifecycleTarget to = 3;
+  uint64 lifecycle_generation = 4;
+  uint64 audit_position = 5;
+  uint64 audit_ingest_time_unix_seconds = 6;
+}
+
+message TenantAliasBindRequest {
+  string tenant = 1;
+  string external_alias = 2;
+  uint64 expected_generation = 3;
+  string idempotency_key = 4;
+}
+
+message TenantAliasBindResponse {
+  string tenant = 1;
+  uint64 alias_generation = 2;
+  uint64 audit_position = 3;
+  uint64 audit_ingest_time_unix_seconds = 4;
+}
+
+message TenantRetentionPreviewRequest {
+  string tenant = 1;
+  uint64 proposed_retention_seconds = 2;
+  optional string continuation = 3;
+}
+
+message TenantRetentionScopeImpact {
+  string signal = 1;
+  uint32 shard = 2;
+  string catalog_identity = 3;
+  uint64 catalog_generation = 4;
+  sint64 evaluated_at_unix_nanos = 5;
+  optional sint64 affected_start_unix_nanos = 6;
+  optional sint64 affected_end_unix_nanos = 7;
+  uint64 affected_bytes = 8;
+  uint64 immediately_reclaimable_bytes = 9;
+  uint64 deferred_active_segment_bytes = 10;
+  uint64 deferred_mixed_sealed_segment_bytes = 11;
+  RetentionReclamation earliest_reclamation = 12;
+  optional sint64 earliest_reclamation_unix_nanos = 13;
+}
+
+enum RetentionReclamation {
+  RETENTION_RECLAMATION_NONE = 0;
+  RETENTION_RECLAMATION_AT = 1;
+  RETENTION_RECLAMATION_BLOCKED_BY_DURABLE_LEASE = 2;
+  RETENTION_RECLAMATION_BLOCKED_BY_IN_PROCESS_SNAPSHOT = 3;
+}
+
+message TenantRetentionPreviewResponse {
+  string tenant = 1;
+  uint64 retention_generation = 2;
+  uint64 proposed_retention_seconds = 3;
+  string catalog_identity = 4;
+  uint64 catalog_generation = 5;
+  string confirmation_digest = 6;
+  repeated TenantRetentionScopeImpact scopes = 7;
+  optional string continuation = 8;
+  sint64 confirmation_evaluated_at_unix_nanos = 9;
+}
+
+message TenantRetentionUpdateRequest {
+  string tenant = 1;
+  uint64 proposed_retention_seconds = 2;
+  uint64 expected_generation = 3;
+  optional string confirmation_digest = 4;
+  string idempotency_key = 5;
+  optional sint64 confirmation_evaluated_at_unix_nanos = 6;
+}
+
+message TenantRetentionUpdateResponse {
+  string tenant = 1;
+  uint64 retention_generation = 2;
+  uint64 audit_position = 3;
+  uint64 audit_ingest_time_unix_seconds = 4;
+}
+
+message TenantCreateRequest {
+  reserved 1;
+  string slug = 2;
+  string display_name = 3;
+  uint64 retention_seconds = 4;
+  uint32 weight = 5;
+  uint64 memory_bytes = 6;
+  uint64 queue_slots = 7;
+  uint64 task_slots = 8;
+  uint64 buffer_cache_bytes = 9;
+  uint64 batch_items = 10;
+  uint64 lease_slots = 11;
+  uint64 retry_slots = 12;
+  uint64 io_permits = 13;
+  uint64 cpu_work_units = 14;
+  uint64 file_descriptors = 15;
+  uint64 disk_headroom_bytes = 16;
+  string idempotency_key = 17;
+}
+
+message TenantCreateResponse {
+  string tenant = 1;
+  uint64 resource_generation = 2;
+  uint64 audit_position = 3;
+}
+
+message TenantInspectRequest {
+  string tenant = 1;
+}
+
+message TenantListRequest {
+  optional string continuation = 1;
+}
+
+message TenantDescriptor {
+  string tenant = 1;
+  string slug = 2;
+  optional string display_name = 3;
+  optional uint64 retention_seconds = 4;
+  optional uint64 display_generation = 5;
+  optional uint64 retention_generation = 6;
+  TenantLifecycleTarget lifecycle = 7;
+}
+
+message TenantInspectResponse {
+  TenantDescriptor tenant = 1;
+}
+
+message TenantListResponse {
+  repeated TenantDescriptor tenants = 1;
+  optional string continuation = 2;
+}
+
+message TenantDisplayNameUpdateRequest {
+  string tenant = 1;
+  uint64 expected_display_generation = 2;
+  string display_name = 3;
+  string idempotency_key = 4;
+}
+
+message TenantDisplayNameUpdateResponse {
+  string tenant = 1;
+  uint64 display_generation = 2;
+  uint64 audit_position = 3;
+}
+
+message TenantQuotaUpdateRequest {
+  string tenant = 1;
+  uint64 expected_generation = 2;
+  string idempotency_key = 3;
+  uint32 weight = 4;
+  uint64 memory_bytes = 5;
+  uint64 queue_slots = 6;
+  uint64 task_slots = 7;
+  uint64 buffer_cache_bytes = 8;
+  uint64 batch_items = 9;
+  uint64 lease_slots = 10;
+  uint64 retry_slots = 11;
+  uint64 io_permits = 12;
+  uint64 cpu_work_units = 13;
+  uint64 file_descriptors = 14;
+  uint64 disk_headroom_bytes = 15;
+}
+
+message TenantQuotaUpdateResponse {
+  uint64 resource_generation = 1;
+}
+
+message ApiKeyRequest {
+  KeyAction action = 1;
+  optional KeyScope scope = 2;
+  optional string principal = 3;
+  optional uint64 expires_at_unix_seconds = 4;
+  optional uint64 expected_generation = 5;
+  optional string idempotency_key = 6;
+  // An explicit control-plane target for System Administration credential
+  // lifecycle control. It never participates in data-plane attribution.
+  optional string target_tenant = 7;
+}
+enum KeyAction {
+  KEY_ACTION_UNSPECIFIED = 0;
+  KEY_ACTION_CREATE = 1;
+  KEY_ACTION_LIST = 2;
+  KEY_ACTION_ROTATE = 3;
+  KEY_ACTION_REVOKE = 4;
+  KEY_ACTION_SCOPE_INSPECT = 5;
+}
+enum KeyScope {
+  KEY_SCOPE_UNSPECIFIED = 0;
+  KEY_SCOPE_INGEST = 1;
+  KEY_SCOPE_QUERY = 2;
+  KEY_SCOPE_TENANT_ADMINISTRATION = 3;
+  KEY_SCOPE_SYSTEM_ADMINISTRATION = 4;
+}
+message KeyDescriptor {
+  string principal = 1;
+  KeyScope scope = 2;
+  bool active = 3;
+  optional uint64 expires_at_unix_seconds = 4;
+  uint64 generation = 5;
+}
+message ApiKeyResponse {
+  repeated KeyDescriptor keys = 1;
+  optional string principal = 2;
+  // Present only in the first successful create/rotate response. Idempotent
+  // retries resolve the principal but never reconstruct or redisplay a secret.
+  optional string secret = 3;
+}
+
+message CapabilityRequest {
+  uint32 api_major = 1;
+  Capability capability = 2;
+}
+
+// Status selects a bounded page from the coordinator's identity-ordered
+// registry. An omitted cursor selects the first page; an omitted limit uses
+// the published safe default. The cursor is the prior page's opaque task
+// identity and never names a Catalog object.
+message MaintenanceStatusRequest {
+  optional string cursor = 1;
+  optional uint32 limit = 2;
+}
+
+message MaintenanceTaskStatus {
+  string identity = 1;
+  string task_class = 2;
+  string scope = 3;
+  string phase = 4;
+  uint64 submitted_at_unix_seconds = 5;
+  optional uint64 checkpoint_sequence = 6;
+  optional uint64 pause_until_unix_seconds = 7;
+  bool cancellation_requested = 8;
+  optional uint64 resource_generation = 9;
+  optional MaintenanceResourceReservations reservations = 10;
+  optional string blocked_precondition = 11;
+  repeated string safe_actions = 12;
+  optional uint64 backlog_age_seconds = 13;
+  optional string conflict_owner = 14;
+  optional uint32 checkpoint_completed_inputs = 15;
+  uint32 input_object_count = 16;
+  uint32 output_object_count = 17;
+  optional uint32 estimated_output_object_amplification_milli = 18;
+  optional string terminal_outcome = 19;
+  optional MaintenanceResourceReservations expected_foreground_impact = 20;
+  optional string terminal_failure_class = 21;
+  optional uint64 maintenance_window_until_unix_seconds = 22;
+  // Unix epoch (0) is a valid trusted durable-progress instant.
+  optional uint64 last_progress_at_unix_seconds = 23;
+  optional bool no_durable_progress_slo_breached = 24;
+  optional uint64 no_durable_progress_slo_seconds = 25;
+  // Current coordinator-owned authority for this task's declared reservation:
+  // foreground_reservation or recovery_reserve.
+  optional string capacity_risk = 26;
+  // Current lifecycle safety consequence. Omitted when no such fact applies.
+  optional string retention_impact = 27;
+  optional string recovery_impact = 28;
+  // Server-owned earliest time at which every active finite deferral permits
+  // execution. This is the later expiry when a pause and window overlap.
+  optional uint64 automatic_resume_at_unix_seconds = 29;
+}
+
+// A task's coordinator-derived peak Resource Governor reservation. This is
+// redacted to bounded aggregate amounts and never contains object identities.
+message MaintenanceResourceReservations {
+  uint64 memory_bytes = 1;
+  uint64 queue_slots = 2;
+  uint64 task_slots = 3;
+  uint64 buffer_cache_bytes = 4;
+  uint64 batch_items = 5;
+  uint64 lease_slots = 6;
+  uint64 retry_slots = 7;
+  uint64 io_permits = 8;
+  uint64 cpu_work_units = 9;
+  uint64 file_descriptors = 10;
+  uint64 disk_headroom_bytes = 11;
+}
+
+message MaintenanceStatusResponse {
+  repeated MaintenanceTaskStatus tasks = 1;
+  uint32 queued = 2;
+  uint32 running = 3;
+  uint32 deferred = 4;
+  uint32 terminal = 5;
+  uint32 returned = 6;
+  uint32 total = 7;
+  optional string next_cursor = 8;
+  // Authenticated Catalog-backed evidence for durable immutable corruption.
+  // It is repeated on each task page because it has a separate fixed capacity.
+  repeated IntegrityQuarantineFinding integrity_findings = 9;
+}
+
+// A known Event or Ingest range, or an explicit authenticated absence reason.
+// Endpoints are present only for `known`; no ingest-time fallback is permitted
+// for unavailable Event evidence.
+message AuthenticatedTimeRange {
+  string provenance = 1;
+  optional sint64 earliest_unix_nanos = 2;
+  optional sint64 latest_unix_nanos = 3;
+}
+
+message IntegrityQuarantineFinding {
+  string tenant = 1;
+  string signal = 2;
+  uint32 shard = 3;
+  string segment = 4;
+  uint64 base_position = 5;
+  AuthenticatedTimeRange event_range = 6;
+  AuthenticatedTimeRange ingest_range = 7;
+}
+
+message MaintenanceExplainRequest {
+  string identity = 1;
+}
+
+message MaintenanceExplainResponse {
+  MaintenanceTaskStatus task = 1;
+}
+
+// A bounded authenticated pass over one explicit immutable signal scope. A
+// continuation is accepted only with its exact prior Catalog generation.
+message OnlineVerificationRequest {
+  string tenant = 1;
+  string signal = 2;
+  uint32 shard = 3;
+  optional uint64 expected_catalog_generation = 4;
+  optional string continuation = 5;
+}
+
+// Secret-free, versioned evidence for one online verification pass. A true
+// completion is only emitted for a fully authenticated healthy scope.
+message OnlineVerificationReport {
+  uint32 report_version = 1;
+  string tenant = 2;
+  string signal = 3;
+  uint32 shard = 4;
+  uint64 catalog_generation = 5;
+  uint32 examined_segments = 6;
+  uint64 examined_bytes = 7;
+  uint32 omitted_segments = 8;
+  string outcome = 9;
+  bool verification_complete = 10;
+  optional string continuation = 11;
+  repeated IntegrityQuarantineFinding findings = 12;
+  // SHA-256 over the versioned canonical JSON account, excluding this field.
+  string report_checksum = 13;
+}
+
+// An authenticated system-administration request for one explicit existing
+// scope. Release 1 accepts only compaction; the Storage Kernel selects a
+// sealed source and derives its retention bucket, inputs, preconditions, and
+// reservations from authenticated Catalog state.
+message MaintenanceRunRequest {
+  string task_class = 1;
+  string tenant = 2;
+  string signal = 3;
+  uint32 shard = 4;
+  string idempotency_key = 5;
+}
+
+// Immutable acknowledgement of one durable task descriptor. Live phase,
+// blocking, reservation and progress facts are exposed only by Status/Explain.
+message MaintenanceTaskAcknowledgement {
+  string identity = 1;
+  string task_class = 2;
+  string scope = 3;
+  uint64 submitted_at_unix_seconds = 4;
+}
+
+message MaintenanceRunResponse {
+  MaintenanceTaskAcknowledgement task = 1;
+  uint64 resource_generation = 2;
+}
+
+// Defers only one existing optional task for a bounded server-derived
+// duration. The resource generation fences the immutable task preconditions.
+message MaintenancePauseRequest {
+  string identity = 1;
+  uint64 resource_generation = 2;
+  uint64 duration_seconds = 3;
+  string idempotency_key = 4;
+}
+
+// Removes one existing durable pause. The server never accepts an expiry or
+// other scheduling input from a caller.
+message MaintenanceResumeRequest {
+  string identity = 1;
+  string idempotency_key = 2;
+}
+
+message MaintenanceControlResponse {
+  MaintenanceTaskAcknowledgement task = 1;
+  uint64 audit_position = 2;
+  string action = 3;
+  optional uint64 resource_generation = 4;
+  optional uint64 pause_until_unix_seconds = 5;
+}
+
+// Defers a closed set of optional maintenance classes until a duration derived
+// from the server Lifecycle Clock. The expected Catalog generation fences the
+// one global window against concurrent operator changes.
+message MaintenanceWindowRequest {
+  repeated string deferred_classes = 1;
+  uint64 expected_catalog_generation = 2;
+  uint64 duration_seconds = 3;
+  string idempotency_key = 4;
+}
+
+message MaintenanceWindowResponse {
+  repeated string deferred_classes = 1;
+  uint64 until_unix_seconds = 2;
+  uint64 catalog_generation = 3;
+  uint64 audit_position = 4;
+}
+
+message CapabilityResponse {
+  uint32 api_major = 1;
+  string schema_digest = 2;
+  CapabilityAvailability availability = 3;
+  PublicError refusal = 4;
+  DeprecationState deprecation = 5;
+  Capability capability = 6;
+}
+
+// Unspecified preserves additive compatibility with older v1 clients, whose
+// negotiation request means the canonical public interface itself.
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  CAPABILITY_CANONICAL_PUBLIC_INTERFACE = 1;
+  CAPABILITY_RELEASE_ONE_QUERY = 2;
+  CAPABILITY_METRICS = 3;
+  CAPABILITY_QUERY_SESSIONS = 4;
+  CAPABILITY_QUERY_TAIL = 5;
+}
+
+enum CapabilityAvailability {
+  CAPABILITY_AVAILABILITY_UNSPECIFIED = 0;
+  CAPABILITY_AVAILABILITY_IMPLEMENTED = 1;
+  CAPABILITY_AVAILABILITY_UNAVAILABLE = 2;
+  CAPABILITY_AVAILABILITY_UNSUPPORTED = 3;
+  CAPABILITY_AVAILABILITY_VERSION_INCOMPATIBLE = 4;
+}
+
+enum RetryClass {
+  RETRY_CLASS_UNSPECIFIED = 0;
+  RETRY_CLASS_NEVER = 1;
+  RETRY_CLASS_AFTER_BACKOFF = 2;
+  RETRY_CLASS_AFTER_INPUT_CORRECTION = 3;
+}
+
+enum CompletionState {
+  COMPLETION_STATE_UNSPECIFIED = 0;
+  COMPLETION_STATE_REJECTED = 1;
+  // Transport loss or unresolved cancellation leaves the outcome unknown.
+  // Pending cleanup or partial effects can still progress. Reconcile explicitly;
+  // this state never authorizes a blind retry.
+  COMPLETION_STATE_AMBIGUOUS = 2;
+}
+
+enum DeprecationState {
+  DEPRECATION_STATE_UNSPECIFIED = 0;
+  DEPRECATION_STATE_CURRENT = 1;
+  DEPRECATION_STATE_DEPRECATED = 2;
+}
+
+message PublicError {
+  PublicErrorCode code = 1;
+  RetryClass retry_class = 2;
+  CompletionState completion_state = 3;
+  FailureSource source = 4;
+  SafeDetail safe_detail = 5;
+}
+
+enum PublicErrorCode {
+  PUBLIC_ERROR_CODE_UNSPECIFIED = 0;
+  PUBLIC_ERROR_CODE_UNSUPPORTED_API_VERSION = 1;
+  PUBLIC_ERROR_CODE_CAPABILITY_UNAVAILABLE = 2;
+  PUBLIC_ERROR_CODE_CAPABILITY_UNSUPPORTED = 3;
+  PUBLIC_ERROR_CODE_MALFORMED_REQUEST = 4;
+  PUBLIC_ERROR_CODE_REQUEST_TOO_LARGE = 5;
+  PUBLIC_ERROR_CODE_UNKNOWN_FIELD = 6;
+  PUBLIC_ERROR_CODE_AUTHENTICATION_REJECTED = 7;
+  PUBLIC_ERROR_CODE_CAPACITY_UNAVAILABLE = 8;
+  PUBLIC_ERROR_CODE_QUERY_UNAVAILABLE = 9;
+  PUBLIC_ERROR_CODE_SNAPSHOT_EXPIRED = 10;
+  PUBLIC_ERROR_CODE_INVALID_CURSOR = 11;
+  PUBLIC_ERROR_CODE_INVALID_BUDGET = 12;
+  PUBLIC_ERROR_CODE_BUDGET_EXHAUSTED = 13;
+  PUBLIC_ERROR_CODE_AUTHORIZATION_CHANGED = 14;
+  PUBLIC_ERROR_CODE_CANCELLED = 15;
+  PUBLIC_ERROR_CODE_UNSUPPORTED_QUERY = 16;
+  PUBLIC_ERROR_CODE_IDEMPOTENCY_CONFLICT = 17;
+  PUBLIC_ERROR_CODE_STORE_UNAVAILABLE = 18;
+  PUBLIC_ERROR_CODE_INCOMPLETE_DATA = 19;
+  PUBLIC_ERROR_CODE_MALFORMED_PERSISTENT_DATA = 20;
+  PUBLIC_ERROR_CODE_INTERNAL = 21;
+  PUBLIC_ERROR_CODE_UNSUPPORTED_FEATURE = 22;
+}
+
+enum FailureSource {
+  FAILURE_SOURCE_UNSPECIFIED = 0;
+  FAILURE_SOURCE_CAPABILITY_NEGOTIATION = 1;
+  FAILURE_SOURCE_GRPC_DECODE = 2;
+  FAILURE_SOURCE_HTTP_DECODE = 3;
+  FAILURE_SOURCE_QUERY_EXECUTION = 4;
+}
+
+enum SafeDetail {
+  SAFE_DETAIL_UNSPECIFIED = 0;
+  SAFE_DETAIL_API_MAJOR_UNSUPPORTED = 1;
+  SAFE_DETAIL_CAPABILITY_NOT_AVAILABLE = 2;
+  SAFE_DETAIL_CAPABILITY_NOT_SUPPORTED = 3;
+  SAFE_DETAIL_REQUEST_MALFORMED = 4;
+  SAFE_DETAIL_REQUEST_LIMIT_EXCEEDED = 5;
+  SAFE_DETAIL_FIELD_NOT_RECOGNIZED = 6;
+  SAFE_DETAIL_AUTHENTICATION_REJECTED = 7;
+  SAFE_DETAIL_CAPACITY_UNAVAILABLE = 8;
+  SAFE_DETAIL_QUERY_UNAVAILABLE = 9;
+  SAFE_DETAIL_SNAPSHOT_EXPIRED = 10;
+  SAFE_DETAIL_INVALID_CURSOR = 11;
+  SAFE_DETAIL_INVALID_BUDGET = 12;
+  SAFE_DETAIL_BUDGET_EXHAUSTED = 13;
+  SAFE_DETAIL_AUTHORIZATION_CHANGED = 14;
+  SAFE_DETAIL_CANCELLED = 15;
+  SAFE_DETAIL_UNSUPPORTED_QUERY = 16;
+  SAFE_DETAIL_IDEMPOTENCY_CONFLICT = 17;
+  SAFE_DETAIL_STORE_UNAVAILABLE = 18;
+  SAFE_DETAIL_INCOMPLETE_DATA = 19;
+  SAFE_DETAIL_MALFORMED_PERSISTENT_DATA = 20;
+  SAFE_DETAIL_INTERNAL = 21;
+  SAFE_DETAIL_UNSUPPORTED_FEATURE = 22;
+}
+
+// Preview is read-only. Confirmation requires the exact generation-bound loss
+// commitment and an explicit acknowledgement; status requires only Operation ID.
+message SegmentAbandonmentRequest {
+  string tenant = 1;
+  string signal = 2;
+  uint32 shard = 3;
+  string segment = 4;
+  optional uint64 expected_catalog_generation = 5;
+  optional string confirmation = 6;
+  optional string idempotency_key = 7;
+  bool accept_data_loss = 8;
+  optional string operation_id = 9;
+}
+message SegmentAbandonmentResponse {
+  uint64 catalog_generation = 1;
+  string status = 2;
+  string irreversible_boundary = 3;
+  optional string confirmation = 4;
+  optional string operation_id = 5;
+  IntegrityQuarantineFinding finding = 6;
+}
+
+// Online system administration. Mutations accept a durable phase operation;
+// the authenticated root journal remains the sole phase authority. Configuration
+// references are server-local protected references, never credential contents.
+service ProviderMigrationService {
+  rpc Manage(ProviderMigrationRequest) returns (ProviderMigrationResponse);
+}
+
+message ProviderMigrationRequest {
+  string action = 1;
+  optional uint64 expected_catalog_generation = 2;
+  optional string idempotency_key = 3;
+  optional string configuration_reference = 4;
+  optional string operation_id = 5;
+}
+
+message ProviderMigrationOperation {
+  string id = 1;
+  string status = 2;
+  string phase = 3;
+  uint32 progress_percent = 4;
+  string retry = 5;
+  string cancellation = 6;
+  string irreversible_boundary = 7;
+  optional uint64 lookup_expires_at_unix_seconds = 8;
+}
+
+message ProviderMigrationResponse {
+  uint64 catalog_generation = 1;
+  string root_phase = 2;
+  uint64 active_epoch = 3;
+  optional uint64 successor_epoch = 4;
+  optional uint64 predecessor_epoch = 5;
+  optional ProviderMigrationOperation operation = 6;
+  ProviderMigrationIdentity active_provider = 7;
+  ProviderMigrationIdentity source_provider = 8;
+  optional ProviderMigrationIdentity target_provider = 9;
+}
+
+// Exact immutable locator and provider-owned version. Family codes match
+// LocalFile=1, AwsKms=2, GoogleCloudKms=3, AzureKeyVault=4,
+// AzureManagedHsm=5, VaultTransit=6, OpenBaoTransit=7, Kmip21=8.
+message ProviderMigrationIdentity {
+  uint32 family = 1;
+  string locator = 2;
+  string version = 3;
+}
+
+// Native administration uses the closed HTTP failure codes in http.json.
+// stale_generation alone identifies a rejected expected resource generation or
+// operation revision;
+// precondition_failed does not imply that retrying is safe.
+// Native Repository administration is served by the authenticated HTTP API.
+// Locator is a server-local native credential context, never a serialized secret.
+service RepositoryService {
+  rpc Manage(RepositoryRequest) returns (RepositoryResponse);
+}
+message RepositoryRequest {
+  string action = 1;
+  optional uint64 expected_catalog_generation = 2;
+  optional string idempotency_key = 3;
+  optional string locator = 4;
+  optional string repository_id = 5;
+  optional string operation_id = 6;
+  optional RepositoryAwsS3Target aws_s3 = 7;
+  optional RepositoryGoogleCloudStorageTarget google_cloud_storage = 8;
+  optional RepositoryAzureBlobTarget azure_blob = 9;
+}
+message RepositoryAzureBlobTarget {
+  string account = 1;
+  string container = 2;
+  string prefix = 3;
+}
+message RepositoryGoogleCloudStorageTarget {
+  string bucket = 1;
+  string project_number = 2;
+  string location = 3;
+  string prefix = 4;
+}
+message RepositoryAwsS3Target {
+  string bucket = 1;
+  string region = 2;
+  string endpoint = 3;
+  string expected_owner = 4;
+  string prefix = 5;
+}
+message RepositoryOperation {
+  string id = 1;
+  string status = 2;
+  string phase = 3;
+  uint32 progress_percent = 4;
+  string retry = 5;
+  string cancellation = 6;
+  string irreversible_boundary = 7;
+  optional uint64 lookup_expires_at_unix_seconds = 8;
+}
+message RepositoryIdentity {
+  string repository_id = 1;
+  string instance_id = 2;
+  string provider_kind = 3;
+  uint32 format_epoch = 4;
+  string integrity_fingerprint = 5;
+  string prefix_commitment = 6;
+}
+message RepositoryDoctorResult {
+  bool verified = 1;
+  bool probes_deleted = 2;
+  string external_retention = 3;
+}
+message RepositoryDefaultRetention {
+  string mode = 1;
+  string period_unit = 2;
+  uint32 period = 3;
+}
+message RepositoryLifecyclePolicy {
+  bool current_expiration = 1;
+  bool noncurrent_expiration = 2;
+  bool transition = 3;
+  bool abandoned_upload_expiration = 4;
+}
+message RepositoryPolicyObservation {
+  string state = 1;
+  optional string value = 2;
+  optional string failure = 3;
+  optional uint32 retry_after_millis = 4;
+  optional RepositoryDefaultRetention default_retention = 5;
+  optional RepositoryLifecyclePolicy lifecycle = 6;
+  optional RepositoryObjectRetention object_retention = 7;
+  optional RepositoryEventHold event_hold = 8;
+}
+message RepositoryObjectRetention {
+  string mode = 1;
+  uint64 retain_until_unix_seconds = 2;
+}
+message RepositoryEventHold {
+  bool enabled = 1;
+  optional string period_unit = 2;
+  optional uint32 period = 3;
+}
+message RepositoryObjectProtection {
+  RepositoryPolicyObservation retention = 1;
+  RepositoryPolicyObservation legal_hold = 2;
+  RepositoryPolicyObservation event_hold = 3;
+}
+message RepositoryPolicyReceipt {
+  uint64 observed_at_unix_seconds = 1;
+  RepositoryPolicyObservation versioning = 2;
+  RepositoryPolicyObservation object_lock = 3;
+  RepositoryPolicyObservation lifecycle = 4;
+  optional RepositoryObjectProtection doctor_probe = 5;
+  optional RepositoryPolicyObservation soft_delete = 6;
+}
+message RepositoryResponse {
+  uint64 catalog_generation = 1;
+  optional RepositoryOperation operation = 2;
+  optional RepositoryIdentity identity = 3;
+  optional RepositoryDoctorResult doctor = 4;
+  optional RepositoryPolicyReceipt policy = 5;
+}
+
+service BackupService {
+  rpc Manage(BackupRequest) returns (BackupResponse);
+  rpc List(BackupListRequest) returns (BackupListResponse);
+}
+message BackupRequest {
+  string action = 1;
+  optional uint64 expected_catalog_generation = 2;
+  optional string idempotency_key = 3;
+  optional string locator = 4;
+  optional string repository_id = 5;
+  optional string operation_id = 6;
+  optional RepositoryAwsS3Target aws_s3 = 7;
+  optional RepositoryGoogleCloudStorageTarget google_cloud_storage = 8;
+  optional RepositoryAzureBlobTarget azure_blob = 9;
+  optional uint64 retention_seconds = 10;
+  optional string snapshot_id = 11;
+  optional string expected_manifest_checksum = 12;
+  optional uint64 expected_operation_revision = 13;
+}
+message BackupSnapshotReceipt {
+  string registry_generation_checksum = 7;
+  string manifest_checksum = 1;
+  uint64 catalog_generation = 2;
+  string catalog_identity = 3;
+  uint64 uploaded_bytes = 4;
+  uint64 reused_bytes = 5;
+  uint64 retain_until_unix_seconds = 6;
+}
+// Historical source publication authenticated during restore. The current
+// registry head is the one observed at reconciliation, not original publication.
+// Transfer counters and original publication time are deliberately absent.
+message BackupRestoredPublication {
+  string manifest_checksum = 1;
+  string current_registry_generation_checksum = 2;
+  string source_catalog_identity = 3;
+  uint64 source_catalog_generation = 4;
+  uint64 retain_until_unix_seconds = 5;
+  string restore_origin_transaction = 6;
+  string restore_intent_digest = 7;
+  string capture_operation_id = 8;
+  string capture_request_digest = 9;
+  string restore_idempotency_key = 10;
+}
+message BackupResponse {
+  RepositoryOperation operation = 1;
+  optional RepositoryIdentity repository = 2;
+  optional BackupSnapshotReceipt receipt = 3;
+  string kind = 4;
+  bool cleanup_pending = 5;
+  optional BackupRetentionReceipt retention_receipt = 6;
+  uint64 operation_revision = 7;
+  optional string terminal_error_code = 8;
+  optional string verification_report = 9;
+  optional string verification_report_checksum = 10;
+  optional BackupRestoredPublication restored_publication = 11;
+}
+
+message BackupListRequest {
+  string repository_id = 1;
+  uint32 limit = 2;
+  optional string cursor = 3;
+}
+message BackupListEntry {
+  string snapshot_id = 1;
+  string manifest_checksum = 2;
+  uint64 created_unix_seconds = 3;
+  uint64 retain_until_unix_seconds = 4;
+}
+message BackupListResponse {
+  RepositoryIdentity repository = 1;
+  optional string registry_generation_checksum = 2;
+  repeated BackupListEntry entries = 3;
+  optional string next_cursor = 4;
+}
+
+message BackupRetentionReceipt {
+  string snapshot_id = 1;
+  string manifest_checksum = 2;
+  string registry_generation_checksum = 3;
+  uint32 deleted_objects = 4;
+  uint32 already_absent_objects = 5;
+  uint32 retained_shared_objects = 6;
+}
+
+// Irreversible whole-tenant purge within registered managed repositories.
+service TenantPurgeService {
+  rpc Manage(TenantPurgeRequest) returns (TenantPurgeResponse);
+}
+message TenantPurgeRequest {
+  string action = 1;
+  optional string tenant_id = 2;
+  optional string confirmation_slug = 3;
+  optional uint64 expected_catalog_generation = 4;
+  optional uint64 expected_lifecycle_generation = 5;
+  optional string idempotency_key = 6;
+  optional string operation_id = 7;
+}
+message TenantPurgeResponse {
+  uint64 catalog_generation = 1;
+  optional ProviderMigrationOperation operation = 2;
+  string managed_scope = 3;
+}
+
+// Select the independently authenticated operator-staged release; replacement remains external.
+service UpgradeService { rpc Manage(UpgradeRequest) returns (UpgradeResponse); }
+message UpgradeRequest {
+ string action = 1;
+ optional string candidate_manifest = 2;
+ optional string repository_id = 3;
+ optional uint64 retention_seconds = 4;
+ optional uint64 expected_catalog_generation = 5;
+ optional string idempotency_key = 6;
+ optional string operation_id = 7;
+}
+message UpgradeResponse {
+ uint64 catalog_generation = 1;
+ optional UpgradeOperation operation = 2;
+ optional UpgradeDetails details = 3;
+}
+message UpgradeDetails {
+ reserved 1;
+ string source_version = 2;
+ string target_version = 3;
+ string source_manifest = 4;
+ string target_manifest = 5;
+ string source_artifact = 6;
+ string target_artifact = 7;
+ string configuration = 8;
+ uint32 format_epoch = 9;
+ string repository_id = 10;
+ bool rollback_available = 11;
+ optional string snapshot_manifest = 12;
+}
+
+enum UpgradePhase {
+ UPGRADE_PHASE_UNSPECIFIED = 0;
+ UPGRADE_PHASE_PREFLIGHT = 1;
+ UPGRADE_PHASE_DRAINING = 2;
+ UPGRADE_PHASE_SNAPSHOT = 3;
+ UPGRADE_PHASE_PUBLISHING = 4;
+ UPGRADE_PHASE_AWAITING_RESTART = 5;
+ UPGRADE_PHASE_VERIFYING = 6;
+ UPGRADE_PHASE_SUCCEEDED = 7;
+}
+message UpgradeOperation {
+ string id = 1;
+ string status = 2;
+ UpgradePhase phase = 3;
+ uint32 progress_percent = 4;
+ string retry = 5;
+ string cancellation = 6;
+ string irreversible_boundary = 7;
+ optional uint64 lookup_expires_at_unix_seconds = 8;
+}
+
+// Caller-lowered budgets for the bounded native Log Execute operation.
+// Server and tenant ceilings remain authoritative.
+message LogQueryBudget {
+  uint64 scanned_bytes = 1;
+  uint64 decoded_records = 2;
+  uint64 output_rows = 3;
+  uint64 output_bytes = 4;
+  uint64 memory_bytes = 5;
+  uint64 cpu_work_units = 6;
+  uint64 wall_seconds = 7;
+  uint64 maximum_time_range_nanoseconds = 8;
+}
+message LogQueryRequest {
+  string pipeline = 1;
+  LogQueryBudget budget = 2;
+}
+
+// The first external Query slice executes a finite Log pipeline. Native gRPC,
+// SQL, resume, tail, export and Trace transports remain separate incomplete work.
+service LogQueryService {
+  rpc Execute(LogQueryRequest) returns (LogQueryResponse);
+  rpc Session(LogQuerySessionRequest) returns (LogQueryResponse);
+  rpc Cancel(LogQueryCancelRequest) returns (LogQueryCancelResponse);
+}
+message LogQueryResponse { repeated LogQueryEvent events = 1; }
+message LogQueryEvent {
+  oneof event {
+    LogQueryHeader header = 1;
+    LogQueryBatch batch = 2;
+    LogQueryTerminal terminal = 3;
+  }
+}
+message LogQueryColumn { string name = 1; string value_type = 2; bool nullable = 3; }
+message LogQuerySnapshot { bytes identity = 1; uint64 generation = 2; uint64 frontier = 3; }
+message LogQueryOrdering { string column = 1; string value_type = 2; string direction = 3; }
+message LogQueryLease { bytes identity = 1; uint64 expiry_unix_seconds = 2; }
+message LogQueryHeader {
+  repeated LogQueryColumn columns = 1;
+  LogQuerySnapshot snapshot = 2;
+  repeated LogQueryOrdering ordering = 3;
+  LogQueryBudget effective_budget = 4;
+  LogQueryLease lease = 5;
+  optional bytes initial_cursor = 6;
+  optional string tail_phase = 7;
+}
+message LogQueryBatch {
+  uint64 sequence = 1;
+  repeated LogQueryRow rows = 2;
+  bytes prior_digest = 3;
+  bytes digest = 4;
+}
+message LogQueryRow { repeated LogQueryCell cells = 1; bool replayed = 2; }
+message LogQueryCell {
+  oneof value {
+    LogQueryValue native_value = 1;
+    LogQueryOccurrences occurrences = 2;
+    LogQueryTimestamp timestamp = 3;
+    uint64 unsigned_integer = 4;
+    LogQueryMissing missing = 5;
+  }
+}
+message LogQueryMissing {}
+message LogQueryOccurrences { repeated LogQueryValue values = 1; }
+message LogQueryTimestamp {
+  optional sint64 unix_nanoseconds = 1;
+  string provenance = 2;
+  string quality = 3;
+  optional uint64 source_value = 4;
+}
+// Tagged recursive native values preserve missing/null, floating-point bits,
+// binary data, ordered maps, occurrence sets and policy marker evidence.
+message LogQueryValue {
+  oneof value {
+    LogQueryNull null_value = 1;
+    bool boolean_value = 2;
+    sint64 integer_value = 3;
+    fixed64 float_bits = 4;
+    string text_value = 5;
+    bytes bytes_value = 6;
+    LogQueryArray array_value = 7;
+    LogQueryObject object_value = 8;
+    LogQueryMarker marker_value = 9;
+    LogQueryTruncated truncated_value = 10;
+  }
+}
+message LogQueryNull {}
+message LogQueryArray { repeated LogQueryValue values = 1; }
+message LogQueryObject { repeated LogQueryKeyValue entries = 1; }
+message LogQueryKeyValue { string key = 1; LogQueryValue value = 2; }
+message LogQueryMarker { string action = 1; string original_kind = 2; }
+message LogQueryTruncated { string action = 1; LogQueryValue value = 2; }
+message LogQueryTerminal {
+  string state = 1;
+  string reason = 2;
+  LogQueryStats stats = 3;
+  repeated LogQueryAffectedRange affected_ranges = 4;
+  optional bytes continuation_cursor = 5;
+}
+message LogQueryAffectedRange {
+  string temporal_axis = 1;
+  optional sint64 earliest_nanoseconds = 2;
+  optional sint64 latest_nanoseconds = 3;
+}
+message LogQueryStats {
+  uint64 records = 1;
+  uint64 scanned_bytes = 2;
+  uint64 decoded_records = 3;
+  uint64 output_bytes = 4;
+  uint64 memory_peak_bytes = 5;
+  uint64 cpu_work_units = 6;
+  uint64 wall_seconds = 7;
+  optional uint64 last_sequence = 8;
+  bytes result_digest = 9;
+  LogQueryBudget cumulative_budget = 10;
+  uint64 resume_count = 11;
+  uint64 repeated_batch_count = 12;
+  optional string limiting_budget = 13;
+  bool reduced_pruning = 14;
+}
+
+// A bounded historical page or an authenticated continuation of its exact snapshot.
+// The server reauthenticates every continuation; a cursor is never a credential.
+message LogQuerySessionRequest {
+  oneof operation {
+    LogQueryRequest execute = 1;
+    bytes resume = 2;
+    LogQueryTailRequest tail = 4;
+  }
+  uint32 batch_limit = 3;
+}
+
+// Idempotently releases only the authenticated cursor's bound leases.
+message LogQueryCancelRequest {
+  oneof cursor { bytes query = 1; bytes tail = 2; }
+}
+// True only after the owning Kernel has durably released all bound leases.
+message LogQueryCancelResponse { bool cancelled = 1; }
+
+// Session and Tail budgets retain the canonical hard 3600-second Snapshot Lease ceiling.
+// Each HTTP poll has an independent bounded connection lifetime.
+// One bounded native Tail poll. A receipt acknowledges only a batch already
+// delivered to the caller; absent receipts preserve at-least-once replay.
+message LogQueryTailRequest {
+  LogQueryRequest query = 1;
+  optional bytes cursor = 2;
+  optional uint32 historical_rows = 3;
+  LogQueryAcknowledgement acknowledgement = 4;
+}
+message LogQueryAcknowledgement { uint64 sequence = 1; bytes digest = 2; }
+
+// Stable terminal reason vocabulary for generated client status helpers.
+enum LogQueryStopReason {
+  LOG_QUERY_STOP_REASON_UNSPECIFIED = 0;
+  LOG_QUERY_STOP_REASON_UNAUTHORIZED = 1;
+  LOG_QUERY_STOP_REASON_IDEMPOTENCY_CONFLICT = 2;
+  LOG_QUERY_STOP_REASON_INVALID_BUDGET = 3;
+  LOG_QUERY_STOP_REASON_BUDGET_EXHAUSTED = 4;
+  LOG_QUERY_STOP_REASON_INVALID_CURSOR = 5;
+  LOG_QUERY_STOP_REASON_SNAPSHOT_EXPIRED = 6;
+  LOG_QUERY_STOP_REASON_AUTHORIZATION_CHANGED = 7;
+  LOG_QUERY_STOP_REASON_CANCELLED = 8;
+  LOG_QUERY_STOP_REASON_RESOURCE_ADMISSION_REFUSED = 9;
+  LOG_QUERY_STOP_REASON_RESOURCE_EXHAUSTED = 10;
+  LOG_QUERY_STOP_REASON_UNSUPPORTED_QUERY = 11;
+  LOG_QUERY_STOP_REASON_STORE_UNAVAILABLE = 12;
+  LOG_QUERY_STOP_REASON_INCOMPLETE_DATA = 13;
+  LOG_QUERY_STOP_REASON_MALFORMED_PERSISTENT_DATA = 14;
+  LOG_QUERY_STOP_REASON_INTERNAL = 15;
+  LOG_QUERY_STOP_REASON_DISCONNECTED = 16;
+  LOG_QUERY_STOP_REASON_CONSUMER_LAGGED = 17;
+}
