@@ -130,36 +130,74 @@ class NativeLifecycle(DataLifecycle):
         else: raise AssertionError("unsupported test lifecycle action")
 
     def ingest(self):
+        # TEMPORARY SDK127 experiment. Closed notes are reported after cleanup.
+        def pod_identity():
+            try:
+                result = self.kube("get", "pod", self.pod, "-o", "json", "--request-timeout=1s", timeout=1, check=False)
+                if result.returncode or len(result.stdout) > 65536:
+                    return None
+                pod = json.loads(result.stdout)
+                uid, statuses = pod["metadata"]["uid"], pod["status"]["containerStatuses"]
+                if (isinstance(uid, str) and re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", uid)
+                        and isinstance(statuses, list) and 1 <= len(statuses) <= 8
+                        and all(type(item.get("restartCount")) is int and 0 <= item["restartCount"] <= 4294967295 for item in statuses)):
+                    return uid, sum(item["restartCount"] for item in statuses)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError):
+                pass
+            return None
+
+        before = pod_identity()
+        forward_count = len(self.forwarders)
         try:
             return super().ingest()
         except Exception as original:
-            # TEMPORARY SDK127 experiment: inspect before close(), never retry.
-            # Attach closed facts for the existing harness after its cleanup.
-            fact = {"event": "helm_ingest_forward_failure", "forward_status": "unavailable",
-                    "stderr_class": "unavailable", "pod_uid": "unavailable", "restarts": "unavailable"}
+            fact = {"event": "helm_ingest_forward_failure", "forward_selection": "unobserved",
+                    "forward_status": "unavailable", "stderr_class": "unobserved", "stderr_bytes": 0,
+                    "stderr_truncated": False, "baseline_pod_uid": before[0] if before else "unavailable",
+                    "baseline_restarts": before[1] if before else "unavailable", "pod_uid": "unavailable",
+                    "restarts": "unavailable", "pod_identity": "unobserved", "http_failures": []}
             try:
-                if self.forwarders:
-                    forward = self.forwarders[-1]
+                # The base ingest creates one 4318 forward before SSL/urllib.
+                # Never attribute an older or ambiguously added process to it.
+                if len(self.forwarders) == forward_count + 1:
+                    forward = self.forwarders[forward_count]
+                    fact["forward_selection"] = "single_new"
                     status = forward.poll()
                     fact["forward_status"] = status if type(status) is int and -128 <= status <= 255 else "running"
                     if select.select([forward.stderr], [], [], 0)[0]:
                         error = os.read(forward.stderr.fileno(), 4097)
-                        fact["stderr_class"] = "other"
+                        fact.update(stderr_bytes=len(error), stderr_truncated=len(error) > 4096,
+                                    stderr_class="other")
                         if len(error) <= 4096:
-                            if b"lost connection to pod" in error:
-                                fact["stderr_class"] = "lost_pod_connection"
-                            elif b"connection refused" in error:
-                                fact["stderr_class"] = "connection_refused"
-                result = self.kube("get", "pod", self.pod, "-o", "json", "--request-timeout=1s", timeout=1, check=False)
-                if not result.returncode and len(result.stdout) <= 65536:
-                    pod = json.loads(result.stdout)
-                    uid = pod["metadata"]["uid"]
-                    statuses = pod["status"]["containerStatuses"]
-                    if (isinstance(uid, str) and re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", uid)
-                            and isinstance(statuses, list) and 1 <= len(statuses) <= 8
-                            and all(type(item.get("restartCount")) is int and 0 <= item["restartCount"] <= 4294967295 for item in statuses)):
-                        fact.update(pod_uid=uid, restarts=sum(item["restartCount"] for item in statuses))
-            except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError):
+                            for token, label in [(b"lost connection to pod", "lost_pod_connection"),
+                                    (b"connection refused", "connection_refused"), (b"connection reset by peer", "connection_reset"),
+                                    (b"broken pipe", "broken_pipe"), (b"context deadline exceeded", "deadline"),
+                                    (b"error creating forwarding stream", "stream_setup"), (b"error upgrading connection", "stream_setup"),
+                                    (b"EOF", "eof"), (b"error forwarding port", "port_forward")]:
+                                if ((token != b"EOF" and token in error)
+                                        or (token == b"EOF" and re.search(rb"(?:^|[ :])EOF(?:\r?\n|$)", error))):
+                                    fact["stderr_class"] = label
+                                    break
+            except (OSError, ValueError, TypeError, AttributeError, IndexError, RuntimeError, subprocess.SubprocessError):
+                pass
+            after = pod_identity()
+            if after:
+                fact.update(pod_uid=after[0], restarts=after[1])
+                if before:
+                    fact["pod_identity"] = "same" if before[0] == after[0] else "changed"
+            try:
+                result = self.kube("logs", self.pod, "-c", "positron", "--tail=64", "--limit-bytes=8192", "--request-timeout=1s", timeout=1, check=False)
+                if not result.returncode and len(result.stdout) <= 8192:
+                    for line in result.stdout.splitlines():
+                        try:
+                            event = json.loads(line)
+                            if (event.get("event") == "native_http_connection_failed" and event.get("listener") == "otlp_http"
+                                    and event.get("stage") in {"tls_handshake", "response_completion"}
+                                    and event.get("reason") in {"timed_out", "would_block", "unexpected_eof", "connection_reset", "connection_aborted", "broken_pipe", "invalid_data", "other"}):
+                                fact["http_failures"] = fact["http_failures"][-3:] + [{key: event[key] for key in ["listener", "stage", "reason"]}]
+                        except (ValueError, TypeError, AttributeError):
+                            pass
+            except (OSError, ValueError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError):
                 pass
             BaseException.add_note(original, json.dumps(fact))
             raise

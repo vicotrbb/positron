@@ -107,12 +107,14 @@ pub(super) fn serve_connection<S: Read + Write + TimeoutStream>(
     let response = match result {
         Ok(response) | Err(response) => response,
     };
-    io::write_response(stream, response).map_err(|_| {
-        health
-            .operational_telemetry()
-            .record(crate::operational::OperationalEvent::Diagnostic(
-                crate::OperationalDiagnostic::HttpResponseCompletionFailure(role),
-            ));
+    io::write_response(stream, response).map_err(|error| {
+        health.operational_telemetry().record(
+            crate::operational::OperationalEvent::NativeHttpFailure {
+                role,
+                stage: crate::operational::NativeHttpFailureStage::ResponseCompletion,
+                reason: error.kind(),
+            },
+        );
         ConnectionFailure
     })
 }
@@ -140,12 +142,14 @@ pub(super) fn serve_tls_connection<S: Read + Write + TimeoutStream>(
     let response = match result {
         Ok(response) | Err(response) => response,
     };
-    io::write_response(stream, response).map_err(|_| {
-        health
-            .operational_telemetry()
-            .record(crate::operational::OperationalEvent::Diagnostic(
-                crate::OperationalDiagnostic::HttpResponseCompletionFailure(role),
-            ));
+    io::write_response(stream, response).map_err(|error| {
+        health.operational_telemetry().record(
+            crate::operational::OperationalEvent::NativeHttpFailure {
+                role,
+                stage: crate::operational::NativeHttpFailureStage::ResponseCompletion,
+                reason: error.kind(),
+            },
+        );
         ConnectionFailure
     })
 }

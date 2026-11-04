@@ -2276,11 +2276,13 @@ fn serve_http(
                                             &mut tls,
                                             connection_protection.tls_handshake_deadline(),
                                         )
-                                        .inspect_err(|_| {
+                                        .inspect_err(|error| {
                                             connection_health.operational_telemetry().record(
-                                                crate::operational::OperationalEvent::Diagnostic(
-                                                    crate::OperationalDiagnostic::TlsHandshakeFailure(role),
-                                                ),
+                                                crate::operational::OperationalEvent::NativeHttpFailure {
+                                                    role,
+                                                    stage: crate::operational::NativeHttpFailureStage::TlsHandshake,
+                                                    reason: error.kind(),
+                                                },
                                             );
                                         })
                                         .is_ok()

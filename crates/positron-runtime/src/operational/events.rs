@@ -192,9 +192,29 @@ impl BackupReadStage {
     }
 }
 
+// TEMPORARY SDK127 transport observation; no error text enters the event ring.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NativeHttpFailureStage {
+    TlsHandshake,
+    ResponseCompletion,
+}
+impl NativeHttpFailureStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::TlsHandshake => "tls_handshake",
+            Self::ResponseCompletion => "response_completion",
+        }
+    }
+}
+
 /// Closed operational facts; arbitrary text cannot enter the process event ring.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OperationalEvent {
+    NativeHttpFailure {
+        role: crate::ListenerRole,
+        stage: NativeHttpFailureStage,
+        reason: std::io::ErrorKind,
+    },
     BackupReadFailure {
         stage: BackupReadStage,
         failure: crate::services::MaintenanceServiceFailure,
@@ -231,6 +251,7 @@ pub(crate) enum OperationalEvent {
 impl OperationalEvent {
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::NativeHttpFailure { .. } => "native_http_connection_failed",
             Self::BackupReadFailure { .. } => "backup_read_failure",
             Self::Diagnostic(diagnostic) => diagnostic.name(),
             Self::QueryCompleted { .. } => "query_completed",
@@ -258,7 +279,10 @@ impl OperationalEvent {
                 | OperationalDiagnostic::LocalKeyCustodyWarning
                 | OperationalDiagnostic::IndependentKeyRecoveryRequired,
             ) => "warn",
-            Self::ProcessFenced | Self::BackupReadFailure { .. } | Self::Diagnostic(_) => "error",
+            Self::ProcessFenced
+            | Self::BackupReadFailure { .. }
+            | Self::Diagnostic(_)
+            | Self::NativeHttpFailure { .. } => "error",
             Self::RequestCompleted {
                 outcome: RequestOutcome::Unavailable,
                 ..
@@ -278,6 +302,26 @@ impl OperationalEvent {
     }
     pub(crate) fn json(self) -> serde_json::Value {
         let mut value = serde_json::json!({"event": self.name(), "severity": self.severity(), "component": "runtime"});
+        if let Self::NativeHttpFailure {
+            role,
+            stage,
+            reason,
+        } = self
+        {
+            value["listener"] = listener_label(role).into();
+            value["stage"] = stage.label().into();
+            value["reason"] = match reason {
+                std::io::ErrorKind::TimedOut => "timed_out",
+                std::io::ErrorKind::WouldBlock => "would_block",
+                std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
+                std::io::ErrorKind::ConnectionReset => "connection_reset",
+                std::io::ErrorKind::ConnectionAborted => "connection_aborted",
+                std::io::ErrorKind::BrokenPipe => "broken_pipe",
+                std::io::ErrorKind::InvalidData => "invalid_data",
+                _ => "other",
+            }
+            .into();
+        }
         if let Self::DependencyResourcesUnavailable(Some(context)) = self {
             context.append_json(&mut value);
         }

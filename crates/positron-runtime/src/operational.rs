@@ -5,7 +5,9 @@ mod events;
 mod metrics;
 mod telemetry;
 
-pub(crate) use events::{BackupReadStage, OperationalEvent, RequestOutcome};
+pub(crate) use events::{
+    BackupReadStage, NativeHttpFailureStage, OperationalEvent, RequestOutcome,
+};
 pub use events::{
     IntegrityScrubFailureStage, MaintenanceWorkerOperation, OperationalDiagnostic,
     OperationalReloadRejection, OwnerInspectionUnavailableReason, render_operational_diagnostic,

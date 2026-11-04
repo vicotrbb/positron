@@ -65,6 +65,7 @@ fn native_tls_handshake_failure_is_closed_and_observable() -> Result<(), Box<dyn
                 record["event"] == "native_http_connection_failed"
                     && record["stage"] == "tls_handshake"
                     && record["listener"] == "otlp_http"
+                    && record["reason"] == "invalid_data"
             }) {
                 return Ok(());
             }

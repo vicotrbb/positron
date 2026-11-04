@@ -246,6 +246,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_http_reason_fits_the_existing_output_bound() -> std::io::Result<()> {
+        for stage in [
+            crate::operational::NativeHttpFailureStage::TlsHandshake,
+            crate::operational::NativeHttpFailureStage::ResponseCompletion,
+        ] {
+            let mut output = Vec::new();
+            emit(
+                &mut output,
+                false,
+                OperationalEvent::NativeHttpFailure {
+                    role: crate::ListenerRole::OtlpHttp,
+                    stage,
+                    reason: std::io::ErrorKind::ConnectionAborted,
+                },
+            )?;
+            assert!(output.len() <= 510);
+            let event: serde_json::Value = serde_json::from_slice(&output)?;
+            assert_eq!(event["event"], "native_http_connection_failed");
+            assert_eq!(event["severity"], "error");
+            assert_eq!(event["reason"], "connection_aborted");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn finite_query_timing_record_fits_native_output_bound() -> std::io::Result<()> {
         let mut output = Vec::new();
         emit(

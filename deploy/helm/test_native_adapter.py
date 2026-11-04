@@ -71,6 +71,108 @@ class NativeAdapter(unittest.TestCase):
             self.assertIs(caught.exception, failure)
             self.assertEqual(sum(args[0] == "exec" for args in calls), 1)
 
+    def test_ingest_attributes_only_new_forward_and_keeps_closed_server_reason(self):
+        from unittest.mock import Mock
+        from data_lifecycle import DataLifecycle
+        uid = "11111111-1111-4111-8111-111111111111"
+        pod = {"metadata": {"uid": uid}, "status": {"containerStatuses": [{"restartCount": 0}]}}
+        old, current = Mock(), Mock()
+        current.poll.return_value = None
+        current.stderr.fileno.return_value = 3
+        events = [{"event": "native_http_connection_failed", "listener": "otlp_http", "stage": "response_completion", "reason": "would_block", "private": "credential-canary"},
+                  {"event": "native_http_connection_failed", "listener": "otlp_http", "stage": "tls_handshake", "reason": "credential-canary"}]
+        calls, pod_reads = [], []
+        changed_uid = "22222222-2222-4222-8222-222222222222"
+        def kube(*args, **kwargs):
+            calls.append((args, kwargs))
+            self.assertFalse(kwargs["check"])
+            self.assertLessEqual(kwargs["timeout"], 1)
+            if args[0] == "logs":
+                value = b"\n".join(json.dumps(event).encode() for event in events)
+            else:
+                if pod_reads:
+                    pod["metadata"]["uid"] = changed_uid
+                pod_reads.append(True)
+                value = json.dumps(pod).encode()
+            return subprocess.CompletedProcess([], 0, value, b"credential-canary")
+        original = ConnectionRefusedError("original")
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
+            lifecycle.forwarders.append(old)
+            def fail(_self):
+                self.assertEqual(calls[0][0][0], "get", "baseline precedes forward creation")
+                lifecycle.forwarders.append(current)
+                raise original
+            output = io.StringIO()
+            with patch.object(DataLifecycle, "ingest", fail), patch("select.select", return_value=([current.stderr], [], [])), \
+                    patch("os.read", return_value=b"error forwarding port credential-canary: EOF\n"), contextlib.redirect_stdout(output), self.assertRaises(ConnectionRefusedError) as caught:
+                lifecycle.ingest()
+            self.assertIs(caught.exception, original)
+            old.poll.assert_not_called()
+            current.poll.assert_called_once()
+            fact = json.loads(original.__notes__[0])
+            self.assertEqual(fact["forward_selection"], "single_new")
+            self.assertEqual(fact["stderr_class"], "eof")
+            self.assertEqual(fact["pod_identity"], "changed")
+            self.assertEqual(fact["pod_uid"], changed_uid)
+            self.assertEqual(fact["baseline_pod_uid"], uid)
+            self.assertEqual(fact["http_failures"], [{"listener": "otlp_http", "stage": "response_completion", "reason": "would_block"}])
+            self.assertNotIn("credential-canary", original.__notes__[0])
+            self.assertLess(len(original.__notes__[0]), 2048)
+            self.assertEqual(output.getvalue(), "")
+
+    def test_ingest_text_and_log_observations_refuse_injected_and_oversized_data(self):
+        from unittest.mock import Mock
+        from data_lifecycle import DataLifecycle
+        for raw, category, truncated in [(b"credential-EOF-canary", "other", False),
+                (b"error forwarding port credential-canary: EOF\n", "eof", False),
+                (b"x" * 4097, "other", True)]:
+            with self.subTest(category=category, truncated=truncated), tempfile.TemporaryDirectory() as directory:
+                original = ConnectionRefusedError("original")
+                forward = Mock()
+                forward.poll.return_value = None
+                forward.stderr.fileno.return_value = 3
+                def kube(*args, **kwargs):
+                    self.assertFalse(kwargs["check"])
+                    self.assertLessEqual(kwargs["timeout"], 1)
+                    return subprocess.CompletedProcess([], 0, b"credential-canary" * 600 if args[0] == "logs" else b"{}", b"credential-canary")
+                lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
+                def fail(_self):
+                    lifecycle.forwarders.append(forward)
+                    raise original
+                output = io.StringIO()
+                with patch.object(DataLifecycle, "ingest", fail), patch("select.select", return_value=([forward.stderr], [], [])), \
+                        patch("os.read", return_value=raw), contextlib.redirect_stdout(output), self.assertRaises(ConnectionRefusedError) as caught:
+                    lifecycle.ingest()
+                self.assertIs(caught.exception, original)
+                fact = json.loads(original.__notes__[0])
+                self.assertEqual(fact["stderr_class"], category)
+                self.assertEqual(fact["stderr_truncated"], truncated)
+                self.assertEqual(fact["http_failures"], [])
+                self.assertNotIn("credential", original.__notes__[0])
+                self.assertEqual(output.getvalue(), "")
+
+    def test_ingest_does_not_guess_forward_when_none_or_two_were_created(self):
+        from unittest.mock import Mock
+        from data_lifecycle import DataLifecycle
+        for count in [0, 2]:
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
+                original = ConnectionRefusedError("original")
+                def kube(*args, **kwargs):
+                    raise RuntimeError("credential-canary")
+                lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
+                forwards = [Mock() for _ in range(count + 1)]
+                lifecycle.forwarders.append(forwards[0])
+                def fail(_self):
+                    lifecycle.forwarders.extend(forwards[1:])
+                    raise original
+                with patch.object(DataLifecycle, "ingest", fail), self.assertRaises(ConnectionRefusedError) as caught:
+                    lifecycle.ingest()
+                self.assertIs(caught.exception, original)
+                self.assertTrue(all(not forward.poll.called for forward in forwards))
+                self.assertEqual(json.loads(original.__notes__[0])["forward_selection"], "unobserved")
+                self.assertNotIn("credential-canary", original.__notes__[0])
+
     def test_failed_ingest_observes_owned_forward_and_pod_without_retry(self):
         from unittest.mock import Mock
         from data_lifecycle import DataLifecycle
@@ -84,9 +186,11 @@ class NativeAdapter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             kube = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps(pod).encode(), b"private-canary"))
             lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
-            lifecycle.forwarders.append(forward)
             output = io.StringIO()
-            with patch.object(DataLifecycle, "ingest", side_effect=original) as ingest, \
+            def fail(_self):
+                lifecycle.forwarders.append(forward)
+                raise original
+            with patch.object(DataLifecycle, "ingest", autospec=True, side_effect=fail) as ingest, \
                     patch("select.select", return_value=([forward.stderr], [], [])), \
                     patch("os.read", return_value=b"error: lost connection to pod\nprivate-canary"), \
                     contextlib.redirect_stdout(output), self.assertRaises(ConnectionRefusedError) as caught:
@@ -94,8 +198,11 @@ class NativeAdapter(unittest.TestCase):
             self.assertIs(caught.exception, original)
             ingest.assert_called_once()
             self.assertEqual(output.getvalue(), "")
-            self.assertEqual(json.loads(original.__notes__[0]), {"event": "helm_ingest_forward_failure", "forward_status": 1,
-                "stderr_class": "lost_pod_connection", "pod_uid": uid, "restarts": 0})
+            fact = json.loads(original.__notes__[0])
+            self.assertEqual((fact["forward_status"], fact["stderr_class"], fact["pod_uid"], fact["restarts"]),
+                             (1, "lost_pod_connection", uid, 0))
+            self.assertEqual(fact["pod_identity"], "same")
+            self.assertNotIn("private-canary", original.__notes__[0])
             self.assertLessEqual(kube.call_args.kwargs["timeout"], 1)
             self.assertNotIn("private-canary", output.getvalue())
 
@@ -112,7 +219,11 @@ class NativeAdapter(unittest.TestCase):
                 lifecycle.ingest()
             self.assertIs(caught.exception, original)
             self.assertEqual(output.getvalue(), "")
-            self.assertEqual(json.loads(original.__notes__[0]), {"event": "helm_ingest_forward_failure", "forward_status": "unavailable", "stderr_class": "unavailable", "pod_uid": "unavailable", "restarts": "unavailable"})
+            fact = json.loads(original.__notes__[0])
+            self.assertEqual(fact["forward_selection"], "unobserved")
+            self.assertEqual(fact["pod_identity"], "unobserved")
+            self.assertEqual(fact["http_failures"], [])
+            self.assertNotIn("private-canary", original.__notes__[0])
 
     def test_actual_adapter_runtime_error_is_contained_without_exposing_credential(self):
         import traceback
@@ -143,7 +254,9 @@ class NativeAdapter(unittest.TestCase):
             output = io.StringIO()
             with patch.object(DataLifecycle, "ingest", return_value=None), contextlib.redirect_stdout(output):
                 lifecycle.ingest()
-            kube.assert_not_called()
+            kube.assert_called_once()
+            self.assertFalse(kube.call_args.kwargs["check"])
+            self.assertLessEqual(kube.call_args.kwargs["timeout"], 1)
             self.assertEqual(output.getvalue(), "")
 
     def test_initial_ingest_failure_diagnostics_emit_only_closed_transport_fields(self):
