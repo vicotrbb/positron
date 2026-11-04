@@ -164,63 +164,6 @@ fn independent_packages(fixture: &support::Fixture, seed: &[u8]) -> (Vec<u8>, Ve
     assert_eq!(first, second, "independent clean Cargo archives differ");
     (first, second)
 }
-fn bind_schema(fixture: &mut support::Fixture) {
-    let schema = include_bytes!("../../../api/positron/v1/positron.proto");
-    let index = fixture
-        .inventory
-        .artifacts
-        .iter()
-        .position(|artifact| artifact.surface == Surface::Api)
-        .unwrap();
-    fixture.replace_artifact(index, schema, schema);
-    fixture.inventory.compatibility.schema = FileIdentity::of(schema).sha256;
-    let npm_index = fixture
-        .inventory
-        .artifacts
-        .iter()
-        .position(|artifact| artifact.surface == Surface::SdkTypeScript)
-        .unwrap();
-    let npm_bytes = std::fs::read(
-        fixture
-            .root
-            .join("bundle")
-            .join(&fixture.inventory.artifacts[npm_index].file),
-    )
-    .unwrap();
-    let digest = support::hex(&fixture.inventory.compatibility.schema);
-    let npm = rewrite_package(&npm_bytes, None, |path, bytes| match path {
-        "package/api/positron.proto" => schema.to_vec(),
-        "package/api/schema.sha256" => format!("{digest}\n").into_bytes(),
-        "package/package.json" => {
-            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            value["positron"]["schema_digest"] = serde_json::json!(digest);
-            serde_json::to_vec(&value).unwrap()
-        },
-        _ => bytes,
-    });
-    fixture.replace_artifact(npm_index, &npm, &npm);
-    let compatibility = support::hex(
-        &FileIdentity::of(&serde_json::to_vec(&fixture.inventory.compatibility).unwrap()).sha256,
-    );
-    let schema = support::hex(&fixture.inventory.compatibility.schema);
-    for artifact in fixture.inventory.artifacts.clone() {
-        let path = fixture.root.join("bundle").join(&artifact.provenance);
-        let mut document: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let parameters = &mut document["predicate"]["buildDefinition"]["externalParameters"];
-        parameters["schema_sha256"] = serde_json::json!(schema);
-        parameters["compatibility_sha256"] = serde_json::json!(compatibility);
-        let bytes = serde_json::to_vec(&document).unwrap();
-        std::fs::write(path, &bytes).unwrap();
-        fixture
-            .inventory
-            .files
-            .iter_mut()
-            .find(|file| file.id == artifact.provenance)
-            .unwrap()
-            .identity = FileIdentity::of(&bytes);
-    }
-}
 fn private_fixture_package(real: &[u8]) -> Vec<u8> {
     // Only fixture identities change. This package is never live registry or
     // project-release evidence. The actual installed package is tested separately.
@@ -300,7 +243,8 @@ fn verify(
 }
 #[test]
 fn real_rust_sdk_payload_binds_to_full_signed_release_and_refuses_mutation() {
-    let mut fixture = support::Fixture::new();
+    let mut fixture =
+        support::Fixture::new_with_api(include_bytes!("../../../api/positron/v1/positron.proto"));
     let real = cargo_package(
         &fixture,
         std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
@@ -327,7 +271,6 @@ fn real_rust_sdk_payload_binds_to_full_signed_release_and_refuses_mutation() {
     let package = private_fixture_package(&original);
     let independent = private_fixture_package(&independent);
     fixture.replace_artifact(index, &package, &independent);
-    bind_schema(&mut fixture);
     let digest = support::hex(&FileIdentity::of(&package).sha256);
     let (signed, construction) = publish(&fixture, &digest);
     verify(&fixture, &signed, &construction).unwrap();
@@ -434,7 +377,8 @@ fn real_rust_sdk_payload_binds_to_full_signed_release_and_refuses_mutation() {
 
 #[test]
 fn gitless_sdk_source_needs_explicit_private_fixture_vcs_identity() {
-    let mut fixture = support::Fixture::new();
+    let mut fixture =
+        support::Fixture::new_with_api(include_bytes!("../../../api/positron/v1/positron.proto"));
     let real = cargo_package(
         &fixture,
         std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
@@ -479,7 +423,6 @@ fn gitless_sdk_source_needs_explicit_private_fixture_vcs_identity() {
         }
     });
     fixture.replace_artifact(index, &unbound, &unbound);
-    bind_schema(&mut fixture);
     assert_eq!(
         construct_release(
             &fixture.inventory,
