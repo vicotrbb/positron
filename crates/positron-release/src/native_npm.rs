@@ -111,7 +111,6 @@ pub(crate) fn inspect_sdk(
             },
         }
     }
-    drop(archive);
     // Require aligned tar termination, gzip integrity, and exactly one gzip member.
     let mut padding = Vec::new();
     decoded
