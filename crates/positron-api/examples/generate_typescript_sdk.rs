@@ -198,16 +198,14 @@ fn main() -> Result<()> {
             {
                 if let (Some(group), Some(key)) =
                     (field["oneof"].as_u64(), field["json_name"].as_str())
-                {
-                    if let Some(property) = schema["properties"]
+                    && let Some(property) = schema["properties"]
                         .as_object_mut()
                         .and_then(|properties| properties.remove(key))
-                    {
-                        groups
-                            .entry(group)
-                            .or_default()
-                            .push((key.to_owned(), property));
-                    }
+                {
+                    groups
+                        .entry(group)
+                        .or_default()
+                        .push((key.to_owned(), property));
                 }
             }
         }
