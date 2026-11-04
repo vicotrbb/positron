@@ -74,19 +74,19 @@ fn signed_inventory_cannot_hide_missing_rust_sdk_api_metadata() {
 }
 
 fn cargo_package(fixture: &support::Fixture, repository: &std::path::Path) -> Vec<u8> {
-    let target = fixture.root.join("cargo-package");
-    let output = std::process::Command::new(env!("CARGO"))
+    package(repository, &fixture.root.join("cargo-package"), true)
+}
+
+fn package(repository: &std::path::Path, target: &std::path::Path, allow_dirty: bool) -> Vec<u8> {
+    let mut command = std::process::Command::new(env!("CARGO"));
+    command.arg("package");
+    if allow_dirty {
+        command.arg("--allow-dirty");
+    }
+    let output = command
         .current_dir(repository)
-        .env("CARGO_TARGET_DIR", &target)
-        .args([
-            "package",
-            "--locked",
-            "--offline",
-            "--allow-dirty",
-            "--no-verify",
-            "-p",
-            "positron-sdk",
-        ])
+        .env("CARGO_TARGET_DIR", target)
+        .args(["--locked", "--offline", "--no-verify", "-p", "positron-sdk"])
         .output()
         .unwrap();
     assert!(
@@ -100,6 +100,69 @@ fn cargo_package(fixture: &support::Fixture, repository: &std::path::Path) -> Ve
             .join(format!("positron-sdk-{}.crate", env!("CARGO_PKG_VERSION"))),
     )
     .unwrap()
+}
+fn independent_packages(fixture: &support::Fixture, seed: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut packages = Vec::new();
+    for name in ["source-one", "source-two"] {
+        let root = fixture.root.join(name);
+        tar::Archive::new(flate2::read::GzDecoder::new(seed))
+            .unpack(&root)
+            .unwrap();
+        let source = root.join(format!("positron-sdk-{}", env!("CARGO_PKG_VERSION")));
+        let vcs = source.join(".cargo_vcs_info.json");
+        if vcs.exists() {
+            std::fs::remove_file(vcs).unwrap();
+        }
+        // These private commits bind independently packaged source, including on
+        // gitless Nix inputs. No project or global Git configuration is changed.
+        for args in [
+            vec!["init", "--quiet", "--initial-branch=main"],
+            vec!["add", "--all"],
+            vec![
+                "-c",
+                "user.name=SDK fixture",
+                "-c",
+                "user.email=sdk@example.invalid",
+                "commit",
+                "--quiet",
+                "--no-gpg-sign",
+                "-m",
+                "SDK fixture",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .current_dir(&source)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "fixture Git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let bytes = package(&source, &fixture.root.join(format!("target-{name}")), false);
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+        let mut entry = archive
+            .entries()
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| entry.path().unwrap().ends_with(".cargo_vcs_info.json"))
+            .expect("independent package must carry its clean source commit");
+        let mut vcs = String::new();
+        entry.read_to_string(&mut vcs).unwrap();
+        let vcs: serde_json::Value = serde_json::from_str(&vcs).unwrap();
+        assert_ne!(vcs["git"]["dirty"], true);
+        packages.push(bytes);
+    }
+    let second = packages.pop().unwrap();
+    let first = packages.pop().unwrap();
+    assert_eq!(first, second, "independent clean Cargo archives differ");
+    (first, second)
 }
 fn bind_schema(fixture: &mut support::Fixture) {
     let schema = include_bytes!("../../../api/positron/v1/positron.proto");
@@ -235,8 +298,10 @@ fn real_rust_sdk_payload_binds_to_full_signed_release_and_refuses_mutation() {
         .err(),
         Some(ReleaseError::IdentityMismatch)
     );
-    let package = private_fixture_package(&real);
-    fixture.replace_artifact(index, &package, &package);
+    let (original, independent) = independent_packages(&fixture, &real);
+    let package = private_fixture_package(&original);
+    let independent = private_fixture_package(&independent);
+    fixture.replace_artifact(index, &package, &independent);
     bind_schema(&mut fixture);
     let digest = support::hex(&FileIdentity::of(&package).sha256);
     let (signed, construction) = publish(&fixture, &digest);
