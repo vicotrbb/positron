@@ -19,6 +19,7 @@ mod native_go;
 mod native_maven;
 mod native_maven_package;
 mod native_nix;
+mod native_npm;
 mod native_nuget;
 mod native_packages;
 mod native_rpm;

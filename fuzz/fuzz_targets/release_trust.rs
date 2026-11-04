@@ -224,12 +224,12 @@ fn mutate_package(fixture: &mut support::Fixture, index: usize, data: &[u8]) -> 
             bytes[local + 14..local + 18].copy_from_slice(&crc);
             bytes[central + 16..central + 20].copy_from_slice(&crc);
         },
-        Surface::SdkRust => {
+        Surface::SdkRust | Surface::SdkTypeScript => {
             let mut decoded = Vec::new();
             flate2::read::GzDecoder::new(bytes.as_slice())
                 .read_to_end(&mut decoded)
                 .unwrap();
-            // The fixture's first regular tar member is its normalized Cargo.toml.
+            // The first member is Cargo.toml or npm package.json, respectively.
             let size = tar::Archive::new(decoded.as_slice())
                 .entries()
                 .unwrap()

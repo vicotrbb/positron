@@ -48,6 +48,21 @@ pub(crate) fn verify_identities(
                 &inventory.compatibility.schema,
             )?;
         }
+        if artifact.surface == Surface::SdkTypeScript {
+            if artifact.publication.registry != "https://registry.npmjs.org"
+                || artifact.publication.native_subject
+                    != format!("pkg:npm/%40positron/sdk@{version}")
+            {
+                return Err(ReleaseError::IdentityMismatch);
+            }
+            crate::native_npm::inspect_sdk(
+                &bundle.read(&artifact.file, crate::native_npm::MAX_INPUT)?,
+                &version,
+                &inventory.source_commit,
+                &inventory.api_version,
+                &inventory.compatibility.schema,
+            )?;
+        }
         let digest = hex(&inventory.file(&artifact.file)?.identity.sha256);
         let spdx = document(bundle, &artifact.spdx)?;
         let packages = spdx

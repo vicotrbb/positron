@@ -174,6 +174,31 @@ fn bind_schema(fixture: &mut support::Fixture) {
         .unwrap();
     fixture.replace_artifact(index, schema, schema);
     fixture.inventory.compatibility.schema = FileIdentity::of(schema).sha256;
+    let npm_index = fixture
+        .inventory
+        .artifacts
+        .iter()
+        .position(|artifact| artifact.surface == Surface::SdkTypeScript)
+        .unwrap();
+    let npm_bytes = std::fs::read(
+        fixture
+            .root
+            .join("bundle")
+            .join(&fixture.inventory.artifacts[npm_index].file),
+    )
+    .unwrap();
+    let digest = support::hex(&fixture.inventory.compatibility.schema);
+    let npm = rewrite_package(&npm_bytes, None, |path, bytes| match path {
+        "package/api/positron.proto" => schema.to_vec(),
+        "package/api/schema.sha256" => format!("{digest}\n").into_bytes(),
+        "package/package.json" => {
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            value["positron"]["schema_digest"] = serde_json::json!(digest);
+            serde_json::to_vec(&value).unwrap()
+        },
+        _ => bytes,
+    });
+    fixture.replace_artifact(npm_index, &npm, &npm);
     let compatibility = support::hex(
         &FileIdentity::of(&serde_json::to_vec(&fixture.inventory.compatibility).unwrap()).sha256,
     );

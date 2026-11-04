@@ -58,3 +58,6 @@ mod administration_refusals;
 
 #[path = "native_transport/log_query.rs"]
 mod log_query;
+
+#[path = "native_transport/typescript.rs"]
+mod typescript;

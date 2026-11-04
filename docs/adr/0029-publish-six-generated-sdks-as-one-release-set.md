@@ -12,3 +12,15 @@ existing signed inventory. SPDX/CycloneDX, provenance, independent payload bytes
 crates.io native evidence, signatures, revocation, and complete-set requirements
 remain in that same owning verification path. Private test identities establish
 verification behavior, not publication or release evidence.
+
+The TypeScript publication workspace is `sdk/typescript`. The Rust Public
+Interface generator emits its HTTP wire types, exclusive Protobuf oneofs,
+canonical descriptor and schema metadata, bounded transport, query delivery
+helpers, and package identity. Compiler inputs are locked and the package has
+no runtime dependencies. TypeScript's adapter executes generated bindings;
+server policy and canonical error/retry metadata remain Rust-owned. Native npm
+package inspection authenticates the embedded API definition, digest, source
+commit, exports, version, generator and registry identity under the same Release
+Trust path. The npm Sigstore provenance profile, SBOMs, independent rebuild,
+signatures, revocation and Release Manifest remain the existing authorities.
+Private fixture identities and local package tests do not establish publication.

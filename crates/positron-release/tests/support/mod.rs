@@ -27,6 +27,10 @@ impl Drop for Fixture {
 }
 impl Fixture {
     pub fn new() -> Self {
+        Self::new_with_api(b"canonical api definition")
+    }
+
+    pub fn new_with_api(api: &[u8]) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "positron-release-{}-{}-{}",
@@ -54,7 +58,7 @@ impl Fixture {
             receiver: [1; 32],
             api: [2; 32],
             query: [3; 32],
-            schema: Sha256::digest(b"canonical api definition").into(),
+            schema: Sha256::digest(api).into(),
             crd: [5; 32],
             operator: [6; 32],
         };
@@ -177,7 +181,7 @@ impl Fixture {
                     include_bytes!("../fixtures/positron_1.0.0_arm64.deb").to_vec()
                 }
             } else if surface == Api {
-                b"canonical api definition".to_vec()
+                api.to_vec()
             } else if surface == Nix {
                 include_bytes!("../fixtures/positron.nar").to_vec()
             } else {
@@ -260,7 +264,7 @@ impl Fixture {
                 },
             });
         }
-        let mut native = native_registry::fixtures("1.0.0", &fixture.inventory.source_commit);
+        let mut native = native_registry::fixtures("1.0.0", &fixture.inventory.source_commit, api);
         native.extend(native_packages::fixtures("1.0.0"));
         native.extend(native_rpm::fixtures());
         fixture.install_native(native);
