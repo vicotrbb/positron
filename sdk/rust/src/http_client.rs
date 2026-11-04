@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -131,7 +131,7 @@ impl HttpClient {
         if timeout.is_zero() {
             return Err(());
         }
-        let response = self
+        let response = match self
             .client
             .post(format!("{}{path}", self.endpoint))
             .bearer_auth(bearer)
@@ -139,20 +139,67 @@ impl HttpClient {
             .body(body)
             .timeout(timeout)
             .send()
-            .map_err(|_| ())?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let phase = if error.is_timeout() {
+                    "send_timeout"
+                } else {
+                    "send_other"
+                };
+                execute_failure_probe(path, phase, None)?;
+                return Err(());
+            },
+        };
         let status = response.status().as_u16();
         let limit = response_limit
             .checked_add(1)
             .and_then(|limit| u64::try_from(limit).ok())
             .ok_or(())?;
         let mut bytes = Zeroizing::new(Vec::with_capacity(response_limit));
-        response
-            .take(limit)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ())?;
+        if let Err(error) = response.take(limit).read_to_end(&mut bytes) {
+            let timeout = error.kind() == std::io::ErrorKind::TimedOut
+                || error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                    .is_some_and(reqwest::Error::is_timeout);
+            execute_failure_probe(
+                path,
+                if timeout {
+                    "read_timeout"
+                } else {
+                    "read_other"
+                },
+                None,
+            )?;
+            return Err(());
+        }
         if bytes.len() > response_limit {
+            execute_failure_probe(path, "response_bound", None)?;
             return Err(());
         }
         Ok((status, bytes))
     }
+}
+
+// TEMPORARY SDK127 Nix experiment. Remove every probe before merge.
+// Only finite Execute errors reach stderr; failed writes retain that same failure.
+pub(crate) fn execute_failure_probe(
+    path: &str,
+    phase: &'static str,
+    response: Option<(u16, usize)>,
+) -> Result<(), ()> {
+    if path != crate::log_query::HTTP_PATH {
+        return Ok(());
+    }
+    let line = match response {
+        Some((status, bytes)) => {
+            format!("POSITRON_SDK127_PROBE {phase} status={status} bytes={bytes}\n")
+        },
+        None => format!("POSITRON_SDK127_PROBE {phase}\n"),
+    };
+    std::io::stderr()
+        .lock()
+        .write_all(line.as_bytes())
+        .map_err(|_| ())
 }

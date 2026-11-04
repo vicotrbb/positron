@@ -310,7 +310,7 @@ fn offline_restore_reference_survives_frontiers_that_refuse_continuation() -> Re
         .begin_upgrade(accepted)?
         .finish(ShutdownTrigger::FirstSignal)?;
     drop(host);
-    let reference = verified_snapshot(&case, id)?;
+    let (reference, qualification_failure) = verified_snapshot(&case, id)?;
     let before = binding(&case)?;
     // Existing startup-recovery fault convention: damage acknowledged native
     // storage after releasing the offline owner, leaving Catalog evidence intact.
@@ -361,6 +361,9 @@ fn offline_restore_reference_survives_frontiers_that_refuse_continuation() -> Re
         "reference inspection must preserve Catalog and historical marker"
     );
     reference_refuses_other_bindings(&case, id, before)?;
+    if let Some(failure) = qualification_failure {
+        return Err(failure.into());
+    }
     Ok(())
 }
 fn reference_refuses_other_bindings(
@@ -413,11 +416,18 @@ fn reference_refuses_other_bindings(
 fn verified_snapshot(
     case: &Case,
     id: positron_governance::OperationId,
-) -> Result<positron_governance::BackupVerificationParameters> {
+) -> Result<(
+    positron_governance::BackupVerificationParameters,
+    Option<String>,
+)> {
     let mut session = begin_session(case, id)?;
     // The operator API advances in bounded thirty-second calls. This is a
     // correctness-test watchdog, not a total Backup/Verification product SLO.
     let watchdog = Instant::now() + Duration::from_secs(300);
+    // TEMPORARY SDK127 experiment. Late progress can never qualify this fixture.
+    let mut qualification_failure = None;
+    let mut diagnostic_deadline = None;
+    let mut diagnostic_turns = 0_u8;
     let initial = session.status()?;
     let mut revision = initial.revision();
     let mut turns = 0_u64;
@@ -425,87 +435,108 @@ fn verified_snapshot(
     let mut reopen_elapsed = Duration::ZERO;
     let mut last_reopen_elapsed = Duration::ZERO;
     let mut recent_turns = std::collections::VecDeque::with_capacity(4);
-    loop {
-        let advance_started = Instant::now();
-        let turn = (advance_started + Duration::from_secs(30)).min(watchdog);
-        let operation = match session.advance(turn) {
-            Ok(operation) => operation,
-            Err(positron_runtime::UpgradeFailure::CapacityUnavailable) => {
-                // The bounded operator call explicitly permits a retry when
-                // its admitted turn cannot make durable progress. Keep the
-                // same intent and overall watchdog; all other failures escape.
-                session.status()?
-            },
-            Err(error) => return Err(error.into()),
-        };
-        let last_advance_elapsed = advance_started.elapsed();
-        advance_elapsed += last_advance_elapsed;
-        turns += 1;
-        assert_eq!(operation.operation_id(), id);
-        assert_eq!(operation.request(), initial.request());
-        assert_eq!(operation.upgrade_parameters(), initial.upgrade_parameters());
-        assert_eq!(
-            operation.upgrade_drain_evidence(),
-            initial.upgrade_drain_evidence()
-        );
-        assert!(operation.revision() >= revision);
-        revision = operation.revision();
-        if operation.upgrade_stage() == Some(UpgradeStage::Publishing) {
-            assert!(operation.upgrade_snapshot_evidence().is_some());
-            break;
-        }
-        assert!(!operation.status().is_terminal(), "{operation:?}");
-        let children = session.progress(&case.effective).map(|progress| {
-            let summarize = |child: Option<positron_runtime::UpgradeChildProgress>| {
-                child.map(|child| {
-                    (
-                        child.kind,
-                        child.phase,
-                        child.status,
-                        child.revision,
-                        child.progress_percent,
-                        child.checkpoint.map(|checkpoint| checkpoint.sequence),
-                    )
-                })
+    let observation = (|| -> Result<positron_governance::BackupVerificationParameters> {
+        loop {
+            let advance_started = Instant::now();
+            if let Some(deadline) = diagnostic_deadline {
+                if diagnostic_turns >= 8 || advance_started >= deadline {
+                    return Err("diagnostic continuation bound elapsed".into());
+                }
+                diagnostic_turns += 1;
+            }
+            let turn = (advance_started + Duration::from_secs(30))
+                .min(diagnostic_deadline.unwrap_or(watchdog));
+            let operation = match session.advance(turn) {
+                Ok(operation) => operation,
+                Err(positron_runtime::UpgradeFailure::CapacityUnavailable) => {
+                    // The bounded operator call explicitly permits a retry when
+                    // its admitted turn cannot make durable progress. Keep the
+                    // same intent and overall watchdog; all other failures escape.
+                    session.status()?
+                },
+                Err(error) => return Err(error.into()),
             };
-            (
-                summarize(progress.snapshot),
-                summarize(progress.verification),
-            )
-        });
-        if recent_turns.len() == 4 {
-            recent_turns.pop_front();
+            let last_advance_elapsed = advance_started.elapsed();
+            advance_elapsed += last_advance_elapsed;
+            turns += 1;
+            assert_eq!(operation.operation_id(), id);
+            assert_eq!(operation.request(), initial.request());
+            assert_eq!(operation.upgrade_parameters(), initial.upgrade_parameters());
+            assert_eq!(
+                operation.upgrade_drain_evidence(),
+                initial.upgrade_drain_evidence()
+            );
+            assert!(operation.revision() >= revision);
+            revision = operation.revision();
+            if operation.upgrade_stage() == Some(UpgradeStage::Publishing) {
+                assert!(operation.upgrade_snapshot_evidence().is_some());
+                break;
+            }
+            assert!(!operation.status().is_terminal(), "{operation:?}");
+            let children = session.progress(&case.effective).map(|progress| {
+                let summarize = |child: Option<positron_runtime::UpgradeChildProgress>| {
+                    child.map(|child| {
+                        (
+                            child.kind,
+                            child.phase,
+                            child.status,
+                            child.revision,
+                            child.progress_percent,
+                            child.checkpoint.map(|checkpoint| checkpoint.sequence),
+                        )
+                    })
+                };
+                (
+                    summarize(progress.snapshot),
+                    summarize(progress.verification),
+                )
+            });
+            if recent_turns.len() == 4 {
+                recent_turns.pop_front();
+            }
+            recent_turns.push_back((
+                turns,
+                last_advance_elapsed.as_millis(),
+                last_reopen_elapsed.as_millis(),
+                children,
+            ));
+            if qualification_failure.is_none() && Instant::now() >= watchdog {
+                qualification_failure = Some(format!(
+                    "snapshot watchdog status={:?} stage={:?} revision={} turns={turns} last_advance_ms={} advance_total_ms={} reopen_total_ms={} recent_turns(turn,advance_ms,preceding_reopen_ms,children)={:?}",
+                    operation.status(),
+                    operation.upgrade_stage(),
+                    operation.revision(),
+                    last_advance_elapsed.as_millis(),
+                    advance_elapsed.as_millis(),
+                    reopen_elapsed.as_millis(),
+                    recent_turns,
+                ));
+                eprintln!("QUALIFICATION_FAILED offline_snapshot_watchdog");
+                diagnostic_deadline = Some(Instant::now() + Duration::from_secs(300));
+            }
+            // Each real offline CLI command releases its owner before the next
+            // invocation resumes the same durable operation.
+            let reopen_started = Instant::now();
+            drop(session);
+            session = begin_session(case, id)?;
+            last_reopen_elapsed = reopen_started.elapsed();
+            reopen_elapsed += last_reopen_elapsed;
+            // A stable parent revision makes no claim about either child's progress.
+            std::thread::sleep(Duration::from_millis(20));
         }
-        recent_turns.push_back((
-            turns,
-            last_advance_elapsed.as_millis(),
-            last_reopen_elapsed.as_millis(),
-            children,
-        ));
-        assert!(
-            Instant::now() < watchdog,
-            "snapshot watchdog status={:?} stage={:?} revision={} turns={turns} last_advance_ms={} advance_total_ms={} reopen_total_ms={} recent_turns(turn,advance_ms,preceding_reopen_ms,children)={:?}",
-            operation.status(),
-            operation.upgrade_stage(),
-            operation.revision(),
-            last_advance_elapsed.as_millis(),
-            advance_elapsed.as_millis(),
-            reopen_elapsed.as_millis(),
-            recent_turns,
-        );
-        // Each real offline CLI command releases its owner before the next
-        // invocation resumes the same durable operation.
-        let reopen_started = Instant::now();
-        drop(session);
-        session = begin_session(case, id)?;
-        last_reopen_elapsed = reopen_started.elapsed();
-        reopen_elapsed += last_reopen_elapsed;
-        // A stable parent revision makes no claim about either child's progress.
-        std::thread::sleep(Duration::from_millis(20));
+        session
+            .rollback_snapshot()?
+            .ok_or_else(|| "verified receipt".into())
+    })();
+    match observation {
+        Ok(reference) => Ok((reference, qualification_failure)),
+        Err(error) => match qualification_failure {
+            Some(original) => {
+                Err(format!("{original}; diagnostic continuation failed: {error}").into())
+            },
+            None => Err(error),
+        },
     }
-    session
-        .rollback_snapshot()?
-        .ok_or_else(|| "verified receipt".into())
 }
 
 fn ingest_before_upgrade(process: &RunningProcess, credential: &str) -> Result {

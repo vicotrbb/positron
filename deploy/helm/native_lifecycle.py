@@ -129,6 +129,43 @@ class NativeLifecycle(DataLifecycle):
         elif action == "up": self.scale(1)
         else: raise AssertionError("unsupported test lifecycle action")
 
+    def ingest(self):
+        try:
+            return super().ingest()
+        except Exception:
+            # TEMPORARY SDK127 experiment: inspect before close(), never retry.
+            fact = {"event": "helm_ingest_forward_failure", "forward_status": "unavailable",
+                    "stderr_class": "unavailable", "pod_uid": "unavailable", "restarts": "unavailable"}
+            try:
+                if self.forwarders:
+                    forward = self.forwarders[-1]
+                    status = forward.poll()
+                    fact["forward_status"] = status if type(status) is int and -128 <= status <= 255 else "running"
+                    if select.select([forward.stderr], [], [], 0)[0]:
+                        error = os.read(forward.stderr.fileno(), 4097)
+                        fact["stderr_class"] = "other"
+                        if len(error) <= 4096:
+                            if b"lost connection to pod" in error:
+                                fact["stderr_class"] = "lost_pod_connection"
+                            elif b"connection refused" in error:
+                                fact["stderr_class"] = "connection_refused"
+                result = self.kube("get", "pod", self.pod, "-o", "json", "--request-timeout=1s", timeout=1)
+                if len(result.stdout) <= 65536:
+                    pod = json.loads(result.stdout)
+                    uid = pod["metadata"]["uid"]
+                    statuses = pod["status"]["containerStatuses"]
+                    if (isinstance(uid, str) and re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", uid)
+                            and isinstance(statuses, list) and 1 <= len(statuses) <= 8
+                            and all(type(item.get("restartCount")) is int and 0 <= item["restartCount"] <= 4294967295 for item in statuses)):
+                        fact.update(pod_uid=uid, restarts=sum(item["restartCount"] for item in statuses))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+                pass
+            try:
+                print(json.dumps(fact))
+            except OSError:
+                pass  # Failed observation output cannot replace the ingest failure.
+            raise
+
     def close(self):
         for process in self.forwarders:
             process.terminate()

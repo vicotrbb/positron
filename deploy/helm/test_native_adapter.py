@@ -71,6 +71,59 @@ class NativeAdapter(unittest.TestCase):
             self.assertIs(caught.exception, failure)
             self.assertEqual(sum(args[0] == "exec" for args in calls), 1)
 
+    def test_failed_ingest_observes_owned_forward_and_pod_without_retry(self):
+        from unittest.mock import Mock
+        from data_lifecycle import DataLifecycle
+        original = ConnectionRefusedError("private-canary")
+        forward = Mock()
+        forward.poll.return_value = 1
+        forward.stderr = Mock()
+        forward.stderr.fileno.return_value = 3
+        uid = "11111111-1111-4111-8111-111111111111"
+        pod = {"metadata": {"uid": uid}, "status": {"containerStatuses": [{"restartCount": 0}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            kube = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps(pod).encode(), b"private-canary"))
+            lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
+            lifecycle.forwarders.append(forward)
+            output = io.StringIO()
+            with patch.object(DataLifecycle, "ingest", side_effect=original) as ingest, \
+                    patch("select.select", return_value=([forward.stderr], [], [])), \
+                    patch("os.read", return_value=b"error: lost connection to pod\nprivate-canary"), \
+                    contextlib.redirect_stdout(output), self.assertRaises(ConnectionRefusedError) as caught:
+                lifecycle.ingest()
+            self.assertIs(caught.exception, original)
+            ingest.assert_called_once()
+            self.assertEqual(json.loads(output.getvalue()), {"event": "helm_ingest_forward_failure", "forward_status": 1,
+                "stderr_class": "lost_pod_connection", "pod_uid": uid, "restarts": 0})
+            self.assertLessEqual(kube.call_args.kwargs["timeout"], 1)
+            self.assertNotIn("private-canary", output.getvalue())
+
+    def test_failed_ingest_probe_failure_cannot_replace_original_or_emit_raw_text(self):
+        from data_lifecycle import DataLifecycle
+        original = ConnectionRefusedError("original")
+        with tempfile.TemporaryDirectory() as directory:
+            def kube(*args, **kwargs):
+                raise OSError("private-canary")
+            lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
+            output = io.StringIO()
+            with patch.object(DataLifecycle, "ingest", side_effect=original), contextlib.redirect_stdout(output), \
+                    self.assertRaises(ConnectionRefusedError) as caught:
+                lifecycle.ingest()
+            self.assertIs(caught.exception, original)
+            self.assertEqual(json.loads(output.getvalue()), {"event": "helm_ingest_forward_failure", "forward_status": "unavailable", "stderr_class": "unavailable", "pod_uid": "unavailable", "restarts": "unavailable"})
+
+    def test_successful_ingest_has_no_temporary_observation(self):
+        from unittest.mock import Mock
+        from data_lifecycle import DataLifecycle
+        with tempfile.TemporaryDirectory() as directory:
+            kube = Mock()
+            lifecycle = NativeLifecycle(self, Path(directory), kube, None, None, "pod", [], None, {}, b"administrator_secret=x query_secret=y")
+            output = io.StringIO()
+            with patch.object(DataLifecycle, "ingest", return_value=None), contextlib.redirect_stdout(output):
+                lifecycle.ingest()
+            kube.assert_not_called()
+            self.assertEqual(output.getvalue(), "")
+
     def test_initial_ingest_failure_diagnostics_emit_only_closed_transport_fields(self):
         calls = []
         def kube(*args, **kwargs):

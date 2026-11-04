@@ -1,6 +1,7 @@
 """Public telemetry outcomes for the NixOS VM. Credentials never enter argv or logs."""
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -68,6 +69,41 @@ if sys.argv[1] == "readiness-diagnostics":
     except (ValueError, TypeError, OSError, subprocess.TimeoutExpired):
         pass
     print(json.dumps(observation))
+elif sys.argv[1] == "query-failure-facts":
+    # TEMPORARY SDK127 experiment: observe after failure, never replay the query.
+    until, facts = time.monotonic() + 5, []
+    for _ in range(20):
+        remaining = until - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            result = subprocess.run(["journalctl", "--unit=positron", "--output=json",
+                "--output-fields=MESSAGE", "--no-pager", "--lines=64"],
+                capture_output=True, timeout=min(1, remaining))
+            if result.returncode or len(result.stdout) > 65536:
+                raise ValueError("journal observation unavailable")
+            for line in result.stdout.splitlines():
+                value = json.loads(json.loads(line)["MESSAGE"])
+                event = value.get("event")
+                if event == "process_serving":
+                    fact = {"event": event}
+                elif (event == "request_completed"
+                        and value.get("listener") in {"control", "operations", "api", "otlp_grpc", "otlp_http", "loki_push"}
+                        and value.get("outcome") in {"success", "authentication_rejected", "capacity_rejected", "request_rejected", "unavailable"}
+                        and all(type(value.get(key)) is int and 0 <= value[key] <= 18446744073709551615
+                                for key in ["request_id", "duration_micros"])):
+                    fact = {key: value[key] for key in ["event", "listener", "outcome", "request_id", "duration_micros"]}
+                else:
+                    continue
+                if fact not in facts and len(facts) < 8:
+                    facts.append(fact)
+            if any(fact.get("listener") == "api" for fact in facts):
+                break
+        except (ValueError, KeyError, TypeError, AttributeError, OSError, subprocess.TimeoutExpired):
+            pass
+        time.sleep(min(0.25, max(0, until - time.monotonic())))
+    for fact in facts or [{"event": "query_server_observation", "outcome": "unavailable"}]:
+        print(json.dumps(fact))
 elif sys.argv[1] == "ingest":
     body = json.dumps({"resourceLogs": [{"scopeLogs": [{"logRecords": [
         {"timeUnixNano": "42", "body": {"stringValue": marker}}
@@ -219,14 +255,33 @@ else:
             if time.monotonic() >= deadline:
                 raise RuntimeError("query deadline elapsed")
             break
+        # TEMPORARY SDK127 diagnostic capture; retain the original CLI class.
+        stderr = result.stderr
+        if len(stderr) <= 4096:
+            canonical = []
+            phases = {b"send_timeout", b"send_other", b"read_timeout", b"read_other", b"response_bound"}
+            for line in stderr.splitlines():
+                prefix = b"POSITRON_SDK127_PROBE "
+                if line.startswith(prefix) and line[len(prefix):] in phases:
+                    print(json.dumps({"event": "query_transport_probe", "phase": line[len(prefix):].decode("ascii")}))
+                else:
+                    numeric = re.fullmatch(rb"POSITRON_SDK127_PROBE (response_decode|rejection_decode) status=([1-5][0-9]{2}) bytes=([0-9]{1,6})", line)
+                    if numeric and int(numeric[3]) <= 262145:
+                        print(json.dumps({"event": "query_transport_probe", "phase": numeric[1].decode("ascii"),
+                            "status": int(numeric[2]), "bytes": int(numeric[3])}))
+                    else:
+                        canonical.append(line)
+            stderr = b"\n".join(canonical)
+        else:
+            stderr = b"unrecognized"
         last_rejection = {
             b"positron: invalid bounded query request": "invalid_request",
             b"positron: query authentication rejected": "authentication_rejected",
             b"positron: query capacity unavailable; retry after backoff": "capacity_unavailable",
             b"positron: query unavailable; inspect instance readiness": "query_unavailable",
             b"positron: query transport or response unavailable": "transport",
-        }.get(result.stderr.strip(), "other")
-        if time.monotonic() + 1 >= deadline or b"capacity unavailable" not in result.stderr:
+        }.get(stderr.strip(), "other")
+        if time.monotonic() + 1 >= deadline or last_rejection != "capacity_unavailable":
             elapsed_ms = int((time.monotonic() - (deadline - 30)) * 1000)
             raise RuntimeError(f"public query failed: code={last_rejection} returncode={result.returncode} "
                 f"attempt={attempt} elapsed_ms={elapsed_ms}")
