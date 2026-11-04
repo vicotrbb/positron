@@ -75,19 +75,69 @@ fn await_terminated(pid: u32) -> TestResult {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
-fn terminate(child: &mut Child, saturated: bool, phase: &str) -> TestResult {
+fn terminate(
+    child: &mut Child,
+    saturated: bool,
+    phase: &str,
+    operations_port: u16,
+    authorization: &str,
+) -> TestResult {
+    let started = Instant::now();
     assert!(
         Command::new("/bin/kill")
             .args(["-TERM", &child.id().to_string()])
             .status()?
             .success()
     );
-    let status = wait_for_child(child)?;
+    let mut status = None;
+    // Retain this fixture's existing 100 x 25ms wait and failure decision.
+    for _ in 0..100 {
+        status = child.try_wait()?;
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let Some(status) = status else {
+        let timeout_ms = started.elapsed().as_millis();
+        let public_phase = output_public_phase(operations_port, authorization);
+        let helpers = children(child.id()).ok().map(|children| children.len());
+        let natural_status = child.try_wait()?;
+        let observed_ms = started.elapsed().as_millis();
+        if natural_status.is_none() {
+            child.kill()?;
+            let _reaped = child.wait()?;
+        }
+        // Diagnostic observation never turns an already-expired wait into success.
+        return Err(format!("saturated={saturated} phase={phase} child_wait_expired_ms={timeout_ms} observed_ms={observed_ms} public_phase={public_phase} owned_helpers={helpers:?} natural_status={natural_status:?}").into());
+    };
     if status.code() != Some(0) {
         return Err(format!("saturated={saturated} phase={phase} status={status}").into());
     }
     Ok(())
 }
+
+fn output_public_phase(port: u16, authorization: &str) -> &'static str {
+    // Keep only closed phase values, never response bodies or credential-bearing errors.
+    configuration_status(port, authorization)
+        .ok()
+        .and_then(|response| {
+            let (_, body) = response.split_once("\r\n\r\n")?;
+            let status: serde_json::Value = serde_json::from_str(body).ok()?;
+            match status["phase"].as_str()? {
+                "starting" => Some("starting"),
+                "recovering" => Some("recovering"),
+                "serving" => Some("serving"),
+                "draining" => Some("draining"),
+                "fenced" => Some("fenced"),
+                "stopping" => Some("stopping"),
+                "stopped" => Some("stopped"),
+                _ => None,
+            }
+        })
+        .unwrap_or("unavailable")
+}
+
 fn output_failure_context(reader: &mut std::io::PipeReader, child: &mut Child) -> String {
     let status = child.try_wait();
     let mut bytes = Vec::new();
@@ -322,14 +372,23 @@ fn normal_and_saturated_output_reap_before_graceful_marker_and_retain_acknowledg
                 .spawn()?,
         );
         wait_for_ready(ports[0]).map_err(|error| {
+            // Observe phase before draining the pipe changes output backpressure.
+            let phase = output_public_phase(ports[0], &format!("Bearer {}", claim.secret()));
             format!(
-                "saturated={saturated} phase=initial_readiness error={error} {}",
+                "saturated={saturated} phase=initial_readiness public_phase={phase} error={error} {}",
                 output_failure_context(&mut reader, &mut child)
             )
         })?;
         let helper = children(child.id())?.first().copied();
         http(ports[3], "/v1/logs", claim.ingest_secret().ok_or("ingest credential")?, br#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"timeUnixNano":"42","body":{"stringValue":"output-helper-retained"}}]}]}]}"#)?;
-        terminate(&mut child, saturated, "after_ingest").map_err(|error| {
+        terminate(
+            &mut child,
+            saturated,
+            "after_ingest",
+            ports[0],
+            &format!("Bearer {}", claim.secret()),
+        )
+        .map_err(|error| {
             format!(
                 "{error} {}",
                 output_failure_context(&mut reader, &mut child)
@@ -377,7 +436,13 @@ fn normal_and_saturated_output_reap_before_graceful_marker_and_retain_acknowledg
                 .count(),
             1
         );
-        terminate(&mut restarted, saturated, "after_query")?;
+        terminate(
+            &mut restarted,
+            saturated,
+            "after_query",
+            ports[0],
+            &format!("Bearer {}", claim.secret()),
+        )?;
         fs::remove_dir_all(root)?;
     }
     Ok(())
