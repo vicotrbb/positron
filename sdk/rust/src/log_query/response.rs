@@ -11,11 +11,7 @@ impl LogQueryResponse {
     }
     pub fn encode_session(&self) -> Result<Vec<u8>, LogQueryWireFailure> {
         self.validate_inner(true, false)?;
-        let bytes = serde_json::to_vec(self).map_err(|_| LogQueryWireFailure)?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(LogQueryWireFailure);
-        }
-        Ok(bytes)
+        self.encode_bounded()
     }
     pub fn decode_session(bytes: &[u8]) -> Result<Self, LogQueryWireFailure> {
         if bytes.len() > MAX_RESPONSE_BYTES {
@@ -27,11 +23,7 @@ impl LogQueryResponse {
     }
     pub fn encode_tail(&self) -> Result<Vec<u8>, LogQueryWireFailure> {
         self.validate_inner(true, true)?;
-        let bytes = serde_json::to_vec(self).map_err(|_| LogQueryWireFailure)?;
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(LogQueryWireFailure);
-        }
-        Ok(bytes)
+        self.encode_bounded()
     }
     pub fn decode_tail(bytes: &[u8]) -> Result<Self, LogQueryWireFailure> {
         if bytes.len() > MAX_RESPONSE_BYTES {
@@ -366,6 +358,10 @@ fn validate_value(value: &LogQueryValue, depth: u8) -> Result<(), LogQueryWireFa
         return Err(LogQueryWireFailure);
     }
     match value.value.as_ref().ok_or(LogQueryWireFailure)? {
+        // ProtoJSON builds a base64 temporary before passing bytes to the writer.
+        log_query_value::Value::BytesValue(bytes) if bytes.len() > MAX_RESPONSE_BYTES => {
+            return Err(LogQueryWireFailure);
+        },
         log_query_value::Value::ArrayValue(array) => {
             for value in &array.values {
                 validate_value(value, depth + 1)?;
@@ -415,6 +411,9 @@ impl LogQueryResponse {
     /// governed capacity before invoking this encoder.
     pub fn encode(&self) -> Result<Vec<u8>, LogQueryWireFailure> {
         self.validate()?;
+        self.encode_bounded()
+    }
+    fn encode_bounded(&self) -> Result<Vec<u8>, LogQueryWireFailure> {
         let mut output = BoundedOutput(Vec::new());
         output
             .0

@@ -6,16 +6,45 @@ use std::time::{Duration, Instant};
 use positron_sdk::log_query::{LogQueryServiceClient, LogQueryTransport};
 
 #[test]
-fn generated_query_client_accepts_complete_response_after_five_seconds()
+fn generated_session_client_accepts_complete_response_after_five_seconds()
 -> Result<(), Box<dyn std::error::Error>> {
     let (request, response) = query_exchange()?;
+    use positron_sdk::api_keys::protobuf::{CapabilityAvailability, CapabilityResponse};
+    use positron_sdk::generated::{
+        ApiVersion, Capability, CapabilityClient, CapabilityRequest, SchemaDigest, Transport,
+    };
+    use positron_sdk::log_query::{LogQuerySessionRequest, log_query_session_request};
+    let request = LogQuerySessionRequest {
+        operation: Some(log_query_session_request::Operation::Execute(request)),
+        batch_limit: 1,
+    };
     let expected_request = request.encode()?;
-    let response_bytes = response.encode()?;
+    let response_bytes = response.encode_session()?;
+    let negotiation = CapabilityClient::encode(
+        CapabilityRequest::for_capability(ApiVersion::V1, Capability::QuerySessions),
+        Transport::HttpJson,
+    );
+    let capability_response = serde_json::to_vec(&CapabilityResponse {
+        api_major: 1,
+        schema_digest: SchemaDigest::canonical().as_str().into(),
+        capability: Capability::QuerySessions as i32,
+        availability: CapabilityAvailability::Implemented as i32,
+        ..Default::default()
+    })?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let endpoint = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     let server = std::thread::spawn(move || -> std::io::Result<()> {
-        let mut stream = receive_request(&listener, "/v1/logs:query", &expected_request)?;
+        let mut capability =
+            receive_request(&listener, negotiation.path(), negotiation.as_bytes())?;
+        write!(
+            capability,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            capability_response.len()
+        )?;
+        capability.write_all(&capability_response)?;
+        drop(capability);
+        let mut stream = receive_request(&listener, "/v1/logs:session", &expected_request)?;
         std::thread::sleep(Duration::from_secs(6));
         let write = (|| {
             write!(
@@ -39,7 +68,7 @@ fn generated_query_client_accepts_complete_response_after_five_seconds()
         Ok(())
     });
     let client = LogQueryServiceClient::new(LogQueryTransport::PlaintextOptOut { endpoint })?;
-    let result = client.execute("test-only-query-key", &request);
+    let result = client.session("test-only-query-key", &request);
     server.join().map_err(|_| "query fixture panicked")??;
     assert_eq!(result?, response);
     Ok(())
@@ -202,7 +231,7 @@ fn query_transport_total_deadline_bounds_held_headers_and_trickled_body()
             positron_sdk::log_query::LogQueryServiceClientFailure::Transport
         );
         assert!(
-            elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(35),
+            elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(7),
             "total query deadline was not enforced"
         );
     }
