@@ -25,29 +25,37 @@ pub(in crate::services) fn execute(
     services: &ServiceHandle,
     bearer: &str,
     body: &[u8],
+    timings: Option<&super::QueryTimings>,
 ) -> Result<(Vec<u8>, TransferredResourceReservation), ServiceFailure> {
-    services.require_data_or_mutation_admission()?;
-    let context = super::authorize(services, bearer)?;
-    let request = api::LogQueryRequest::decode(body).map_err(|_| ServiceFailure::InvalidRequest)?;
-    let requested = request
-        .budget
-        .as_ref()
-        .ok_or(ServiceFailure::InvalidRequest)?;
-    let budget = native_budget(requested)?;
-    let tenant = crate::services::context_tenant(context)?;
-    let claim = WorkClaim::authenticated(
-        tenant,
-        context.principal_id(),
-        WorkKind::InteractiveQueryTail,
-        ResourceAmounts::only(ResourceDimension::MemoryBytes, RESPONSE_WORKSPACE_BYTES)
-            .map_err(|_| ServiceFailure::Internal)?,
-    )
-    .map_err(|_| ServiceFailure::Internal)?;
-    let reservation = services
-        .instance
-        .resource_governor()
-        .reserve(claim)
-        .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+    let context = super::timed(timings.map(|timings| &timings.initial_auth), || {
+        services.require_data_or_mutation_admission()?;
+        super::authorize(services, bearer)
+    })?;
+    let (request, budget, reservation) =
+        super::timed(timings.map(|timings| &timings.decode_admission), || {
+            let request =
+                api::LogQueryRequest::decode(body).map_err(|_| ServiceFailure::InvalidRequest)?;
+            let requested = request
+                .budget
+                .as_ref()
+                .ok_or(ServiceFailure::InvalidRequest)?;
+            let budget = native_budget(requested)?;
+            let tenant = crate::services::context_tenant(context)?;
+            let claim = WorkClaim::authenticated(
+                tenant,
+                context.principal_id(),
+                WorkKind::InteractiveQueryTail,
+                ResourceAmounts::only(ResourceDimension::MemoryBytes, RESPONSE_WORKSPACE_BYTES)
+                    .map_err(|_| ServiceFailure::Internal)?,
+            )
+            .map_err(|_| ServiceFailure::Internal)?;
+            let reservation = services
+                .instance
+                .resource_governor()
+                .reserve(claim)
+                .map_err(|_| ServiceFailure::CapacityUnavailable)?;
+            Ok::<_, ServiceFailure>((request, budget, reservation))
+        })?;
     // Revalidation in the shared executor closes revocation races after bounded
     // request decoding and response admission, without a second authority.
     let bytes = super::with_log_query_events(
@@ -56,6 +64,7 @@ pub(in crate::services) fn execute(
         services.instance.logs_shard,
         &request.pipeline,
         budget,
+        timings,
         |events| render(events, false),
     )?;
     Ok((bytes, reservation.transfer()))

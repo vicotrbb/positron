@@ -73,3 +73,42 @@ fn query_failure_details_are_closed_optional_and_keep_the_existing_ring_and_coun
     );
     Ok(())
 }
+
+#[test]
+fn finite_query_timings_preserve_bounded_ring_and_query_counters()
+-> Result<(), Box<dyn std::error::Error>> {
+    let telemetry = OperationalTelemetry::default();
+    for _ in 0..33 {
+        telemetry.record_query_timed(
+            RequestOutcome::Success,
+            std::time::Duration::from_micros(7),
+            None,
+            Some([u64::MAX; 10]),
+        );
+    }
+    let records = telemetry.snapshot().map_err(|_| "ring")?;
+    assert_eq!(records.len(), 32);
+    assert_eq!(
+        telemetry.dropped.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let event = telemetry
+        .take_pending()
+        .map_err(|_| "pending")?
+        .ok_or("event")?
+        .json();
+    assert!(
+        event
+            .get("finite_stage_micros")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|values| values.len() == 10
+                && values.iter().all(|value| value.as_u64() == Some(u64::MAX)))
+    );
+    let mut metrics = String::new();
+    telemetry.metrics(&mut metrics, false);
+    assert!(
+        metrics.contains("positron_queries_total{outcome=\"success\"} 33"),
+        "{metrics}"
+    );
+    Ok(())
+}

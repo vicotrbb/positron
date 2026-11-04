@@ -875,10 +875,11 @@ impl ServiceHandle {
         session: bool,
     ) -> Result<(Vec<u8>, TransferredResourceReservation), (u16, &'static str)> {
         let started = std::time::Instant::now();
+        let timings = (!session).then(query::QueryTimings::default);
         let execution = if session {
             query::execute_session(self, bearer, body)
         } else {
-            query::execute(self, bearer, body)
+            query::execute(self, bearer, body, timings.as_ref())
         };
         let failure = execution.as_ref().err().copied();
         let result = execution.map_err(|failure| match failure {
@@ -894,10 +895,12 @@ impl ServiceHandle {
         if let Ok(owner) = self.integrity_health.lock()
             && let Some(health) = owner.as_ref()
         {
-            health.operational_telemetry().record_query(
+            let elapsed = started.elapsed();
+            health.operational_telemetry().record_query_timed(
                 crate::operational::RequestOutcome::from_status(status),
-                started.elapsed(),
+                elapsed,
                 failure,
+                timings.as_ref().map(|timings| timings.snapshot(elapsed)),
             );
         }
         result

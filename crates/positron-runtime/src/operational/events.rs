@@ -204,6 +204,8 @@ pub(crate) enum OperationalEvent {
         outcome: RequestOutcome,
         duration_micros: u64,
         failure: Option<crate::services::ServiceFailure>,
+        // TEMPORARY SDK127 fixed finite-Execute wall timings; never wire data.
+        finite_stage_micros: Option<[u64; 10]>,
     },
     RequestCompleted {
         role: crate::ListenerRole,
@@ -287,10 +289,14 @@ impl OperationalEvent {
             outcome,
             duration_micros,
             failure,
+            finite_stage_micros,
         } = self
         {
             value["outcome"] = outcome.label().into();
             value["duration_micros"] = duration_micros.into();
+            if let Some(stages) = finite_stage_micros {
+                value["finite_stage_micros"] = serde_json::json!(stages);
+            }
             if let Some(category) = failure.and_then(crate::services::maintenance_failure_category)
             {
                 value["failure"] = category.into();

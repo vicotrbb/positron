@@ -246,6 +246,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn finite_query_timing_record_fits_native_output_bound() -> std::io::Result<()> {
+        let mut output = Vec::new();
+        emit(
+            &mut output,
+            false,
+            OperationalEvent::QueryCompleted {
+                outcome: crate::operational::RequestOutcome::Unavailable,
+                duration_micros: u64::MAX,
+                failure: Some(crate::services::ServiceFailure::DurabilityFrontierAmbiguity),
+                finite_stage_micros: Some([u64::MAX; 10]),
+            },
+        )?;
+        assert!(output.len() <= 510, "{}", output.len());
+        let value: serde_json::Value = serde_json::from_slice(&output)?;
+        assert!(
+            value
+                .get("finite_stage_micros")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|values| values.len() == 10
+                    && values.iter().all(|value| value.as_u64() == Some(u64::MAX)))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn structured_operational_output_is_closed_json_and_sink_failure_is_explicit()
     -> Result<(), Box<dyn std::error::Error>> {
         assert!(!log_enabled(

@@ -68,6 +68,15 @@ impl OperationalTelemetry {
         elapsed: std::time::Duration,
         failure: Option<crate::services::ServiceFailure>,
     ) {
+        self.record_query_timed(outcome, elapsed, failure, None);
+    }
+    pub(crate) fn record_query_timed(
+        &self,
+        outcome: RequestOutcome,
+        elapsed: std::time::Duration,
+        failure: Option<crate::services::ServiceFailure>,
+        finite_stage_micros: Option<[u64; 10]>,
+    ) {
         let duration_micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         match self.buffer.lock() {
             Ok(mut buffer) => {
@@ -86,6 +95,7 @@ impl OperationalTelemetry {
             outcome,
             duration_micros,
             failure,
+            finite_stage_micros,
         });
     }
     pub(crate) fn record_query_budget(&self, dimension: positron_query::QueryBudgetDimension) {
