@@ -70,13 +70,14 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
 
     /// TEMPORARY internal SDK127 experiment; remove before shipping.
     /// Borrowed wall-microsecond cells: Catalog revalidation, guards/clock,
-    /// source lease/state setup, eager page (including usage/lease validation).
+    /// source lease/state setup, eager page (including usage/lease validation),
+    /// then NESTED usage total/primary refresh/primary publication across attempts.
     #[doc(hidden)]
     pub fn execute_with_schema_observed(
         &self,
         query: PlannedQuery<'kernel>,
         schema: &positron_signals::SchemaCatalog,
-        timings: &[std::cell::Cell<u64>; 4],
+        timings: &[std::cell::Cell<u64>; 7],
     ) -> Result<QueryStream<'ledger>, QueryFailure> {
         let batch_limit = query.plan.limit();
         self.execute_inner(query, batch_limit, false, Some(schema), Some(timings))
@@ -88,7 +89,7 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         batch_limit: u16,
         pagination: bool,
         schema: Option<&positron_signals::SchemaCatalog>,
-        timings: Option<&[std::cell::Cell<u64>; 4]>,
+        timings: Option<&[std::cell::Cell<u64>; 7]>,
     ) -> Result<QueryStream<'ledger>, QueryFailure> {
         // Correlation has two authenticated Signal Store sources. Until the
         // paired-store path admits both snapshots, it must never degrade into
@@ -138,6 +139,11 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
             };
             Ok((now, expiry, trace_ledger))
         })?;
+        let usage_observation = timings.map(|_| {
+            std::sync::Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU64::new(0)
+            }))
+        });
         let (lease, trace_lease, state, resources) = observed(timings.map(|t| &t[2]), || {
             // PlannedQuery still owns its admitted CPU reservation while the
             // separately scoped immutable source snapshots are constructed.
@@ -213,9 +219,14 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 },
                 None => ExecutionResources::new(reservation, lease.identity(), lease.usage()),
             };
-            Ok((lease, trace_lease, state, resources))
+            Ok((
+                lease,
+                trace_lease,
+                state,
+                resources.with_usage_observation(usage_observation.clone()),
+            ))
         })?;
-        observed(timings.map(|t| &t[3]), || {
+        let result = observed(timings.map(|t| &t[3]), || {
             self.run_page(
                 state,
                 lease.snapshot(),
@@ -228,7 +239,13 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
                 },
                 resources,
             )
-        })
+        });
+        if let (Some(timings), Some(usage)) = (timings, usage_observation) {
+            for (target, source) in timings.iter().skip(4).zip(usage.iter()) {
+                target.set(source.load(std::sync::atomic::Ordering::Relaxed));
+            }
+        }
+        result
     }
 
     pub fn execute_page(

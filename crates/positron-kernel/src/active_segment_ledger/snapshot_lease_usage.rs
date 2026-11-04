@@ -71,7 +71,19 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         identity: SnapshotLeaseId,
         delta: SnapshotLeaseUsage,
     ) -> Result<SnapshotLeaseUsage, LedgerFailure> {
-        self.record_snapshot_lease_usage_inner(identity, None, delta, 0)
+        self.record_snapshot_lease_usage_inner(identity, None, delta, 0, None)
+    }
+
+    /// TEMPORARY SDK127 experiment: nested refresh and publication wall times.
+    /// Normal callers never install observations; remove before shipping.
+    #[doc(hidden)]
+    pub fn record_snapshot_lease_usage_observed(
+        &self,
+        identity: SnapshotLeaseId,
+        delta: SnapshotLeaseUsage,
+        timings: [&std::sync::atomic::AtomicU64; 2],
+    ) -> Result<SnapshotLeaseUsage, LedgerFailure> {
+        self.record_snapshot_lease_usage_inner(identity, None, delta, 0, Some(timings))
     }
 
     /// Adds physical work for one admitted marked-resume attempt.
@@ -93,6 +105,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             Some((attempt.resume_count(), previous)),
             delta,
             0,
+            None,
         )
     }
 
@@ -102,6 +115,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
         attempt: Option<(u64, SnapshotLeaseUsage)>,
         delta: SnapshotLeaseUsage,
         retries: u8,
+        timings: Option<[&std::sync::atomic::AtomicU64; 2]>,
     ) -> Result<SnapshotLeaseUsage, LedgerFailure> {
         let mut state = self
             .state
@@ -121,9 +135,11 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             }
         }
         self.retry_pending_releases(&mut state)?;
-        self.catalog
-            .refresh_state()
-            .map_err(|failure| LedgerFailure::new(map_catalog_failure(failure.code())))?;
+        observed_usage(timings.map(|cells| cells[0]), || {
+            self.catalog
+                .refresh_state()
+                .map_err(|failure| LedgerFailure::new(map_catalog_failure(failure.code())))
+        })?;
         let basis = self.catalog.pin()?;
         let record = records(&basis)?
             .into_iter()
@@ -173,29 +189,31 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             transaction.cancel(&mut state);
             return Err(failure);
         }
-        #[cfg(any(test, fuzzing, feature = "test-support"))]
-        let publication =
-            super::fault::emit_event(super::fault::LedgerFileEvent::BeforeLeaseUsagePublication)
-                .and_then(|()| {
-                    publish_many(
-                        self.catalog,
-                        &basis,
-                        &BTreeSet::from([identity]),
-                        vec![encoded],
-                    )
-                })
-                .and_then(|()| {
-                    super::fault::emit_event(
-                        super::fault::LedgerFileEvent::AfterLeaseUsagePublication,
-                    )
-                });
-        #[cfg(not(any(test, fuzzing, feature = "test-support")))]
-        let publication = publish_many(
-            self.catalog,
-            &basis,
-            &BTreeSet::from([identity]),
-            vec![encoded],
-        );
+        let publication = observed_usage(timings.map(|cells| cells[1]), || {
+            #[cfg(any(test, fuzzing, feature = "test-support"))]
+            let publication = super::fault::emit_event(
+                super::fault::LedgerFileEvent::BeforeLeaseUsagePublication,
+            )
+            .and_then(|()| {
+                publish_many(
+                    self.catalog,
+                    &basis,
+                    &BTreeSet::from([identity]),
+                    vec![encoded],
+                )
+            })
+            .and_then(|()| {
+                super::fault::emit_event(super::fault::LedgerFileEvent::AfterLeaseUsagePublication)
+            });
+            #[cfg(not(any(test, fuzzing, feature = "test-support")))]
+            let publication = publish_many(
+                self.catalog,
+                &basis,
+                &BTreeSet::from([identity]),
+                vec![encoded],
+            );
+            publication
+        });
         if let Err(failure) = publication {
             if failure.completion_state() == super::LedgerCompletionState::CommitAmbiguous {
                 let reconciled = self.reconcile_ambiguous_usage(
@@ -232,6 +250,7 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
                             attempt,
                             delta,
                             retries + 1,
+                            timings,
                         );
                     },
                     Err(failure) => {
@@ -299,4 +318,22 @@ impl<'kernel, 'catalog> ActiveSegmentLedger<'kernel, 'catalog> {
             LedgerFailureCode::StorageUnavailable,
         ))
     }
+}
+
+// These are nested sums across attempts, including error returns. No delivery here.
+fn observed_usage<T>(slot: Option<&std::sync::atomic::AtomicU64>, work: impl FnOnce() -> T) -> T {
+    let Some(slot) = slot else {
+        return work();
+    };
+    let started = std::time::Instant::now();
+    let result = work();
+    let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let _previous = slot
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |value| Some(value.saturating_add(micros)),
+        )
+        .unwrap_or_else(|value| value);
+    result
 }

@@ -2679,3 +2679,73 @@ fn lease_clock(seconds: i64) -> crate::LifecycleClock<crate::FixedLifecycleClock
         positron_domain::time::UnixNanoseconds::new(seconds * 1_000_000_000),
     ))
 }
+
+#[test]
+fn temporary_observed_snapshot_lease_usage_preserves_publication_and_writer_guards()
+-> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    with_fixture(|authority, catalog, scope| {
+        let ledger = ActiveSegmentLedger::open(
+            authority,
+            catalog,
+            scope,
+            SegmentProtectionKey::from_owned(Box::new([0x75; 32])),
+        )?;
+        for observed in [false, true] {
+            let identity = ledger.create_snapshot_lease(100, 200)?.identity();
+            let timings = [AtomicU64::new(0), AtomicU64::new(0)];
+            let record = |delta| {
+                if observed {
+                    ledger.record_snapshot_lease_usage_observed(
+                        identity,
+                        delta,
+                        [&timings[0], &timings[1]],
+                    )
+                } else {
+                    ledger.record_snapshot_lease_usage(identity, delta)
+                }
+            };
+            let delta = SnapshotLeaseUsage::new(1, 2, 3, 4, 5, 6, 7);
+            let failure = with_catalog_fault(CatalogFileEvent::WriteObject, || record(delta))
+                .expect_err("failed publication remains retryable");
+            assert_eq!(failure.code(), LedgerFailureCode::StorageUnavailable);
+            assert_eq!(
+                ledger.snapshot_lease_usage(identity, 101)?,
+                SnapshotLeaseUsage::default()
+            );
+            assert_eq!(record(delta)?, delta);
+            assert_eq!(ledger.snapshot_lease_usage(identity, 101)?, delta);
+            assert_eq!(record(SnapshotLeaseUsage::default())?, delta);
+            let reconciled =
+                with_ledger_fault(LedgerFileEvent::BeforeLeaseUsagePublication, || {
+                    record(delta)
+                })?;
+            assert_eq!(reconciled, delta.merge(delta)?);
+            assert_eq!(ledger.snapshot_lease_usage(identity, 101)?, reconciled);
+            if observed {
+                assert!(
+                    timings
+                        .iter()
+                        .all(|value| value.load(Ordering::Relaxed) > 0)
+                );
+            }
+            let marked = ledger.resume_snapshot_lease_with_marker(identity, 101, 1, [9; 32])?;
+            let before = timings
+                .each_ref()
+                .map(|value| value.load(Ordering::Relaxed));
+            let failure = record(delta).expect_err("live marked attempt excludes unmarked writer");
+            assert_eq!(failure.code(), LedgerFailureCode::ConcurrentWriter);
+            assert_eq!(
+                timings
+                    .each_ref()
+                    .map(|value| value.load(Ordering::Relaxed)),
+                before
+            );
+            drop(marked);
+            ledger.release_snapshot_lease(identity)?;
+            let failure = record(delta).expect_err("released lease stays expired");
+            assert_eq!(failure.code(), LedgerFailureCode::SnapshotExpired);
+        }
+        Ok(())
+    })
+}

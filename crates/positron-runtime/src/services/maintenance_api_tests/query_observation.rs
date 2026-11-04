@@ -36,7 +36,7 @@ fn malformed_public_query_keeps_its_response_and_reports_a_closed_failure()
         .get("finite_stage_millis")
         .and_then(serde_json::Value::as_array)
         .ok_or("finite Execute stage timing missing")?;
-    assert_eq!(stages.len(), 14);
+    assert_eq!(stages.len(), 17);
     assert!(stages.iter().all(|value| value.as_u64().is_some()));
     // Decode failure occurs before the gate, Catalog, ledger and execution.
     assert!(stages.iter().skip(2).all(|value| value.as_u64() == Some(0)));
@@ -122,7 +122,7 @@ fn public_finite_query_reports_eager_stages_and_native_terminal_without_changing
         .get("finite_stage_millis")
         .and_then(serde_json::Value::as_array)
         .ok_or("finite stages")?;
-    assert_eq!(stages.len(), 14);
+    assert_eq!(stages.len(), 17);
     assert!(
         stages
             .iter()

@@ -84,7 +84,7 @@ fn finite_query_timings_preserve_bounded_ring_and_query_counters()
             std::time::Duration::from_micros(7),
             None,
             Some(super::FiniteQueryObservation {
-                stage_millis: [u64::MAX; 14],
+                stage_millis: [u64::MAX; 17],
                 terminal: u64::MAX,
                 wall_seconds: u64::MAX,
                 limiting_budget: u64::MAX,
@@ -106,7 +106,7 @@ fn finite_query_timings_preserve_bounded_ring_and_query_counters()
         event
             .get("finite_stage_millis")
             .and_then(serde_json::Value::as_array)
-            .is_some_and(|values| values.len() == 14
+            .is_some_and(|values| values.len() == 17
                 && values.iter().all(|value| value.as_u64() == Some(999_999)))
     );
     let mut metrics = String::new();

@@ -281,7 +281,7 @@ mod tests {
                 duration_micros: u64::MAX,
                 failure: Some(crate::services::ServiceFailure::DurabilityFrontierAmbiguity),
                 finite_observation: Some(crate::operational::FiniteQueryObservation {
-                    stage_millis: [u64::MAX; 14],
+                    stage_millis: [u64::MAX; 17],
                     terminal: u64::MAX,
                     wall_seconds: u64::MAX,
                     limiting_budget: u64::MAX,
@@ -294,7 +294,7 @@ mod tests {
             value
                 .get("finite_stage_millis")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|values| values.len() == 14
+                .is_some_and(|values| values.len() == 17
                     && values.iter().all(|value| value.as_u64() == Some(999_999)))
         );
         assert_eq!(value["finite_terminal"], 3);

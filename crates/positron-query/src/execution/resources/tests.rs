@@ -57,7 +57,9 @@ fn lease_identity_mismatch_releases_every_pre_stream_resource() -> Result<(), Bo
         )?;
         let identity = lease.identity();
         drop(lease);
-        let resources = ExecutionResources::new(admission, identity, SnapshotLeaseUsage::default());
+        let observation = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
+        let resources = ExecutionResources::new(admission, identity, SnapshotLeaseUsage::default())
+            .with_usage_observation(Some(observation.clone()));
         let expected = SnapshotLeaseId::new([0x99; 16])?;
 
         let state = test_cursor_state(identity.to_bytes());
@@ -72,6 +74,7 @@ fn lease_identity_mismatch_releases_every_pre_stream_resource() -> Result<(), Bo
             Err(failure) => failure,
         };
         assert_eq!(failure.code(), QueryFailureCode::Internal);
+        assert_eq!(Arc::strong_count(&observation), 1);
         assert_eq!(
             ledger
                 .resume_snapshot_lease(identity, 100 + iteration)
@@ -92,6 +95,35 @@ fn lease_identity_mismatch_releases_every_pre_stream_resource() -> Result<(), Bo
             assert_eq!(after.usage(dimension), baseline.usage(dimension));
         }
     }
+    let admission = authority.governor().reserve(WorkClaim::tenant(
+        tenant,
+        WorkKind::InteractiveQueryTail,
+        ResourceAmounts::new([1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0]),
+    )?)?;
+    let lease = ledger.create_snapshot_lease_for_at_catalog_with_expiry_task(
+        &coordinator,
+        200,
+        std::num::NonZeroU64::new(100).ok_or("nonzero ttl")?,
+        catalog.pin()?.identity(),
+    )?;
+    let observation = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
+    let resources =
+        ExecutionResources::new(admission, lease.identity(), SnapshotLeaseUsage::default())
+            .with_usage_observation(Some(observation.clone()));
+    drop(lease);
+    let (admission, identity, target) = resources.into_stream();
+    assert_eq!(
+        Arc::strong_count(&observation),
+        1,
+        "observer detached before stream ownership transfer"
+    );
+    assert!(target.is_none());
+    ledger.release_snapshot_lease_with_expiry_task(&coordinator, identity)?;
+    drop(admission);
+    assert_eq!(
+        authority.governor().inspect()?.outstanding_total(),
+        baseline.outstanding_total()
+    );
     Ok(())
 }
 
@@ -279,4 +311,10 @@ fn add(left: ResourceAmounts, right: ResourceAmounts) -> Result<ResourceAmounts,
         value(ResourceDimension::FileDescriptors)?,
         value(ResourceDimension::DiskHeadroomBytes)?,
     ]))
+}
+
+#[test]
+fn temporary_usage_observer_preserves_resource_send_and_sync() {
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<ExecutionResources>();
 }

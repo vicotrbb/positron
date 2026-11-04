@@ -1224,6 +1224,30 @@ fn temporary_observed_eager_execution_preserves_rows_budgets_and_cancelled_failu
                 }
             }
         }
+        // Fail the usage publication after the initial source lease is durable.
+        // This reaches run_page's Err path, unlike cancellation during admission.
+        for observed in [false, true] {
+            let budget = QueryBudget::new(1_048_576, 4, 2, 1_048_576, 1_048_576, 60)?;
+            let query = service.plan_pipeline(fixture.context, source, budget)?;
+            let timings = std::array::from_fn(|_| std::cell::Cell::new(u64::MAX));
+            let failure = positron_kernel::with_catalog_publication_fault_after(
+                positron_kernel::CatalogPublicationFault::SynchronizeCommit,
+                1,
+                || {
+                    if observed {
+                        service.execute_with_schema_observed(query, schema.catalog(), &timings)
+                    } else {
+                        service.execute_with_schema(query, schema.catalog())
+                    }
+                },
+            )
+            .expect_err("usage publication fails before stream delivery");
+            assert_eq!(failure.code(), QueryFailureCode::StoreUnavailable);
+            if observed {
+                assert!(timings.iter().all(|value| value.get() < u64::MAX));
+                assert!(timings.iter().skip(4).all(|value| value.get() > 0));
+            }
+        }
         Ok(())
     })
 }

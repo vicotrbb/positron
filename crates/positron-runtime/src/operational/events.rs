@@ -212,7 +212,7 @@ impl NativeHttpFailureStage {
 // Limiting budget: 0 none/unobserved; 1..8 follow the explicit runtime match.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FiniteQueryObservation {
-    pub(crate) stage_millis: [u64; 14],
+    pub(crate) stage_millis: [u64; 17],
     pub(crate) terminal: u64,
     pub(crate) wall_seconds: u64,
     pub(crate) limiting_budget: u64,

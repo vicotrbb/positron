@@ -21,7 +21,10 @@ use positron_governance::{CompatibilityHints, PresentedCredential, RequestedInte
 // decode/admission, Catalog gate, reauth, Catalog/identity/key, ledger open,
 // plan/schema setup, schema view entry wait, query Catalog revalidation,
 // query guards/clock, source lease/state setup, eager page incl persist/validation,
-// schema callback return tail, stream iteration/lease release/render.
+// schema callback return tail, stream iteration/lease release/render; then NESTED
+// usage total (including target if present), primary-lease refresh/recovery,
+// primary-lease publication (sums across attempts).
+// Last three overlap eager page: this is NOT a partition or a CPU measurement.
 // Entry wait is not assumed IO; return tail is not assumed cleanup; none is CPU.
 #[derive(Default)]
 pub(super) struct QueryTimings {
@@ -33,7 +36,7 @@ pub(super) struct QueryTimings {
     ledger_open: std::cell::Cell<u64>,
     plan_schema: std::cell::Cell<u64>,
     schema_entry: std::cell::Cell<u64>,
-    eager: [std::cell::Cell<u64>; 4],
+    eager: [std::cell::Cell<u64>; 7],
     schema_return: std::cell::Cell<u64>,
     consume_render: std::cell::Cell<u64>,
     terminal: std::cell::Cell<u64>,
@@ -61,6 +64,9 @@ impl QueryTimings {
                 self.eager[3].get(),
                 self.schema_return.get(),
                 self.consume_render.get(),
+                self.eager[4].get(),
+                self.eager[5].get(),
+                self.eager[6].get(),
             ]
             .map(|micros| (micros / 1000).min(999_999)),
             terminal: self.terminal.get(),
