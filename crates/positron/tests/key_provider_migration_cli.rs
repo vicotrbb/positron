@@ -106,7 +106,7 @@ fn status(
 }
 
 fn scripted_provider_status_peer(
-    listener: std::net::TcpListener,
+    listener: &std::net::TcpListener,
     responses: Vec<Option<(u16, &'static str)>>,
     deadline: Instant,
 ) -> (Vec<ProviderMigrationRequest>, std::io::Result<()>) {
@@ -228,7 +228,7 @@ fn assert_provider_status_diagnostic(responses: &[Option<(u16, &'static str)>]) 
     let expected_attempts = responses.len();
     let deadline = Instant::now() + Duration::from_secs(10);
     let server =
-        std::thread::spawn(move || scripted_provider_status_peer(listener, responses, deadline));
+        std::thread::spawn(move || scripted_provider_status_peer(&listener, responses, deadline));
     let client =
         ProviderMigrationServiceClient::new(ProviderMigrationTransport::PlaintextOptOut {
             endpoint,
@@ -276,19 +276,42 @@ fn assert_provider_status_diagnostic(responses: &[Option<(u16, &'static str)>]) 
 
 #[test]
 fn provider_status_peer_finishes_when_no_second_request_arrives() -> TestResult {
+    assert_provider_peer_finishes_after_setup(Duration::ZERO)
+}
+
+#[test]
+fn provider_status_peer_does_not_spend_missing_request_window_on_client_setup() -> TestResult {
+    assert_provider_peer_finishes_after_setup(Duration::from_millis(150))
+}
+
+fn assert_provider_peer_finishes_after_setup(setup_delay: Duration) -> TestResult {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let endpoint = listener.local_addr()?;
-    let peer_deadline = Instant::now() + Duration::from_millis(100);
     let (finished, completion) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        let result = scripted_provider_status_peer(
-            listener,
-            vec![Some((503, r#"{"code":"capacity_unavailable"}"#)), None],
-            peer_deadline,
+        // Use the existing first-exchange fixture budget. Only the absence of
+        // a second request is measured against the short missing-request bound.
+        let (mut requests, first) = scripted_provider_status_peer(
+            &listener,
+            vec![Some((503, r#"{"code":"capacity_unavailable"}"#))],
+            Instant::now() + Duration::from_secs(10),
         );
+        let outcome = match first {
+            Ok(()) => {
+                let (next, outcome) = scripted_provider_status_peer(
+                    &listener,
+                    vec![None],
+                    Instant::now() + Duration::from_millis(100),
+                );
+                requests.extend(next);
+                outcome
+            },
+            Err(error) => Err(error),
+        };
         let _ = finished.send(());
-        result
+        (requests, outcome)
     });
+    std::thread::sleep(setup_delay);
     let client =
         ProviderMigrationServiceClient::new(ProviderMigrationTransport::PlaintextOptOut {
             endpoint,
@@ -310,7 +333,18 @@ fn provider_status_peer_finishes_when_no_second_request_arrives() -> TestResult 
     let failure = outcome
         .expect_err("expired capacity must remain refused")
         .to_string();
-    assert!(failure.starts_with("provider migration status read: CapacityUnavailable"));
+    let actual_class = if failure.starts_with("provider migration status read: CapacityUnavailable")
+    {
+        "capacity_unavailable"
+    } else if failure.starts_with("provider migration status read: Transport") {
+        "transport"
+    } else {
+        "other"
+    };
+    assert!(
+        failure.starts_with("provider migration status read: CapacityUnavailable"),
+        "expected capacity_unavailable; actual_class={actual_class}"
+    );
     assert!(!failure.contains("peer-secret-canary"));
     assert_eq!(requests.len(), 1);
     assert_eq!(
