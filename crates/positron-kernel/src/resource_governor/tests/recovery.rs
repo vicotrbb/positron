@@ -1182,3 +1182,60 @@ fn protected_tenant_purge_grants_authorize_repository_deletion_only_for_purge()
     assert!(!repair.authorizes_repository_transport());
     Ok(())
 }
+
+#[test]
+fn recovery_shared_borrowing_beyond_ordinary_ceiling_refuses_growth_without_fencing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tenant = tenant(0xe1)?;
+    // The reserve may exceed the sum of the protected pools. Recovery can
+    // legitimately borrow that difference beyond the ordinary-work ceiling.
+    let kernel = establish(tenant, 200, 190)?;
+    let disk = ResourceDimension::DiskHeadroomBytes;
+    let original = ResourceAmounts::only(disk, 1)?;
+    let grown = ResourceAmounts::only(disk, 2)?;
+    let mut ordinary = kernel.reserve(WorkClaim::tenant(
+        tenant,
+        WorkKind::InteractiveQueryTail,
+        original,
+    )?)?;
+    let before = kernel.inspect()?;
+    let mut recovery = kernel.recovery().reserve(RecoveryWorkClaim::system(
+        RecoveryWorkKind::DurabilityCompletion,
+        ResourceAmounts::only(disk, before.ordinary_capacity(disk) + 1)?,
+    )?)?;
+    let borrowed = kernel.inspect()?;
+    assert!(borrowed.recovery_shared_usage(disk) > borrowed.ordinary_capacity(disk));
+    let failure = ordinary
+        .try_resize_preserving_capacity(grown)
+        .expect_err("recovery occupancy temporarily prevents ordinary growth");
+    assert_eq!(
+        failure.admission_code(),
+        Some(AdmissionFailureCode::CapacityOccupiedByRecovery)
+    );
+    assert_eq!(failure.retry(), AdmissionRetry::AfterCapacityRelease);
+    assert_eq!(failure.limiting_scope(), LimitingScope::RecoveryOccupancy);
+    assert_eq!(failure.limiting_dimension(), Some(disk));
+    assert_eq!(
+        failure.existing_capacity(),
+        ExistingCapacityDisposition::CapacityRetained
+    );
+    assert_eq!(ordinary.granted(), original);
+    assert_eq!(
+        kernel.inspect()?.lifecycle(),
+        positron_kernel::GovernorLifecycle::Open
+    );
+    for dimension in ResourceDimension::ALL {
+        assert_eq!(
+            kernel.inspect()?.usage(dimension),
+            borrowed.usage(dimension)
+        );
+    }
+    recovery.cancel()?;
+    ordinary.try_resize_preserving_capacity(grown)?;
+    assert_eq!(ordinary.granted(), grown);
+    assert_eq!(
+        kernel.inspect()?.lifecycle(),
+        positron_kernel::GovernorLifecycle::Open
+    );
+    Ok(())
+}
