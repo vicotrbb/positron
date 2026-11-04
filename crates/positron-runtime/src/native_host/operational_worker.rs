@@ -280,18 +280,26 @@ mod tests {
                 outcome: crate::operational::RequestOutcome::Unavailable,
                 duration_micros: u64::MAX,
                 failure: Some(crate::services::ServiceFailure::DurabilityFrontierAmbiguity),
-                finite_stage_micros: Some([u64::MAX; 10]),
+                finite_observation: Some(crate::operational::FiniteQueryObservation {
+                    stage_millis: [u64::MAX; 14],
+                    terminal: u64::MAX,
+                    wall_seconds: u64::MAX,
+                    limiting_budget: u64::MAX,
+                }),
             },
         )?;
         assert!(output.len() <= 510, "{}", output.len());
         let value: serde_json::Value = serde_json::from_slice(&output)?;
         assert!(
             value
-                .get("finite_stage_micros")
+                .get("finite_stage_millis")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|values| values.len() == 10
-                    && values.iter().all(|value| value.as_u64() == Some(u64::MAX)))
+                .is_some_and(|values| values.len() == 14
+                    && values.iter().all(|value| value.as_u64() == Some(999_999)))
         );
+        assert_eq!(value["finite_terminal"], 3);
+        assert_eq!(value["finite_wall_seconds"], 999_999);
+        assert_eq!(value["finite_limiting_budget"], 8);
         Ok(())
     }
 

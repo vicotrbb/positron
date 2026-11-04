@@ -6,7 +6,8 @@ mod metrics;
 mod telemetry;
 
 pub(crate) use events::{
-    BackupReadStage, NativeHttpFailureStage, OperationalEvent, RequestOutcome,
+    BackupReadStage, FiniteQueryObservation, NativeHttpFailureStage, OperationalEvent,
+    RequestOutcome,
 };
 pub use events::{
     IntegrityScrubFailureStage, MaintenanceWorkerOperation, OperationalDiagnostic,

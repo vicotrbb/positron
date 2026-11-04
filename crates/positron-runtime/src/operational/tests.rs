@@ -83,7 +83,12 @@ fn finite_query_timings_preserve_bounded_ring_and_query_counters()
             RequestOutcome::Success,
             std::time::Duration::from_micros(7),
             None,
-            Some([u64::MAX; 10]),
+            Some(super::FiniteQueryObservation {
+                stage_millis: [u64::MAX; 14],
+                terminal: u64::MAX,
+                wall_seconds: u64::MAX,
+                limiting_budget: u64::MAX,
+            }),
         );
     }
     let records = telemetry.snapshot().map_err(|_| "ring")?;
@@ -99,10 +104,10 @@ fn finite_query_timings_preserve_bounded_ring_and_query_counters()
         .json();
     assert!(
         event
-            .get("finite_stage_micros")
+            .get("finite_stage_millis")
             .and_then(serde_json::Value::as_array)
-            .is_some_and(|values| values.len() == 10
-                && values.iter().all(|value| value.as_u64() == Some(u64::MAX)))
+            .is_some_and(|values| values.len() == 14
+                && values.iter().all(|value| value.as_u64() == Some(999_999)))
     );
     let mut metrics = String::new();
     telemetry.metrics(&mut metrics, false);

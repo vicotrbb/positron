@@ -207,6 +207,17 @@ impl NativeHttpFailureStage {
     }
 }
 
+// TEMPORARY finite Execute experiment. Milliseconds saturate at 999999;
+// terminal: 0 unobserved, 1 Complete, 2 Incomplete, 3 Continued.
+// Limiting budget: 0 none/unobserved; 1..8 follow the explicit runtime match.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FiniteQueryObservation {
+    pub(crate) stage_millis: [u64; 14],
+    pub(crate) terminal: u64,
+    pub(crate) wall_seconds: u64,
+    pub(crate) limiting_budget: u64,
+}
+
 /// Closed operational facts; arbitrary text cannot enter the process event ring.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OperationalEvent {
@@ -225,7 +236,7 @@ pub(crate) enum OperationalEvent {
         duration_micros: u64,
         failure: Option<crate::services::ServiceFailure>,
         // TEMPORARY SDK127 fixed finite-Execute wall timings; never wire data.
-        finite_stage_micros: Option<[u64; 10]>,
+        finite_observation: Option<FiniteQueryObservation>,
     },
     RequestCompleted {
         role: crate::ListenerRole,
@@ -333,13 +344,17 @@ impl OperationalEvent {
             outcome,
             duration_micros,
             failure,
-            finite_stage_micros,
+            finite_observation,
         } = self
         {
             value["outcome"] = outcome.label().into();
             value["duration_micros"] = duration_micros.into();
-            if let Some(stages) = finite_stage_micros {
-                value["finite_stage_micros"] = serde_json::json!(stages);
+            if let Some(observation) = finite_observation {
+                value["finite_stage_millis"] =
+                    serde_json::json!(observation.stage_millis.map(|value| value.min(999_999)));
+                value["finite_terminal"] = observation.terminal.min(3).into();
+                value["finite_wall_seconds"] = observation.wall_seconds.min(999_999).into();
+                value["finite_limiting_budget"] = observation.limiting_budget.min(8).into();
             }
             if let Some(category) = failure.and_then(crate::services::maintenance_failure_category)
             {

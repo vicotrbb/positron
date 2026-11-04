@@ -33,19 +33,16 @@ fn malformed_public_query_keeps_its_response_and_reports_a_closed_failure()
         Some("invalid_request")
     );
     let stages = event
-        .get("finite_stage_micros")
+        .get("finite_stage_millis")
         .and_then(serde_json::Value::as_array)
         .ok_or("finite Execute stage timing missing")?;
-    assert_eq!(stages.len(), 10);
+    assert_eq!(stages.len(), 14);
     assert!(stages.iter().all(|value| value.as_u64().is_some()));
     // Decode failure occurs before the gate, Catalog, ledger and execution.
-    assert!(
-        stages
-            .iter()
-            .skip(2)
-            .take(7)
-            .all(|value| value.as_u64() == Some(0))
-    );
+    assert!(stages.iter().skip(2).all(|value| value.as_u64() == Some(0)));
+    assert_eq!(event["finite_terminal"], 0);
+    assert_eq!(event["finite_wall_seconds"], 0);
+    assert_eq!(event["finite_limiting_budget"], 0);
     assert!(event.to_string().len() < 510);
     assert!(matches!(
         services.execute_log_query_session(&query, body),
@@ -63,12 +60,15 @@ fn malformed_public_query_keeps_its_response_and_reports_a_closed_failure()
         last.get("event").and_then(serde_json::Value::as_str),
         Some("query_completed")
     );
-    assert!(last.get("finite_stage_micros").is_none());
+    assert!(last.get("finite_stage_millis").is_none());
+    assert!(last.get("finite_terminal").is_none());
+    assert!(last.get("finite_wall_seconds").is_none());
+    assert!(last.get("finite_limiting_budget").is_none());
     Ok(())
 }
 
 #[test]
-fn public_finite_query_reports_stage_partition_without_changing_response()
+fn public_finite_query_reports_eager_stages_and_native_terminal_without_changing_response()
 -> Result<(), Box<dyn std::error::Error>> {
     use positron_api::log_query as api;
     let fixture = Fixture::new()?;
@@ -119,26 +119,17 @@ fn public_finite_query_reports_stage_partition_without_changing_response()
         Some("success")
     );
     let stages = event
-        .get("finite_stage_micros")
+        .get("finite_stage_millis")
         .and_then(serde_json::Value::as_array)
         .ok_or("finite stages")?;
-    assert_eq!(stages.len(), 10);
-    let measured = stages
-        .iter()
-        .take(9)
-        .try_fold(0_u64, |sum, value| {
-            value.as_u64().map(|value| sum.saturating_add(value))
-        })
-        .ok_or("numeric stages")?;
-    let residual = stages
-        .last()
-        .and_then(serde_json::Value::as_u64)
-        .ok_or("residual")?;
-    let total = event
-        .get("duration_micros")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or("total")?;
-    assert!(measured > 0);
-    assert_eq!(measured.saturating_add(residual), total);
+    assert_eq!(stages.len(), 14);
+    assert!(
+        stages
+            .iter()
+            .all(|value| value.as_u64().is_some_and(|value| value <= 999_999))
+    );
+    assert_eq!(event["finite_terminal"], 1);
+    assert!(event["finite_wall_seconds"].as_u64().is_some());
+    assert_eq!(event["finite_limiting_budget"], 0);
     Ok(())
 }

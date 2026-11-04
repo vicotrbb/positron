@@ -1145,3 +1145,85 @@ fn continued_cursor(events: &[QueryEvent]) -> Result<&QueryCursor, Box<dyn Error
         })
         .ok_or_else(|| format!("continued cursor missing: {events:?}").into())
 }
+
+#[test]
+fn temporary_observed_eager_execution_preserves_rows_budgets_and_cancelled_failure()
+-> Result<(), Box<dyn Error>> {
+    QueryFixture::scoped("observed-eager", |fixture| {
+        let schema = fixture
+            .kernel
+            .append_indexed_text_logs(vec!["needle one"], 1)?;
+        let service = fixture.service(1)?;
+        let source = "pipeline:v1 logs | range query_time -100 100 | search body contains \"needle\" | limit 2";
+        for scanned in [1, 1_048_576] {
+            let budget = QueryBudget::new(scanned, 4, 2, 1_048_576, 1_048_576, 60)?;
+            let plain = service
+                .execute_with_schema(
+                    service.plan_pipeline(fixture.context, source, budget)?,
+                    schema.catalog(),
+                )?
+                .collect::<Vec<_>>();
+            let timings = std::array::from_fn(|_| std::cell::Cell::new(u64::MAX));
+            let observed = service
+                .execute_with_schema_observed(
+                    service.plan_pipeline(fixture.context, source, budget)?,
+                    schema.catalog(),
+                    &timings,
+                )?
+                .collect::<Vec<_>>();
+            let rows = |events: &[QueryEvent]| {
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        QueryEvent::Batch(batch) => Some(batch.records().to_vec()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(rows(&plain), rows(&observed));
+            let terminal = |events: &[QueryEvent]| match events.last() {
+                Some(QueryEvent::Terminal(QueryTerminal::Complete(stats))) => Ok((
+                    1,
+                    stats.records(),
+                    stats.scanned_bytes(),
+                    stats.decoded_records(),
+                    stats.limiting_budget(),
+                )),
+                Some(QueryEvent::Terminal(QueryTerminal::Incomplete(value))) => {
+                    let stats = value.stats();
+                    Ok((
+                        2,
+                        stats.records(),
+                        stats.scanned_bytes(),
+                        stats.decoded_records(),
+                        stats.limiting_budget(),
+                    ))
+                },
+                _ => Err("missing native terminal"),
+            };
+            assert_eq!(terminal(&plain)?, terminal(&observed)?);
+            assert_eq!(terminal(&observed)?.0, if scanned == 1 { 2 } else { 1 });
+            assert!(timings.iter().all(|value| value.get() < u64::MAX));
+            for observed in [false, true] {
+                let query = service.plan_pipeline(fixture.context, source, budget)?;
+                query.cancellation().cancel();
+                let timings = std::array::from_fn(|_| std::cell::Cell::new(u64::MAX));
+                let result = if observed {
+                    service.execute_with_schema_observed(query, schema.catalog(), &timings)
+                } else {
+                    service.execute_with_schema(query, schema.catalog())
+                };
+                assert!(
+                    matches!(result, Err(failure) if failure.code() == QueryFailureCode::Cancelled)
+                );
+                if observed {
+                    assert!(timings[0].get() < u64::MAX);
+                    assert!(timings[1].get() < u64::MAX);
+                    assert_eq!(timings[2].get(), u64::MAX);
+                    assert_eq!(timings[3].get(), u64::MAX);
+                }
+            }
+        }
+        Ok(())
+    })
+}

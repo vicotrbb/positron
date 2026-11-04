@@ -16,10 +16,13 @@ use super::{
 };
 use positron_governance::{CompatibilityHints, PresentedCredential, RequestedIntent};
 
-// TEMPORARY SDK127 stage wall timings. Remove after the platform experiment.
-// Fixed order: initial admission/auth, decode/admission, catalog gate, reauth,
-// Catalog/identity/key, ledger open, plan/schema setup, schema/execution setup,
-// lazy consume/render, unattributed residual. No request content enters here.
+// TEMPORARY SDK127 wall observation. Remove after the platform experiment.
+// stage_millis fixed order (each saturates at 999999ms): initial admission/auth,
+// decode/admission, Catalog gate, reauth, Catalog/identity/key, ledger open,
+// plan/schema setup, schema view entry wait, query Catalog revalidation,
+// query guards/clock, source lease/state setup, eager page incl persist/validation,
+// schema callback return tail, stream iteration/lease release/render.
+// Entry wait is not assumed IO; return tail is not assumed cleanup; none is CPU.
 #[derive(Default)]
 pub(super) struct QueryTimings {
     initial_auth: std::cell::Cell<u64>,
@@ -29,32 +32,74 @@ pub(super) struct QueryTimings {
     catalog_identity: std::cell::Cell<u64>,
     ledger_open: std::cell::Cell<u64>,
     plan_schema: std::cell::Cell<u64>,
-    schema_execute: std::cell::Cell<u64>,
+    schema_entry: std::cell::Cell<u64>,
+    eager: [std::cell::Cell<u64>; 4],
+    schema_return: std::cell::Cell<u64>,
     consume_render: std::cell::Cell<u64>,
+    terminal: std::cell::Cell<u64>,
+    wall_seconds: std::cell::Cell<u64>,
+    limiting_budget: std::cell::Cell<u64>,
 }
 impl QueryTimings {
-    pub(super) fn snapshot(&self, elapsed: std::time::Duration) -> [u64; 10] {
-        let mut values = [
-            self.initial_auth.get(),
-            self.decode_admission.get(),
-            self.catalog_gate.get(),
-            self.reauthorize.get(),
-            self.catalog_identity.get(),
-            self.ledger_open.get(),
-            self.plan_schema.get(),
-            self.schema_execute.get(),
-            self.consume_render.get(),
-            0,
-        ];
-        let measured = values
-            .iter()
-            .fold(0_u64, |total, value| total.saturating_add(*value));
-        if let Some(residual) = values.last_mut() {
-            *residual = u64::try_from(elapsed.as_micros())
-                .unwrap_or(u64::MAX)
-                .saturating_sub(measured);
+    pub(super) fn snapshot(
+        &self,
+        _elapsed: std::time::Duration,
+    ) -> crate::operational::FiniteQueryObservation {
+        crate::operational::FiniteQueryObservation {
+            stage_millis: [
+                self.initial_auth.get(),
+                self.decode_admission.get(),
+                self.catalog_gate.get(),
+                self.reauthorize.get(),
+                self.catalog_identity.get(),
+                self.ledger_open.get(),
+                self.plan_schema.get(),
+                self.schema_entry.get(),
+                self.eager[0].get(),
+                self.eager[1].get(),
+                self.eager[2].get(),
+                self.eager[3].get(),
+                self.schema_return.get(),
+                self.consume_render.get(),
+            ]
+            .map(|micros| (micros / 1000).min(999_999)),
+            terminal: self.terminal.get(),
+            wall_seconds: self.wall_seconds.get(),
+            limiting_budget: self.limiting_budget.get(),
         }
-        values
+    }
+    // Native iterator truth after its existing release/cancellation handling; never client receipt.
+    fn observe_terminal(&self, event: &positron_query::QueryEvent) {
+        use positron_query::{QueryBudgetDimension as B, QueryEvent, QueryTerminal};
+        let stats = match event {
+            QueryEvent::Terminal(QueryTerminal::Complete(stats)) => {
+                self.terminal.set(1);
+                Some(*stats)
+            },
+            QueryEvent::Terminal(QueryTerminal::Incomplete(value)) => {
+                self.terminal.set(2);
+                Some(value.stats())
+            },
+            QueryEvent::Terminal(QueryTerminal::Continued(_)) => {
+                self.terminal.set(3);
+                None
+            },
+            _ => None,
+        };
+        if let Some(stats) = stats {
+            self.wall_seconds.set(stats.wall_seconds());
+            self.limiting_budget.set(match stats.limiting_budget() {
+                None => 0,
+                Some(B::ScannedBytes) => 1,
+                Some(B::DecodedRecords) => 2,
+                Some(B::OutputRows) => 3,
+                Some(B::OutputBytes) => 4,
+                Some(B::MemoryBytes) => 5,
+                Some(B::CpuWorkUnits) => 6,
+                Some(B::WallSeconds) => 7,
+                Some(B::MaximumTimeRangeNanoseconds) => 8,
+            });
+        }
     }
 }
 fn timed<T>(slot: Option<&std::cell::Cell<u64>>, work: impl FnOnce() -> T) -> T {
@@ -339,16 +384,44 @@ fn with_log_query_events_mode<T>(
                                 .session(tenant, instance.resource_governor())
                         })
                         .map_err(|_| ServiceFailure::CapacityUnavailable)?;
-                        timed(timings.map(|timings| &timings.schema_execute), || {
-                            schema.with_catalog_view(tenant, |catalog| {
+                        let entered = timings.map(|_| std::time::Instant::now());
+                        let returned = std::cell::Cell::new(None);
+                        let result = schema.with_catalog_view(tenant, |catalog| {
+                            if let (Some(timings), Some(entered)) = (timings, entered) {
+                                timings.schema_entry.set(
+                                    u64::try_from(entered.elapsed().as_micros())
+                                        .unwrap_or(u64::MAX),
+                                );
+                                let result = service.execute_with_schema_observed(
+                                    query,
+                                    catalog,
+                                    &timings.eager,
+                                );
+                                returned.set(Some(std::time::Instant::now()));
+                                result
+                            } else {
                                 service.execute_with_schema(query, catalog)
-                            })
-                        })
-                        .map_err(schema_bootstrap::classify_replay_failure)?
-                        .map_err(|failure| {
-                            services.record_query_budget(failure.limiting_budget());
-                            classify(&failure)
-                        })?
+                            }
+                        });
+                        if let Some(timings) = timings {
+                            // If the callback was not entered, retain the whole failed entry wait.
+                            let (slot, started) = match returned.get() {
+                                Some(started) => (&timings.schema_return, Some(started)),
+                                None => (&timings.schema_entry, entered),
+                            };
+                            if let Some(started) = started {
+                                slot.set(
+                                    u64::try_from(started.elapsed().as_micros())
+                                        .unwrap_or(u64::MAX),
+                                );
+                            }
+                        }
+                        result
+                            .map_err(schema_bootstrap::classify_replay_failure)?
+                            .map_err(|failure| {
+                                services.record_query_budget(failure.limiting_budget());
+                                classify(&failure)
+                            })?
                     }
                 },
             };
@@ -358,6 +431,9 @@ fn with_log_query_events_mode<T>(
             services.notify_maintenance_worker();
             timed(timings.map(|timings| &timings.consume_render), || {
                 consume(&mut events.inspect(|event| {
+                    if let Some(timings) = timings {
+                        timings.observe_terminal(event);
+                    }
                     if let positron_query::QueryEvent::Terminal(
                         positron_query::QueryTerminal::Incomplete(incomplete),
                     ) = event
