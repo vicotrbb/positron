@@ -818,7 +818,6 @@ mod tests {
         struct FailingFlush {
             stream: MemoryStream,
             flushes: usize,
-            kind: std::io::ErrorKind,
         }
         impl Read for FailingFlush {
             fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
@@ -832,7 +831,7 @@ mod tests {
             fn flush(&mut self) -> std::io::Result<()> {
                 self.flushes += 1;
                 if self.flushes == 1 {
-                    Err(std::io::Error::new(self.kind, "credential-canary"))
+                    Err(std::io::ErrorKind::BrokenPipe.into())
                 } else {
                     Ok(())
                 }
@@ -843,73 +842,54 @@ mod tests {
                 Ok(())
             }
         }
-        for (kind, reason) in [
-            (std::io::ErrorKind::TimedOut, "timed_out"),
-            (std::io::ErrorKind::WouldBlock, "would_block"),
-            (std::io::ErrorKind::UnexpectedEof, "unexpected_eof"),
-            (std::io::ErrorKind::ConnectionReset, "connection_reset"),
-            (std::io::ErrorKind::ConnectionAborted, "connection_aborted"),
-            (std::io::ErrorKind::BrokenPipe, "broken_pipe"),
-            (std::io::ErrorKind::InvalidData, "invalid_data"),
-            (std::io::ErrorKind::PermissionDenied, "other"),
-        ] {
-            for tls in [false, true] {
-                let health = crate::health::ProcessState::starting().health();
-                let mut stream = FailingFlush {
-                    stream: MemoryStream {
-                        input: Cursor::new(
-                            b"GET /health/live HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
-                        ),
-                        output: Vec::new(),
-                    },
-                    flushes: 0,
-                    kind,
-                };
-                let serve = if tls {
-                    serve_tls_connection
-                } else {
-                    super::super::serve_connection
-                };
-                let outcome = serve(
-                    &mut stream,
-                    crate::ListenerRole::Operations,
-                    "127.0.0.1:1".parse().expect("loopback peer"),
-                    None,
-                    &health,
-                    super::super::RouteDependencies::new(None, None),
-                    crate::ConnectionProtection::new(
-                        std::num::NonZeroU16::MIN,
-                        std::time::Duration::from_secs(1),
-                        std::time::Duration::from_secs(1),
-                        std::time::Duration::from_secs(1),
-                        std::time::Duration::from_secs(1),
-                        std::time::Duration::from_secs(1),
+        for tls in [false, true] {
+            let health = crate::health::ProcessState::starting().health();
+            let mut stream = FailingFlush {
+                stream: MemoryStream {
+                    input: Cursor::new(
+                        b"GET /health/live HTTP/1.1\r\nHost: localhost\r\n\r\n".to_vec(),
                     ),
-                );
-                let output = std::str::from_utf8(&stream.stream.output).expect("HTTP response");
-                assert_eq!(output.matches("HTTP/1.1 ").count(), 1, "{output}");
-                assert!(
-                    outcome.is_err(),
-                    "completion failure must reach the listener owner"
-                );
-                let records: Vec<serde_json::Value> = serde_json::from_str(
-                    &health
-                        .operational_logs_json()
-                        .expect("bounded operational ring"),
-                )
-                .expect("closed diagnostic JSON");
-                assert_eq!(records.len(), 1);
-                assert_eq!(records[0]["event"], "native_http_connection_failed");
-                assert_eq!(records[0]["stage"], "response_completion");
-                assert_eq!(records[0]["listener"], "operations");
-                assert_eq!(records[0]["reason"], reason);
-                assert_eq!(records[0]["severity"], "error");
-                assert!(
-                    !serde_json::to_string(&records)
-                        .expect("closed records")
-                        .contains("credential-canary")
-                );
-            }
+                    output: Vec::new(),
+                },
+                flushes: 0,
+            };
+            let serve = if tls {
+                serve_tls_connection
+            } else {
+                super::super::serve_connection
+            };
+            let outcome = serve(
+                &mut stream,
+                crate::ListenerRole::Operations,
+                "127.0.0.1:1".parse().expect("loopback peer"),
+                None,
+                &health,
+                super::super::RouteDependencies::new(None, None),
+                crate::ConnectionProtection::new(
+                    std::num::NonZeroU16::MIN,
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(1),
+                ),
+            );
+            let output = std::str::from_utf8(&stream.stream.output).expect("HTTP response");
+            assert_eq!(output.matches("HTTP/1.1 ").count(), 1, "{output}");
+            assert!(
+                outcome.is_err(),
+                "completion failure must reach the listener owner"
+            );
+            let records: Vec<serde_json::Value> = serde_json::from_str(
+                &health
+                    .operational_logs_json()
+                    .expect("bounded operational ring"),
+            )
+            .expect("closed diagnostic JSON");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0]["event"], "native_http_connection_failed");
+            assert_eq!(records[0]["stage"], "response_completion");
+            assert_eq!(records[0]["listener"], "operations");
         }
     }
 

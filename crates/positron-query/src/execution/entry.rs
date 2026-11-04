@@ -54,7 +54,7 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         query: PlannedQuery<'kernel>,
     ) -> Result<QueryStream<'ledger>, QueryFailure> {
         let batch_limit = query.plan.limit();
-        self.execute_inner(query, batch_limit, false, None, None)
+        self.execute_inner(query, batch_limit, false, None)
     }
 
     /// Executes against one immutable tenant schema view. The view is used
@@ -65,22 +65,7 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         schema: &positron_signals::SchemaCatalog,
     ) -> Result<QueryStream<'ledger>, QueryFailure> {
         let batch_limit = query.plan.limit();
-        self.execute_inner(query, batch_limit, false, Some(schema), None)
-    }
-
-    /// TEMPORARY internal SDK127 experiment; remove before shipping.
-    /// Borrowed wall-microsecond cells: Catalog revalidation, guards/clock,
-    /// source lease/state setup, eager page (including usage/lease validation),
-    /// then NESTED usage total/primary refresh/primary publication across attempts.
-    #[doc(hidden)]
-    pub fn execute_with_schema_observed(
-        &self,
-        query: PlannedQuery<'kernel>,
-        schema: &positron_signals::SchemaCatalog,
-        timings: &[std::cell::Cell<u64>; 7],
-    ) -> Result<QueryStream<'ledger>, QueryFailure> {
-        let batch_limit = query.plan.limit();
-        self.execute_inner(query, batch_limit, false, Some(schema), Some(timings))
+        self.execute_inner(query, batch_limit, false, Some(schema))
     }
 
     fn execute_inner(
@@ -89,7 +74,6 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         batch_limit: u16,
         pagination: bool,
         schema: Option<&positron_signals::SchemaCatalog>,
-        timings: Option<&[std::cell::Cell<u64>; 7]>,
     ) -> Result<QueryStream<'ledger>, QueryFailure> {
         // Correlation has two authenticated Signal Store sources. Until the
         // paired-store path admits both snapshots, it must never degrade into
@@ -98,161 +82,133 @@ impl<'kernel, 'catalog, 'ledger> QueryService<'kernel, 'catalog, 'ledger> {
         if query.plan.is_log_to_trace_correlation() && self.trace_ledger.is_none() {
             return Err(QueryFailure::new(QueryFailureCode::StoreUnavailable));
         }
-        let (tenant, catalog_identity, _) = observed(timings.map(|t| &t[0]), || {
-            self.current_query_catalog(query.context)
-        })?;
-        let (now, expiry, trace_ledger) = observed(timings.map(|t| &t[1]), || {
-            if query.cancellation.is_cancelled() {
-                return Err(QueryFailure::new(QueryFailureCode::Cancelled));
+        let (tenant, catalog_identity, _) = self.current_query_catalog(query.context)?;
+        if query.cancellation.is_cancelled() {
+            return Err(QueryFailure::new(QueryFailureCode::Cancelled));
+        }
+        if !query.plan.has_total_limit() {
+            return Err(QueryFailure::new(QueryFailureCode::UnsupportedQuery));
+        }
+        if pagination && batch_limit == 0 {
+            return Err(QueryFailure::new(QueryFailureCode::InvalidBudget));
+        }
+        let now = self.observe_planned(&query)?;
+        let expiry = query
+            .started_at
+            .checked_add(query.budget.wall_seconds())
+            .ok_or_else(|| QueryFailure::new(QueryFailureCode::InvalidBudget))?;
+        if now >= expiry {
+            return Err(QueryFailure::budget_exhausted(
+                crate::QueryBudgetDimension::WallSeconds,
+            ));
+        }
+        let trace_ledger = if query.plan.is_log_to_trace_correlation() {
+            let trace_ledger = self
+                .trace_ledger
+                .ok_or_else(|| QueryFailure::new(QueryFailureCode::StoreUnavailable))?;
+            if trace_ledger.scope().tenant_id() != tenant {
+                return Err(QueryFailure::new(QueryFailureCode::Unauthorized));
             }
-            if !query.plan.has_total_limit() {
-                return Err(QueryFailure::new(QueryFailureCode::UnsupportedQuery));
+            if trace_ledger.scope().signal_kind() != positron_domain::routing::SignalKind::Traces {
+                return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData));
             }
-            if pagination && batch_limit == 0 {
-                return Err(QueryFailure::new(QueryFailureCode::InvalidBudget));
-            }
-            let now = self.observe_planned(&query)?;
-            let expiry = query
-                .started_at
-                .checked_add(query.budget.wall_seconds())
-                .ok_or_else(|| QueryFailure::new(QueryFailureCode::InvalidBudget))?;
-            if now >= expiry {
-                return Err(QueryFailure::budget_exhausted(
-                    crate::QueryBudgetDimension::WallSeconds,
-                ));
-            }
-            let trace_ledger = if query.plan.is_log_to_trace_correlation() {
-                let trace_ledger = self
-                    .trace_ledger
-                    .ok_or_else(|| QueryFailure::new(QueryFailureCode::StoreUnavailable))?;
-                if trace_ledger.scope().tenant_id() != tenant {
-                    return Err(QueryFailure::new(QueryFailureCode::Unauthorized));
+            Some(trace_ledger)
+        } else {
+            None
+        };
+        // PlannedQuery still owns its admitted CPU reservation while the
+        // separately scoped immutable source snapshots are constructed.
+        let lease = match self.maintenance {
+            Some(coordinator) => self
+                .ledger
+                .create_snapshot_lease_for_at_catalog_with_expiry_task(
+                    coordinator,
+                    now,
+                    remaining_ttl(now, expiry)?,
+                    catalog_identity,
+                )
+                .map_err(map_ledger_failure)?,
+            None => self
+                .ledger
+                .create_snapshot_lease_for_at_catalog(
+                    now,
+                    remaining_ttl(now, expiry)?,
+                    catalog_identity,
+                )
+                .map_err(map_ledger_failure)?,
+        };
+        let trace_lease = match trace_ledger {
+            Some(trace_ledger) => {
+                let (reauthorized_tenant, trace_catalog_identity, _) =
+                    match self.current_query_catalog(query.context) {
+                        Ok(current) => current,
+                        Err(failure) => {
+                            return Err(self.fail_after_source_lease(lease.identity(), failure));
+                        },
+                    };
+                if reauthorized_tenant != tenant {
+                    let failure = QueryFailure::new(QueryFailureCode::AuthorizationChanged);
+                    return Err(self.fail_after_source_lease(lease.identity(), failure));
                 }
-                if trace_ledger.scope().signal_kind()
-                    != positron_domain::routing::SignalKind::Traces
-                {
-                    return Err(QueryFailure::new(QueryFailureCode::MalformedPersistentData));
-                }
-                Some(trace_ledger)
-            } else {
-                None
-            };
-            Ok((now, expiry, trace_ledger))
-        })?;
-        let usage_observation = timings.map(|_| {
-            std::sync::Arc::new(std::array::from_fn(|_| {
-                std::sync::atomic::AtomicU64::new(0)
-            }))
-        });
-        let (lease, trace_lease, state, resources) = observed(timings.map(|t| &t[2]), || {
-            // PlannedQuery still owns its admitted CPU reservation while the
-            // separately scoped immutable source snapshots are constructed.
-            let lease = match self.maintenance {
-                Some(coordinator) => self
-                    .ledger
-                    .create_snapshot_lease_for_at_catalog_with_expiry_task(
-                        coordinator,
-                        now,
-                        remaining_ttl(now, expiry)?,
-                        catalog_identity,
-                    )
-                    .map_err(map_ledger_failure)?,
-                None => self
-                    .ledger
-                    .create_snapshot_lease_for_at_catalog(
-                        now,
-                        remaining_ttl(now, expiry)?,
-                        catalog_identity,
-                    )
-                    .map_err(map_ledger_failure)?,
-            };
-            let trace_lease = match trace_ledger {
-                Some(trace_ledger) => {
-                    let (reauthorized_tenant, trace_catalog_identity, _) =
-                        match self.current_query_catalog(query.context) {
-                            Ok(current) => current,
-                            Err(failure) => {
-                                return Err(self.fail_after_source_lease(lease.identity(), failure));
-                            },
-                        };
-                    if reauthorized_tenant != tenant {
-                        let failure = QueryFailure::new(QueryFailureCode::AuthorizationChanged);
-                        return Err(self.fail_after_source_lease(lease.identity(), failure));
-                    }
-                    let trace_result = match self.maintenance {
-                        Some(coordinator) => trace_ledger
-                            .create_snapshot_lease_for_at_catalog_with_expiry_task(
-                                coordinator,
-                                now,
-                                remaining_ttl(now, expiry)?,
-                                trace_catalog_identity,
-                            ),
-                        None => trace_ledger.create_snapshot_lease_for_at_catalog(
+                let trace_result = match self.maintenance {
+                    Some(coordinator) => trace_ledger
+                        .create_snapshot_lease_for_at_catalog_with_expiry_task(
+                            coordinator,
                             now,
                             remaining_ttl(now, expiry)?,
                             trace_catalog_identity,
                         ),
-                    };
-                    match trace_result {
-                        Ok(lease) => Some(lease),
-                        Err(failure) => {
-                            let primary = map_ledger_failure(failure);
-                            return Err(self.fail_after_source_lease(lease.identity(), primary));
-                        },
-                    }
-                },
-                None => None,
-            };
-            let (mut state, reservation) =
-                initial_state(query, lease.snapshot(), tenant, expiry, lease.identity());
-            if let Some(trace_lease) = trace_lease.as_ref() {
-                state.trace_catalog_identity =
-                    Some(trace_lease.snapshot().catalog_identity().to_bytes());
-                state.trace_catalog_generation = Some(trace_lease.snapshot().catalog_generation());
-                state.trace_frontier = Some(trace_lease.snapshot().frontier().value());
-                state.trace_lease_identity = Some(trace_lease.identity().to_bytes());
-            }
-            let resources = match trace_lease.as_ref() {
-                Some(trace_lease) => {
-                    ExecutionResources::new(reservation, lease.identity(), lease.usage())
-                        .with_target_lease(trace_lease.identity(), trace_lease.usage())
-                },
-                None => ExecutionResources::new(reservation, lease.identity(), lease.usage()),
-            };
-            Ok((
-                lease,
-                trace_lease,
-                state,
-                resources.with_usage_observation(usage_observation.clone()),
-            ))
-        })?;
-        let result = observed(timings.map(|t| &t[3]), || {
-            self.run_page(
-                state,
-                lease.snapshot(),
-                super::page::PageInput {
-                    trace_snapshot: trace_lease.as_ref().map(|lease| lease.snapshot()),
-                    trace_lease: trace_lease.as_ref().map(|lease| lease.identity()),
-                    batch_limit,
-                    pagination,
-                    schema,
-                },
-                resources,
-            )
-        });
-        if let (Some(timings), Some(usage)) = (timings, usage_observation) {
-            for (target, source) in timings.iter().skip(4).zip(usage.iter()) {
-                target.set(source.load(std::sync::atomic::Ordering::Relaxed));
-            }
+                    None => trace_ledger.create_snapshot_lease_for_at_catalog(
+                        now,
+                        remaining_ttl(now, expiry)?,
+                        trace_catalog_identity,
+                    ),
+                };
+                match trace_result {
+                    Ok(lease) => Some(lease),
+                    Err(failure) => {
+                        let primary = map_ledger_failure(failure);
+                        return Err(self.fail_after_source_lease(lease.identity(), primary));
+                    },
+                }
+            },
+            None => None,
+        };
+        let (mut state, reservation) =
+            initial_state(query, lease.snapshot(), tenant, expiry, lease.identity());
+        if let Some(trace_lease) = trace_lease.as_ref() {
+            state.trace_catalog_identity =
+                Some(trace_lease.snapshot().catalog_identity().to_bytes());
+            state.trace_catalog_generation = Some(trace_lease.snapshot().catalog_generation());
+            state.trace_frontier = Some(trace_lease.snapshot().frontier().value());
+            state.trace_lease_identity = Some(trace_lease.identity().to_bytes());
         }
-        result
+        let resources = match trace_lease.as_ref() {
+            Some(trace_lease) => {
+                ExecutionResources::new(reservation, lease.identity(), lease.usage())
+                    .with_target_lease(trace_lease.identity(), trace_lease.usage())
+            },
+            None => ExecutionResources::new(reservation, lease.identity(), lease.usage()),
+        };
+        self.run_page(
+            state,
+            lease.snapshot(),
+            super::page::PageInput {
+                trace_snapshot: trace_lease.as_ref().map(|lease| lease.snapshot()),
+                trace_lease: trace_lease.as_ref().map(|lease| lease.identity()),
+                batch_limit,
+                pagination,
+                schema,
+            },
+            resources,
+        )
     }
 
     pub fn execute_page(
         &self,
         query: PlannedQuery<'kernel>,
     ) -> Result<QueryStream<'ledger>, QueryFailure> {
-        self.execute_inner(query, self.batch_limit, true, None, None)
+        self.execute_inner(query, self.batch_limit, true, None)
     }
 
     pub fn resume(
@@ -655,15 +611,4 @@ fn remaining_ttl(now: u64, expiry: u64) -> Result<std::num::NonZeroU64, QueryFai
         .checked_sub(now)
         .and_then(std::num::NonZeroU64::new)
         .ok_or_else(|| QueryFailure::new(QueryFailureCode::SnapshotExpired))
-}
-
-// Optional observation changes neither the returned value nor error precedence.
-fn observed<T>(slot: Option<&std::cell::Cell<u64>>, work: impl FnOnce() -> T) -> T {
-    let Some(slot) = slot else {
-        return work();
-    };
-    let started = std::time::Instant::now();
-    let result = work();
-    slot.set(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
-    result
 }

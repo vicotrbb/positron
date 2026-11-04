@@ -97,20 +97,7 @@ in pkgs.testers.runNixOSTest {
     except Exception:
         observe_service_failure()
         raise
-    try:
-        machine.succeed("python /etc/positron-service-check.py query")
-    except Exception:
-        observe_service_failure()
-        # TEMPORARY SDK127 experiment. Observe once; preserve the failed query.
-        try:
-            code, observation = machine.execute("timeout --kill-after=1s 7s python /etc/positron-service-check.py query-failure-facts")
-            if code == 0:
-                print(observation, end="")
-            else:
-                print('{"event":"query_server_observation","outcome":"unavailable"}')
-        except Exception:
-            print('{"event":"query_server_observation","outcome":"unavailable"}')
-        raise
+    machine.succeed("python /etc/positron-service-check.py query")
     machine.succeed("systemctl stop positron")
     machine.succeed("umask 077; python /etc/positron-lifecycle-check.py recovery")
     machine.succeed("systemctl start positron")

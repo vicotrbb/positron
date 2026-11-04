@@ -192,40 +192,9 @@ impl BackupReadStage {
     }
 }
 
-// TEMPORARY SDK127 transport observation; no error text enters the event ring.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum NativeHttpFailureStage {
-    TlsHandshake,
-    ResponseCompletion,
-}
-impl NativeHttpFailureStage {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::TlsHandshake => "tls_handshake",
-            Self::ResponseCompletion => "response_completion",
-        }
-    }
-}
-
-// TEMPORARY finite Execute experiment. Milliseconds saturate at 999999;
-// terminal: 0 unobserved, 1 Complete, 2 Incomplete, 3 Continued.
-// Limiting budget: 0 none/unobserved; 1..8 follow the explicit runtime match.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct FiniteQueryObservation {
-    pub(crate) stage_millis: [u64; 17],
-    pub(crate) terminal: u64,
-    pub(crate) wall_seconds: u64,
-    pub(crate) limiting_budget: u64,
-}
-
 /// Closed operational facts; arbitrary text cannot enter the process event ring.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OperationalEvent {
-    NativeHttpFailure {
-        role: crate::ListenerRole,
-        stage: NativeHttpFailureStage,
-        reason: std::io::ErrorKind,
-    },
     BackupReadFailure {
         stage: BackupReadStage,
         failure: crate::services::MaintenanceServiceFailure,
@@ -235,8 +204,6 @@ pub(crate) enum OperationalEvent {
         outcome: RequestOutcome,
         duration_micros: u64,
         failure: Option<crate::services::ServiceFailure>,
-        // TEMPORARY SDK127 fixed finite-Execute wall timings; never wire data.
-        finite_observation: Option<FiniteQueryObservation>,
     },
     RequestCompleted {
         role: crate::ListenerRole,
@@ -262,7 +229,6 @@ pub(crate) enum OperationalEvent {
 impl OperationalEvent {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::NativeHttpFailure { .. } => "native_http_connection_failed",
             Self::BackupReadFailure { .. } => "backup_read_failure",
             Self::Diagnostic(diagnostic) => diagnostic.name(),
             Self::QueryCompleted { .. } => "query_completed",
@@ -290,10 +256,7 @@ impl OperationalEvent {
                 | OperationalDiagnostic::LocalKeyCustodyWarning
                 | OperationalDiagnostic::IndependentKeyRecoveryRequired,
             ) => "warn",
-            Self::ProcessFenced
-            | Self::BackupReadFailure { .. }
-            | Self::Diagnostic(_)
-            | Self::NativeHttpFailure { .. } => "error",
+            Self::ProcessFenced | Self::BackupReadFailure { .. } | Self::Diagnostic(_) => "error",
             Self::RequestCompleted {
                 outcome: RequestOutcome::Unavailable,
                 ..
@@ -313,26 +276,6 @@ impl OperationalEvent {
     }
     pub(crate) fn json(self) -> serde_json::Value {
         let mut value = serde_json::json!({"event": self.name(), "severity": self.severity(), "component": "runtime"});
-        if let Self::NativeHttpFailure {
-            role,
-            stage,
-            reason,
-        } = self
-        {
-            value["listener"] = listener_label(role).into();
-            value["stage"] = stage.label().into();
-            value["reason"] = match reason {
-                std::io::ErrorKind::TimedOut => "timed_out",
-                std::io::ErrorKind::WouldBlock => "would_block",
-                std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
-                std::io::ErrorKind::ConnectionReset => "connection_reset",
-                std::io::ErrorKind::ConnectionAborted => "connection_aborted",
-                std::io::ErrorKind::BrokenPipe => "broken_pipe",
-                std::io::ErrorKind::InvalidData => "invalid_data",
-                _ => "other",
-            }
-            .into();
-        }
         if let Self::DependencyResourcesUnavailable(Some(context)) = self {
             context.append_json(&mut value);
         }
@@ -344,18 +287,10 @@ impl OperationalEvent {
             outcome,
             duration_micros,
             failure,
-            finite_observation,
         } = self
         {
             value["outcome"] = outcome.label().into();
             value["duration_micros"] = duration_micros.into();
-            if let Some(observation) = finite_observation {
-                value["finite_stage_millis"] =
-                    serde_json::json!(observation.stage_millis.map(|value| value.min(999_999)));
-                value["finite_terminal"] = observation.terminal.min(3).into();
-                value["finite_wall_seconds"] = observation.wall_seconds.min(999_999).into();
-                value["finite_limiting_budget"] = observation.limiting_budget.min(8).into();
-            }
             if let Some(category) = failure.and_then(crate::services::maintenance_failure_category)
             {
                 value["failure"] = category.into();

@@ -60,7 +60,6 @@ pub(in crate::services) fn execute(
         bearer,
         services.instance.logs_shard,
         mode,
-        None,
         |events| render(events, true),
     )?;
     Ok((bytes, reservation.transfer()))
@@ -97,7 +96,6 @@ pub(in crate::services) fn cancel(
         bearer,
         services.instance.logs_shard,
         1,
-        None,
         |service, context| match request.cursor.as_ref() {
             Some(api::log_query_cancel_request::Cursor::Query(bytes)) => {
                 let cursor = positron_query::QueryCursor::from_bytes(bytes)

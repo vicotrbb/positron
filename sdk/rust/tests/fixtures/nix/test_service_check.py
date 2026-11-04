@@ -287,56 +287,17 @@ class QueryDeadline(unittest.TestCase):
             self.run_query([(29.5, self.refused()), (0, self.complete())])
         self.assertEqual(len(self.commands), 1)
 
-    def test_unknown_probe_lines_cannot_change_failure_class_or_enable_retry(self):
-        for error in [b"POSITRON_SDK127_PROBE send_timeout\npositron: query transport or response unavailable\n",
-                      b"unknown capacity unavailable\n", b"POSITRON_SDK127_PROBE response_bound\n"]:
-            output = io.StringIO()
-            with self.subTest(error=error), contextlib.redirect_stdout(output), self.assertRaisesRegex(RuntimeError, "code=other"):
-                self.run_query([(0, self.refused(error))])
+    def test_transport_failure_never_retries(self):
+        with self.assertRaisesRegex(RuntimeError, "code=transport"):
+            self.run_query([(1, self.refused(b"positron: query transport or response unavailable"))])
+        self.assertEqual(len(self.commands), 1)
+
+    def test_noncanonical_capacity_text_never_retries(self):
+        for error in [b"unknown capacity unavailable\n",
+                      b"positron: query capacity unavailable; retry after backoff\ninjected\n"]:
+            with self.subTest(error=error), self.assertRaisesRegex(RuntimeError, "code=other"):
+                self.run_query([(0, self.refused(error)), (0, self.complete())])
             self.assertEqual(len(self.commands), 1)
-            self.assertEqual(output.getvalue(), "")
-
-
-
-class QueryServerObservation(unittest.TestCase):
-    def collect(self, payload):
-        clock = [0]
-        output = io.StringIO()
-        result = types.SimpleNamespace(returncode=0, stdout=payload, stderr=b"private-canary")
-        with mock.patch.object(pathlib.Path, "read_text", return_value="administrator_secret=private-canary\n"), \
-                mock.patch.object(pathlib.Path, "write_text"), \
-                mock.patch.object(sys, "argv", ["service-check.py", "query-failure-facts"]), \
-                mock.patch("subprocess.run", return_value=result) as execute, \
-                mock.patch("time.monotonic", side_effect=lambda: clock[0]), \
-                mock.patch("time.sleep", side_effect=lambda value: clock.__setitem__(0, clock[0] + value)), \
-                contextlib.redirect_stdout(output):
-            runpy.run_path(str(pathlib.Path(__file__).with_name("service-check.py")))
-        self.assertLessEqual(execute.call_count, 20)
-        self.assertTrue(all(call.args[0][0] == "journalctl" and 0 < call.kwargs["timeout"] <= 1 for call in execute.call_args_list))
-        self.assertNotIn("private-canary", output.getvalue())
-        return [json.loads(line) for line in output.getvalue().splitlines()]
-
-    def test_failure_collector_projects_only_existing_closed_completion_facts(self):
-        events = [{"event": "process_serving", "secret": "private-canary"},
-            {"event": "request_completed", "listener": "api", "outcome": "success", "request_id": 7,
-                "duration_micros": 9000000, "body": "private-canary"}]
-        payload = b"\n".join(json.dumps({"MESSAGE": json.dumps(event), "extra": "private-canary"}).encode() for event in events)
-        self.assertEqual(self.collect(payload), [{"event": "process_serving"},
-            {"event": "request_completed", "listener": "api", "outcome": "success", "request_id": 7, "duration_micros": 9000000}])
-
-    def test_control_traffic_cannot_displace_query_completion(self):
-        events = [{"event": "request_completed", "listener": "control", "outcome": "success", "request_id": n, "duration_micros": 1} for n in range(8)]
-        query = {"event": "request_completed", "listener": "api", "outcome": "success", "request_id": 9, "duration_micros": 6000000}
-        payload = b"\n".join(json.dumps({"MESSAGE": json.dumps(event)}).encode() for event in events + [query])
-        self.assertEqual(self.collect(payload), [query])
-
-    def test_failure_collector_refuses_unknown_types_and_oversized_records(self):
-        invalid = [{"event": "private-canary"}, {"event": "request_completed", "listener": "private-canary"},
-            {"event": "request_completed", "listener": "api", "outcome": "private-canary"},
-            {"event": "request_completed", "listener": "api", "outcome": "success", "request_id": True, "duration_micros": 1}]
-        for payload in [b"x" * 65537] + [json.dumps({"MESSAGE": json.dumps(event)}).encode() for event in invalid]:
-            with self.subTest(size=len(payload)):
-                self.assertEqual(self.collect(payload), [{"event": "query_server_observation", "outcome": "unavailable"}])
 
 
 class BackupOutcomeKnowledge(unittest.TestCase):
@@ -616,7 +577,7 @@ class RestartReadinessObservation(unittest.TestCase):
                     "disk_pressure": "healthy", "usable_disk_bytes": 123456}}},
                 "unrelated": "protected-canary"}
 
-    def invoke(self, response=None, failure=True, collector_error=False, systemd_output=None, collector_result=None, ingest_failure=False, query_failure=False):
+    def invoke(self, response=None, failure=True, collector_error=False, systemd_output=None, collector_result=None, ingest_failure=False):
         import textwrap
         self.observations = []
         self.commands = []
@@ -633,8 +594,6 @@ class RestartReadinessObservation(unittest.TestCase):
             def succeed(self, command):
                 owner.commands.append(command)
                 if ingest_failure and command == "python /etc/positron-service-check.py ingest":
-                    raise original
-                if query_failure and command == "python /etc/positron-service-check.py query":
                     raise original
                 if command == "systemctl restart positron":
                     self.restarted = True
@@ -658,8 +617,6 @@ class RestartReadinessObservation(unittest.TestCase):
                     raise OSError("protected-canary")
                 if collector_result is not None:
                     return collector_result
-                if command.endswith(" query-failure-facts"):
-                    return 0, '{"event":"query_server_observation","outcome":"unavailable"}\n'
                 owner.assertEqual(command,
                     "timeout --kill-after=1s 14s python /etc/positron-service-check.py readiness-diagnostics")
                 output = io.StringIO()
@@ -729,15 +686,6 @@ class RestartReadinessObservation(unittest.TestCase):
         self.assertLessEqual(sum(count for _, count in self.reads), 65537)
         self.assertTrue(all(not options for _, options in self.waits),
                         "preserve the driver's original readiness timeout")
-
-    def test_query_failure_observes_without_replay_and_preserves_original_failure(self):
-        for collector_error in [False, True]:
-            with self.subTest(collector_error=collector_error):
-                self.invoke(query_failure=True, collector_error=collector_error)
-                self.assertEqual(self.commands.count("python /etc/positron-service-check.py query"), 1)
-                self.assertEqual(len(self.observations), 2)
-                self.assertTrue(self.observations[-1][0].endswith(" query-failure-facts"))
-                self.assertNotIn("protected-canary", self.output)
 
     def test_ingest_failure_observes_once_without_replay_or_replacing_the_failure(self):
         self.invoke(ingest_failure=True)

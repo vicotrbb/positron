@@ -15,8 +15,6 @@ pub(crate) struct ExecutionResources {
     usage_before: SnapshotLeaseUsage,
     attempt: Option<SnapshotLeaseAttempt>,
     target_lease: Option<TargetLease>,
-    // TEMPORARY fixed observation; never crosses into QueryStream.
-    usage_observation: Option<std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>>,
 }
 
 struct TargetLease {
@@ -38,7 +36,6 @@ impl ExecutionResources {
             usage_before,
             attempt: None,
             target_lease: None,
-            usage_observation: None,
         }
     }
 
@@ -55,7 +52,6 @@ impl ExecutionResources {
             usage_before,
             attempt: Some(attempt),
             target_lease: None,
-            usage_observation: None,
         }
     }
 
@@ -90,37 +86,7 @@ impl ExecutionResources {
         self
     }
 
-    pub(super) fn with_usage_observation(
-        mut self,
-        observation: Option<std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>>,
-    ) -> Self {
-        self.usage_observation = observation;
-        self
-    }
-
     pub(super) fn persist_usage(
-        &mut self,
-        ledger: &ActiveSegmentLedger<'_, '_>,
-        target_ledger: Option<&ActiveSegmentLedger<'_, '_>>,
-        state: &crate::cursor::CursorState,
-    ) -> Result<(), QueryFailure> {
-        let observation = self.usage_observation.clone();
-        let started = observation.as_ref().map(|_| std::time::Instant::now());
-        let result = self.persist_usage_inner(ledger, target_ledger, state);
-        if let (Some(observation), Some(started)) = (observation, started) {
-            let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-            let _previous = observation[0]
-                .fetch_update(
-                    std::sync::atomic::Ordering::Relaxed,
-                    std::sync::atomic::Ordering::Relaxed,
-                    |value| Some(value.saturating_add(micros)),
-                )
-                .unwrap_or_else(|value| value);
-        }
-        result
-    }
-
-    fn persist_usage_inner(
         &mut self,
         ledger: &ActiveSegmentLedger<'_, '_>,
         target_ledger: Option<&ActiveSegmentLedger<'_, '_>>,
@@ -140,14 +106,7 @@ impl ExecutionResources {
             Some(attempt) => {
                 ledger.record_snapshot_lease_usage_for_attempt(attempt, previous, delta)
             },
-            None => match self.usage_observation.as_ref() {
-                Some(cells) => ledger.record_snapshot_lease_usage_observed(
-                    self.lease,
-                    delta,
-                    [&cells[1], &cells[2]],
-                ),
-                None => ledger.record_snapshot_lease_usage(self.lease, delta),
-            },
+            None => ledger.record_snapshot_lease_usage(self.lease, delta),
         }
         .map_err(map_ledger_failure)?;
         if let Some(target) = self.target_lease.as_mut() {
@@ -249,8 +208,6 @@ impl ExecutionResources {
         SnapshotLeaseId,
         Option<SnapshotLeaseId>,
     ) {
-        // Detach before any returned stream can escape the eager execution.
-        drop(self.usage_observation);
         (
             self.admission,
             self.lease,

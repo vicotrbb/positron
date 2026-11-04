@@ -310,44 +310,8 @@ fn offline_restore_reference_survives_frontiers_that_refuse_continuation() -> Re
         .begin_upgrade(accepted)?
         .finish(ShutdownTrigger::FirstSignal)?;
     drop(host);
-    let (reference, qualification_failure) = verified_snapshot(&case, id)?;
-    let validation = validate_restore_reference(&case, id, &reference);
-    finish_qualification(qualification_failure, validation)
-}
-
-fn finish_qualification(original: Option<String>, observation: Result) -> Result {
-    match (original, observation) {
-        (Some(original), Err(error)) => {
-            Err(format!("{original}; diagnostic validation failed: {error}").into())
-        },
-        (Some(original), Ok(())) => Err(original.into()),
-        (None, result) => result,
-    }
-}
-
-#[test]
-fn diagnostic_failure_retains_original_watchdog_detail() -> Result {
-    let original = "snapshot watchdog turns=8 revision=4";
-    let failure = finish_qualification(Some(original.into()), Err("later semantic refusal".into()))
-        .expect_err("latched failure must remain failure");
-    let message = failure.to_string();
-    assert!(message.contains(original), "{message}");
-    assert!(message.contains("later semantic refusal"), "{message}");
-    assert_eq!(
-        finish_qualification(Some(original.into()), Ok(()))
-            .expect_err("late success fails")
-            .to_string(),
-        original
-    );
-    finish_qualification(None, Ok(()))
-}
-
-fn validate_restore_reference(
-    case: &Case,
-    id: positron_governance::OperationId,
-    reference: &positron_governance::BackupVerificationParameters,
-) -> Result {
-    let before = binding(case)?;
+    let reference = verified_snapshot(&case, id)?;
+    let before = binding(&case)?;
     // Existing startup-recovery fault convention: damage acknowledged native
     // storage after releasing the offline owner, leaving Catalog evidence intact.
     let segments = fs::read_dir(case.root.join("data/segments/sealed"))?
@@ -359,9 +323,7 @@ fn validate_restore_reference(
                 .is_some_and(|extension| extension == "segment")
         })
         .collect::<Vec<_>>();
-    if segments.is_empty() {
-        return Err("acknowledged sealed native segments missing".into());
-    }
+    assert!(!segments.is_empty(), "acknowledged sealed native segments");
     for segment in segments {
         fs::write(segment, b"corrupt acknowledged frontier")?;
     }
@@ -370,41 +332,35 @@ fn validate_restore_reference(
         Err(error) => error,
     };
     eprintln!("native corruption continuation refusal: {refusal:?}");
-    if !matches!(
+    assert!(matches!(
         refusal,
         UpgradeFailure::DrainIncomplete | UpgradeFailure::UnsafeState
-    ) {
-        return Err("damaged native storage did not refuse continuation safely".into());
-    }
-    if binding(case)? != before {
-        return Err("fault must preserve authenticated Catalog receipt".into());
-    }
-    let before = binding(case)?;
-    let output = command(case, "restore-reference", id, None)?;
-    if !output.status.success() {
-        return Err(format!(
-            "read-only restore reference refused after frontier change: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
+    ));
+    assert_eq!(
+        binding(&case)?,
+        before,
+        "fault must preserve authenticated Catalog receipt"
+    );
+    let before = binding(&case)?;
+    let output = command(&case, "restore-reference", id, None)?;
+    assert!(
+        output.status.success(),
+        "read-only restore reference refused after frontier change: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout)?;
-    if !stdout.contains("fresh_target_required=true")
-        || !stdout.contains(&format!("snapshot_id={}", hex(&reference.snapshot_id())))
-        || !stdout.contains(&format!(
-            "manifest_checksum={}",
-            hex(&reference.manifest_checksum())
-        ))
-    {
-        return Err(
-            "restore reference must retain exact verified identity and fresh target requirement"
-                .into(),
-        );
-    }
-    if binding(case)? != before {
-        return Err("reference inspection must preserve Catalog and historical marker".into());
-    }
-    reference_refuses_other_bindings(case, id, before)?;
+    assert!(stdout.contains("fresh_target_required=true"));
+    assert!(stdout.contains(&format!("snapshot_id={}", hex(&reference.snapshot_id()))));
+    assert!(stdout.contains(&format!(
+        "manifest_checksum={}",
+        hex(&reference.manifest_checksum())
+    )));
+    assert_eq!(
+        binding(&case)?,
+        before,
+        "reference inspection must preserve Catalog and historical marker"
+    );
+    reference_refuses_other_bindings(&case, id, before)?;
     Ok(())
 }
 fn reference_refuses_other_bindings(
@@ -413,18 +369,13 @@ fn reference_refuses_other_bindings(
     before: (u64, Option<GracefulShutdownRecord>),
 ) -> Result {
     let wrong = positron_governance::OperationId::from_bytes([0x93; 16])?;
-    if wrong == id {
-        return Err("different operation identity required".into());
-    }
-    if command(case, "restore-reference", wrong, None)?
-        .status
-        .success()
-    {
-        return Err("different operation must refuse receipt".into());
-    }
-    if binding(case)? != before {
-        return Err("wrong operation must preserve Catalog binding".into());
-    }
+    assert_ne!(wrong, id);
+    assert!(
+        !command(case, "restore-reference", wrong, None)?
+            .status
+            .success()
+    );
+    assert_eq!(binding(case)?, before);
     let path = case.root.join("positron.toml");
     let original = fs::read_to_string(&path)?;
     let old = case.root.join("export/query.credential");
@@ -435,9 +386,7 @@ fn reference_refuses_other_bindings(
         old.to_str().ok_or("credential path")?,
         other.to_str().ok_or("alternate credential path")?,
     );
-    if changed == original {
-        return Err("different credential configuration required".into());
-    }
+    assert_ne!(changed, original);
     fs::write(&path, changed)?;
     let changed_configuration = positron_config::resolve(
         positron_config::ConfigurationInputs::try_from_sources(
@@ -447,35 +396,28 @@ fn reference_refuses_other_bindings(
         )
         .map_err(|_| "changed valid configuration")?,
     )?;
-    if changed_configuration.audit_binding_digest() == case.effective.audit_binding_digest() {
-        return Err("different configuration audit binding required".into());
-    }
+    assert_ne!(
+        changed_configuration.audit_binding_digest(),
+        case.effective.audit_binding_digest()
+    );
     let result = command(case, "restore-reference", id, None);
     fs::write(&path, original)?;
-    if result?.status.success() {
-        return Err("different configuration must refuse receipt".into());
-    }
-    if binding(case)? != before {
-        return Err("wrong configuration must preserve Catalog binding".into());
-    }
+    assert!(
+        !result?.status.success(),
+        "different configuration must refuse receipt"
+    );
+    assert_eq!(binding(case)?, before);
     Ok(())
 }
 #[inline(never)]
 fn verified_snapshot(
     case: &Case,
     id: positron_governance::OperationId,
-) -> Result<(
-    positron_governance::BackupVerificationParameters,
-    Option<String>,
-)> {
+) -> Result<positron_governance::BackupVerificationParameters> {
     let mut session = begin_session(case, id)?;
     // The operator API advances in bounded thirty-second calls. This is a
     // correctness-test watchdog, not a total Backup/Verification product SLO.
     let watchdog = Instant::now() + Duration::from_secs(300);
-    // TEMPORARY SDK127 experiment. Late progress can never qualify this fixture.
-    let mut qualification_failure = None;
-    let mut diagnostic_deadline = None;
-    let mut diagnostic_turns = 0_u8;
     let initial = session.status()?;
     let mut revision = initial.revision();
     let mut turns = 0_u64;
@@ -483,117 +425,87 @@ fn verified_snapshot(
     let mut reopen_elapsed = Duration::ZERO;
     let mut last_reopen_elapsed = Duration::ZERO;
     let mut recent_turns = std::collections::VecDeque::with_capacity(4);
-    let observation = (|| -> Result<positron_governance::BackupVerificationParameters> {
-        loop {
-            let advance_started = Instant::now();
-            if let Some(deadline) = diagnostic_deadline {
-                if diagnostic_turns >= 8 || advance_started >= deadline {
-                    return Err("diagnostic continuation bound elapsed".into());
-                }
-                diagnostic_turns += 1;
-            }
-            let turn = (advance_started + Duration::from_secs(30))
-                .min(diagnostic_deadline.unwrap_or(watchdog));
-            let operation = match session.advance(turn) {
-                Ok(operation) => operation,
-                Err(positron_runtime::UpgradeFailure::CapacityUnavailable) => {
-                    // The bounded operator call explicitly permits a retry when
-                    // its admitted turn cannot make durable progress. Keep the
-                    // same intent and overall watchdog; all other failures escape.
-                    session.status()?
-                },
-                Err(error) => return Err(error.into()),
-            };
-            let last_advance_elapsed = advance_started.elapsed();
-            advance_elapsed += last_advance_elapsed;
-            turns += 1;
-            let children = session.progress(&case.effective).map(|progress| {
-                let summarize = |child: Option<positron_runtime::UpgradeChildProgress>| {
-                    child.map(|child| {
-                        (
-                            child.kind,
-                            child.phase,
-                            child.status,
-                            child.revision,
-                            child.progress_percent,
-                            child.checkpoint.map(|checkpoint| checkpoint.sequence),
-                        )
-                    })
-                };
-                (
-                    summarize(progress.snapshot),
-                    summarize(progress.verification),
-                )
-            });
-            if recent_turns.len() == 4 {
-                recent_turns.pop_front();
-            }
-            recent_turns.push_back((
-                turns,
-                last_advance_elapsed.as_millis(),
-                last_reopen_elapsed.as_millis(),
-                children,
-            ));
-            if qualification_failure.is_none() && Instant::now() >= watchdog {
-                qualification_failure = Some(format!(
-                    "snapshot watchdog status={:?} stage={:?} revision={} turns={turns} last_advance_ms={} advance_total_ms={} reopen_total_ms={} recent_turns(turn,advance_ms,preceding_reopen_ms,children)={:?}",
-                    operation.status(),
-                    operation.upgrade_stage(),
-                    operation.revision(),
-                    last_advance_elapsed.as_millis(),
-                    advance_elapsed.as_millis(),
-                    reopen_elapsed.as_millis(),
-                    recent_turns,
-                ));
-                eprintln!("QUALIFICATION_FAILED offline_snapshot_watchdog");
-                diagnostic_deadline = Some(Instant::now() + Duration::from_secs(300));
-            }
-            if operation.operation_id() != id
-                || operation.request() != initial.request()
-                || operation.upgrade_parameters() != initial.upgrade_parameters()
-                || operation.upgrade_drain_evidence() != initial.upgrade_drain_evidence()
-            {
-                return Err(
-                    "offline continuation must preserve operation identity, request, and evidence"
-                        .into(),
-                );
-            }
-            if operation.revision() < revision {
-                return Err("offline revision regressed".into());
-            }
-            revision = operation.revision();
-            if operation.upgrade_stage() == Some(UpgradeStage::Publishing) {
-                if operation.upgrade_snapshot_evidence().is_none() {
-                    return Err("Publishing requires snapshot evidence".into());
-                }
-                break;
-            }
-            if operation.status().is_terminal() {
-                return Err("offline snapshot terminated before Publishing".into());
-            }
-            // Each real offline CLI command releases its owner before the next
-            // invocation resumes the same durable operation.
-            let reopen_started = Instant::now();
-            drop(session);
-            session = begin_session(case, id)?;
-            last_reopen_elapsed = reopen_started.elapsed();
-            reopen_elapsed += last_reopen_elapsed;
-            // A stable parent revision makes no claim about either child's progress.
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        session
-            .rollback_snapshot()?
-            .ok_or_else(|| "verified receipt".into())
-    })();
-    match observation {
-        Ok(reference) => Ok((reference, qualification_failure)),
-        Err(error) => match qualification_failure {
-            Some(original) => {
-                Err(format!("{original}; diagnostic continuation failed: {error}").into())
+    loop {
+        let advance_started = Instant::now();
+        let turn = (advance_started + Duration::from_secs(30)).min(watchdog);
+        let operation = match session.advance(turn) {
+            Ok(operation) => operation,
+            Err(positron_runtime::UpgradeFailure::CapacityUnavailable) => {
+                // The bounded operator call explicitly permits a retry when
+                // its admitted turn cannot make durable progress. Keep the
+                // same intent and overall watchdog; all other failures escape.
+                session.status()?
             },
-            None => Err(error),
-        },
+            Err(error) => return Err(error.into()),
+        };
+        let last_advance_elapsed = advance_started.elapsed();
+        advance_elapsed += last_advance_elapsed;
+        turns += 1;
+        assert_eq!(operation.operation_id(), id);
+        assert_eq!(operation.request(), initial.request());
+        assert_eq!(operation.upgrade_parameters(), initial.upgrade_parameters());
+        assert_eq!(
+            operation.upgrade_drain_evidence(),
+            initial.upgrade_drain_evidence()
+        );
+        assert!(operation.revision() >= revision);
+        revision = operation.revision();
+        if operation.upgrade_stage() == Some(UpgradeStage::Publishing) {
+            assert!(operation.upgrade_snapshot_evidence().is_some());
+            break;
+        }
+        assert!(!operation.status().is_terminal(), "{operation:?}");
+        let children = session.progress(&case.effective).map(|progress| {
+            let summarize = |child: Option<positron_runtime::UpgradeChildProgress>| {
+                child.map(|child| {
+                    (
+                        child.kind,
+                        child.phase,
+                        child.status,
+                        child.revision,
+                        child.progress_percent,
+                        child.checkpoint.map(|checkpoint| checkpoint.sequence),
+                    )
+                })
+            };
+            (
+                summarize(progress.snapshot),
+                summarize(progress.verification),
+            )
+        });
+        if recent_turns.len() == 4 {
+            recent_turns.pop_front();
+        }
+        recent_turns.push_back((
+            turns,
+            last_advance_elapsed.as_millis(),
+            last_reopen_elapsed.as_millis(),
+            children,
+        ));
+        assert!(
+            Instant::now() < watchdog,
+            "snapshot watchdog status={:?} stage={:?} revision={} turns={turns} last_advance_ms={} advance_total_ms={} reopen_total_ms={} recent_turns(turn,advance_ms,preceding_reopen_ms,children)={:?}",
+            operation.status(),
+            operation.upgrade_stage(),
+            operation.revision(),
+            last_advance_elapsed.as_millis(),
+            advance_elapsed.as_millis(),
+            reopen_elapsed.as_millis(),
+            recent_turns,
+        );
+        // Each real offline CLI command releases its owner before the next
+        // invocation resumes the same durable operation.
+        let reopen_started = Instant::now();
+        drop(session);
+        session = begin_session(case, id)?;
+        last_reopen_elapsed = reopen_started.elapsed();
+        reopen_elapsed += last_reopen_elapsed;
+        // A stable parent revision makes no claim about either child's progress.
+        std::thread::sleep(Duration::from_millis(20));
     }
+    session
+        .rollback_snapshot()?
+        .ok_or_else(|| "verified receipt".into())
 }
 
 fn ingest_before_upgrade(process: &RunningProcess, credential: &str) -> Result {

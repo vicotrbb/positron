@@ -22,7 +22,6 @@ pub(super) fn execute(
         bearer,
         services.instance.logs_shard,
         128,
-        None,
         |service, context| {
             let query = service
                 .plan_pipeline(context, &query.pipeline, budget)

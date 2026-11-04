@@ -68,41 +68,6 @@ if sys.argv[1] == "readiness-diagnostics":
     except (ValueError, TypeError, OSError, subprocess.TimeoutExpired):
         pass
     print(json.dumps(observation))
-elif sys.argv[1] == "query-failure-facts":
-    # TEMPORARY SDK127 experiment: observe after failure, never replay the query.
-    until, facts = time.monotonic() + 5, []
-    for _ in range(20):
-        remaining = until - time.monotonic()
-        if remaining <= 0:
-            break
-        try:
-            result = subprocess.run(["journalctl", "--unit=positron", "--output=json",
-                "--output-fields=MESSAGE", "--no-pager", "--lines=64"],
-                capture_output=True, timeout=min(1, remaining))
-            if result.returncode or len(result.stdout) > 65536:
-                raise ValueError("journal observation unavailable")
-            for line in result.stdout.splitlines():
-                value = json.loads(json.loads(line)["MESSAGE"])
-                event = value.get("event")
-                if event == "process_serving":
-                    fact = {"event": event}
-                elif (event == "request_completed"
-                        and value.get("listener") == "api"
-                        and value.get("outcome") in {"success", "authentication_rejected", "capacity_rejected", "request_rejected", "unavailable"}
-                        and all(type(value.get(key)) is int and 0 <= value[key] <= 18446744073709551615
-                                for key in ["request_id", "duration_micros"])):
-                    fact = {key: value[key] for key in ["event", "listener", "outcome", "request_id", "duration_micros"]}
-                else:
-                    continue
-                if fact not in facts and len(facts) < 8:
-                    facts.append(fact)
-            if any(fact.get("listener") == "api" for fact in facts):
-                break
-        except (ValueError, KeyError, TypeError, AttributeError, OSError, subprocess.TimeoutExpired):
-            pass
-        time.sleep(min(0.25, max(0, until - time.monotonic())))
-    for fact in facts or [{"event": "query_server_observation", "outcome": "unavailable"}]:
-        print(json.dumps(fact))
 elif sys.argv[1] == "ingest":
     body = json.dumps({"resourceLogs": [{"scopeLogs": [{"logRecords": [
         {"timeUnixNano": "42", "body": {"stringValue": marker}}
