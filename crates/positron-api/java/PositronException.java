@@ -6,12 +6,32 @@ import static dev.positron.Codec.*;
 /** Safe error detail with canonical retry and completion policy. */
 public final class PositronException extends Exception {
  private static final long serialVersionUID=1L;
- public final String failure,retryClass,completionState;
+ public final String failure,retryClass,completionState,source,safeDetail;
  public final int status;
- public PositronException(String failure,String retryClass,String completionState,int status){super("Positron request failed");this.failure=failure;this.retryClass=retryClass;this.completionState=completionState;this.status=status;}
+ public PositronException(String failure,String retryClass,String completionState,int status){this(failure,retryClass,completionState,status,null,null);}
+ private PositronException(String failure,String retryClass,String completionState,int status,String source,String safeDetail){super("Positron request failed");this.failure=failure;this.retryClass=retryClass;this.completionState=completionState;this.status=status;this.source=source;this.safeDetail=safeDetail;}
  static PositronException transport(){return new PositronException("Transport","RETRY_CLASS_NEVER","COMPLETION_STATE_AMBIGUOUS",0);}
  static String canonical(String kind,JsonNode value){for(var item:CONTRACT.path("descriptor").path("enums").path(kind))if(value.equals(item.path("name"))||value.equals(item.path("number")))return item.path("name").asText();throw new WireException();}
  private static String read(JsonNode error,String snake,String camel,String kind){require(!(error.has(snake)&&error.has(camel)));return canonical(kind,error.has(snake)?error.path(snake):error.path(camel));}
+ static PositronException nativeFailure(int status,byte[] bytes,JsonNode route){
+  if(bytes.length>1024)return transport();
+  try {
+   var error=parse(bytes);require(error.isObject());
+   var fields=error.fieldNames();while(fields.hasNext())require(java.util.Set.of("code","retry_class","retryClass","completion_state","completionState","source","safe_detail","safeDetail").contains(fields.next()));
+   String code;boolean protobuf;
+   try{code=canonical("PublicErrorCode",error.path("code"));require(!code.endsWith("_UNSPECIFIED"));protobuf=true;}
+   catch(WireException e){code=text(error.path("code"));require(!code.isEmpty()&&java.util.Arrays.asList(route.path("responses").path(Integer.toString(status)).asText().split(" or ")).contains(code));protobuf=false;}
+   boolean retryPresent=error.has("retry_class")||error.has("retryClass"),completionPresent=error.has("completion_state")||error.has("completionState");
+   require(retryPresent==completionPresent&&(!protobuf||retryPresent));
+   String retry=retryPresent?read(error,"retry_class","retryClass","RetryClass"):"RETRY_CLASS_NEVER";
+   String completion=completionPresent?read(error,"completion_state","completionState","CompletionState"):"COMPLETION_STATE_AMBIGUOUS";
+   require(!retry.endsWith("_UNSPECIFIED")&&!completion.endsWith("_UNSPECIFIED")&&(!completion.equals("COMPLETION_STATE_AMBIGUOUS")||retry.equals("RETRY_CLASS_NEVER")));
+   String source=error.has("source")?canonical("FailureSource",error.path("source")):null;
+   String detail=error.has("safe_detail")||error.has("safeDetail")?read(error,"safe_detail","safeDetail","SafeDetail"):null;
+   require((source==null||!source.endsWith("_UNSPECIFIED"))&&(detail==null||!detail.endsWith("_UNSPECIFIED"))&&(!protobuf||source!=null&&detail!=null));
+   return new PositronException(code,retry,completion,status,source,detail);
+  }catch(WireException e){return transport();}
+ }
  public static PositronException query(int status,byte[] bytes,boolean cancellation){
   if(bytes.length>1024)return transport();
   try {var error=parse(bytes);String code=canonical("PublicErrorCode",error.path("code")),retry=read(error,"retry_class","retryClass","RetryClass"),completion=read(error,"completion_state","completionState","CompletionState"),source=canonical("FailureSource",error.path("source")),detail=read(error,"safe_detail","safeDetail","SafeDetail");

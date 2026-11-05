@@ -76,9 +76,10 @@ class PackageTests(unittest.TestCase):
             classpath = consumer(output, first, repository)
             keystore=output / 'tls.p12'
             run([JAVA_HOME / 'bin/keytool', '-genkeypair', '-alias', 'test', '-keyalg', 'RSA', '-keysize', '2048', '-validity', '1', '-storetype', 'PKCS12', '-keystore', keystore, '-storepass', 'test-only', '-dname', 'CN=localhost'])
-            for test in ('Goldens', 'Delivery', 'Transport', 'Example'):
+            for test in ('Goldens', 'Delivery', 'Transport', 'Refusals', 'Example'):
                 with self.subTest(test=test):
-                    result = run([JAVA_HOME / 'bin/java', '-Xmx256m', '-XX:ActiveProcessorCount=2', '-cp', classpath, test, ROOT / 'api/positron/v1', keystore])
+                    arguments = [] if test == 'Example' else [ROOT / 'api/positron/v1', keystore]
+                    result = run([JAVA_HOME / 'bin/java', '-Xmx256m', '-XX:ActiveProcessorCount=2', '-cp', classpath, test, *arguments])
                     self.assertTrue(result.stdout.strip())
 
 if __name__ == '__main__':

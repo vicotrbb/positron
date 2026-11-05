@@ -40,7 +40,7 @@ public final class Client {
    long remaining=deadline-System.nanoTime();if(remaining<=0)throw PositronException.transport();
    var builder=HttpRequest.newBuilder(endpoint.resolve(route.path("path").asText())).timeout(Duration.ofNanos(remaining)).header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofByteArray(body));if(bearer!=null)builder.header("Authorization","Bearer "+bearer);
    int limit=route.path("max_response_bytes").asInt(4096);future=HTTP.sendAsync(builder.build(),info->new BoundedBody(limit));var response=future.get(remaining,TimeUnit.NANOSECONDS);byte[] bytes=response.body();
-   if(response.statusCode()<200||response.statusCode()>=300){if(query)throw PositronException.query(response.statusCode(),bytes,rpc.endsWith("/Cancel"));throw new PositronException("Refused","RETRY_CLASS_NEVER","COMPLETION_STATE_REJECTED",response.statusCode());}
+   if(response.statusCode()<200||response.statusCode()>=300){if(query)throw PositronException.query(response.statusCode(),bytes,rpc.endsWith("/Cancel"));throw PositronException.nativeFailure(response.statusCode(),bytes,route);}
    if(query&&!rpc.endsWith("/Cancel"))return Query.decode(bytes,input.has("tail")?"tail":rpc.endsWith("/Session")?"session":"execute");
    var value=decode(route.path("response").asText(),bytes);if(rpc.endsWith("LogQueryService/Cancel"))require(value.path("cancelled").asBoolean());return value;
   }catch(PositronException e){throw e;}catch(InterruptedException e){Thread.currentThread().interrupt();throw PositronException.transport();}catch(Exception e){throw PositronException.transport();}
