@@ -308,3 +308,26 @@ func TestInvalidOriginalRequestTextIsNeverSent(t *testing.T) {
 		t.Fatal("invalid request text reached transport")
 	}
 }
+
+func TestPromotedInvalidRequestTextIsNeverSent(t *testing.T) {
+	type embeddedQuery struct {
+		Pipeline string                   `json:"pipeline"`
+		Budget   *positron.LogQueryBudget `json:"budget"`
+	}
+	type promotedQuery struct{ *embeddedQuery }
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(503) }))
+	defer server.Close()
+	client, err := positron.NewClient(server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	value := func(text string) *string { return &text }
+	request := promotedQuery{&embeddedQuery{string([]byte{0xff}), &positron.LogQueryBudget{ScannedBytes: value("1"), DecodedRecords: value("1"), OutputRows: value("1"), OutputBytes: value("1"), MemoryBytes: value("1"), CpuWorkUnits: value("1"), WallSeconds: value("1"), MaximumTimeRangeNanoseconds: value("1")}}}
+	var result any
+	err = client.Call(context.Background(), "positron.v1.LogQueryService/Execute", request, "key", &result)
+	if !errors.Is(err, positron.ErrWire) || calls != 0 {
+		t.Fatal("promoted invalid text reached transport")
+	}
+}

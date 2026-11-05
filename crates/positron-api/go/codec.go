@@ -490,7 +490,7 @@ func Decode(name string, data []byte) (map[string]any, error) {
 }
 
 // Validate original strings before encoding/json can replace invalid UTF-8.
-// Walk only exported JSON fields; byte slices retain their binary encoding.
+// Include promoted exported members of anonymous structs; byte slices stay binary.
 func validInputText(value reflect.Value, depth int, budget *int) bool {
 	if depth > 64 {
 		return false
@@ -552,7 +552,11 @@ func validInputText(value reflect.Value, depth int, budget *int) bool {
 		shape := value.Type()
 		for index := 0; index < value.NumField(); index++ {
 			field := shape.Field(index)
-			if field.PkgPath != "" || strings.SplitN(field.Tag.Get("json"), ",", 2)[0] == "-" {
+			fieldType := field.Type
+			if fieldType.Kind() == reflect.Pointer {
+				fieldType = fieldType.Elem()
+			}
+			if field.PkgPath != "" && (!field.Anonymous || fieldType.Kind() != reflect.Struct) || strings.SplitN(field.Tag.Get("json"), ",", 2)[0] == "-" {
 				continue
 			}
 			if !validInputText(value.Field(index), depth+1, budget) {

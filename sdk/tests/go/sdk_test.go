@@ -153,3 +153,46 @@ func TestEncodeRejectsInvalidOriginalUTF8(t *testing.T) {
 		t.Fatal("pointer cycle accepted")
 	}
 }
+
+func TestEncodeValidatesPromotedUnexportedStructMembers(t *testing.T) {
+	type embeddedText struct {
+		TextValue string `json:"textValue"`
+	}
+	type promotedText struct{ embeddedText }
+	type promotedPointer struct{ *embeddedText }
+	invalid := string([]byte{0xff})
+	for _, value := range []any{promotedText{embeddedText{invalid}}, promotedPointer{&embeddedText{invalid}}} {
+		if _, err := positron.Encode("LogQueryValue", value); !errors.Is(err, positron.ErrWire) {
+			t.Fatal("promoted invalid text was repaired")
+		}
+	}
+	for _, value := range []any{promotedText{embeddedText{"�😀"}}, promotedPointer{&embeddedText{"�😀"}}} {
+		data, err := positron.Encode("LogQueryValue", value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checked, err := positron.Decode("LogQueryValue", data)
+		if err != nil || checked["textValue"] != "�😀" {
+			t.Fatal("promoted valid text changed")
+		}
+	}
+	type embeddedBytes struct {
+		BytesValue []byte `json:"bytesValue"`
+	}
+	type promotedBytes struct{ *embeddedBytes }
+	if _, err := positron.Encode("LogQueryValue", promotedBytes{&embeddedBytes{[]byte{0xff, 0, 0xc0}}}); err != nil {
+		t.Fatal("promoted binary bytes refused")
+	}
+
+	type ignoredText string
+	type ignoredFields struct {
+		TextValue string `json:"textValue"`
+		ignoredText
+		Ignored string `json:"-"`
+		private string
+	}
+	checked, err := positron.Encode("LogQueryValue", ignoredFields{TextValue: "valid", ignoredText: ignoredText(invalid), Ignored: invalid, private: invalid})
+	if err != nil || string(checked) != `{"textValue":"valid"}` {
+		t.Fatal("native ignored fields were inspected")
+	}
+}
