@@ -387,6 +387,16 @@ impl Fixture {
             .find(|artifact| artifact.surface == Surface::Homebrew)
             .unwrap() = native_registry::homebrew(formula.into_bytes());
     }
+    pub fn refresh_python_publication(&mut self, contents: Vec<u8>) {
+        let version = self.inventory.version;
+        let version = format!("{}.{}.{}", version.major, version.minor, version.patch);
+        *self
+            .native_artifacts
+            .iter_mut()
+            .find(|artifact| artifact.surface == Surface::SdkPython)
+            .unwrap() =
+            native_registry::python_wheel(&version, &self.inventory.source_commit, contents);
+    }
     pub fn replace_artifact(&mut self, index: usize, bytes: &[u8], payload: &[u8]) {
         let artifact = self.inventory.artifacts[index].clone();
         let old = hex(&self.inventory.file(&artifact.file).unwrap().identity.sha256);

@@ -72,6 +72,20 @@ jobs:
           (cd sdk/typescript && npm ci --ignore-scripts && npm run build)
           POSITRON_TYPESCRIPT_SDK="$PWD/sdk/typescript" node --test sdk/tests/typescript/*.test.mjs
 
+      - name: Prepare Python SDK packaging toolchain
+        run: |
+          python3 -m venv "$RUNNER_TEMP/python-sdk-build"
+          "$RUNNER_TEMP/python-sdk-build/bin/python" -m pip install --disable-pip-version-check --no-deps -r sdk/tests/python/requirements-build.txt
+          echo "POSITRON_PYTHON=$RUNNER_TEMP/python-sdk-build/bin/python" >> "$GITHUB_ENV"
+
+      - name: Verify clean Python SDK generation, package and install
+        run: |
+          generated="$(mktemp -d)"
+          trap 'rm -rf "$generated"' EXIT
+          cargo run --locked -p positron-api --example generate_python_sdk -- "$generated"
+          diff -r --exclude=__pycache__ --exclude=build --exclude=dist --exclude='*.egg-info' sdk/python "$generated"
+          PYTHONPATH="$PWD/sdk/python" "$POSITRON_PYTHON" -m unittest discover -s sdk/tests/python
+
       - name: Run unit and integration tests
         run: cargo test --locked --workspace --lib --bins --tests
 
