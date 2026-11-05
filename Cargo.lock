@@ -3603,6 +3603,7 @@ dependencies = [
 name = "positron"
 version = "0.0.0"
 dependencies = [
+ "der",
  "age",
  "base64 0.22.1",
  "close_fds",
@@ -3624,6 +3625,8 @@ dependencies = [
  "rcgen",
  "reqwest 0.12.28",
  "ring",
+ "rsa",
+ "rustls-pki-types",
  "rustix",
  "rustls",
  "serde_json",

@@ -114,6 +114,26 @@ jobs:
       - name: Verify clean JVM SDK generation, reproducible JARs and Maven consumer conformance
         run: python3 -m unittest discover -s sdk/tests/java
 
+      - name: Prepare pinned .NET SDK toolchain
+        run: |
+          sdk_version="$(python3 -c 'import json; print(json.load(open("sdk/dotnet/toolchain.json"))["sdk"])')"
+          sdk_url="$(python3 -c 'import json; print(json.load(open("sdk/dotnet/toolchain.json"))["linux_x64_url"])')"
+          sdk_sha512="$(python3 -c 'import json; print(json.load(open("sdk/dotnet/toolchain.json"))["linux_x64_sha512"])')"
+          mkdir -p "target/dotnet-sdk-tools/$sdk_version"
+          curl -fLsS -o target/dotnet-sdk-tools/sdk.tar.gz "$sdk_url"
+          echo "$sdk_sha512  target/dotnet-sdk-tools/sdk.tar.gz" | sha512sum -c -
+          tar -xzf target/dotnet-sdk-tools/sdk.tar.gz -C "target/dotnet-sdk-tools/$sdk_version"
+          echo "DOTNET_ROOT=$PWD/target/dotnet-sdk-tools/$sdk_version" >> "$GITHUB_ENV"
+          echo "DOTNET_CLI_HOME=$PWD/target/dotnet-home" >> "$GITHUB_ENV"
+          echo "NUGET_PACKAGES=$PWD/target/dotnet-nuget" >> "$GITHUB_ENV"
+          echo 'DOTNET_PROCESSOR_COUNT=2' >> "$GITHUB_ENV"
+          echo 'DOTNET_NOLOGO=1' >> "$GITHUB_ENV"
+          echo 'DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1' >> "$GITHUB_ENV"
+          echo 'DOTNET_CLI_TELEMETRY_OPTOUT=1' >> "$GITHUB_ENV"
+
+      - name: Verify clean .NET SDK generation, reproducible packages and NuGet consumer conformance
+        run: python3 -m unittest discover -s sdk/tests/dotnet
+
       - name: Run unit and integration tests
         run: cargo test --locked --workspace --lib --bins --tests
 

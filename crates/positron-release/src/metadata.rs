@@ -95,6 +95,15 @@ pub(crate) fn verify_identities(
                 &inventory.compatibility.schema,
             )?;
         }
+        if artifact.surface == Surface::SdkDotNet {
+            if artifact.publication.registry != "https://api.nuget.org/v3/index.json"
+                || artifact.publication.native_subject
+                    != format!("pkg:nuget/Positron.SDK@{version}")
+            {
+                return Err(ReleaseError::IdentityMismatch);
+            }
+            crate::native_nuget::sdk::inspect(&bundle.read(&artifact.file, 64 << 20)?, inventory)?;
+        }
         let digest = hex(&inventory.file(&artifact.file)?.identity.sha256);
         let spdx = document(bundle, &artifact.spdx)?;
         let packages = spdx

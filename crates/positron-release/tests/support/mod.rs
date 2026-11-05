@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod dotnet;
 pub mod keyless;
 mod native_packages;
 mod native_registry;
@@ -444,6 +445,20 @@ impl Fixture {
                 .unwrap();
             self.native_artifacts[index] = native;
         }
+    }
+    pub fn replace_dotnet_publication(&mut self, native: native_registry::NativeArtifactFixture) {
+        let index = self
+            .inventory
+            .artifacts
+            .iter()
+            .position(|a| a.surface == Surface::SdkDotNet)
+            .unwrap();
+        self.replace_artifact(index, &native.contents, native.payload.as_ref().unwrap());
+        *self
+            .native_artifacts
+            .iter_mut()
+            .find(|a| a.surface == Surface::SdkDotNet)
+            .unwrap() = native;
     }
     pub fn refresh_go_publication(&mut self, contents: Vec<u8>) {
         *self

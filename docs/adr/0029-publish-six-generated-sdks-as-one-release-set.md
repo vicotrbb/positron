@@ -63,3 +63,18 @@ independent rebuilds, revocation and complete-set publication remain in the
 signed Release Manifest. Clean Maven consumer installs, shared golden fixtures
 and installed-JAR candidate-server conformance exercise the package. Local
 builds and private signing fixtures do not establish Maven Central publication.
+
+The .NET publication workspace is `sdk/dotnet`, with the canonical NuGet identity
+`Positron.SDK`. The pinned .NET SDK 8.0.427 emits a .NET 8 assembly with native
+System.Text.Json and HTTP/TLS; no runtime package dependencies or server-domain
+types cross the binding. The Rust Public Interface generator owns typed wire
+records, canonical metadata, bounded transport and query delivery helpers. Native
+NuGet packaging includes source, XML documentation, portable symbols, license,
+API/schema and source identity. Deterministic unsigned container normalization
+precedes all signatures and provenance and refuses signed archives. The existing
+NuGet Release Trust owner authenticates actual package identities and generated
+sources, repository CMS signatures and RFC 3161 timestamps under installed trust.
+Independent payloads, SPDX/CycloneDX, provenance, revocation and publication state
+remain bound by the signed Release Manifest. Clean installed consumers compile
+the documented example, share canonical golden fixtures and exercise the live
+candidate server. Private fixture signatures do not establish NuGet publication.
