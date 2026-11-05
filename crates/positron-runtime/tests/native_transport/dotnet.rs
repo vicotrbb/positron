@@ -58,7 +58,7 @@ fn generated_dotnet_sdk_conforms_against_candidate_server() -> Result<(), Box<dy
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let input = serde_json::json!({"endpoint":format!("http://{endpoint}"),"bearer":claim.query_secret().ok_or("query key")?,"admin":claim.secret()});
+    let input = serde_json::json!({"endpoint":format!("http://{endpoint}"),"bearer":claim.query_secret().ok_or("query key")?,"admin":claim.secret(),"old_client_request":serde_json::from_slice::<serde_json::Value>(include_bytes!("../../../positron-api/tests/fixtures/capability-v1-old-client.json"))?});
     child
         .stdin
         .take()

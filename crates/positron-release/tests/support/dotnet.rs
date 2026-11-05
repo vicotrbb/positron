@@ -311,8 +311,10 @@ pub fn package(unsigned: Vec<u8>, version: &str) -> NativeArtifactFixture {
 pub fn fixture(version: &str, source: &str, api: &[u8]) -> NativeArtifactFixture {
     let schema = super::hex(&Sha256::digest(api));
     let release=serde_json::to_vec(&json!({"name":"Positron.SDK","version":version,"source_commit":source,"api_version":"positron.v1","schema_digest":schema,"release_manifest_surface":"SdkDotNet","registry":"https://api.nuget.org/v3/index.json","generator":"positron-api=1,dotnet=8.0.427,protoc-bin-vendored=3.2.0"})).unwrap();
-    let contract =
-        serde_json::to_vec(&json!({"api_version":"positron.v1","schema_digest":schema})).unwrap();
+    let mut contract: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../../../sdk/dotnet/contract.json")).unwrap();
+    contract["schema_digest"] = json!(schema);
+    let contract = serde_json::to_vec(&contract).unwrap();
     let nuspec = format!(
         "<package><metadata><id>Positron.SDK</id><version>{version}</version><license type=\"expression\">MIT</license></metadata></package>"
     );

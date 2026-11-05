@@ -38,3 +38,8 @@ metadata, API definition and digest accompany the DLL. Release Trust binds final
 NuGet signature bytes and package identity, SBOMs, provenance and independent
 rebuilds to the existing signed Release Manifest. Local builds and private test
 signatures establish validation behavior, not NuGet publication.
+
+Compatibility checks send the canonical old-v1 request shape to the candidate
+server and use bounded synthetic older-peer fixtures for baseline success, stable
+error/completion behavior and refusal before unsupported effects. These checks
+do not claim qualification against historical release binaries.

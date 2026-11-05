@@ -249,3 +249,53 @@ fn dotnet_metadata_and_generated_member_mutations_are_refused() {
         );
     }
 }
+#[test]
+fn dotnet_executable_contract_cannot_drift_behind_unchanged_identity_strings() {
+    for field in ["schemas", "descriptor", "routes", "query_errors"] {
+        let mut fixture = support::Fixture::new();
+        let index = fixture
+            .inventory
+            .artifacts
+            .iter()
+            .position(|a| a.surface == Surface::SdkDotNet)
+            .unwrap();
+        let unsigned = std::fs::read(
+            fixture
+                .root
+                .join("bundle")
+                .join(fixture.inventory.artifacts[index].payload.as_ref().unwrap()),
+        )
+        .unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&unsigned)).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut archive.by_name("positron/contract.json").unwrap(),
+            &mut bytes,
+        )
+        .unwrap();
+        let mut contract: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let api_version = contract["api_version"].clone();
+        let schema_digest = contract["schema_digest"].clone();
+        contract[field] = serde_json::json!({});
+        assert_eq!(contract["api_version"], api_version);
+        assert_eq!(contract["schema_digest"], schema_digest);
+        let changed = rewrite(
+            &unsigned,
+            "positron/contract.json",
+            &serde_json::to_vec(&contract).unwrap(),
+        );
+        fixture.replace_dotnet_publication(support::dotnet::package(changed, "1.0.0"));
+        assert_eq!(
+            construct_release(
+                &fixture.inventory,
+                &fixture.root.join("bundle"),
+                &fixture.rebuild,
+                &[],
+                vec![]
+            )
+            .err(),
+            Some(ReleaseError::IdentityMismatch),
+            "{field}"
+        );
+    }
+}

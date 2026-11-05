@@ -123,7 +123,12 @@ pub(crate) fn inspect(bytes: &[u8], inventory: &ReleaseInventory) -> Result<(), 
     }
     let contract: Value = serde_json::from_slice(get("positron/contract.json")?)
         .map_err(|_| ReleaseError::Invalid)?;
-    if contract["api_version"] != inventory.api_version || contract["schema_digest"] != digest {
+    let mut canonical: Value =
+        serde_json::from_slice(include_bytes!("../../../../sdk/dotnet/contract.json"))
+            .map_err(|_| ReleaseError::Invalid)?;
+    canonical["api_version"] = Value::String(inventory.api_version.clone());
+    canonical["schema_digest"] = Value::String(digest);
+    if contract != canonical {
         return Err(ReleaseError::IdentityMismatch);
     }
     let xml = crate::native_xml::document(get("positron.sdk.nuspec")?)?;
