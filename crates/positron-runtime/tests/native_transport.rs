@@ -67,5 +67,7 @@ mod typescript;
 #[path = "native_transport/go.rs"]
 mod go;
 
+#[path = "native_transport/dotnet.rs"]
+mod dotnet;
 #[path = "native_transport/java.rs"]
 mod java;

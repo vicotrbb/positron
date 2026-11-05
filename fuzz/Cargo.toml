@@ -19,6 +19,9 @@ reqwest = { path = "../vendor/reqwest-0.12.28" }
 ring = { path = "../vendor/ring-0.17.14" }
 
 [dependencies]
+rsa = { version = "=0.9.10", default-features = false }
+der = { version = "=0.7.10", features = ["derive"] }
+rustls-pki-types = "=1.15.1"
 crc32fast = "=1.5.0"
 positron-release = { path = "../crates/positron-release" }
 pgp = { version = "=0.21.0", default-features = false }

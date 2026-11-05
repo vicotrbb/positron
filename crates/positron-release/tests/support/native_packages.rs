@@ -15,7 +15,7 @@ use std::io::{Cursor, Write};
 
 pub fn fixtures(version: &str, source: &str, api: &[u8]) -> Vec<NativeArtifactFixture> {
     let mut fixtures = maven(version, source, api, None);
-    fixtures.push(nuget(version));
+    fixtures.push(super::dotnet::fixture(version, source, api));
     fixtures
 }
 pub fn maven(

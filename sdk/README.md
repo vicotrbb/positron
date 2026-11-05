@@ -18,3 +18,9 @@ The JVM package in `java/` uses Java 21 records and the native HTTP/TLS client.
 Generate it with `generate_java_sdk`; [java.md](java.md) describes bounded calls,
 receipts, pinned Maven packaging and Release Manifest verification. Consumer
 tests in `tests/java/` build and install actual JARs in a clean Maven repository.
+
+The .NET package in `dotnet/` targets .NET 8 with no runtime package dependencies.
+Generate it with `generate_dotnet_sdk`; [dotnet.md](dotnet.md) describes typed
+clients, bounded calls, native NuGet packaging and signed Release Manifest binding.
+Tests in `tests/dotnet/` install actual packages into a clean NuGet cache, compile
+the documented example, and run shared golden and live server conformance.

@@ -1,0 +1,9 @@
+{
+  "api_version": "positron.v1",
+  "generator": "positron-api=1,dotnet=8.0.427,protoc-bin-vendored=3.2.0",
+  "name": "Positron.SDK",
+  "registry": "https://api.nuget.org/v3/index.json",
+  "release_manifest_surface": "SdkDotNet",
+  "schema_digest": "413f1f3eb9cfef33bde9701c670dfa33808d4896042d14ca0713eabd151bdddf",
+  "version": "0.0.0"
+}

@@ -187,6 +187,21 @@ fn mutate_package(fixture: &mut support::Fixture, index: usize, data: &[u8]) -> 
                     .unwrap_or_else(|_| bytes.clone()),
             );
         },
+        Surface::SdkDotNet if data.get(1).copied().unwrap_or(0) % 2 == 1 => {
+            let mut unsigned = std::fs::read(fixture.root.join("bundle").join(artifact.payload.as_ref().unwrap())).unwrap();
+            let mut archive = zip::ZipArchive::new(Cursor::new(&unsigned)).unwrap();
+            let selected = usize::from(data.get(2).copied().unwrap_or(0)) % archive.len();
+            let member = archive.by_index(selected).unwrap();
+            let start = member.data_start().unwrap() as usize;let end = start + member.size() as usize;
+            let local = member.header_start() as usize;let central = member.central_header_start() as usize;
+            drop(member);drop(archive);
+            if start == end {return false;}
+            mutate(&mut unsigned[start..end], data);
+            let crc = crc32fast::hash(&unsigned[start..end]).to_le_bytes();
+            unsigned[local+14..local+18].copy_from_slice(&crc);unsigned[central+16..central+20].copy_from_slice(&crc);
+            fixture.replace_dotnet_publication(support::dotnet::package(unsigned,"1.0.0"));
+            return true;
+        },
         Surface::SdkDotNet => {
             let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
             let member = archive.by_name(".signature.p7s").unwrap();

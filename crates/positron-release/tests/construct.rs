@@ -204,14 +204,17 @@ fn signed_nuget_wrap_binds_the_actual_unsigned_rebuilt_zip() {
         .position(|artifact| artifact.surface == Surface::SdkDotNet)
         .unwrap();
     fixture.replace_artifact(index, signed, &unsigned);
-    construct_release(
-        &fixture.inventory,
-        &fixture.root.join("bundle"),
-        &fixture.rebuild,
-        &[],
-        vec![],
-    )
-    .unwrap();
+    assert_eq!(
+        construct_release(
+            &fixture.inventory,
+            &fixture.root.join("bundle"),
+            &fixture.rebuild,
+            &[],
+            vec![]
+        )
+        .err(),
+        Some(ReleaseError::IdentityMismatch)
+    );
     let payload = fixture.inventory.artifacts[index].payload.clone().unwrap();
     let unrelated = b"unrelated independently rebuilt SDK source";
     std::fs::write(fixture.root.join("bundle").join(&payload), unrelated).unwrap();

@@ -1,5 +1,6 @@
 //! Native NuGet repository-primary signatures with explicitly installed certificate and TSA trust.
 use crate::{ReleaseError, native_cms as cms_profile};
+pub(crate) mod sdk;
 mod timestamp;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use der::{

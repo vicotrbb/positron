@@ -1,0 +1,6 @@
+{
+  "framework": "net8.0",
+  "osx_arm64_sha512": "79786b93f249d233b15f1d6338d4798bd71c8143f267c5e84de76c9eb8a1054920e56ea5478f7bddfb74b951cc58aaca11fbd780cf134350b7cb7cdcb42a8c8c",
+  "osx_arm64_url": "https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.427/dotnet-sdk-8.0.427-osx-arm64.tar.gz",
+  "sdk": "8.0.427"
+}
