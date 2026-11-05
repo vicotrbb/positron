@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -488,8 +489,86 @@ func Decode(name string, data []byte) (map[string]any, error) {
 	return result, nil
 }
 
+// Validate original strings before encoding/json can replace invalid UTF-8.
+// Walk only exported JSON fields; byte slices retain their binary encoding.
+func validInputText(value reflect.Value, depth int, budget *int) bool {
+	if depth > 64 {
+		return false
+	}
+	for value.IsValid() && (value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer) {
+		if *budget <= 0 {
+			return false
+		}
+		*budget--
+		if value.IsNil() {
+			return true
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() {
+		return true
+	}
+	if *budget <= 0 {
+		return false
+	}
+	*budget--
+	switch value.Kind() {
+	case reflect.String:
+		text := value.String()
+		if len(text) > *budget {
+			return false
+		}
+		*budget -= len(text)
+		return utf8.ValidString(text)
+	case reflect.Slice:
+		if value.Type().Elem().Kind() == reflect.Uint8 {
+			if value.Len() > *budget {
+				return false
+			}
+			*budget -= value.Len()
+			return true
+		}
+		fallthrough
+	case reflect.Array:
+		if value.Len() > *budget {
+			return false
+		}
+		for index := 0; index < value.Len(); index++ {
+			if !validInputText(value.Index(index), depth+1, budget) {
+				return false
+			}
+		}
+	case reflect.Map:
+		if value.Len() > *budget {
+			return false
+		}
+		entries := value.MapRange()
+		for entries.Next() {
+			if !validInputText(entries.Key(), depth+1, budget) || !validInputText(entries.Value(), depth+1, budget) {
+				return false
+			}
+		}
+	case reflect.Struct:
+		shape := value.Type()
+		for index := 0; index < value.NumField(); index++ {
+			field := shape.Field(index)
+			if field.PkgPath != "" || strings.SplitN(field.Tag.Get("json"), ",", 2)[0] == "-" {
+				continue
+			}
+			if !validInputText(value.Field(index), depth+1, budget) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Encode preserves integer precision and validates the public request before transport.
 func Encode(name string, value any) ([]byte, error) {
+	budget := 262144
+	if !validInputText(reflect.ValueOf(value), 0, &budget) {
+		return nil, ErrWire
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, ErrWire

@@ -285,3 +285,26 @@ func TestSessionKeepsItsSeparateTransportWindow(t *testing.T) {
 		t.Fatal("finite Execute ceiling leaked into Session")
 	}
 }
+
+func TestInvalidOriginalRequestTextIsNeverSent(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		fmt.Fprint(w, `{"tenants":[],"continuation":null}`)
+	}))
+	defer server.Close()
+	client, err := positron.NewClient(server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	invalid := string([]byte{0xff})
+	value := func(text string) *string { return &text }
+	request := positron.LogQueryRequest{Pipeline: &invalid, Budget: &positron.LogQueryBudget{
+		ScannedBytes: value("1"), DecodedRecords: value("1"), OutputRows: value("1"), OutputBytes: value("1"), MemoryBytes: value("1"), CpuWorkUnits: value("1"), WallSeconds: value("1"), MaximumTimeRangeNanoseconds: value("1"),
+	}}
+	_, err = client.LogQueryExecute(context.Background(), request, "key")
+	if !errors.Is(err, positron.ErrWire) || calls != 0 {
+		t.Fatal("invalid request text reached transport")
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const modulePath = "github.com/vicotrbb/positron/sdk/go"
@@ -104,6 +105,10 @@ func FuzzPublicDecode(f *testing.F) {
 	f.Fuzz(func(t *testing.T, name string, data []byte) {
 		if len(data) > 262145 {
 			return
+		}
+		_, encodeError := positron.Encode("LogQueryValue", map[string]any{"textValue": string(data)})
+		if !utf8.Valid(data) && encodeError == nil {
+			t.Fatal("invalid UTF-8 was repaired")
 		}
 		_, _ = positron.Decode(name, data)
 		_, _ = positron.DecodeQuery(data, "session")

@@ -110,3 +110,46 @@ func TestUnicodeSurrogateParity(t *testing.T) {
 		}
 	}
 }
+
+func TestEncodeRejectsInvalidOriginalUTF8(t *testing.T) {
+	invalid := string([]byte{0xff})
+	for _, value := range []any{
+		map[string]any{"textValue": invalid},
+		positron.LogQueryValue{TextValue: &invalid},
+		map[string]any{"objectValue": map[string]any{"entries": []any{map[string]any{"key": invalid, "value": map[string]any{"textValue": "valid"}}}}},
+		map[string]any{invalid: "value"},
+	} {
+		if _, err := positron.Encode("LogQueryValue", value); !errors.Is(err, positron.ErrWire) {
+			t.Fatalf("invalid original string accepted: %T", value)
+		}
+	}
+	for _, text := range []string{"ordinary", "�", "😀", `\ud800`} {
+		data, err := positron.Encode("LogQueryValue", positron.LogQueryValue{TextValue: &text})
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := positron.Decode("LogQueryValue", data)
+		if err != nil || value["textValue"] != text {
+			t.Fatal("valid text changed")
+		}
+	}
+	data, err := positron.Encode("LogQueryValue", map[string]any{"bytesValue": []byte{0xff, 0, 0xc0}})
+	if err != nil {
+		t.Fatal("binary bytes treated as text")
+	}
+	value, err := positron.Decode("LogQueryValue", data)
+	if err != nil || value["bytesValue"] != "/wDA" {
+		t.Fatal("binary semantics changed")
+	}
+	cycle := map[string]any{}
+	cycle["objectValue"] = cycle
+	if _, err := positron.Encode("LogQueryValue", cycle); !errors.Is(err, positron.ErrWire) {
+		t.Fatal("cyclic input accepted")
+	}
+	type pointerCycle struct{ Next *pointerCycle }
+	pointer := &pointerCycle{}
+	pointer.Next = pointer
+	if _, err := positron.Encode("LogQueryValue", pointer); !errors.Is(err, positron.ErrWire) {
+		t.Fatal("pointer cycle accepted")
+	}
+}
