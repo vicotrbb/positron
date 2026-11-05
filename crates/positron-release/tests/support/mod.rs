@@ -234,6 +234,33 @@ impl Fixture {
             let digest = hex(&FileIdentity::of(&content).sha256);
             let spdx = fixture.add(format!("spdx-{index}"),&serde_json::to_vec(&json!({"spdxVersion":"SPDX-2.3","SPDXID":"SPDXRef-DOCUMENT","packages":[{"SPDXID":"SPDXRef-positron","name":file,"versionInfo":"1.0.0","licenseConcluded":"MIT","checksums":[{"algorithm":"SHA256","checksumValue":digest}]}]})).unwrap());
             let cyclonedx = fixture.add(format!("cdx-{index}"),&serde_json::to_vec(&json!({"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[{"type":"application","name":file,"version":"1.0.0","hashes":[{"alg":"SHA-256","content":digest}]}]})).unwrap());
+            if surface == SdkJava {
+                let dependencies: serde_json::Value = serde_json::from_slice(include_bytes!(
+                    "../../../positron-api/java/dependencies.json"
+                ))
+                .unwrap();
+                for (id, key) in [(&spdx, "packages"), (&cyclonedx, "components")] {
+                    let path = fixture.root.join("bundle").join(id);
+                    let mut metadata: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    for dependency in dependencies.as_array().unwrap() {
+                        let name = &dependency["name"];
+                        let version = &dependency["version"];
+                        let hash = &dependency["sha256"];
+                        let license = &dependency["license"];
+                        metadata[key].as_array_mut().unwrap().push(if key=="packages" {json!({"SPDXID":format!("SPDXRef-{}",name.as_str().unwrap()),"name":name,"versionInfo":version,"licenseConcluded":license,"checksums":[{"algorithm":"SHA256","checksumValue":hash}]})} else {json!({"type":"library","group":dependency["group"],"name":name,"version":version,"licenses":[{"license":{"id":license}}],"hashes":[{"alg":"SHA-256","content":hash}]})});
+                    }
+                    let bytes = serde_json::to_vec(&metadata).unwrap();
+                    std::fs::write(path, &bytes).unwrap();
+                    fixture
+                        .inventory
+                        .files
+                        .iter_mut()
+                        .find(|f| f.id == *id)
+                        .unwrap()
+                        .identity = FileIdentity::of(&bytes);
+                }
+            }
             let provenance = fixture.add(format!("provenance-{index}"),&serde_json::to_vec(&json!({"_type":"https://in-toto.io/Statement/v1","subject":[{"name":file,"digest":{"sha256":digest}}],"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildDefinition":{"buildType":"https://positron.dev/release/v1","externalParameters":{"source_commit":fixture.inventory.source_commit,"build_identity":fixture.inventory.build_identity,"api_version":fixture.inventory.api_version,"product_version":"1.0.0","target":target,"inputs_sha256":inputs_hash,"schema_sha256":hex(&fixture.inventory.compatibility.schema),"compatibility_sha256":compatibility_hash}},"runDetails":{"builder":{"id":"builder-one"}}}})).unwrap());
             let license_notices = fixture.add(
                 format!("licenses-{index}"),
@@ -265,7 +292,11 @@ impl Fixture {
             });
         }
         let mut native = native_registry::fixtures("1.0.0", &fixture.inventory.source_commit, api);
-        native.extend(native_packages::fixtures("1.0.0"));
+        native.extend(native_packages::fixtures(
+            "1.0.0",
+            &fixture.inventory.source_commit,
+            api,
+        ));
         native.extend(native_rpm::fixtures());
         fixture.install_native(native);
         fixture.refresh_homebrew();
@@ -386,6 +417,33 @@ impl Fixture {
             .iter_mut()
             .find(|artifact| artifact.surface == Surface::Homebrew)
             .unwrap() = native_registry::homebrew(formula.into_bytes());
+    }
+    pub fn refresh_java_publications(
+        &mut self,
+        contents: &std::collections::BTreeMap<String, Vec<u8>>,
+    ) {
+        let api = std::fs::read(
+            self.root.join("bundle").join(
+                &self
+                    .inventory
+                    .artifacts
+                    .iter()
+                    .find(|a| a.surface == Surface::Api)
+                    .unwrap()
+                    .file,
+            ),
+        )
+        .unwrap();
+        for native in
+            native_packages::maven("1.0.0", &self.inventory.source_commit, &api, Some(contents))
+        {
+            let index = self
+                .native_artifacts
+                .iter()
+                .position(|a| a.surface == Surface::SdkJava && a.filename == native.filename)
+                .unwrap();
+            self.native_artifacts[index] = native;
+        }
     }
     pub fn refresh_go_publication(&mut self, contents: Vec<u8>) {
         *self

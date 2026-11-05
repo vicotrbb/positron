@@ -1,0 +1,10 @@
+{
+  "api_version": "positron.v1",
+  "artifact": "sdk",
+  "generator": "positron-api=1,java=21,maven=3.9.11,jackson=2.19.2,protoc-bin-vendored=3.2.0",
+  "group": "dev.positron",
+  "registry": "https://repo.maven.apache.org/maven2",
+  "release_manifest_surface": "SdkJava",
+  "schema_digest": "413f1f3eb9cfef33bde9701c670dfa33808d4896042d14ca0713eabd151bdddf",
+  "version": "0.0.0"
+}

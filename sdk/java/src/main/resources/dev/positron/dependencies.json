@@ -1,0 +1,23 @@
+[
+  {
+    "group": "com.fasterxml.jackson.core",
+    "name": "jackson-annotations",
+    "version": "2.19.2",
+    "license": "Apache-2.0",
+    "sha256": "e516743a316dcf83c572ffc9cb6e8c5e8c134880c8c5155b02f7b34e9c5dc3cf"
+  },
+  {
+    "group": "com.fasterxml.jackson.core",
+    "name": "jackson-core",
+    "version": "2.19.2",
+    "license": "Apache-2.0",
+    "sha256": "aa77eaf29293a868c47372194f7c5287d77d9370b04ea25d3fffc1e4904b5880"
+  },
+  {
+    "group": "com.fasterxml.jackson.core",
+    "name": "jackson-databind",
+    "version": "2.19.2",
+    "license": "Apache-2.0",
+    "sha256": "0a1bd4e9b0d670e632d40ee8c625ad376233502f03c2f5889baea95d025b47a7"
+  }
+]

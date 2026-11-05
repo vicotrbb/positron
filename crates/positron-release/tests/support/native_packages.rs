@@ -13,12 +13,17 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
 
-pub fn fixtures(version: &str) -> Vec<NativeArtifactFixture> {
-    let mut fixtures = maven(version);
+pub fn fixtures(version: &str, source: &str, api: &[u8]) -> Vec<NativeArtifactFixture> {
+    let mut fixtures = maven(version, source, api, None);
     fixtures.push(nuget(version));
     fixtures
 }
-fn maven(version: &str) -> Vec<NativeArtifactFixture> {
+pub fn maven(
+    version: &str,
+    source: &str,
+    api: &[u8],
+    actual: Option<&std::collections::BTreeMap<String, Vec<u8>>>,
+) -> Vec<NativeArtifactFixture> {
     let now = keyless::NOW as u32;
     let key = SecretKeyParamsBuilder::default()
         .key_type(KeyType::Ed25519Legacy)
@@ -56,22 +61,80 @@ fn maven(version: &str) -> Vec<NativeArtifactFixture> {
     );
     let root = json!({"public_key":public.to_armored_string(None.into()).unwrap()});
     let digest = Sha256::digest(serde_json::to_vec(&root).unwrap()).into();
-    let pom=format!("<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>dev.positron</groupId><artifactId>sdk</artifactId><version>{version}</version></project>").into_bytes();
-    [(".pom","type=pom",pom,None),(".jar","type=jar",jar("sdk.txt",b"synthetic compiled SDK payload\n"),Some(())),("-sources.jar","classifier=sources&type=jar",jar("dev/positron/Client.java",b"package dev.positron; public final class Client {}\n"),Some(())),("-javadoc.jar","classifier=javadoc&type=jar",jar("index.html",b"<html><body>SDK fixture documentation</body></html>"),Some(()))].into_iter().map(|(suffix,qualifiers,contents,payload)| {
+    let pom = include_str!("../../../positron-api/java/pom.xml")
+        .replace("@VERSION@", version)
+        .into_bytes();
+    let schema = super::hex(&Sha256::digest(api));
+    let release=serde_json::to_vec(&json!({"group":"dev.positron","artifact":"sdk","version":version,"source_commit":source,"api_version":"positron.v1","schema_digest":schema,"release_manifest_surface":"SdkJava","registry":"https://repo.maven.apache.org/maven2","generator":"positron-api=1,java=21,maven=3.9.11,jackson=2.19.2,protoc-bin-vendored=3.2.0"})).unwrap();
+    let contract =
+        serde_json::to_vec(&json!({"api_version":"positron.v1","schema_digest":schema})).unwrap();
+    let mut resources = vec![
+        ("dev/positron/release.json".into(), release),
+        ("dev/positron/contract.json".into(), contract),
+        ("dev/positron/api/positron.proto".into(), api.to_vec()),
+        (
+            "dev/positron/api/schema.sha256".into(),
+            format!("{schema}\n").into_bytes(),
+        ),
+        ("dev/positron/LICENSE".into(), b"MIT".to_vec()),
+    ];
+    resources.push((
+        "dev/positron/dependencies.json".into(),
+        include_bytes!("../../../positron-api/java/dependencies.json").to_vec(),
+    ));
+    let mut classes = resources.clone();
+    classes.push((
+        "META-INF/MANIFEST.MF".into(),
+        b"Manifest-Version: 1.0\r\nAutomatic-Module-Name: dev.positron.sdk\r\n\r\n".to_vec(),
+    ));
+    classes.push((
+        "META-INF/maven/dev.positron/sdk/pom.xml".into(),
+        pom.clone(),
+    ));
+    for name in [
+        "Client",
+        "Codec",
+        "Query",
+        "BatchTracker",
+        "PositronException",
+        "Types",
+    ] {
+        classes.push((
+            format!("dev/positron/{name}.class"),
+            b"\xca\xfe\xba\xbe\0\0\0\x41synthetic fixture".to_vec(),
+        ));
+        resources.push((
+            format!("dev/positron/{name}.java"),
+            format!("package dev.positron; public final class {name} {{}}\n").into_bytes(),
+        ));
+    }
+    let docs = vec![
+        ("index.html".into(), b"<html>SDK fixture</html>".to_vec()),
+        (
+            "dev.positron.sdk/dev/positron/Client.html".into(),
+            b"<html>Client fixture</html>".to_vec(),
+        ),
+    ];
+    [(".pom","type=pom",pom,None),(".jar","type=jar",jar(&classes),Some(())),("-sources.jar","classifier=sources&type=jar",jar(&resources),Some(())),("-javadoc.jar","classifier=javadoc&type=jar",jar(&docs),Some(()))].into_iter().map(|(suffix,qualifiers,mut contents,payload)| {
+        if let Some(actual)=actual {contents=actual.get(&format!("sdk-{version}{suffix}")).unwrap().clone();}
         let signature=config(SignatureType::Binary).sign(&key.primary_key,&Password::empty(),contents.as_slice()).unwrap();
         NativeArtifactFixture {surface:Surface::SdkJava,filename:format!("sdk-{version}{suffix}"),payload:payload.map(|_|contents.clone()),contents,registry:"https://repo.maven.apache.org/maven2".into(),subject:format!("pkg:maven/dev.positron/sdk@{version}?{qualifiers}"),revision:None,policy:NativePublisherPolicy::Maven{trusted_root_sha256:digest},proof:json!({"trustedRoot":root,"signature":{"signature":DetachedSignature::new(signature).to_armored_string(None.into()).unwrap()}})}
     }).collect()
 }
-fn jar(name: &str, contents: &[u8]) -> Vec<u8> {
+fn jar(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    zip.start_file(
-        name,
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
-    )
-    .unwrap();
-    zip.write_all(contents).unwrap();
+    for (name, contents) in files {
+        zip.start_file(
+            name,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(contents).unwrap();
+    }
     zip.finish().unwrap().into_inner()
 }
+
 fn nuget(version: &str) -> NativeArtifactFixture {
     use cms::{cert::CertificateChoices, content_info::ContentInfo, signed_data::SignedData};
     use x509_cert::der::{Decode, Encode};

@@ -49,3 +49,17 @@ signatures, revocation, independent rebuilds and complete-set publication remain
 owned by the signed Release Manifest. Clean cache module installs, shared golden
 fixtures and an installed-module live candidate test exercise the package.
 Private fixture authorities and local proxy installs do not establish publication.
+
+The Java/JVM publication workspace is `sdk/java`, with the existing native Maven
+coordinates `dev.positron:sdk` and automatic module name `dev.positron.sdk`.
+Java 21 and Maven 3.9.11 are pinned build inputs. Jackson 2.19.2 supplies native
+record and tree serialization; all wire shapes, error policy and descriptor
+metadata are emitted by the Rust Public Interface owner. Bounded native HTTP/TLS
+and delivery helpers execute those bindings without a JNI or server-domain
+runtime dependency. Native Maven inspection binds the actual POM, compiled and
+source JARs, Javadoc, API/schema, source identity, generator and registry under
+the existing Release Trust path. OpenPGP signatures, SBOMs, provenance,
+independent rebuilds, revocation and complete-set publication remain in the
+signed Release Manifest. Clean Maven consumer installs, shared golden fixtures
+and installed-JAR candidate-server conformance exercise the package. Local
+builds and private signing fixtures do not establish Maven Central publication.
