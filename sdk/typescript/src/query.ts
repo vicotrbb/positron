@@ -194,7 +194,7 @@ export function validateQueryRequest(rpc: string, request: unknown): void {
       require(input.batchLimit === 1);
       const tail = object(input.tail); query(tail.query,true);
       if (tail.cursor !== undefined) { cursor(tail.cursor); require(tail.historicalRows === undefined); }
-      if (tail.historicalRows !== undefined) require(uint(tail.historicalRows) > 0n && uint(tail.historicalRows) <= 128n);
+      if (tail.historicalRows !== undefined) require(typeof tail.historicalRows === 'number' && Number.isInteger(tail.historicalRows) && tail.historicalRows > 0 && tail.historicalRows <= 128);
       if (tail.acknowledgement !== undefined) { require(tail.cursor !== undefined); digest(object(tail.acknowledgement).digest); }
     }
   }

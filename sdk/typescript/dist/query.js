@@ -264,7 +264,7 @@ export function validateQueryRequest(rpc, request) {
                 require(tail.historicalRows === undefined);
             }
             if (tail.historicalRows !== undefined)
-                require(uint(tail.historicalRows) > 0n && uint(tail.historicalRows) <= 128n);
+                require(typeof tail.historicalRows === 'number' && Number.isInteger(tail.historicalRows) && tail.historicalRows > 0 && tail.historicalRows <= 128);
             if (tail.acknowledgement !== undefined) {
                 require(tail.cursor !== undefined);
                 digest(object(tail.acknowledgement).digest);
