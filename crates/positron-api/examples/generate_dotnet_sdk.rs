@@ -133,7 +133,7 @@ fn main() -> Result<()> {
     fs::write(
         output.join("toolchain.json"),
         serde_json::to_vec_pretty(
-            &json!({"sdk":"8.0.427","framework":"net8.0","osx_arm64_url":"https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.427/dotnet-sdk-8.0.427-osx-arm64.tar.gz","osx_arm64_sha512":"79786b93f249d233b15f1d6338d4798bd71c8143f267c5e84de76c9eb8a1054920e56ea5478f7bddfb74b951cc58aaca11fbd780cf134350b7cb7cdcb42a8c8c"}),
+            &json!({"sdk":"8.0.427","framework":"net8.0","linux_x64_url":"https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.427/dotnet-sdk-8.0.427-linux-x64.tar.gz","linux_x64_sha512":"85725692f465f5024b9b42a159a29d9f73e8c57ad9e8bfe1e7028a505d18031d68931e8aa3f9de44145b08170dde897c8a78e1aa18d4219698b6891af7095d39","osx_arm64_url":"https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.427/dotnet-sdk-8.0.427-osx-arm64.tar.gz","osx_arm64_sha512":"79786b93f249d233b15f1d6338d4798bd71c8143f267c5e84de76c9eb8a1054920e56ea5478f7bddfb74b951cc58aaca11fbd780cf134350b7cb7cdcb42a8c8c"}),
         )?,
     )?;
     fs::write(output.join(".gitignore"), "bin/\nobj/\n")?;
