@@ -11,18 +11,20 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type route struct {
-	RPC             string `json:"rpc"`
-	Request         string `json:"request"`
-	Response        string `json:"response"`
-	Path            string `json:"path"`
-	Method          string `json:"method"`
-	Maximum         int    `json:"max_request_bytes"`
-	ResponseMaximum int    `json:"max_response_bytes"`
+	Responses       map[string]any `json:"responses"`
+	RPC             string         `json:"rpc"`
+	Request         string         `json:"request"`
+	Response        string         `json:"response"`
+	Path            string         `json:"path"`
+	Method          string         `json:"method"`
+	Maximum         int            `json:"max_request_bytes"`
+	ResponseMaximum int            `json:"max_response_bytes"`
 }
 
 // Client owns a bounded native HTTP transport; it never automatically retries effects.
@@ -104,6 +106,78 @@ func QueryError(status int, data []byte, cancellation bool) error {
 		}
 	}
 	return transportError()
+}
+
+// nativeError accepts only identities declared by the route or canonical PublicError.
+func nativeError(status int, data []byte, route route) error {
+	if len(data) > 1024 {
+		return transportError()
+	}
+	parsed, err := parseJSON(data)
+	if err != nil {
+		return transportError()
+	}
+	refusal, ok := object(parsed)
+	if !ok {
+		return transportError()
+	}
+	for key := range refusal {
+		switch key {
+		case "code", "retry_class", "retryClass", "completion_state", "completionState", "source", "safe_detail", "safeDetail":
+		default:
+			return transportError()
+		}
+	}
+	code := enum("PublicErrorCode", refusal["code"])
+	protobuf := code != "" && !strings.HasSuffix(code, "_UNSPECIFIED")
+	if !protobuf {
+		code = text(refusal["code"])
+		declared := false
+		switch allowed := route.Responses[strconv.Itoa(status)].(type) {
+		case string:
+			declared = code != "" && code == allowed
+		case []any:
+			for _, candidate := range allowed {
+				declared = declared || code != "" && code == text(candidate)
+			}
+		}
+		if !declared {
+			return transportError()
+		}
+	}
+	read := func(snake, camel, kind string) (string, bool) {
+		value, present := refusal[snake]
+		if alternative, exists := refusal[camel]; exists {
+			if present {
+				return "", true
+			}
+			value, present = alternative, true
+		}
+		result := enum(kind, value)
+		if strings.HasSuffix(result, "_UNSPECIFIED") {
+			result = ""
+		}
+		return result, present
+	}
+	retry, retryPresent := read("retry_class", "retryClass", "RetryClass")
+	completion, completionPresent := read("completion_state", "completionState", "CompletionState")
+	if retryPresent != completionPresent || protobuf && !retryPresent {
+		return transportError()
+	}
+	if !retryPresent {
+		retry = "RETRY_CLASS_NEVER"
+		completion = "COMPLETION_STATE_AMBIGUOUS"
+	}
+	if retry == "" || completion == "" || completion == "COMPLETION_STATE_AMBIGUOUS" && retry != "RETRY_CLASS_NEVER" {
+		return transportError()
+	}
+	source := enum("FailureSource", refusal["source"])
+	_, sourcePresent := refusal["source"]
+	detail, detailPresent := read("safe_detail", "safeDetail", "SafeDetail")
+	if sourcePresent && (source == "" || strings.HasSuffix(source, "_UNSPECIFIED")) || detailPresent && detail == "" || protobuf && (!sourcePresent || !detailPresent) {
+		return transportError()
+	}
+	return &ClientError{Failure: code, Code: code, RetryClass: retry, CompletionState: completion, Source: source, SafeDetail: detail, Status: status}
 }
 
 // Call executes a generated RPC once. The context bounds DNS, connect, headers and complete body delivery.
@@ -202,24 +276,7 @@ func (c *Client) Call(ctx context.Context, rpc string, input any, bearer string,
 		if query {
 			return QueryError(response.StatusCode, data, strings.HasSuffix(rpc, "/Cancel"))
 		}
-		refusal, decodeError := Decode("PublicError", data)
-		if decodeError != nil {
-			return transportError()
-		}
-		code := enum("PublicErrorCode", refusal["code"])
-		retry := enum("RetryClass", refusal["retry_class"])
-		completion := enum("CompletionState", refusal["completion_state"])
-		source := enum("FailureSource", refusal["source"])
-		detail := enum("SafeDetail", refusal["safe_detail"])
-		for _, value := range []string{code, retry, completion, source, detail} {
-			if value == "" || strings.HasSuffix(value, "_UNSPECIFIED") {
-				return transportError()
-			}
-		}
-		if completion == "COMPLETION_STATE_AMBIGUOUS" && retry != "RETRY_CLASS_NEVER" {
-			return transportError()
-		}
-		return &ClientError{Failure: code, Code: code, RetryClass: retry, CompletionState: completion, Source: source, SafeDetail: detail, Status: response.StatusCode}
+		return nativeError(response.StatusCode, data, route)
 	}
 	var decoded map[string]any
 	if query && !strings.HasSuffix(rpc, "/Cancel") {

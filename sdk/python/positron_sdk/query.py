@@ -267,7 +267,7 @@ def validate_request(rpc, request):
                 cursor(tail['cursor'])
                 require('historicalRows' not in tail)
             if 'historicalRows' in tail:
-                require(0 < uint(tail['historicalRows']) <= 128)
+                require(type(tail['historicalRows']) is int and 0 < tail['historicalRows'] <= 128)
             if 'acknowledgement' in tail:
                 require('cursor' in tail)
                 digest(obj(tail['acknowledgement']).get('digest'))

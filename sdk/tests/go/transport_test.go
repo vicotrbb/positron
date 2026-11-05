@@ -376,3 +376,53 @@ func TestClientCallAcceptsNativeDominantRequestFields(t *testing.T) {
 		t.Fatal("valid dominant request was not sent")
 	}
 }
+
+func TestNativeAdministrationRefusalsPreserveIdentityAndCertainty(t *testing.T) {
+	cases := []struct {
+		name, body, code, completion string
+		status                       int
+	}{
+		{"authentication", `{"code":"authentication_rejected"}`, "authentication_rejected", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"native certainty", `{"code":"invalid_request","retryClass":"RETRY_CLASS_NEVER","completionState":"COMPLETION_STATE_REJECTED"}`, "invalid_request", "COMPLETION_STATE_REJECTED", 400},
+		{"native canonical metadata", `{"code":"authentication_rejected","retry_class":1,"completion_state":1,"source":1,"safe_detail":1}`, "authentication_rejected", "COMPLETION_STATE_REJECTED", 401},
+		{"duplicate aliases", `{"code":"authentication_rejected","retry_class":1,"retryClass":1,"completion_state":1}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"invalid source", `{"code":"authentication_rejected","source":0}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"invalid detail", `{"code":"authentication_rejected","safeDetail":0}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"unknown", `{"code":"private-secret"}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"wrong status", `{"code":"authentication_rejected"}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 400},
+		{"incomplete certainty", `{"code":"authentication_rejected","retryClass":"RETRY_CLASS_NEVER"}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"unsafe retry", `{"code":"authentication_rejected","retryClass":"RETRY_CLASS_SAFE","completionState":"COMPLETION_STATE_AMBIGUOUS"}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"duplicate", `{"code":"authentication_rejected","code":"authentication_rejected"}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"unknown field", `{"code":"authentication_rejected","secret":"private-secret"}`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"malformed", `{`, "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+		{"oversized", `{"code":"authentication_rejected"}` + strings.Repeat(" ", 1024), "Transport", "COMPLETION_STATE_AMBIGUOUS", 401},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+			client, err := positron.NewClient(server.URL, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			var out map[string]any
+			err = client.Call(context.Background(), "positron.v1.TenantService/List", map[string]any{}, "private-secret", &out)
+			var failure *positron.ClientError
+			if !errors.As(err, &failure) || failure.Failure != tc.code || failure.CompletionState != tc.completion || failure.RetryClass != "RETRY_CLASS_NEVER" {
+				t.Fatalf("unexpected refusal: %#v", err)
+			}
+			if tc.code != "Transport" && (failure.Status != tc.status || failure.Code != tc.code) {
+				t.Fatalf("lost native identity: %#v", failure)
+			}
+			if strings.Contains(err.Error(), "private-secret") || calls != 1 {
+				t.Fatal("unsafe diagnostics or automatic retry")
+			}
+		})
+	}
+}

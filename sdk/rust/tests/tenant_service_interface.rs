@@ -214,3 +214,24 @@ fn purged_tenant_descriptor_reserves_identity_without_retaining_profile() {
     assert!(TenantDescriptor::decode(br#"{"tenant":"22222222-2222-2222-2222-222222222222","slug":"acme-observability","lifecycle":"active"}"#).is_err());
     assert!(TenantDescriptor::decode(br#"{"tenant":"22222222-2222-2222-2222-222222222222","slug":"acme-observability","display_name":"Acme","retention_seconds":1,"display_generation":1,"retention_generation":1,"lifecycle":"purged"}"#).is_err());
 }
+
+#[test]
+fn tenant_create_http_metadata_excludes_reserved_fields() {
+    let mapping: serde_json::Value =
+        serde_json::from_str(include_str!("../api/positron/v1/http.json"))
+            .expect("canonical HTTP mapping");
+    let route = mapping["mappings"]
+        .as_array()
+        .expect("routes")
+        .iter()
+        .find(|route| route["request"] == "TenantCreateRequest")
+        .expect("Tenant create route");
+    let fields = route["request_fields"].as_array().expect("request fields");
+    let numbers: Vec<_> = fields
+        .iter()
+        .map(|field| field["number"].as_u64().expect("field number"))
+        .collect();
+    // The canonical request reserves field 1; its served fields are 2 through 17.
+    assert_eq!(numbers, (2..=17).collect::<Vec<_>>());
+    assert!(fields.iter().all(|field| field["proto"] != "tenant"));
+}

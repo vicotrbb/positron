@@ -105,6 +105,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             json!({"type":"object", "additionalProperties":false, "properties": properties});
     }
     for route in http["mappings"].as_array_mut().ok_or("HTTP routes")? {
+        let request = route["request"].as_str().ok_or("route request")?;
+        let canonical = metadata["messages"][request]
+            .as_array()
+            .ok_or("request field metadata")?;
+        // Native administration routes retain their existing JSON field names.
+        // Removed or reserved Protobuf fields cannot remain advertised.
+        route["request_fields"]
+            .as_array_mut()
+            .ok_or("request fields")?
+            .retain(|field| {
+                canonical
+                    .iter()
+                    .any(|item| item["number"] == field["number"])
+            });
         if !route["rpc"]
             .as_str()
             .is_some_and(|rpc| rpc.starts_with("positron.v1.LogQueryService/"))
