@@ -17,9 +17,12 @@ func require(ok bool) error {
 	}
 	return nil
 }
+
+var phase = "input"
+
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "Go live conformance failed")
+		fmt.Fprintf(os.Stderr, "Go live conformance failed at %s: %T\n", phase, err)
 		os.Exit(1)
 	}
 	fmt.Println("Go live conformance passed")
@@ -70,6 +73,7 @@ func run() error {
 		}
 		return nil, errors.New("admission exhausted")
 	}
+	phase = "execute"
 	first, err := admitted(func() (positron.LogQueryResponse, error) { return client.LogQueryExecute(ctx, query, args.Bearer) })
 	if err != nil {
 		return err
@@ -79,6 +83,7 @@ func run() error {
 	if err != nil || len(batches) != 1 {
 		return errors.New("execute differs")
 	}
+	phase = "session"
 	page, err := admitted(func() (positron.LogQueryResponse, error) {
 		return client.LogQuerySession(ctx, positron.LogQuerySessionRequest{Execute: &query, BatchLimit: pointer(int64(1))}, args.Bearer)
 	})
@@ -96,6 +101,7 @@ func run() error {
 		return errors.New("missing continuation")
 	}
 	resume := terminal["continuationCursor"].(string)
+	phase = "resume"
 	second, err := admitted(func() (positron.LogQueryResponse, error) {
 		return client.LogQuerySession(ctx, positron.LogQuerySessionRequest{Resume: &resume, BatchLimit: pointer(int64(1))}, args.Bearer)
 	})
@@ -105,6 +111,7 @@ func run() error {
 	if _, err = tracker.Filter(second); err != nil {
 		return err
 	}
+	phase = "cancel"
 	cursor := events[0].(map[string]any)["header"].(map[string]any)["initialCursor"].(string)
 	page, err = admitted(func() (positron.LogQueryResponse, error) {
 		return client.LogQuerySession(ctx, positron.LogQuerySessionRequest{Execute: &query, BatchLimit: pointer(int64(1))}, args.Bearer)
@@ -122,6 +129,7 @@ func run() error {
 	}
 	query.Pipeline = pointer("pipeline:v1 logs | range query_time 0 100 | project commit_position | limit all")
 	query.Budget.WallSeconds = pointer("60")
+	phase = "tail"
 	tail, err := admitted(func() (positron.LogQueryResponse, error) {
 		return client.LogQuerySession(ctx, positron.LogQuerySessionRequest{Tail: &positron.LogQueryTailRequest{Query: &query}, BatchLimit: pointer(int64(1))}, args.Bearer)
 	})
@@ -139,11 +147,13 @@ func run() error {
 		return err
 	}
 	query.Budget.WallSeconds = pointer("5")
+	phase = "authentication"
 	_, err = client.LogQueryExecute(ctx, query, "invalid")
 	var failure *positron.ClientError
 	if !errors.As(err, &failure) || failure.Failure != "AuthenticationRejected" || failure.CompletionState != "COMPLETION_STATE_REJECTED" {
 		return errors.New("authentication outcome differs")
 	}
+	phase = "administration"
 	_, err = client.TenantList(ctx, positron.TenantListRequest{}, args.Admin)
 	return err
 }

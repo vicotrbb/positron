@@ -1,6 +1,14 @@
 {
   "schema_version": 1,
   "representations": [
+    {"id":"unpaired-surrogate-high-value","type":"LogQueryValue","input":"{\"textValue\":\"\\ud800\"}","accepted":false},
+    {"id":"unpaired-surrogate-high-key","type":"LogQueryValue","input":"{\"\\ud800\":\"value\"}","accepted":false},
+    {"id":"unpaired-surrogate-low-value","type":"LogQueryValue","input":"{\"textValue\":\"\\udfff\"}","accepted":false},
+    {"id":"unpaired-surrogate-low-key","type":"LogQueryValue","input":"{\"\\udfff\":\"value\"}","accepted":false},
+    {"id":"surrogate-pair","type":"LogQueryValue","input":"{\"textValue\":\"\\ud83d\\ude00\"}","accepted":true,"canonical":{"textValue":"😀"}},
+    {"id":"literal-replacement","type":"LogQueryValue","input":"{\"textValue\":\"�\"}","accepted":true,"canonical":{"textValue":"�"}},
+    {"id":"escaped-replacement","type":"LogQueryValue","input":"{\"textValue\":\"\\ufffd\"}","accepted":true,"canonical":{"textValue":"�"}},
+    {"id":"escaped-surrogate-literal","type":"LogQueryValue","input":"{\"textValue\":\"\\\\ud800\"}","accepted":true,"canonical":{"textValue":"\\ud800"}},
     {"id":"null","type":"LogQueryValue","input":"{\"nullValue\":{}}","accepted":true,"canonical":{"nullValue":{}}},
     {"id":"false","type":"LogQueryValue","input":"{\"booleanValue\":false}","accepted":true,"canonical":{"booleanValue":false}},
     {"id":"signed-min","type":"LogQueryValue","input":"{\"integerValue\":\"-9223372036854775808\"}","accepted":true,"canonical":{"integerValue":"-9223372036854775808"}},

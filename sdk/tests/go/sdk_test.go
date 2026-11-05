@@ -97,3 +97,16 @@ func TestCrossLanguageGoldens(t *testing.T) {
 		})
 	}
 }
+
+func TestUnicodeSurrogateParity(t *testing.T) {
+	for _, input := range []string{`{"textValue":"\ud800"}`, `{"textValue":"\udfff"}`, `{"\ud800":"value"}`, `{"\udfff":"value"}`, `{"textValue":"\ud800\u0041"}`} {
+		if _, err := positron.Decode("LogQueryValue", []byte(input)); err == nil {
+			t.Fatalf("unpaired surrogate accepted: %s", input)
+		}
+	}
+	for _, input := range []string{`{"textValue":"\ud83d\ude00"}`, `{"textValue":"�"}`, `{"textValue":"\ufffd"}`, `{"textValue":"\\ud800"}`} {
+		if _, err := positron.Decode("LogQueryValue", []byte(input)); err != nil {
+			t.Fatalf("valid Unicode rejected: %s", input)
+		}
+	}
+}

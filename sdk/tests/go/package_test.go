@@ -99,6 +99,8 @@ func FuzzPublicDecode(f *testing.F) {
 	f.Add("LogQueryValue", []byte(`{"textValue":"example"}`))
 	f.Add("LogQueryCell", []byte(`{"unsignedInteger":"18446744073709551615"}`))
 	f.Add("CapabilityRequest", []byte(`{"api_major":1e1000000000}`))
+	f.Add("LogQueryValue", []byte(`{"textValue":"\ud800"}`))
+	f.Add("LogQueryValue", []byte(`{"\udfff":"value"}`))
 	f.Fuzz(func(t *testing.T, name string, data []byte) {
 		if len(data) > 262145 {
 			return

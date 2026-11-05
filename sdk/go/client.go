@@ -135,7 +135,11 @@ func (c *Client) Call(ctx context.Context, rpc string, input any, bearer string,
 			return ErrWire
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	timeout := 30 * time.Second
+	if rpc == "positron.v1.LogQueryService/Execute" {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	query := strings.HasPrefix(rpc, "positron.v1.LogQueryService/")
 	mode := "execute"

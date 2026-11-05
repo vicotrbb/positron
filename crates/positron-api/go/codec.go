@@ -141,8 +141,49 @@ func parse(reader *json.Decoder, depth int) (any, error) {
 	}
 	return nil, ErrWire
 }
+
+// encoding/json repairs lone UTF-16 surrogate escapes. Reject them before
+// decoding so the canonical Rust boundary and this adapter accept the same text.
+func validUnicodeEscapes(data []byte) bool {
+	for index := 0; index < len(data); index++ {
+		if data[index] != '\\' {
+			continue
+		}
+		if index+1 >= len(data) {
+			return false
+		}
+		if data[index+1] != 'u' {
+			index++
+			continue
+		}
+		if index+6 > len(data) {
+			return false
+		}
+		value, err := strconv.ParseUint(string(data[index+2:index+6]), 16, 16)
+		if err != nil {
+			return false
+		}
+		if value >= 0xd800 && value <= 0xdbff {
+			if index+12 > len(data) || data[index+6] != '\\' || data[index+7] != 'u' {
+				return false
+			}
+			low, err := strconv.ParseUint(string(data[index+8:index+12]), 16, 16)
+			if err != nil || low < 0xdc00 || low > 0xdfff {
+				return false
+			}
+			index += 11
+		} else {
+			if value >= 0xdc00 && value <= 0xdfff {
+				return false
+			}
+			index += 5
+		}
+	}
+	return true
+}
+
 func parseJSON(data []byte) (any, error) {
-	if len(data) > 262144 || !utf8.Valid(data) {
+	if len(data) > 262144 || !utf8.Valid(data) || !validUnicodeEscapes(data) {
 		return nil, ErrWire
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))

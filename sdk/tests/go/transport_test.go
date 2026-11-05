@@ -215,3 +215,73 @@ func TestAdministrationPreservesCanonicalErrorTruth(t *testing.T) {
 		t.Fatalf("administration discarded stable code: %v", err)
 	}
 }
+
+func TestExecuteTransportHasFiveSecondCeiling(t *testing.T) {
+	query := map[string]any{"pipeline": "pipeline:v1 logs", "budget": map[string]any{"scannedBytes": "1", "decodedRecords": "1", "outputRows": "1", "outputBytes": "1", "memoryBytes": "1", "cpuWorkUnits": "1", "wallSeconds": "5", "maximumTimeRangeNanoseconds": "1"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(6 * time.Second):
+			w.WriteHeader(503)
+		}
+	}))
+	defer server.Close()
+	client, err := positron.NewClient(server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	for _, shorter := range []bool{false, true} {
+		ctx := context.Background()
+		cancel := func() {}
+		maximum := 5700 * time.Millisecond
+		if shorter {
+			ctx, cancel = context.WithTimeout(ctx, 25*time.Millisecond)
+			maximum = 500 * time.Millisecond
+		}
+		start := time.Now()
+		var result any
+		err = client.Call(ctx, "positron.v1.LogQueryService/Execute", query, "key", &result)
+		cancel()
+		elapsed := time.Since(start)
+		var failure *positron.ClientError
+		if !errors.As(err, &failure) || failure.CompletionState != "COMPLETION_STATE_AMBIGUOUS" || failure.RetryClass != "RETRY_CLASS_NEVER" {
+			t.Fatal("deadline lost ambiguity")
+		}
+		if elapsed > maximum {
+			t.Fatalf("Execute exceeded its transport ceiling: %v", elapsed)
+		}
+	}
+}
+
+func TestSessionKeepsItsSeparateTransportWindow(t *testing.T) {
+	query := map[string]any{"pipeline": "pipeline:v1 logs", "budget": map[string]any{"scannedBytes": "1", "decodedRecords": "1", "outputRows": "1", "outputBytes": "1", "memoryBytes": "1", "cpuWorkUnits": "1", "wallSeconds": "5", "maximumTimeRangeNanoseconds": "1"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/capabilities:negotiate" {
+			fmt.Fprintf(w, `{"api_major":1,"schema_digest":%q,"availability":1,"refusal":null,"deprecation":0,"capability":4}`, positron.SchemaDigest)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5200 * time.Millisecond):
+			w.WriteHeader(503)
+		}
+	}))
+	defer server.Close()
+	client, err := positron.NewClient(server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	start := time.Now()
+	var result any
+	err = client.Call(ctx, "positron.v1.LogQueryService/Session", map[string]any{"execute": query, "batchLimit": 1}, "key", &result)
+	if err == nil {
+		t.Fatal("stalled refusal accepted")
+	}
+	if time.Since(start) < 5100*time.Millisecond {
+		t.Fatal("finite Execute ceiling leaked into Session")
+	}
+}
