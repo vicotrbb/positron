@@ -10459,12 +10459,6 @@ export declare const routes: readonly [{
     readonly request: "TenantCreateRequest";
     readonly request_fields: readonly [{
         readonly deprecated: false;
-        readonly json: "tenant";
-        readonly number: 1;
-        readonly proto: "tenant";
-        readonly type: "string";
-    }, {
-        readonly deprecated: false;
         readonly json: "slug";
         readonly number: 2;
         readonly proto: "slug";

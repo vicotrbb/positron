@@ -1145,13 +1145,6 @@
       "request_fields": [
         {
           "deprecated": false,
-          "json": "tenant",
-          "number": 1,
-          "proto": "tenant",
-          "type": "string"
-        },
-        {
-          "deprecated": false,
           "json": "slug",
           "number": 2,
           "proto": "slug",
