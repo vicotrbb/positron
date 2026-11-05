@@ -84,3 +84,74 @@ fn administrative_routes_refuse_missing_authority_and_malformed_intents_without_
     );
     Ok(())
 }
+
+#[test]
+fn tenant_purge_admission_uses_its_canonical_route_and_body_limit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = live_test_guard();
+    let roots = TestRoots::new("tenant-purge-admission")?;
+    let paths = roots.paths()?;
+    drop(InstanceBootstrap::initialize(
+        &paths,
+        positron_runtime::InitializationPlan::non_interactive(),
+    )?);
+    let claim = InstanceBootstrap::claim(&paths)?;
+    let host = NativeHost::new(bindings(&roots, "tenant-purge-admission")?);
+    let process = ApplicationRuntime::start(
+        ServeConfiguration::new(paths, InitializationMode::ExistingOnly),
+        HostInputs::new(&host, &host),
+    )?;
+    let endpoint = address(
+        &process.bound_endpoints(),
+        positron_runtime::ListenerRole::Api,
+    )?;
+    let tenants = positron_api::tenant_service::TenantServiceClient::new(
+        positron_api::tenant_service::TenantServiceTransport::PlaintextOptOut { endpoint },
+    )?;
+    let list = positron_api::tenant_service::TenantListRequest::new();
+    let before = tenants.list(claim.secret(), &list)?;
+    let path = positron_api::tenant_purge::HTTP_PATH;
+    let body = br#"{"action":"status","operation_id":"11111111111111111111111111111111"}"#;
+    positron_api::tenant_purge::TenantPurgeRequest::decode(body)?;
+    assert!(body.len() > 64);
+    let mut maximum = body.to_vec();
+    maximum.resize(positron_api::tenant_purge::MAX_REQUEST_BYTES, b' ');
+    for payload in [body.as_slice(), maximum.as_slice()] {
+        let response = http(
+            endpoint,
+            "POST",
+            path,
+            &[("Content-Type", "application/json")],
+            payload,
+        )?;
+        assert_status(response.clone(), 401);
+        let (_, response_body) = response.split_once("\r\n\r\n").ok_or("response body")?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(response_body)?,
+            serde_json::json!({"code": "authentication_rejected"})
+        );
+    }
+    let authorization = format!("Bearer {}", claim.secret());
+    let response = http(
+        endpoint,
+        "POST",
+        path,
+        &[
+            ("Authorization", &authorization),
+            ("Content-Type", "application/json"),
+        ],
+        &maximum,
+    )?;
+    assert_status(response.clone(), 404);
+    let (_, response_body) = response.split_once("\r\n\r\n").ok_or("response body")?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(response_body)?,
+        serde_json::json!({"code": "source_unavailable"})
+    );
+    maximum.push(b' ');
+    assert_status(http(endpoint, "POST", path, &[], &maximum)?, 413);
+    assert_status(http(endpoint, "GET", path, &[], &[])?, 405);
+    assert_eq!(tenants.list(claim.secret(), &list)?, before);
+    shutdown_gracefully(process, &roots)?;
+    Ok(())
+}
