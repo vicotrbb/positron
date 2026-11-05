@@ -1,6 +1,7 @@
 //! Required Maven Central publication members under the signed inventory.
 use crate::{files::Bundle, *};
 use std::collections::BTreeMap;
+mod sdk;
 const REGISTRY: &str = "https://repo.maven.apache.org/maven2";
 
 pub(crate) fn verify_metadata(inventory: &ReleaseInventory) -> Result<(), ReleaseError> {
@@ -43,15 +44,7 @@ fn verify(inventory: &ReleaseInventory, files: Option<&Bundle>) -> Result<(), Re
         let (group, name) = identity
             .split_once('/')
             .ok_or(ReleaseError::IdentityMismatch)?;
-        if group.is_empty()
-            || name.is_empty()
-            || !group
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-        {
+        if group != "dev.positron" || name != "sdk" {
             return Err(ReleaseError::IdentityMismatch);
         }
         let (bit, suffix) = match qualifiers {
@@ -69,33 +62,32 @@ fn verify(inventory: &ReleaseInventory, files: Option<&Bundle>) -> Result<(), Re
         if artifact.file != format!("{name}-{version}{suffix}") {
             return Err(ReleaseError::IdentityMismatch);
         }
-        if bit == 1
-            && let Some(files) = files
-        {
-            let bytes = files.read(&artifact.file, 1 << 20)?;
-            let document = crate::native_xml::document(&bytes)?;
-            let root = document.root_element();
-            if root.tag_name().name() != "project"
-                || root.tag_name().namespace() != Some("http://maven.apache.org/POM/4.0.0")
-            {
-                return Err(ReleaseError::Unsupported);
-            }
-            for (field, expected) in [
-                ("modelVersion", "4.0.0"),
-                ("groupId", group),
-                ("artifactId", name),
-                ("version", version.as_str()),
-            ] {
-                if crate::native_xml::text(crate::native_xml::child(root, field)?)? != expected {
-                    return Err(ReleaseError::IdentityMismatch);
-                }
-            }
-        } else if bit != 1 && artifact.payload.is_none() {
+        if bit != 1 && artifact.payload.is_none() {
             return Err(ReleaseError::Unreproducible);
+        }
+        if let Some(files) = files {
+            let bytes = files.read(&artifact.file, 64 << 20)?;
+            sdk::dependencies(files, artifact)?;
+            if bit == 1 {
+                pom(&bytes, &version)?;
+            } else {
+                sdk::inspect(&bytes, bit, inventory, &version)?;
+            }
         }
     }
     if packages.values().any(|mask| *mask != 15) {
         return Err(ReleaseError::PartialSet);
+    }
+    Ok(())
+}
+
+fn pom(bytes: &[u8], version: &str) -> Result<(), ReleaseError> {
+    // One generated POM owns coordinates, module/compiler inputs, runtime
+    // dependency versions, license and packaging plugins. Do not authorize
+    // extra build or runtime dependencies through a second metadata shape.
+    let expected = include_str!("../../positron-api/java/pom.xml").replace("@VERSION@", version);
+    if bytes != expected.as_bytes() {
+        return Err(ReleaseError::IdentityMismatch);
     }
     Ok(())
 }

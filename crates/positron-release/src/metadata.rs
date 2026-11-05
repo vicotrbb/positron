@@ -13,6 +13,7 @@ pub(crate) fn verify_identities(
     inventory: &ReleaseInventory,
     bundle: &Bundle,
 ) -> Result<(), ReleaseError> {
+    crate::native_maven_package::verify_set(inventory, bundle)?;
     let input_identities = inventory
         .inputs
         .iter()

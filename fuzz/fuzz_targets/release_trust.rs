@@ -210,7 +210,7 @@ fn mutate_package(fixture: &mut support::Fixture, index: usize, data: &[u8]) -> 
                 .unwrap(),
             );
         },
-        Surface::SdkGo | Surface::SdkPython => {
+        Surface::SdkGo | Surface::SdkPython | Surface::SdkJava if !artifact.file.ends_with(".pom") => {
             let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
             let selected = usize::from(data.get(1).copied().unwrap_or(0)) % archive.len();
             let member = archive.by_index(selected).unwrap();

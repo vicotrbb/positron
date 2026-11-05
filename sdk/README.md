@@ -13,3 +13,8 @@ The [Go SDK reference](go.md) describes the generated dependency-free Go module,
 its typed API, bounded native HTTPS and delivery receipts. Generate `go/` with
 `generate_go_sdk`; consumer tests in `tests/go/` install actual standard module
 ZIPs in clean caches and share the canonical fixtures and live server suite.
+
+The JVM package in `java/` uses Java 21 records and the native HTTP/TLS client.
+Generate it with `generate_java_sdk`; [java.md](java.md) describes bounded calls,
+receipts, pinned Maven packaging and Release Manifest verification. Consumer
+tests in `tests/java/` build and install actual JARs in a clean Maven repository.

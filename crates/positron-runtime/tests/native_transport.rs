@@ -66,3 +66,6 @@ mod typescript;
 
 #[path = "native_transport/go.rs"]
 mod go;
+
+#[path = "native_transport/java.rs"]
+mod java;
