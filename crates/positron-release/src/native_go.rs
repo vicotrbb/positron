@@ -12,6 +12,8 @@ use std::{
     io::{Cursor, Read},
 };
 
+pub(crate) mod sdk;
+
 const MAX_ARCHIVE: usize = 64 << 20;
 const MAX_MEMBER: u64 = 64 << 20;
 const MAX_DECODED: u64 = 500 << 20; // Go's native module ZIP ceiling, within the caller's 512 MiB budget.

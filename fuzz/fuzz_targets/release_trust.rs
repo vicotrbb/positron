@@ -212,11 +212,7 @@ fn mutate_package(fixture: &mut support::Fixture, index: usize, data: &[u8]) -> 
         },
         Surface::SdkGo | Surface::SdkPython => {
             let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
-            let selected = if artifact.surface == Surface::SdkPython {
-                usize::from(data.get(1).copied().unwrap_or(0)) % archive.len()
-            } else {
-                0
-            };
+            let selected = usize::from(data.get(1).copied().unwrap_or(0)) % archive.len();
             let member = archive.by_index(selected).unwrap();
             let start = member.data_start().unwrap() as usize;
             let end = start + member.size() as usize;

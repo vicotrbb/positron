@@ -28,7 +28,11 @@ export function parseWireJson(text: string): unknown {
       while (position < text.length) {
         const current = text[position++];
         if (current === '\\') position++;
-        else if (current === '"') return JSON.parse(text.slice(start, position));
+        else if (current === '"') {
+          const parsed: unknown = JSON.parse(text.slice(start, position));
+          if (typeof parsed !== 'string' || /[\uD800-\uDFFF]/u.test(parsed)) throw new WireError();
+          return parsed;
+        }
       }
       throw new WireError();
     }

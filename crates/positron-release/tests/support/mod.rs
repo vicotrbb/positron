@@ -387,6 +387,13 @@ impl Fixture {
             .find(|artifact| artifact.surface == Surface::Homebrew)
             .unwrap() = native_registry::homebrew(formula.into_bytes());
     }
+    pub fn refresh_go_publication(&mut self, contents: Vec<u8>) {
+        *self
+            .native_artifacts
+            .iter_mut()
+            .find(|artifact| artifact.surface == Surface::SdkGo)
+            .unwrap() = native_registry::go_archive("1.0.0", contents);
+    }
     pub fn refresh_python_publication(&mut self, contents: Vec<u8>) {
         let version = self.inventory.version;
         let version = format!("{}.{}.{}", version.major, version.minor, version.patch);

@@ -36,3 +36,16 @@ independent payload bytes, signature, provenance and revocation stay in that
 same signed Release Manifest path. Clean generation, installed-wheel examples,
 shared golden fixtures and a live candidate server exercise the package.
 Private signing fixtures and local builds do not establish registry publication.
+
+The Go publication workspace is `sdk/go`, with module identity
+`github.com/vicotrbb/positron/sdk/go` and the standard Go module proxy registry.
+The Rust Public Interface generator emits typed Go request/results, canonical
+validation and error metadata, bounded native HTTPS, and query delivery helpers.
+Go 1.24.0 is the pinned baseline; the module has no dependencies. Native module
+ZIP inspection binds the module/version, source commit, API/schema, generator,
+and complete generated package to the existing Release Trust path. Go checksum
+database proofs authenticate the final ZIP and go.mod bytes. SBOMs, provenance,
+signatures, revocation, independent rebuilds and complete-set publication remain
+owned by the signed Release Manifest. Clean cache module installs, shared golden
+fixtures and an installed-module live candidate test exercise the package.
+Private fixture authorities and local proxy installs do not establish publication.

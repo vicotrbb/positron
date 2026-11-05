@@ -57,57 +57,36 @@ pub fn fixtures(version: &str, source_commit: &str, api: &[u8]) -> Vec<NativeArt
     );
 
     let module = "github.com/vicotrbb/positron/sdk/go";
-    let go_version = format!("v{version}");
+    let prefix = format!("{module}@v{version}");
     let go_mod = format!("module {module}\n\ngo 1.24.0\n");
-    let source = b"package positron\n\ntype Client struct{}\n";
-    let prefix = format!("{module}@{go_version}");
+    let release = serde_json::to_vec(&json!({"module":module,"version":version,"source_commit":source_commit,"api_version":"positron.v1","schema_digest":schema,"release_manifest_surface":"SdkGo","registry":"https://proxy.golang.org","generator":"positron-api=1,go=1.24.0,protoc-bin-vendored=3.2.0"})).unwrap();
+    let contract =
+        serde_json::to_vec(&json!({"api_version":"positron.v1","schema_digest":schema})).unwrap();
+    let digest = format!("{schema}\n");
     let files = [
-        (format!("{prefix}/go.mod"), go_mod.as_bytes()),
-        (format!("{prefix}/sdk.go"), source.as_slice()),
+        ("go.mod", go_mod.as_bytes()),
+        ("release.json", &release),
+        ("contract.json", &contract),
+        ("api/positron.proto", api),
+        ("api/schema.sha256", digest.as_bytes()),
+        ("types.go", b"package positron\n".as_slice()),
+        ("methods.go", b"package positron\n"),
+        ("codec.go", b"package positron\n"),
+        ("client.go", b"package positron\n"),
+        ("query.go", b"package positron\n"),
+        ("README.md", b"SDK"),
+        ("LICENSE", b"MIT"),
     ];
-    let contents = zip(&files
+    let paths = files
         .iter()
-        .map(|(path, data)| (path.as_str(), *data))
-        .collect::<Vec<_>>());
-    let text = format!(
-        "{module} {go_version} {}\n{module} {go_version}/go.mod {}\n",
-        h1(&files),
-        h1(&[("go.mod".into(), go_mod.as_bytes())])
-    );
-    let key = Ed25519KeyPair::from_seed_unchecked(&[45; 32]).unwrap();
-    let name = "sumdb.test.invalid";
-    let mut public = vec![1];
-    public.extend(key.public_key().as_ref());
-    let id = signed_note::key_id(name, &public);
-    let verifier_key = format!("{name}+{id:08x}+{}", B64.encode(public));
-    let mut private = vec![1];
-    private.extend([45; 32]);
-    let signer = StandardSigner::new(&format!(
-        "PRIVATE+KEY+{name}+{id:08x}+{}",
-        B64.encode(private)
-    ))
-    .unwrap();
-    let mut leaf = vec![0];
-    leaf.extend(text.as_bytes());
-    let checkpoint_text = format!(
-        "go.sum database tree\n1\n{}\n",
-        B64.encode(Sha256::digest(leaf))
-    );
-    let mut note = Note::new(checkpoint_text.as_bytes(), &[]).unwrap();
-    note.add_sigs(&[&signer]).unwrap();
-    let checkpoint = String::from_utf8(note.to_bytes()).unwrap();
-    let root = json!({"verifier_key":verifier_key,"checkpoint":checkpoint});
-    let go = artifact(
-        Surface::SdkGo,
-        format!("positron-sdk-go-{version}.zip"),
-        contents,
-        "https://proxy.golang.org",
-        format!("pkg:golang/{module}@{version}"),
-        None,
-        NativePublisherPolicy::GoChecksum {
-            trusted_root_sha256: Sha256::digest(serde_json::to_vec(&root).unwrap()).into(),
-        },
-        json!({"trustedRoot":root,"sumdb":{"record":{"id":0,"text":text},"checkpoint":checkpoint,"inclusion":[],"consistency":[]}}),
+        .map(|(name, bytes)| (format!("{prefix}/{name}"), *bytes))
+        .collect::<Vec<_>>();
+    let go = go_archive(
+        version,
+        zip(&paths
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), *bytes))
+            .collect::<Vec<_>>()),
     );
 
     let package_json = serde_json::to_vec(
@@ -334,4 +313,74 @@ fn h1(files: &[(String, &[u8])]) -> String {
 }
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Sign native checksum evidence only after final module archive bytes exist.
+pub fn go_archive(version: &str, contents: Vec<u8>) -> NativeArtifactFixture {
+    let module = "github.com/vicotrbb/positron/sdk/go";
+    let go_version = format!("v{version}");
+    let mut archive = zip::ZipArchive::new(Cursor::new(&contents)).unwrap();
+    let mut owned = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index_raw(index).unwrap();
+        let name = entry.name().unwrap().into_owned();
+        let mut bytes = Vec::new();
+        let mut reader: Box<dyn std::io::Read> =
+            if entry.compression() == zip::CompressionMethod::Stored {
+                Box::new(&mut entry)
+            } else {
+                Box::new(flate2::read::DeflateDecoder::new(&mut entry))
+            };
+        reader.read_to_end(&mut bytes).unwrap();
+        owned.push((name, bytes));
+    }
+    let files = owned
+        .iter()
+        .map(|(name, bytes)| (name.clone(), bytes.as_slice()))
+        .collect::<Vec<_>>();
+    let go_mod = files
+        .iter()
+        .find(|(name, _)| name.ends_with("/go.mod"))
+        .unwrap()
+        .1;
+    let text = format!(
+        "{module} {go_version} {}\n{module} {go_version}/go.mod {}\n",
+        h1(&files),
+        h1(&[("go.mod".into(), go_mod)])
+    );
+    let key = Ed25519KeyPair::from_seed_unchecked(&[45; 32]).unwrap();
+    let name = "sumdb.test.invalid";
+    let mut public = vec![1];
+    public.extend(key.public_key().as_ref());
+    let id = signed_note::key_id(name, &public);
+    let verifier_key = format!("{name}+{id:08x}+{}", B64.encode(public));
+    let mut private = vec![1];
+    private.extend([45; 32]);
+    let signer = StandardSigner::new(&format!(
+        "PRIVATE+KEY+{name}+{id:08x}+{}",
+        B64.encode(private)
+    ))
+    .unwrap();
+    let mut leaf = vec![0];
+    leaf.extend(text.as_bytes());
+    let checkpoint_text = format!(
+        "go.sum database tree\n1\n{}\n",
+        B64.encode(Sha256::digest(leaf))
+    );
+    let mut note = Note::new(checkpoint_text.as_bytes(), &[]).unwrap();
+    note.add_sigs(&[&signer]).unwrap();
+    let checkpoint = String::from_utf8(note.to_bytes()).unwrap();
+    let root = json!({"verifier_key":verifier_key,"checkpoint":checkpoint});
+    artifact(
+        Surface::SdkGo,
+        format!("positron-sdk-go-{version}.zip"),
+        contents,
+        "https://proxy.golang.org",
+        format!("pkg:golang/{module}@{version}"),
+        None,
+        NativePublisherPolicy::GoChecksum {
+            trusted_root_sha256: Sha256::digest(serde_json::to_vec(&root).unwrap()).into(),
+        },
+        json!({"trustedRoot":root,"sumdb":{"record":{"id":0,"text":text},"checkpoint":checkpoint,"inclusion":[],"consistency":[]}}),
+    )
 }

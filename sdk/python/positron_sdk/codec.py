@@ -36,7 +36,7 @@ def parse_json(text):
     def pairs(items):
         result = {}
         for key, value in items:
-            require(key not in result)
+            require(key not in result and not any(0xd800 <= ord(character) <= 0xdfff for character in key))
             result[key] = value
         return result
     try:
@@ -66,7 +66,7 @@ def validate(schema, value, depth=0):
         require(value in schema['enum'])
     kind = schema.get('type')
     if kind == 'string':
-        require(isinstance(value, str))
+        require(isinstance(value, str) and not any(0xd800 <= ord(character) <= 0xdfff for character in value))
         require(len(value) >= schema.get('minLength', 0) and len(value) <= schema.get('maxLength', 262144))
         if 'pattern' in schema:
             require(re.search(schema['pattern'], value) is not None)

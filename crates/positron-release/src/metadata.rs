@@ -63,6 +63,21 @@ pub(crate) fn verify_identities(
                 &inventory.compatibility.schema,
             )?;
         }
+        if artifact.surface == Surface::SdkGo {
+            if artifact.publication.registry != "https://proxy.golang.org"
+                || artifact.publication.native_subject
+                    != format!("pkg:golang/{}@{version}", crate::native_go::sdk::MODULE)
+            {
+                return Err(ReleaseError::IdentityMismatch);
+            }
+            crate::native_go::sdk::inspect(
+                &bundle.read(&artifact.file, 64 << 20)?,
+                &version,
+                &inventory.source_commit,
+                &inventory.api_version,
+                &inventory.compatibility.schema,
+            )?;
+        }
         if artifact.surface == Surface::SdkPython {
             if artifact.publication.registry != "https://pypi.org"
                 || artifact.publication.native_subject

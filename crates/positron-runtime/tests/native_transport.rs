@@ -63,3 +63,6 @@ mod log_query;
 mod python;
 #[path = "native_transport/typescript.rs"]
 mod typescript;
+
+#[path = "native_transport/go.rs"]
+mod go;

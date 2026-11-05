@@ -1,0 +1,3656 @@
+{
+  "enums": {
+    "Capability": [
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_CANONICAL_PUBLIC_INTERFACE",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_RELEASE_ONE_QUERY",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_METRICS",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_QUERY_SESSIONS",
+        "number": 4
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_QUERY_TAIL",
+        "number": 5
+      }
+    ],
+    "CapabilityAvailability": [
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_AVAILABILITY_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_AVAILABILITY_IMPLEMENTED",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_AVAILABILITY_UNAVAILABLE",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_AVAILABILITY_UNSUPPORTED",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "CAPABILITY_AVAILABILITY_VERSION_INCOMPATIBLE",
+        "number": 4
+      }
+    ],
+    "CompletionState": [
+      {
+        "deprecated": false,
+        "name": "COMPLETION_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "COMPLETION_STATE_REJECTED",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "COMPLETION_STATE_AMBIGUOUS",
+        "number": 2
+      }
+    ],
+    "DeprecationState": [
+      {
+        "deprecated": false,
+        "name": "DEPRECATION_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "DEPRECATION_STATE_CURRENT",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "DEPRECATION_STATE_DEPRECATED",
+        "number": 2
+      }
+    ],
+    "FailureSource": [
+      {
+        "deprecated": false,
+        "name": "FAILURE_SOURCE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "FAILURE_SOURCE_CAPABILITY_NEGOTIATION",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "FAILURE_SOURCE_GRPC_DECODE",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "FAILURE_SOURCE_HTTP_DECODE",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "FAILURE_SOURCE_QUERY_EXECUTION",
+        "number": 4
+      }
+    ],
+    "KeyAction": [
+      {
+        "deprecated": false,
+        "name": "KEY_ACTION_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_ACTION_CREATE",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_ACTION_LIST",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_ACTION_ROTATE",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_ACTION_REVOKE",
+        "number": 4
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_ACTION_SCOPE_INSPECT",
+        "number": 5
+      }
+    ],
+    "KeyScope": [
+      {
+        "deprecated": false,
+        "name": "KEY_SCOPE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_SCOPE_INGEST",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_SCOPE_QUERY",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_SCOPE_TENANT_ADMINISTRATION",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "KEY_SCOPE_SYSTEM_ADMINISTRATION",
+        "number": 4
+      }
+    ],
+    "LogQueryStopReason": [
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_UNAUTHORIZED",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_IDEMPOTENCY_CONFLICT",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_INVALID_BUDGET",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_BUDGET_EXHAUSTED",
+        "number": 4
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_INVALID_CURSOR",
+        "number": 5
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_SNAPSHOT_EXPIRED",
+        "number": 6
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_AUTHORIZATION_CHANGED",
+        "number": 7
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_CANCELLED",
+        "number": 8
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_RESOURCE_ADMISSION_REFUSED",
+        "number": 9
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_RESOURCE_EXHAUSTED",
+        "number": 10
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_UNSUPPORTED_QUERY",
+        "number": 11
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_STORE_UNAVAILABLE",
+        "number": 12
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_INCOMPLETE_DATA",
+        "number": 13
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_MALFORMED_PERSISTENT_DATA",
+        "number": 14
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_INTERNAL",
+        "number": 15
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_DISCONNECTED",
+        "number": 16
+      },
+      {
+        "deprecated": false,
+        "name": "LOG_QUERY_STOP_REASON_CONSUMER_LAGGED",
+        "number": 17
+      }
+    ],
+    "PublicErrorCode": [
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_UNSUPPORTED_API_VERSION",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_CAPABILITY_UNAVAILABLE",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_CAPABILITY_UNSUPPORTED",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_MALFORMED_REQUEST",
+        "number": 4
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_REQUEST_TOO_LARGE",
+        "number": 5
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_UNKNOWN_FIELD",
+        "number": 6
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_AUTHENTICATION_REJECTED",
+        "number": 7
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_CAPACITY_UNAVAILABLE",
+        "number": 8
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_QUERY_UNAVAILABLE",
+        "number": 9
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_SNAPSHOT_EXPIRED",
+        "number": 10
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_INVALID_CURSOR",
+        "number": 11
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_INVALID_BUDGET",
+        "number": 12
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_BUDGET_EXHAUSTED",
+        "number": 13
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_AUTHORIZATION_CHANGED",
+        "number": 14
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_CANCELLED",
+        "number": 15
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_UNSUPPORTED_QUERY",
+        "number": 16
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_IDEMPOTENCY_CONFLICT",
+        "number": 17
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_STORE_UNAVAILABLE",
+        "number": 18
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_INCOMPLETE_DATA",
+        "number": 19
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_MALFORMED_PERSISTENT_DATA",
+        "number": 20
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_INTERNAL",
+        "number": 21
+      },
+      {
+        "deprecated": false,
+        "name": "PUBLIC_ERROR_CODE_UNSUPPORTED_FEATURE",
+        "number": 22
+      }
+    ],
+    "RetentionReclamation": [
+      {
+        "deprecated": false,
+        "name": "RETENTION_RECLAMATION_NONE",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "RETENTION_RECLAMATION_AT",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "RETENTION_RECLAMATION_BLOCKED_BY_DURABLE_LEASE",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "RETENTION_RECLAMATION_BLOCKED_BY_IN_PROCESS_SNAPSHOT",
+        "number": 3
+      }
+    ],
+    "RetryClass": [
+      {
+        "deprecated": false,
+        "name": "RETRY_CLASS_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "RETRY_CLASS_NEVER",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "RETRY_CLASS_AFTER_BACKOFF",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "RETRY_CLASS_AFTER_INPUT_CORRECTION",
+        "number": 3
+      }
+    ],
+    "SafeDetail": [
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_API_MAJOR_UNSUPPORTED",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_CAPABILITY_NOT_AVAILABLE",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_CAPABILITY_NOT_SUPPORTED",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_REQUEST_MALFORMED",
+        "number": 4
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_REQUEST_LIMIT_EXCEEDED",
+        "number": 5
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_FIELD_NOT_RECOGNIZED",
+        "number": 6
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_AUTHENTICATION_REJECTED",
+        "number": 7
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_CAPACITY_UNAVAILABLE",
+        "number": 8
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_QUERY_UNAVAILABLE",
+        "number": 9
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_SNAPSHOT_EXPIRED",
+        "number": 10
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_INVALID_CURSOR",
+        "number": 11
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_INVALID_BUDGET",
+        "number": 12
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_BUDGET_EXHAUSTED",
+        "number": 13
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_AUTHORIZATION_CHANGED",
+        "number": 14
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_CANCELLED",
+        "number": 15
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_UNSUPPORTED_QUERY",
+        "number": 16
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_IDEMPOTENCY_CONFLICT",
+        "number": 17
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_STORE_UNAVAILABLE",
+        "number": 18
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_INCOMPLETE_DATA",
+        "number": 19
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_MALFORMED_PERSISTENT_DATA",
+        "number": 20
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_INTERNAL",
+        "number": 21
+      },
+      {
+        "deprecated": false,
+        "name": "SAFE_DETAIL_UNSUPPORTED_FEATURE",
+        "number": 22
+      }
+    ],
+    "TenantLifecycleTarget": [
+      {
+        "deprecated": false,
+        "name": "TENANT_LIFECYCLE_TARGET_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "TENANT_LIFECYCLE_TARGET_ACTIVE",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "TENANT_LIFECYCLE_TARGET_READ_ONLY",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "TENANT_LIFECYCLE_TARGET_SUSPENDED",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "TENANT_LIFECYCLE_TARGET_PURGING",
+        "number": 4
+      },
+      {
+        "deprecated": false,
+        "name": "TENANT_LIFECYCLE_TARGET_PURGED",
+        "number": 5
+      }
+    ],
+    "UpgradePhase": [
+      {
+        "deprecated": false,
+        "name": "UPGRADE_PHASE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "deprecated": false,
+        "name": "UPGRADE_PHASE_PREFLIGHT",
+        "number": 1
+      },
+      {
+        "deprecated": false,
+        "name": "UPGRADE_PHASE_DRAINING",
+        "number": 2
+      },
+      {
+        "deprecated": false,
+        "name": "UPGRADE_PHASE_SNAPSHOT",
+        "number": 3
+      },
+      {
+        "deprecated": false,
+        "name": "UPGRADE_PHASE_PUBLISHING",
+        "number": 4
+      },
+      {
+        "deprecated": false,
+        "name": "UPGRADE_PHASE_AWAITING_RESTART",
+        "number": 5
+      },
+      {
+        "deprecated": false,
+        "name": "UPGRADE_PHASE_VERIFYING",
+        "number": 6
+      },
+      {
+        "deprecated": false,
+        "name": "UPGRADE_PHASE_SUCCEEDED",
+        "number": 7
+      }
+    ]
+  },
+  "mappings": [
+    {
+      "method": "POST",
+      "path": "/v1/capabilities:negotiate",
+      "public_error_fields": [
+        {
+          "deprecated": false,
+          "json": "code",
+          "number": 1,
+          "proto": "code",
+          "type": "PublicErrorCode"
+        },
+        {
+          "deprecated": false,
+          "json": "retry_class",
+          "number": 2,
+          "proto": "retry_class",
+          "type": "RetryClass"
+        },
+        {
+          "deprecated": false,
+          "json": "completion_state",
+          "number": 3,
+          "proto": "completion_state",
+          "type": "CompletionState"
+        },
+        {
+          "deprecated": false,
+          "json": "source",
+          "number": 4,
+          "proto": "source",
+          "type": "FailureSource"
+        },
+        {
+          "deprecated": false,
+          "json": "safe_detail",
+          "number": 5,
+          "proto": "safe_detail",
+          "type": "SafeDetail"
+        }
+      ],
+      "request": "CapabilityRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "api_major",
+          "number": 1,
+          "proto": "api_major",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "capability",
+          "number": 2,
+          "proto": "capability",
+          "type": "Capability"
+        }
+      ],
+      "response": "CapabilityResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "api_major",
+          "number": 1,
+          "proto": "api_major",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "schema_digest",
+          "number": 2,
+          "proto": "schema_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "availability",
+          "number": 3,
+          "proto": "availability",
+          "type": "CapabilityAvailability"
+        },
+        {
+          "deprecated": false,
+          "json": "refusal",
+          "number": 4,
+          "proto": "refusal",
+          "type": "PublicError"
+        },
+        {
+          "deprecated": false,
+          "json": "deprecation",
+          "number": 5,
+          "proto": "deprecation",
+          "type": "DeprecationState"
+        },
+        {
+          "deprecated": false,
+          "json": "capability",
+          "number": 6,
+          "proto": "capability",
+          "type": "Capability"
+        }
+      ],
+      "rpc": "positron.v1.CapabilityService/Negotiate"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 1024,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/api-keys:manage",
+      "request": "ApiKeyRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "action",
+          "number": 1,
+          "proto": "action",
+          "type": "KeyAction"
+        },
+        {
+          "deprecated": false,
+          "json": "scope",
+          "number": 2,
+          "proto": "scope",
+          "type": "KeyScope"
+        },
+        {
+          "deprecated": false,
+          "json": "principal",
+          "number": 3,
+          "proto": "principal",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expires_at_unix_seconds",
+          "number": 4,
+          "proto": "expires_at_unix_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_generation",
+          "number": 5,
+          "proto": "expected_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 6,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "target_tenant",
+          "number": 7,
+          "proto": "target_tenant",
+          "type": "string"
+        }
+      ],
+      "response": "ApiKeyResponse",
+      "responses": {
+        "200": "ApiKeyResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "key_unavailable",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.ApiKeyService/Manage",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer TenantAdministration",
+      "max_request_bytes": 1024,
+      "max_response_bytes": 1024,
+      "method": "POST",
+      "path": "/v1/tenant-quotas:update",
+      "request": "TenantQuotaUpdateRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "expected_generation",
+          "number": 2,
+          "proto": "expected_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 3,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "weight",
+          "number": 4,
+          "proto": "weight",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "memory_bytes",
+          "number": 5,
+          "proto": "memory_bytes",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "queue_slots",
+          "number": 6,
+          "proto": "queue_slots",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "task_slots",
+          "number": 7,
+          "proto": "task_slots",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "buffer_cache_bytes",
+          "number": 8,
+          "proto": "buffer_cache_bytes",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "batch_items",
+          "number": 9,
+          "proto": "batch_items",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "lease_slots",
+          "number": 10,
+          "proto": "lease_slots",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "retry_slots",
+          "number": 11,
+          "proto": "retry_slots",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "io_permits",
+          "number": 12,
+          "proto": "io_permits",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "cpu_work_units",
+          "number": 13,
+          "proto": "cpu_work_units",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "file_descriptors",
+          "number": 14,
+          "proto": "file_descriptors",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "disk_headroom_bytes",
+          "number": 15,
+          "proto": "disk_headroom_bytes",
+          "type": "uint64"
+        }
+      ],
+      "response": "TenantQuotaUpdateResponse",
+      "responses": {
+        "200": "TenantQuotaUpdateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantQuotaService/Update",
+      "stale_generation_response_fields": [
+        {
+          "description": "current resource generation",
+          "json": "resource_generation",
+          "minimum": 1,
+          "type": "uint64"
+        },
+        {
+          "description": "redacted quota change summary",
+          "json": "semantic_diff",
+          "maximum_length": 1024,
+          "minimum_length": 1,
+          "type": "string"
+        }
+      ],
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 1024,
+      "max_response_bytes": 1024,
+      "method": "POST",
+      "path": "/v1/tenant-lifecycle:transition",
+      "request": "TenantLifecycleTransitionRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "target",
+          "number": 2,
+          "proto": "target",
+          "type": "TenantLifecycleTarget"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_generation",
+          "number": 3,
+          "proto": "expected_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 4,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "TenantLifecycleTransitionResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "from",
+          "number": 2,
+          "proto": "from",
+          "type": "TenantLifecycleTarget"
+        },
+        {
+          "deprecated": false,
+          "json": "to",
+          "number": 3,
+          "proto": "to",
+          "type": "TenantLifecycleTarget"
+        },
+        {
+          "deprecated": false,
+          "json": "lifecycle_generation",
+          "number": 4,
+          "proto": "lifecycle_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 5,
+          "proto": "audit_position",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_ingest_time_unix_seconds",
+          "number": 6,
+          "proto": "audit_ingest_time_unix_seconds",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "TenantLifecycleTransitionResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict",
+          "invalid_transition",
+          "purge_completion_unavailable"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantLifecycleService/Transition",
+      "stale_generation_response_fields": [
+        {
+          "description": "current lifecycle generation",
+          "json": "lifecycle_generation",
+          "minimum": 1,
+          "type": "uint64"
+        },
+        {
+          "description": "redacted lifecycle change summary",
+          "json": "semantic_diff",
+          "maximum_length": 1024,
+          "minimum_length": 1,
+          "type": "string"
+        }
+      ],
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 1024,
+      "max_response_bytes": 1024,
+      "method": "POST",
+      "path": "/v1/tenant-aliases:bind",
+      "request": "TenantAliasBindRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "external_alias",
+          "number": 2,
+          "proto": "external_alias",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_generation",
+          "number": 3,
+          "proto": "expected_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 4,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "TenantAliasBindResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "alias_generation",
+          "number": 2,
+          "proto": "alias_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 3,
+          "proto": "audit_position",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_ingest_time_unix_seconds",
+          "number": 4,
+          "proto": "audit_ingest_time_unix_seconds",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "TenantAliasBindResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict",
+          "alias_already_bound",
+          "alias_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantAliasService/Bind",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 2048,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/tenants:create",
+      "request": "TenantCreateRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "slug",
+          "number": 2,
+          "proto": "slug",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "display_name",
+          "number": 3,
+          "proto": "display_name",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "retention_seconds",
+          "number": 4,
+          "proto": "retention_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "weight",
+          "number": 5,
+          "proto": "weight",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "memory_bytes",
+          "number": 6,
+          "proto": "memory_bytes",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "queue_slots",
+          "number": 7,
+          "proto": "queue_slots",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "task_slots",
+          "number": 8,
+          "proto": "task_slots",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "buffer_cache_bytes",
+          "number": 9,
+          "proto": "buffer_cache_bytes",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "batch_items",
+          "number": 10,
+          "proto": "batch_items",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "lease_slots",
+          "number": 11,
+          "proto": "lease_slots",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "retry_slots",
+          "number": 12,
+          "proto": "retry_slots",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "io_permits",
+          "number": 13,
+          "proto": "io_permits",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "cpu_work_units",
+          "number": 14,
+          "proto": "cpu_work_units",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "file_descriptors",
+          "number": 15,
+          "proto": "file_descriptors",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "disk_headroom_bytes",
+          "number": 16,
+          "proto": "disk_headroom_bytes",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 17,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "TenantCreateResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "resource_generation",
+          "number": 2,
+          "proto": "resource_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 3,
+          "proto": "audit_position",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "TenantCreateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "tenant_conflict",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantService/Create",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 2048,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/tenants:inspect",
+      "request": "TenantInspectRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        }
+      ],
+      "response": "TenantInspectResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "TenantDescriptor"
+        }
+      ],
+      "responses": {
+        "200": "TenantInspectResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantService/Inspect",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 2048,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/tenants:list",
+      "request": "TenantListRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "continuation",
+          "number": 1,
+          "proto": "continuation",
+          "type": "string"
+        }
+      ],
+      "response": "TenantListResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tenants",
+          "number": 1,
+          "proto": "tenants",
+          "repeated": true,
+          "type": "TenantDescriptor"
+        },
+        {
+          "deprecated": false,
+          "json": "continuation",
+          "number": 2,
+          "proto": "continuation",
+          "type": "string"
+        }
+      ],
+      "responses": {
+        "200": "TenantListResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": "stale_continuation",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantService/List",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 2048,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/tenants:update-display-name",
+      "request": "TenantDisplayNameUpdateRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_display_generation",
+          "number": 2,
+          "proto": "expected_display_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "display_name",
+          "number": 3,
+          "proto": "display_name",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 4,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "TenantDisplayNameUpdateResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "display_generation",
+          "number": 2,
+          "proto": "display_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 3,
+          "proto": "audit_position",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "TenantDisplayNameUpdateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "stale_display_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantService/UpdateDisplayName",
+      "stale_generation_response_fields": [
+        {
+          "description": "current display generation",
+          "json": "display_generation",
+          "minimum": 1,
+          "type": "uint64"
+        },
+        {
+          "description": "redacted display-name change summary",
+          "json": "semantic_diff",
+          "maximum_length": 1024,
+          "minimum_length": 1,
+          "type": "string"
+        }
+      ],
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer TenantAdministration",
+      "availability": "available",
+      "max_request_bytes": 2048,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/tenant-retention:preview",
+      "request": "TenantRetentionPreviewRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "proposed_retention_seconds",
+          "number": 2,
+          "proto": "proposed_retention_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "continuation",
+          "number": 3,
+          "proto": "continuation",
+          "type": "string"
+        }
+      ],
+      "response": "TenantRetentionPreviewResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "retention_generation",
+          "number": 2,
+          "proto": "retention_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "proposed_retention_seconds",
+          "number": 3,
+          "proto": "proposed_retention_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "catalog_identity",
+          "number": 4,
+          "proto": "catalog_identity",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "catalog_generation",
+          "number": 5,
+          "proto": "catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "confirmation_digest",
+          "number": 6,
+          "proto": "confirmation_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "scopes",
+          "number": 7,
+          "proto": "scopes",
+          "repeated": true,
+          "type": "TenantRetentionScopeImpact"
+        },
+        {
+          "deprecated": false,
+          "json": "continuation",
+          "number": 8,
+          "proto": "continuation",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "confirmation_evaluated_at_unix_nanos",
+          "number": 9,
+          "proto": "confirmation_evaluated_at_unix_nanos",
+          "type": "sint64"
+        }
+      ],
+      "responses": {
+        "200": "TenantRetentionPreviewResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "409": "stale_continuation",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantRetentionService/Preview",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer TenantAdministration",
+      "availability": "available",
+      "max_request_bytes": 2048,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/tenant-retention:update",
+      "request": "TenantRetentionUpdateRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "proposed_retention_seconds",
+          "number": 2,
+          "proto": "proposed_retention_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_generation",
+          "number": 3,
+          "proto": "expected_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "confirmation_digest",
+          "number": 4,
+          "optional": true,
+          "proto": "confirmation_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 5,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "confirmation_evaluated_at_unix_nanos",
+          "number": 6,
+          "optional": true,
+          "proto": "confirmation_evaluated_at_unix_nanos",
+          "type": "sint64"
+        }
+      ],
+      "response": "TenantRetentionUpdateResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "retention_generation",
+          "number": 2,
+          "proto": "retention_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 3,
+          "proto": "audit_position",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_ingest_time_unix_seconds",
+          "number": 4,
+          "proto": "audit_ingest_time_unix_seconds",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "TenantRetentionUpdateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "tenant_unavailable",
+        "409": [
+          "invalid_confirmation",
+          "stale_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantRetentionService/Update",
+      "stale_generation_response_fields": [
+        {
+          "description": "current retention generation",
+          "json": "retention_generation",
+          "minimum": 1,
+          "type": "uint64"
+        },
+        {
+          "description": "redacted retention change summary",
+          "json": "semantic_diff",
+          "maximum_length": 1024,
+          "minimum_length": 1,
+          "type": "string"
+        }
+      ],
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 128,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/maintenance:status",
+      "request": "MaintenanceStatusRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "cursor",
+          "number": 1,
+          "optional": true,
+          "proto": "cursor",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "limit",
+          "number": 2,
+          "optional": true,
+          "proto": "limit",
+          "type": "uint32"
+        }
+      ],
+      "response": "MaintenanceStatusResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "tasks",
+          "number": 1,
+          "proto": "tasks",
+          "repeated": true,
+          "type": "MaintenanceTaskStatus"
+        },
+        {
+          "deprecated": false,
+          "json": "queued",
+          "number": 2,
+          "proto": "queued",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "running",
+          "number": 3,
+          "proto": "running",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "deferred",
+          "number": 4,
+          "proto": "deferred",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "terminal",
+          "number": 5,
+          "proto": "terminal",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "returned",
+          "number": 6,
+          "proto": "returned",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "total",
+          "number": 7,
+          "proto": "total",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "next_cursor",
+          "number": 8,
+          "optional": true,
+          "proto": "next_cursor",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "integrity_findings",
+          "maximum_items": 64,
+          "number": 9,
+          "proto": "integrity_findings",
+          "repeated": true,
+          "type": "IntegrityQuarantineFinding"
+        }
+      ],
+      "responses": {
+        "200": "MaintenanceStatusResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.MaintenanceService/Status",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 128,
+      "max_response_bytes": 2048,
+      "method": "POST",
+      "path": "/v1/maintenance:explain",
+      "request": "MaintenanceExplainRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "identity",
+          "number": 1,
+          "proto": "identity",
+          "type": "string"
+        }
+      ],
+      "response": "MaintenanceExplainResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "task",
+          "number": 1,
+          "proto": "task",
+          "type": "MaintenanceTaskStatus"
+        }
+      ],
+      "responses": {
+        "200": "MaintenanceExplainResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "task_unavailable",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.MaintenanceService/Explain",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 256,
+      "max_response_bytes": 2048,
+      "method": "POST",
+      "path": "/v1/maintenance:run",
+      "request": "MaintenanceRunRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "class",
+          "number": 1,
+          "proto": "task_class",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 2,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "signal",
+          "number": 3,
+          "proto": "signal",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "shard",
+          "number": 4,
+          "proto": "shard",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 5,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "MaintenanceRunResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "task",
+          "number": 1,
+          "proto": "task",
+          "type": "MaintenanceTaskAcknowledgement"
+        },
+        {
+          "deprecated": false,
+          "json": "resource_generation",
+          "number": 2,
+          "proto": "resource_generation",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "MaintenanceRunResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "idempotency_conflict",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.MaintenanceService/Run",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 192,
+      "max_response_bytes": 2048,
+      "method": "POST",
+      "path": "/v1/maintenance:pause",
+      "request": "MaintenancePauseRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "identity",
+          "number": 1,
+          "proto": "identity",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "resource_generation",
+          "number": 2,
+          "proto": "resource_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "duration_seconds",
+          "number": 3,
+          "proto": "duration_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 4,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "MaintenanceControlResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "task",
+          "number": 1,
+          "proto": "task",
+          "type": "MaintenanceTaskAcknowledgement"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 2,
+          "proto": "audit_position",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "action",
+          "number": 3,
+          "proto": "action",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "resource_generation",
+          "number": 4,
+          "optional": true,
+          "proto": "resource_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "pause_until_unix_seconds",
+          "number": 5,
+          "optional": true,
+          "proto": "pause_until_unix_seconds",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "MaintenanceControlResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "task_unavailable",
+        "409": [
+          "precondition_failed",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.MaintenanceService/Pause",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 192,
+      "max_response_bytes": 2048,
+      "method": "POST",
+      "path": "/v1/maintenance:resume",
+      "request": "MaintenanceResumeRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "identity",
+          "number": 1,
+          "proto": "identity",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 2,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "MaintenanceControlResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "task",
+          "number": 1,
+          "proto": "task",
+          "type": "MaintenanceTaskAcknowledgement"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 2,
+          "proto": "audit_position",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "action",
+          "number": 3,
+          "proto": "action",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "resource_generation",
+          "number": 4,
+          "optional": true,
+          "proto": "resource_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "pause_until_unix_seconds",
+          "number": 5,
+          "optional": true,
+          "proto": "pause_until_unix_seconds",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "MaintenanceControlResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "task_unavailable",
+        "409": [
+          "precondition_failed",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.MaintenanceService/Resume",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 266,
+      "max_response_bytes": 2048,
+      "method": "POST",
+      "path": "/v1/maintenance:window",
+      "request": "MaintenanceWindowRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "deferred_classes",
+          "number": 1,
+          "proto": "deferred_classes",
+          "repeated": true,
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_catalog_generation",
+          "number": 2,
+          "proto": "expected_catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "duration_seconds",
+          "number": 3,
+          "proto": "duration_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 4,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "MaintenanceWindowResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "deferred_classes",
+          "number": 1,
+          "proto": "deferred_classes",
+          "repeated": true,
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "until_unix_seconds",
+          "number": 2,
+          "proto": "until_unix_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "catalog_generation",
+          "number": 3,
+          "proto": "catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 4,
+          "proto": "audit_position",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "MaintenanceWindowResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "precondition_failed",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.MaintenanceService/Window",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 512,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/maintenance:verify",
+      "request": "OnlineVerificationRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "signal",
+          "number": 2,
+          "proto": "signal",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "shard",
+          "number": 3,
+          "proto": "shard",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_catalog_generation",
+          "number": 4,
+          "optional": true,
+          "proto": "expected_catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "continuation",
+          "number": 5,
+          "optional": true,
+          "proto": "continuation",
+          "type": "string"
+        }
+      ],
+      "response": "OnlineVerificationReport",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "report_version",
+          "number": 1,
+          "proto": "report_version",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 2,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "signal",
+          "number": 3,
+          "proto": "signal",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "shard",
+          "number": 4,
+          "proto": "shard",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "catalog_generation",
+          "number": 5,
+          "proto": "catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "examined_segments",
+          "number": 6,
+          "proto": "examined_segments",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "examined_bytes",
+          "number": 7,
+          "proto": "examined_bytes",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "omitted_segments",
+          "number": 8,
+          "proto": "omitted_segments",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "outcome",
+          "number": 9,
+          "proto": "outcome",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "verification_complete",
+          "number": 10,
+          "proto": "verification_complete",
+          "type": "bool"
+        },
+        {
+          "deprecated": false,
+          "json": "continuation",
+          "number": 11,
+          "optional": true,
+          "proto": "continuation",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "findings",
+          "maximum_items": 64,
+          "number": 12,
+          "proto": "findings",
+          "repeated": true,
+          "type": "IntegrityQuarantineFinding"
+        },
+        {
+          "deprecated": false,
+          "json": "report_checksum",
+          "number": 13,
+          "proto": "report_checksum",
+          "type": "string"
+        }
+      ],
+      "responses": {
+        "200": "OnlineVerificationReport",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.MaintenanceService/Verify",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer TenantAdministration",
+      "max_request_bytes": 65536,
+      "max_response_bytes": 1024,
+      "method": "POST",
+      "path": "/v1/policies:validate",
+      "request": "PolicyPreviewRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "policy_json",
+          "number": 1,
+          "proto": "policy_json",
+          "type": "string"
+        }
+      ],
+      "response": "PolicyValidateResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "policy_generation",
+          "number": 1,
+          "proto": "policy_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "policy_digest",
+          "number": 2,
+          "proto": "policy_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "rule_count",
+          "number": 3,
+          "proto": "rule_count",
+          "type": "uint32"
+        }
+      ],
+      "responses": {
+        "200": "PolicyValidateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.PolicyService/Validate",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer TenantAdministration",
+      "max_request_bytes": 65536,
+      "max_response_bytes": 1024,
+      "method": "POST",
+      "path": "/v1/policies:test",
+      "request": "PolicyTestRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "policy_json",
+          "number": 1,
+          "proto": "policy_json",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "candidate_json",
+          "number": 2,
+          "proto": "candidate_json",
+          "type": "string"
+        }
+      ],
+      "response": "PolicyTestResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "policy_generation",
+          "number": 1,
+          "proto": "policy_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "policy_digest",
+          "number": 2,
+          "proto": "policy_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "accepted",
+          "number": 3,
+          "proto": "accepted",
+          "type": "bool"
+        },
+        {
+          "deprecated": false,
+          "json": "applied_rule_count",
+          "number": 4,
+          "proto": "applied_rule_count",
+          "type": "uint32"
+        }
+      ],
+      "responses": {
+        "200": "PolicyTestResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.PolicyService/Test",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer TenantAdministration",
+      "max_request_bytes": 65536,
+      "max_response_bytes": 8192,
+      "method": "POST",
+      "path": "/v1/policies:diff",
+      "request": "PolicyDiffRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "before_policy_json",
+          "number": 1,
+          "proto": "before_policy_json",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "after_policy_json",
+          "number": 2,
+          "proto": "after_policy_json",
+          "type": "string"
+        }
+      ],
+      "response": "PolicyDiffResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "before_policy_generation",
+          "number": 1,
+          "proto": "before_policy_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "before_policy_digest",
+          "number": 2,
+          "proto": "before_policy_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "after_policy_generation",
+          "number": 3,
+          "proto": "after_policy_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "after_policy_digest",
+          "number": 4,
+          "proto": "after_policy_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "semantic_changes",
+          "number": 5,
+          "proto": "semantic_changes",
+          "repeated": true,
+          "type": "string"
+        }
+      ],
+      "responses": {
+        "200": "PolicyDiffResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.PolicyService/Diff",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer TenantAdministration",
+      "max_request_bytes": 65536,
+      "max_response_bytes": 8192,
+      "method": "POST",
+      "path": "/v1/policies:explain",
+      "request": "PolicyExplainRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "policy_json",
+          "number": 1,
+          "proto": "policy_json",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "candidate_json",
+          "number": 2,
+          "proto": "candidate_json",
+          "type": "string"
+        }
+      ],
+      "response": "PolicyExplainResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "policy_generation",
+          "number": 1,
+          "proto": "policy_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "policy_digest",
+          "number": 2,
+          "proto": "policy_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "outcome",
+          "number": 3,
+          "proto": "outcome",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "explanation",
+          "number": 4,
+          "proto": "explanation",
+          "type": "string"
+        }
+      ],
+      "responses": {
+        "200": "PolicyExplainResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.PolicyService/Explain",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer TenantAdministration",
+      "max_request_bytes": 65536,
+      "max_response_bytes": 1024,
+      "method": "POST",
+      "path": "/v1/policies:activate",
+      "request": "PolicyActivateRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "policy_json",
+          "number": 1,
+          "proto": "policy_json",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_generation",
+          "number": 2,
+          "proto": "expected_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 3,
+          "proto": "idempotency_key",
+          "type": "string"
+        }
+      ],
+      "response": "PolicyActivateResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "resource_generation",
+          "number": 1,
+          "proto": "resource_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "policy_digest",
+          "number": 2,
+          "proto": "policy_digest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "audit_position",
+          "number": 3,
+          "proto": "audit_position",
+          "type": "uint64"
+        }
+      ],
+      "responses": {
+        "200": "PolicyActivateResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "409": [
+          "stale_generation",
+          "idempotency_conflict"
+        ],
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.PolicyService/Activate",
+      "stale_generation_response_fields": [
+        {
+          "description": "current policy generation",
+          "json": "resource_generation",
+          "minimum": 1,
+          "type": "uint64"
+        },
+        {
+          "description": "redacted policy generation change",
+          "json": "semantic_diff",
+          "maximum_length": 1024,
+          "minimum_length": 1,
+          "type": "string"
+        }
+      ],
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 768,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/maintenance:abandon-segment",
+      "request": "SegmentAbandonmentRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "tenant",
+          "number": 1,
+          "proto": "tenant",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "signal",
+          "number": 2,
+          "proto": "signal",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "shard",
+          "number": 3,
+          "proto": "shard",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "segment",
+          "number": 4,
+          "proto": "segment",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_catalog_generation",
+          "number": 5,
+          "optional": true,
+          "proto": "expected_catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "confirmation",
+          "number": 6,
+          "optional": true,
+          "proto": "confirmation",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 7,
+          "optional": true,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "accept_data_loss",
+          "number": 8,
+          "proto": "accept_data_loss",
+          "type": "bool"
+        },
+        {
+          "deprecated": false,
+          "json": "operation_id",
+          "number": 9,
+          "optional": true,
+          "proto": "operation_id",
+          "type": "string"
+        }
+      ],
+      "response": "SegmentAbandonmentResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "catalog_generation",
+          "number": 1,
+          "proto": "catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "status",
+          "number": 2,
+          "proto": "status",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "irreversible_boundary",
+          "number": 3,
+          "proto": "irreversible_boundary",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "confirmation",
+          "number": 4,
+          "optional": true,
+          "proto": "confirmation",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "operation_id",
+          "number": 5,
+          "optional": true,
+          "proto": "operation_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "finding",
+          "number": 6,
+          "proto": "finding",
+          "type": "IntegrityQuarantineFinding"
+        }
+      ],
+      "responses": {
+        "200": "SegmentAbandonmentResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.MaintenanceService/AbandonSegment",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "method": "POST",
+      "path": "/v1/key-provider-migrations:manage",
+      "request": "ProviderMigrationRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "action",
+          "number": 1,
+          "proto": "action",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_catalog_generation",
+          "number": 2,
+          "optional": true,
+          "proto": "expected_catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 3,
+          "optional": true,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "configuration_reference",
+          "number": 4,
+          "optional": true,
+          "proto": "configuration_reference",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "operation_id",
+          "number": 5,
+          "optional": true,
+          "proto": "operation_id",
+          "type": "string"
+        }
+      ],
+      "response": "ProviderMigrationResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "catalog_generation",
+          "number": 1,
+          "proto": "catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "root_phase",
+          "number": 2,
+          "proto": "root_phase",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "active_epoch",
+          "number": 3,
+          "proto": "active_epoch",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "successor_epoch",
+          "number": 4,
+          "optional": true,
+          "proto": "successor_epoch",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "predecessor_epoch",
+          "number": 5,
+          "optional": true,
+          "proto": "predecessor_epoch",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "operation",
+          "number": 6,
+          "optional": true,
+          "proto": "operation",
+          "type": "ProviderMigrationOperation"
+        },
+        {
+          "deprecated": false,
+          "json": "active_provider",
+          "number": 7,
+          "proto": "active_provider",
+          "type": "ProviderMigrationIdentity"
+        },
+        {
+          "deprecated": false,
+          "json": "source_provider",
+          "number": 8,
+          "proto": "source_provider",
+          "type": "ProviderMigrationIdentity"
+        },
+        {
+          "deprecated": false,
+          "json": "target_provider",
+          "number": 9,
+          "optional": true,
+          "proto": "target_provider",
+          "type": "ProviderMigrationIdentity"
+        }
+      ],
+      "responses": {
+        "200": "ProviderMigrationResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.ProviderMigrationService/Manage",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "method": "POST",
+      "path": "/v1/repositories:manage",
+      "request": "RepositoryRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "action",
+          "number": 1,
+          "proto": "action",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_catalog_generation",
+          "number": 2,
+          "optional": true,
+          "proto": "expected_catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 3,
+          "optional": true,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "locator",
+          "number": 4,
+          "optional": true,
+          "proto": "locator",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "repository_id",
+          "number": 5,
+          "optional": true,
+          "proto": "repository_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "operation_id",
+          "number": 6,
+          "optional": true,
+          "proto": "operation_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "aws_s3",
+          "number": 7,
+          "optional": true,
+          "proto": "aws_s3",
+          "type": "RepositoryAwsS3Target"
+        },
+        {
+          "deprecated": false,
+          "json": "google_cloud_storage",
+          "number": 8,
+          "optional": true,
+          "proto": "google_cloud_storage",
+          "type": "RepositoryGoogleCloudStorageTarget"
+        },
+        {
+          "deprecated": false,
+          "json": "azure_blob",
+          "number": 9,
+          "optional": true,
+          "proto": "azure_blob",
+          "type": "RepositoryAzureBlobTarget"
+        }
+      ],
+      "response": "RepositoryResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "catalog_generation",
+          "number": 1,
+          "proto": "catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "operation",
+          "number": 2,
+          "optional": true,
+          "proto": "operation",
+          "type": "RepositoryOperation"
+        },
+        {
+          "deprecated": false,
+          "json": "identity",
+          "number": 3,
+          "optional": true,
+          "proto": "identity",
+          "type": "RepositoryIdentity"
+        },
+        {
+          "deprecated": false,
+          "json": "doctor",
+          "number": 4,
+          "optional": true,
+          "proto": "doctor",
+          "type": "RepositoryDoctorResult"
+        },
+        {
+          "deprecated": false,
+          "json": "policy",
+          "number": 5,
+          "optional": true,
+          "proto": "policy",
+          "type": "RepositoryPolicyReceipt"
+        }
+      ],
+      "responses": {
+        "200": "RepositoryResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.RepositoryService/Manage",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "method": "POST",
+      "path": "/v1/backups:manage",
+      "request": "BackupRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "action",
+          "number": 1,
+          "proto": "action",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_catalog_generation",
+          "number": 2,
+          "optional": true,
+          "proto": "expected_catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 3,
+          "optional": true,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "locator",
+          "number": 4,
+          "optional": true,
+          "proto": "locator",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "repository_id",
+          "number": 5,
+          "optional": true,
+          "proto": "repository_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "operation_id",
+          "number": 6,
+          "optional": true,
+          "proto": "operation_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "aws_s3",
+          "number": 7,
+          "optional": true,
+          "proto": "aws_s3",
+          "type": "RepositoryAwsS3Target"
+        },
+        {
+          "deprecated": false,
+          "json": "google_cloud_storage",
+          "number": 8,
+          "optional": true,
+          "proto": "google_cloud_storage",
+          "type": "RepositoryGoogleCloudStorageTarget"
+        },
+        {
+          "deprecated": false,
+          "json": "azure_blob",
+          "number": 9,
+          "optional": true,
+          "proto": "azure_blob",
+          "type": "RepositoryAzureBlobTarget"
+        },
+        {
+          "deprecated": false,
+          "json": "retention_seconds",
+          "number": 10,
+          "optional": true,
+          "proto": "retention_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "snapshot_id",
+          "number": 11,
+          "optional": true,
+          "proto": "snapshot_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_manifest_checksum",
+          "number": 12,
+          "optional": true,
+          "proto": "expected_manifest_checksum",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_operation_revision",
+          "number": 13,
+          "optional": true,
+          "proto": "expected_operation_revision",
+          "type": "uint64"
+        }
+      ],
+      "response": "BackupResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "operation",
+          "number": 1,
+          "proto": "operation",
+          "type": "RepositoryOperation"
+        },
+        {
+          "deprecated": false,
+          "json": "repository",
+          "number": 2,
+          "optional": true,
+          "proto": "repository",
+          "type": "RepositoryIdentity"
+        },
+        {
+          "deprecated": false,
+          "json": "receipt",
+          "number": 3,
+          "optional": true,
+          "proto": "receipt",
+          "type": "BackupSnapshotReceipt"
+        },
+        {
+          "deprecated": false,
+          "json": "kind",
+          "number": 4,
+          "proto": "kind",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "cleanup_pending",
+          "number": 5,
+          "proto": "cleanup_pending",
+          "type": "bool"
+        },
+        {
+          "deprecated": false,
+          "json": "retention_receipt",
+          "number": 6,
+          "optional": true,
+          "proto": "retention_receipt",
+          "type": "BackupRetentionReceipt"
+        },
+        {
+          "deprecated": false,
+          "json": "operation_revision",
+          "number": 7,
+          "proto": "operation_revision",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "terminal_error_code",
+          "number": 8,
+          "optional": true,
+          "proto": "terminal_error_code",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "verification_report",
+          "number": 9,
+          "optional": true,
+          "proto": "verification_report",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "verification_report_checksum",
+          "number": 10,
+          "optional": true,
+          "proto": "verification_report_checksum",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "restored_publication",
+          "number": 11,
+          "optional": true,
+          "proto": "restored_publication",
+          "type": "BackupRestoredPublication"
+        }
+      ],
+      "responses": {
+        "200": "BackupResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable or capacity_unavailable"
+      },
+      "rpc": "positron.v1.BackupService/Manage",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 65536,
+      "method": "POST",
+      "path": "/v1/backups:list",
+      "request": "BackupListRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "repository_id",
+          "number": 1,
+          "proto": "repository_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "limit",
+          "number": 2,
+          "proto": "limit",
+          "type": "uint32"
+        },
+        {
+          "deprecated": false,
+          "json": "cursor",
+          "number": 3,
+          "optional": true,
+          "proto": "cursor",
+          "type": "string"
+        }
+      ],
+      "response": "BackupListResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "repository",
+          "number": 1,
+          "proto": "repository",
+          "type": "RepositoryIdentity"
+        },
+        {
+          "deprecated": false,
+          "json": "registry_generation_checksum",
+          "number": 2,
+          "optional": true,
+          "proto": "registry_generation_checksum",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "entries",
+          "number": 3,
+          "proto": "entries",
+          "repeated": true,
+          "type": "BackupListEntry"
+        },
+        {
+          "deprecated": false,
+          "json": "next_cursor",
+          "number": 4,
+          "optional": true,
+          "proto": "next_cursor",
+          "type": "string"
+        }
+      ],
+      "responses": {
+        "200": "BackupListResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "precondition_failed",
+        "503": "administration_unavailable or capacity_unavailable"
+      },
+      "rpc": "positron.v1.BackupService/List",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "method": "POST",
+      "path": "/v1/tenant-purges:manage",
+      "request": "TenantPurgeRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "action",
+          "number": 1,
+          "proto": "action",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "tenant_id",
+          "number": 2,
+          "optional": true,
+          "proto": "tenant_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "confirmation_slug",
+          "number": 3,
+          "optional": true,
+          "proto": "confirmation_slug",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_catalog_generation",
+          "number": 4,
+          "optional": true,
+          "proto": "expected_catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_lifecycle_generation",
+          "number": 5,
+          "optional": true,
+          "proto": "expected_lifecycle_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 6,
+          "optional": true,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "operation_id",
+          "number": 7,
+          "optional": true,
+          "proto": "operation_id",
+          "type": "string"
+        }
+      ],
+      "response": "TenantPurgeResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "catalog_generation",
+          "number": 1,
+          "proto": "catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "operation",
+          "number": 2,
+          "optional": true,
+          "proto": "operation",
+          "type": "ProviderMigrationOperation"
+        },
+        {
+          "deprecated": false,
+          "json": "managed_scope",
+          "number": 3,
+          "proto": "managed_scope",
+          "type": "string"
+        }
+      ],
+      "responses": {
+        "200": "TenantPurgeResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.TenantPurgeService/Manage",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer SystemAdministration",
+      "max_request_bytes": 4096,
+      "max_response_bytes": 4096,
+      "method": "POST",
+      "path": "/v1/upgrades:manage",
+      "request": "UpgradeRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "action",
+          "number": 1,
+          "proto": "action",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "candidate_manifest",
+          "number": 2,
+          "optional": true,
+          "proto": "candidate_manifest",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "repository_id",
+          "number": 3,
+          "optional": true,
+          "proto": "repository_id",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "retention_seconds",
+          "number": 4,
+          "optional": true,
+          "proto": "retention_seconds",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "expected_catalog_generation",
+          "number": 5,
+          "optional": true,
+          "proto": "expected_catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "idempotency_key",
+          "number": 6,
+          "optional": true,
+          "proto": "idempotency_key",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "operation_id",
+          "number": 7,
+          "optional": true,
+          "proto": "operation_id",
+          "type": "string"
+        }
+      ],
+      "response": "UpgradeResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "catalog_generation",
+          "number": 1,
+          "proto": "catalog_generation",
+          "type": "uint64"
+        },
+        {
+          "deprecated": false,
+          "json": "operation",
+          "number": 2,
+          "optional": true,
+          "proto": "operation",
+          "type": "UpgradeOperation"
+        },
+        {
+          "deprecated": false,
+          "json": "details",
+          "number": 3,
+          "optional": true,
+          "proto": "details",
+          "type": "UpgradeDetails"
+        }
+      ],
+      "responses": {
+        "200": "UpgradeResponse",
+        "400": "invalid_request",
+        "401": "authentication_rejected",
+        "404": "source_unavailable",
+        "409": "stale_generation or precondition_failed or idempotency_conflict",
+        "503": "administration_unavailable"
+      },
+      "rpc": "positron.v1.UpgradeService/Manage",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer Query",
+      "max_request_bytes": 8192,
+      "max_response_bytes": 262144,
+      "method": "POST",
+      "path": "/v1/logs:query",
+      "request": "LogQueryRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "pipeline",
+          "number": 1,
+          "proto": "pipeline",
+          "type": "string"
+        },
+        {
+          "deprecated": false,
+          "json": "budget",
+          "number": 2,
+          "proto": "budget",
+          "type": "LogQueryBudget"
+        }
+      ],
+      "response": "LogQueryResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "events",
+          "number": 1,
+          "proto": "events",
+          "repeated": true,
+          "type": "LogQueryEvent"
+        }
+      ],
+      "rpc": "positron.v1.LogQueryService/Execute",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer Query",
+      "max_request_bytes": 16384,
+      "max_response_bytes": 262144,
+      "method": "POST",
+      "path": "/v1/logs:session",
+      "request": "LogQuerySessionRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "execute",
+          "number": 1,
+          "optional": true,
+          "proto": "execute",
+          "type": "LogQueryRequest"
+        },
+        {
+          "deprecated": false,
+          "json": "resume",
+          "number": 2,
+          "optional": true,
+          "proto": "resume",
+          "type": "bytes"
+        },
+        {
+          "deprecated": false,
+          "json": "tail",
+          "number": 4,
+          "optional": true,
+          "proto": "tail",
+          "type": "LogQueryTailRequest"
+        },
+        {
+          "deprecated": false,
+          "json": "batchLimit",
+          "number": 3,
+          "proto": "batch_limit",
+          "type": "uint32"
+        }
+      ],
+      "response": "LogQueryResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "events",
+          "number": 1,
+          "proto": "events",
+          "repeated": true,
+          "type": "LogQueryEvent"
+        }
+      ],
+      "rpc": "positron.v1.LogQueryService/Session",
+      "unknown_fields": "reject"
+    },
+    {
+      "authentication": "Bearer Query",
+      "max_request_bytes": 16384,
+      "max_response_bytes": 1024,
+      "method": "POST",
+      "path": "/v1/logs:cancel",
+      "request": "LogQueryCancelRequest",
+      "request_fields": [
+        {
+          "deprecated": false,
+          "json": "query",
+          "number": 1,
+          "optional": true,
+          "proto": "query",
+          "type": "bytes"
+        },
+        {
+          "deprecated": false,
+          "json": "tail",
+          "number": 2,
+          "optional": true,
+          "proto": "tail",
+          "type": "bytes"
+        }
+      ],
+      "response": "LogQueryCancelResponse",
+      "response_fields": [
+        {
+          "deprecated": false,
+          "json": "cancelled",
+          "number": 1,
+          "proto": "cancelled",
+          "type": "bool"
+        }
+      ],
+      "rpc": "positron.v1.LogQueryService/Cancel",
+      "unknown_fields": "reject"
+    }
+  ],
+  "max_request_bytes": 64,
+  "schema_digest": "413f1f3eb9cfef33bde9701c670dfa33808d4896042d14ca0713eabd151bdddf",
+  "unknown_fields": "reject"
+}
