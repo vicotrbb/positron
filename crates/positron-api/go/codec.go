@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -489,6 +490,80 @@ func Decode(name string, data []byte) (map[string]any, error) {
 	return result, nil
 }
 
+// JSON field dominance follows encoding/json: shallowest fields win, then
+// explicit names win at equal depth; equally dominant names are not emitted.
+// This selects indexes only. Native encoding/json still performs serialization.
+type jsonInputField struct {
+	index             []int
+	tagged, ambiguous bool
+}
+
+func jsonInputFields(shape reflect.Type, budget *int) (map[string]jsonInputField, bool) {
+	fields := map[string]jsonInputField{}
+	visiting := map[reflect.Type]bool{}
+	var visit func(reflect.Type, []int) bool
+	visit = func(shape reflect.Type, path []int) bool {
+		if len(path) > 64 {
+			return false
+		}
+		if visiting[shape] {
+			return true
+		}
+		visiting[shape] = true
+		defer delete(visiting, shape)
+		for index := 0; index < shape.NumField(); index++ {
+			if *budget <= 0 {
+				return false
+			}
+			*budget--
+			field := shape.Field(index)
+			promoted := field.Type
+			if promoted.Kind() == reflect.Pointer {
+				promoted = promoted.Elem()
+			}
+			if field.PkgPath != "" && (!field.Anonymous || promoted.Kind() != reflect.Struct) {
+				continue
+			}
+			tag := field.Tag.Get("json")
+			if tag == "-" {
+				continue
+			}
+			name, _, _ := strings.Cut(tag, ",")
+			valid := name != ""
+			for _, character := range name {
+				if !strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", character) && !unicode.IsLetter(character) && !unicode.IsDigit(character) {
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				name = ""
+			}
+			indexes := append(append([]int(nil), path...), index)
+			if name == "" && field.Anonymous && promoted.Kind() == reflect.Struct {
+				if !visit(promoted, indexes) {
+					return false
+				}
+				continue
+			}
+			tagged := name != ""
+			if name == "" {
+				name = field.Name
+			}
+			candidate := jsonInputField{index: indexes, tagged: tagged}
+			previous, exists := fields[name]
+			if !exists || len(indexes) < len(previous.index) || len(indexes) == len(previous.index) && tagged && !previous.tagged {
+				fields[name] = candidate
+			} else if len(indexes) == len(previous.index) && tagged == previous.tagged {
+				previous.ambiguous = true
+				fields[name] = previous
+			}
+		}
+		return true
+	}
+	return fields, visit(shape, nil)
+}
+
 // Validate original strings before encoding/json can replace invalid UTF-8.
 // Include promoted exported members of anonymous structs; byte slices stay binary.
 func validInputText(value reflect.Value, depth int, budget *int) bool {
@@ -549,17 +624,26 @@ func validInputText(value reflect.Value, depth int, budget *int) bool {
 			}
 		}
 	case reflect.Struct:
-		shape := value.Type()
-		for index := 0; index < value.NumField(); index++ {
-			field := shape.Field(index)
-			fieldType := field.Type
-			if fieldType.Kind() == reflect.Pointer {
-				fieldType = fieldType.Elem()
-			}
-			if field.PkgPath != "" && (!field.Anonymous || fieldType.Kind() != reflect.Struct) || strings.SplitN(field.Tag.Get("json"), ",", 2)[0] == "-" {
+		fields, ok := jsonInputFields(value.Type(), budget)
+		if !ok {
+			return false
+		}
+		for _, selected := range fields {
+			if selected.ambiguous {
 				continue
 			}
-			if !validInputText(value.Field(index), depth+1, budget) {
+			field := value
+			for _, index := range selected.index {
+				if field.Kind() == reflect.Pointer {
+					if field.IsNil() {
+						field = reflect.Value{}
+						break
+					}
+					field = field.Elem()
+				}
+				field = field.Field(index)
+			}
+			if !validInputText(field, depth+1, budget) {
 				return false
 			}
 		}

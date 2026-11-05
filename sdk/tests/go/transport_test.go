@@ -2,6 +2,7 @@ package sdk_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	positron "github.com/vicotrbb/positron/sdk/go"
@@ -329,5 +330,49 @@ func TestPromotedInvalidRequestTextIsNeverSent(t *testing.T) {
 	err = client.Call(context.Background(), "positron.v1.LogQueryService/Execute", request, "key", &result)
 	if !errors.Is(err, positron.ErrWire) || calls != 0 {
 		t.Fatal("promoted invalid text reached transport")
+	}
+}
+
+func TestClientCallAcceptsNativeDominantRequestFields(t *testing.T) {
+	type child struct {
+		Pipeline string `json:"pipeline"`
+	}
+	type request struct {
+		child
+		Pipeline string                   `json:"pipeline"`
+		Budget   *positron.LogQueryBudget `json:"budget"`
+	}
+	observed := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Pipeline string `json:"pipeline"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		observed <- body.Pipeline
+		w.WriteHeader(503)
+	}))
+	defer server.Close()
+	client, err := positron.NewClient(server.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	text := func(value string) *string { return &value }
+	input := request{child{string([]byte{0xff})}, "pipeline:v1 logs", &positron.LogQueryBudget{ScannedBytes: text("1"), DecodedRecords: text("1"), OutputRows: text("1"), OutputBytes: text("1"), MemoryBytes: text("1"), CpuWorkUnits: text("1"), WallSeconds: text("1"), MaximumTimeRangeNanoseconds: text("1")}}
+	var result any
+	err = client.Call(context.Background(), "positron.v1.LogQueryService/Execute", input, "key", &result)
+	if errors.Is(err, positron.ErrWire) {
+		t.Fatal("non-emitted child refused application request")
+	}
+	select {
+	case pipeline := <-observed:
+		if pipeline != "pipeline:v1 logs" {
+			t.Fatal("dominant application text changed")
+		}
+	default:
+		t.Fatal("valid dominant request was not sent")
 	}
 }

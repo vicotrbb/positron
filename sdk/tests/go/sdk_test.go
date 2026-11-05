@@ -196,3 +196,47 @@ func TestEncodeValidatesPromotedUnexportedStructMembers(t *testing.T) {
 		t.Fatal("native ignored fields were inspected")
 	}
 }
+
+func TestEncodeUsesNativeFieldDominance(t *testing.T) {
+	type embedded struct {
+		TextValue string `json:"textValue"`
+	}
+	type overridden struct {
+		embedded
+		TextValue string `json:"textValue"`
+	}
+	type overriddenPointer struct {
+		*embedded
+		TextValue string `json:"textValue"`
+	}
+	type left struct {
+		Hidden string `json:"hidden"`
+	}
+	type right struct {
+		Hidden string `json:"hidden"`
+	}
+	type ambiguous struct {
+		left
+		right
+		TextValue string `json:"textValue"`
+	}
+	type plain struct{ Hidden string }
+	type tagged struct {
+		Value string `json:"Hidden,omitempty"`
+	}
+	type tagPriority struct {
+		plain
+		tagged
+		TextValue string `json:"textValue"`
+	}
+	invalid := string([]byte{0xff})
+	for _, value := range []any{overridden{embedded{invalid}, "valid"}, overriddenPointer{&embedded{invalid}, "valid"}, ambiguous{left{invalid}, right{invalid}, "valid"}, tagPriority{plain{invalid}, tagged{}, "valid"}} {
+		data, err := positron.Encode("LogQueryValue", value)
+		if err != nil || string(data) != `{"textValue":"valid"}` {
+			t.Fatal("non-emitted field refused valid request")
+		}
+	}
+	if _, err := positron.Encode("LogQueryValue", struct{ embedded }{embedded{invalid}}); !errors.Is(err, positron.ErrWire) {
+		t.Fatal("selected promoted invalid text accepted")
+	}
+}
