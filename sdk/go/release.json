@@ -1,0 +1,9 @@
+{
+  "api_version": "positron.v1",
+  "generator": "positron-api=1,go=1.24.0,protoc-bin-vendored=3.2.0",
+  "module": "github.com/vicotrbb/positron/sdk/go",
+  "registry": "https://proxy.golang.org",
+  "release_manifest_surface": "SdkGo",
+  "schema_digest": "413f1f3eb9cfef33bde9701c670dfa33808d4896042d14ca0713eabd151bdddf",
+  "version": "0.0.0"
+}
